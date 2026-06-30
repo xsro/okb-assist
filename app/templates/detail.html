@@ -5,6 +5,73 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>文献详情 - OKB-Assist</title>
     <link rel="stylesheet" href="/assist/static/style.css">
+    <!-- Marked.js for markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        .markdown-body {
+            padding: 1.5rem;
+            background: var(--card);
+            border-radius: 8px;
+            line-height: 1.8;
+            overflow-wrap: break-word;
+        }
+        .markdown-body h1, .markdown-body h2, .markdown-body h3 {
+            margin-top: 1.5rem;
+            margin-bottom: 0.5rem;
+            padding-bottom: 0.3rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .markdown-body h1 { font-size: 1.8rem; }
+        .markdown-body h2 { font-size: 1.5rem; }
+        .markdown-body h3 { font-size: 1.3rem; border-bottom: none; }
+        .markdown-body p { margin-bottom: 1rem; }
+        .markdown-body pre {
+            background: var(--bg);
+            padding: 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+        }
+        .markdown-body code {
+            background: var(--bg);
+            padding: 0.2rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+        .markdown-body pre code {
+            background: none;
+            padding: 0;
+        }
+        .markdown-body table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        .markdown-body th, .markdown-body td {
+            border: 1px solid var(--border);
+            padding: 0.5rem;
+            text-align: left;
+        }
+        .markdown-body th { background: var(--bg); }
+        .markdown-body img { max-width: 100%; }
+        .markdown-body blockquote {
+            border-left: 4px solid var(--primary);
+            padding-left: 1rem;
+            margin: 1rem 0;
+            color: var(--text-muted);
+        }
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 1rem;
+            margin-top: 1rem;
+            padding: 1rem;
+        }
+        .page-info {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+    </style>
 </head>
 <body>
     <header>
@@ -16,6 +83,18 @@
 
     <main class="container">
         <a href="/assist/" style="display:inline-block;margin-bottom:1rem">← 返回列表</a>
+
+        <!-- Document Info Bar -->
+        <div class="card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem">
+            <div>
+                <h2 id="doc-title" style="margin:0">加载中...</h2>
+                <p id="doc-authors" style="color:var(--text-muted);margin:0.25rem 0 0 0;font-size:0.875rem"></p>
+            </div>
+            <div style="display:flex;gap:0.5rem">
+                <a id="btn-pdf" href="#" target="_blank" class="btn btn-primary" style="display:none">📄 查看 PDF</a>
+                <a id="btn-download" href="#" download class="btn" style="display:none">⬇ 下载 PDF</a>
+            </div>
+        </div>
 
         <!-- Pipeline Status -->
         <div class="card">
@@ -43,6 +122,7 @@
                 <button class="btn btn-warning" id="btn-extract" onclick="runStep('extract')">提取元数据</button>
                 <button class="btn btn-success" id="btn-index" onclick="runStep('index')">索引到 Qdrant</button>
                 <button class="btn btn-primary" id="btn-process" onclick="runFullProcess()">一键处理</button>
+                <button class="btn" id="btn-reset" onclick="resetDoc()" style="margin-left:auto">重置状态</button>
             </div>
         </div>
 
@@ -148,51 +228,70 @@
             </form>
         </div>
 
-        <!-- Content Tabs -->
+        <!-- Markdown Content -->
         <div class="card">
-            <div class="tabs">
-                <div class="tab active" onclick="switchTab('pdf')">PDF</div>
-                <div class="tab" onclick="switchTab('markdown')">Markdown</div>
-            </div>
-
-            <div id="tab-pdf" class="tab-content active">
-                <div id="pdf-viewer" style="text-align:center;padding:2rem;color:var(--text-muted)">
-                    PDF 预览区域
-                </div>
-            </div>
-
-            <div id="tab-markdown" class="tab-content">
-                <div style="display:flex;justify-content:flex-end;margin-bottom:0.5rem">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+                <h2>Markdown 内容</h2>
+                <div style="display:flex;gap:0.5rem">
+                    <button class="btn btn-sm" id="btn-raw" onclick="toggleRawView()">原始文本</button>
                     <button class="btn btn-sm btn-primary" id="btn-edit-md" onclick="toggleEditMarkdown()">编辑</button>
                     <button class="btn btn-sm btn-success" id="btn-save-md" onclick="saveMarkdown()" style="display:none">保存</button>
                 </div>
-                <div id="markdown-content" style="white-space:pre-wrap;font-family:monospace;padding:1rem;background:var(--bg);border-radius:6px;max-height:600px;overflow-y:auto">
-                    加载中...
-                </div>
-                <textarea id="markdown-editor" class="form-control" style="display:none;font-family:monospace;min-height:400px"></textarea>
             </div>
+
+            <!-- Pagination -->
+            <div class="pagination" id="pagination" style="display:none">
+                <button class="btn btn-sm" id="btn-prev" onclick="changePage(-1)">上一页</button>
+                <span class="page-info" id="page-info">第 1 / 1 页</span>
+                <button class="btn btn-sm" id="btn-next" onclick="changePage(1)">下一页</button>
+            </div>
+
+            <!-- Rendered markdown -->
+            <div id="markdown-content" class="markdown-body">
+                <p style="color:var(--text-muted)">加载中...</p>
+            </div>
+
+            <!-- Raw text view -->
+            <div id="markdown-raw" style="display:none;white-space:pre-wrap;font-family:monospace;padding:1rem;background:var(--bg);border-radius:6px;max-height:600px;overflow-y:auto;font-size:0.875rem"></div>
+
+            <!-- Editor -->
+            <textarea id="markdown-editor" class="form-control" style="display:none;font-family:monospace;min-height:400px"></textarea>
         </div>
     </main>
 
     <script src="/assist/static/app.js"></script>
     <script>
-        if (!checkAuth()) throw new Error('Not authenticated');
-
         const docId = {{ doc_id }};
         let doc = null;
         let editingMeta = false;
         let editingMd = false;
+        let showingRaw = false;
+        let currentPage = 1;
+        let totalPages = 1;
 
         async function loadDocument() {
             try {
                 doc = await api.get(`/assist/api/documents/${docId}`);
+                renderDocInfo();
                 renderPipeline();
                 renderMeta();
-                loadPDF();
-                loadMarkdown();
+                loadMarkdown(1);
             } catch (err) {
                 showToast(err.message, 'error');
             }
+        }
+
+        function renderDocInfo() {
+            document.getElementById('doc-title').textContent = doc.title || doc.filename || '未命名';
+            document.getElementById('doc-authors').textContent = formatAuthors(doc.authors);
+
+            // PDF buttons
+            const btnPdf = document.getElementById('btn-pdf');
+            const btnDownload = document.getElementById('btn-download');
+            btnPdf.href = `/assist/api/documents/${docId}/pdf`;
+            btnPdf.style.display = 'inline-flex';
+            btnDownload.href = `/assist/api/documents/${docId}/pdf`;
+            btnDownload.style.display = 'inline-flex';
         }
 
         function renderPipeline() {
@@ -207,7 +306,6 @@
                 if (i === currentIdx) el.classList.add('active');
             });
 
-            // Enable/disable buttons
             document.getElementById('btn-parse').disabled = doc.status !== 'uploaded';
             document.getElementById('btn-extract').disabled = doc.status !== 'markdown_done';
             document.getElementById('btn-index').disabled = doc.status !== 'meta_done';
@@ -215,31 +313,14 @@
         }
 
         const LANG_LABELS = {
-            'en': '🇬🇧 English',
-            'zh': '🇨🇳 中文',
-            'ja': '🇯🇵 日本語',
-            'ko': '🇰🇷 한국어',
-            'fr': '🇫🇷 Français',
-            'de': '🇩🇪 Deutsch',
-            'es': '🇪🇸 Español',
-            'pt': '🇧🇷 Português',
-            'ru': '🇷🇺 Русский',
-            'ar': '🇸🇦 العربية',
-            'it': '🇮🇹 Italiano',
-            'nl': '🇳🇱 Nederlands',
-            'pl': '🇵🇱 Polski',
-            'th': '🇹🇭 ไทย',
-            'vi': '🇻🇳 Tiếng Việt',
-            'tr': '🇹🇷 Türkçe',
+            'en': '🇬🇧 English', 'zh': '🇨🇳 中文', 'ja': '🇯🇵 日本語', 'ko': '🇰🇷 한국어',
+            'fr': '🇫🇷 Français', 'de': '🇩🇪 Deutsch', 'es': '🇪🇸 Español', 'pt': '🇧🇷 Português',
+            'ru': '🇷🇺 Русский', 'ar': '🇸🇦 العربية', 'it': '🇮🇹 Italiano', 'nl': '🇳🇱 Nederlands',
+            'pl': '🇵🇱 Polski', 'th': '🇹🇭 ไทย', 'vi': '🇻🇳 Tiếng Việt', 'tr': '🇹🇷 Türkçe',
         };
 
-        function getLangLabel(code) {
-            return LANG_LABELS[code] || `🌐 ${code || 'Unknown'}`;
-        }
-
-        function isNonEnglish(lang) {
-            return lang && lang !== 'en';
-        }
+        function getLangLabel(code) { return LANG_LABELS[code] || `🌐 ${code || 'Unknown'}`; }
+        function isNonEnglish(lang) { return lang && lang !== 'en'; }
 
         function renderMeta() {
             const view = document.getElementById('meta-view');
@@ -248,53 +329,16 @@
             const nonEn = isNonEnglish(doc.language);
             const langLabel = getLangLabel(doc.language);
 
-            let html = `
-                <table style="width:100%">
-                    <tr><td style="width:120px;font-weight:600">语言</td><td>${langLabel}</td></tr>
-                    <tr><td style="font-weight:600">标题</td><td>${doc.title || '-'}</td></tr>
-            `;
-
-            if (nonEn && doc.title_en) {
-                html += `<tr><td style="font-weight:600">英文标题</td><td>${doc.title_en}</td></tr>`;
-            }
-
-            html += `
-                    <tr><td style="font-weight:600">类型</td><td>${doc.doc_type || '-'}</td></tr>
-                    <tr><td style="font-weight:600">作者</td><td>${authors}</td></tr>
-            `;
-
-            if (nonEn && doc.authors_en) {
-                html += `<tr><td style="font-weight:600">英文作者</td><td>${formatAuthors(doc.authors_en)}</td></tr>`;
-            }
-
-            html += `
-                    <tr><td style="font-weight:600">年份</td><td>${doc.year || '-'}</td></tr>
-                    <tr><td style="font-weight:600">DOI</td><td>${doc.doi || '-'}</td></tr>
-                    <tr><td style="font-weight:600">期刊/会议</td><td>${doc.journal || '-'}</td></tr>
-            `;
-
-            if (nonEn && doc.journal_en) {
-                html += `<tr><td style="font-weight:600">英文期刊/会议</td><td>${doc.journal_en}</td></tr>`;
-            }
-
-            html += `
-                    <tr><td style="font-weight:600">来源</td><td>${doc.source || '-'}</td></tr>
-                    <tr><td style="font-weight:600">分类</td><td>${doc.category || '-'}</td></tr>
-                    <tr><td style="font-weight:600">关键词</td><td>${keywords}</td></tr>
-            `;
-
-            if (nonEn && doc.keywords_en) {
-                html += `<tr><td style="font-weight:600">英文关键词</td><td>${formatKeywords(doc.keywords_en)}</td></tr>`;
-            }
-
-            html += `
-                    <tr><td style="font-weight:600">摘要</td><td>${doc.abstract || '-'}</td></tr>
-            `;
-
-            if (nonEn && doc.abstract_en) {
-                html += `<tr><td style="font-weight:600">英文摘要</td><td style="font-size:0.875rem">${doc.abstract_en}</td></tr>`;
-            }
-
+            let html = `<table style="width:100%"><tr><td style="width:120px;font-weight:600">语言</td><td>${langLabel}</td></tr><tr><td style="font-weight:600">标题</td><td>${doc.title || '-'}</td></tr>`;
+            if (nonEn && doc.title_en) html += `<tr><td style="font-weight:600">英文标题</td><td>${doc.title_en}</td></tr>`;
+            html += `<tr><td style="font-weight:600">类型</td><td>${doc.doc_type || '-'}</td></tr><tr><td style="font-weight:600">作者</td><td>${authors}</td></tr>`;
+            if (nonEn && doc.authors_en) html += `<tr><td style="font-weight:600">英文作者</td><td>${formatAuthors(doc.authors_en)}</td></tr>`;
+            html += `<tr><td style="font-weight:600">年份</td><td>${doc.year || '-'}</td></tr><tr><td style="font-weight:600">DOI</td><td>${doc.doi || '-'}</td></tr><tr><td style="font-weight:600">期刊/会议</td><td>${doc.journal || '-'}</td></tr>`;
+            if (nonEn && doc.journal_en) html += `<tr><td style="font-weight:600">英文期刊/会议</td><td>${doc.journal_en}</td></tr>`;
+            html += `<tr><td style="font-weight:600">来源</td><td>${doc.source || '-'}</td></tr><tr><td style="font-weight:600">分类</td><td>${doc.category || '-'}</td></tr><tr><td style="font-weight:600">关键词</td><td>${keywords}</td></tr>`;
+            if (nonEn && doc.keywords_en) html += `<tr><td style="font-weight:600">英文关键词</td><td>${formatKeywords(doc.keywords_en)}</td></tr>`;
+            html += `<tr><td style="font-weight:600">摘要</td><td>${doc.abstract || '-'}</td></tr>`;
+            if (nonEn && doc.abstract_en) html += `<tr><td style="font-weight:600">英文摘要</td><td style="font-size:0.875rem">${doc.abstract_en}</td></tr>`;
             html += `</table>`;
             view.innerHTML = html;
         }
@@ -302,33 +346,18 @@
         function toggleEnFields() {
             const lang = document.getElementById('meta-language').value;
             const showEn = isNonEnglish(lang);
-            const enFields = ['fg-title-en', 'fg-authors-en', 'fg-journal-en', 'fg-keywords-en', 'fg-abstract-en'];
-            enFields.forEach(id => {
+            ['fg-title-en', 'fg-authors-en', 'fg-journal-en', 'fg-keywords-en', 'fg-abstract-en'].forEach(id => {
                 document.getElementById(id).style.display = showEn ? 'block' : 'none';
             });
         }
 
-        function formatAuthors(authors) {
-            if (!authors) return '-';
-            try {
-                const arr = JSON.parse(authors);
-                return Array.isArray(arr) ? arr.join(', ') : authors;
-            } catch { return authors; }
-        }
-
-        function formatKeywords(keywords) {
-            if (!keywords) return '-';
-            try {
-                const arr = JSON.parse(keywords);
-                return Array.isArray(arr) ? arr.map(k => `<span class="badge badge-uploaded">${k}</span>`).join(' ') : keywords;
-            } catch { return keywords; }
-        }
+        function formatAuthors(a) { if (!a) return '-'; try { const arr = JSON.parse(a); return Array.isArray(arr) ? arr.join(', ') : a; } catch { return a; } }
+        function formatKeywords(k) { if (!k) return '-'; try { const arr = JSON.parse(k); return Array.isArray(arr) ? arr.map(i => `<span class="badge badge-uploaded">${i}</span>`).join(' ') : k; } catch { return k; } }
 
         function toggleEditMeta() {
             editingMeta = !editingMeta;
             document.getElementById('meta-view').style.display = editingMeta ? 'none' : 'block';
             document.getElementById('meta-form').style.display = editingMeta ? 'block' : 'none';
-
             if (editingMeta) {
                 document.getElementById('meta-language').value = doc.language || 'en';
                 document.getElementById('meta-title').value = doc.title || '';
@@ -341,14 +370,11 @@
                 document.getElementById('meta-category').value = doc.category || '';
                 document.getElementById('meta-keywords').value = doc.keywords || '[]';
                 document.getElementById('meta-abstract').value = doc.abstract || '';
-
-                // English fields
                 document.getElementById('meta-title-en').value = doc.title_en || '';
                 document.getElementById('meta-authors-en').value = doc.authors_en || '[]';
                 document.getElementById('meta-journal-en').value = doc.journal_en || '';
                 document.getElementById('meta-keywords-en').value = doc.keywords_en || '[]';
                 document.getElementById('meta-abstract-en').value = doc.abstract_en || '';
-
                 toggleEnFields();
             }
         }
@@ -356,7 +382,7 @@
         document.getElementById('meta-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             try {
-                const data = {
+                await api.put(`/assist/api/documents/${docId}`, {
                     language: document.getElementById('meta-language').value,
                     title: document.getElementById('meta-title').value,
                     doc_type: document.getElementById('meta-type').value,
@@ -373,56 +399,79 @@
                     journal_en: document.getElementById('meta-journal-en').value,
                     keywords_en: document.getElementById('meta-keywords-en').value,
                     abstract_en: document.getElementById('meta-abstract-en').value,
-                };
-                await api.put(`/assist/api/documents/${docId}`, data);
+                });
                 showToast('元数据已保存', 'success');
                 await loadDocument();
                 toggleEditMeta();
-            } catch (err) {
-                showToast(err.message, 'error');
-            }
+            } catch (err) { showToast(err.message, 'error'); }
         });
 
-        function loadPDF() {
-            const viewer = document.getElementById('pdf-viewer');
-            viewer.innerHTML = `<iframe src="/assist/api/documents/${docId}/pdf" style="width:100%;height:600px;border:none;border-radius:6px"></iframe>`;
-        }
-
-        async function loadMarkdown() {
+        async function loadMarkdown(page) {
             try {
-                const data = await api.get(`/assist/api/documents/${docId}/markdown`);
-                document.getElementById('markdown-content').textContent = data.content;
+                const data = await api.get(`/assist/api/documents/${docId}/markdown?page=${page}&page_size=5000`);
+                currentPage = data.page;
+                totalPages = data.total_pages;
+
+                // Render markdown
+                const rendered = marked.parse(data.content || '');
+                document.getElementById('markdown-content').innerHTML = rendered || '<p style="color:var(--text-muted)">无内容</p>';
+                document.getElementById('markdown-raw').textContent = data.content;
+
+                // Update pagination
+                const pagination = document.getElementById('pagination');
+                if (totalPages > 1) {
+                    pagination.style.display = 'flex';
+                    document.getElementById('page-info').textContent = `第 ${currentPage} / ${totalPages} 页`;
+                    document.getElementById('btn-prev').disabled = currentPage <= 1;
+                    document.getElementById('btn-next').disabled = currentPage >= totalPages;
+                } else {
+                    pagination.style.display = 'none';
+                }
             } catch {
-                document.getElementById('markdown-content').textContent = 'Markdown 尚未生成';
+                document.getElementById('markdown-content').innerHTML = '<p style="color:var(--text-muted)">Markdown 尚未生成</p>';
+                document.getElementById('pagination').style.display = 'none';
             }
         }
 
-        function switchTab(tab) {
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+        function changePage(delta) {
+            const newPage = currentPage + delta;
+            if (newPage >= 1 && newPage <= totalPages) {
+                loadMarkdown(newPage);
+            }
+        }
 
-            event.target.classList.add('active');
-            document.getElementById(`tab-${tab}`).classList.add('active');
+        function toggleRawView() {
+            showingRaw = !showingRaw;
+            document.getElementById('markdown-content').style.display = showingRaw ? 'none' : 'block';
+            document.getElementById('markdown-raw').style.display = showingRaw ? 'block' : 'none';
+            document.getElementById('btn-raw').textContent = showingRaw ? '渲染视图' : '原始文本';
         }
 
         function toggleEditMarkdown() {
             editingMd = !editingMd;
             const content = document.getElementById('markdown-content');
+            const raw = document.getElementById('markdown-raw');
             const editor = document.getElementById('markdown-editor');
             const btnEdit = document.getElementById('btn-edit-md');
             const btnSave = document.getElementById('btn-save-md');
+            const btnRaw = document.getElementById('btn-raw');
 
             if (editingMd) {
-                editor.value = content.textContent;
+                editor.value = raw.textContent || document.getElementById('markdown-content').textContent;
                 content.style.display = 'none';
+                raw.style.display = 'none';
                 editor.style.display = 'block';
                 btnEdit.style.display = 'none';
                 btnSave.style.display = 'inline-flex';
+                btnRaw.style.display = 'none';
             } else {
                 content.style.display = 'block';
+                raw.style.display = 'none';
                 editor.style.display = 'none';
                 btnEdit.style.display = 'inline-flex';
                 btnSave.style.display = 'none';
+                btnRaw.style.display = 'inline-flex';
+                showingRaw = false;
             }
         }
 
@@ -433,10 +482,17 @@
                 });
                 showToast('Markdown 已保存', 'success');
                 toggleEditMarkdown();
-                loadMarkdown();
-            } catch (err) {
-                showToast(err.message, 'error');
-            }
+                loadMarkdown(currentPage);
+            } catch (err) { showToast(err.message, 'error'); }
+        }
+
+        async function resetDoc() {
+            if (!confirm('确定要重置状态吗？这将清除已生成的 Markdown 和元数据。')) return;
+            try {
+                const result = await api.post(`/assist/api/pipeline/${docId}/reset`);
+                showToast(result.detail, 'success');
+                await loadDocument();
+            } catch (err) { showToast(err.message, 'error'); }
         }
 
         async function runStep(step) {
@@ -445,9 +501,7 @@
                 const result = await api.post(`/assist/api/pipeline/${docId}/${step}`);
                 showToast(result.detail, 'success');
                 await loadDocument();
-            } catch (err) {
-                showToast(err.message, 'error');
-            }
+            } catch (err) { showToast(err.message, 'error'); }
         }
 
         async function runFullProcess() {
@@ -456,9 +510,7 @@
                 const result = await api.post(`/assist/api/pipeline/${docId}/process`);
                 showToast(result.detail, result.results?.every(r => r.status === 'success') ? 'success' : 'error');
                 await loadDocument();
-            } catch (err) {
-                showToast(err.message, 'error');
-            }
+            } catch (err) { showToast(err.message, 'error'); }
         }
 
         loadDocument();

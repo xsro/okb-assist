@@ -37,24 +37,7 @@ EXTRACT_PROMPT = """请从以下学术文献内容中提取元数据，严格按
 3. 如果是英文文献（language="en"），*_en字段留空即可
 
 请返回以下JSON格式：
-{
-  "language": "语言代码",
-  "type": "book 或 article 或 conference 或 thesis",
-  "title": "标题（原文）",
-  "title_en": "英文标题（非英文文献必填）",
-  "year": 发表年份(整数),
-  "authors": ["作者1", "作者2"],
-  "authors_en": ["Author1", "Author2"],
-  "abstract": "摘要（原文）",
-  "abstract_en": "英文摘要（非英文文献必填）",
-  "doi": "DOI号",
-  "source": "来源",
-  "journal": "期刊名或会议名（原文）",
-  "journal_en": "英文期刊/会议名（非英文文献必填）",
-  "keywords": ["关键词1", "关键词2"],
-  "keywords_en": ["keyword1", "keyword2"],
-  "category": "分类"
-}
+{{"language": "语言代码", "type": "book 或 article 或 conference 或 thesis", "title": "标题（原文）", "title_en": "英文标题（非英文文献必填）", "year": 发表年份(整数), "authors": ["作者1", "作者2"], "authors_en": ["Author1", "Author2"], "abstract": "摘要（原文）", "abstract_en": "英文摘要（非英文文献必填）", "doi": "DOI号", "source": "来源", "journal": "期刊名或会议名（原文）", "journal_en": "英文期刊/会议名（非英文文献必填）", "keywords": ["关键词1", "关键词2"], "keywords_en": ["keyword1", "keyword2"], "category": "分类"}}
 
 文献内容：
 {content}
@@ -96,20 +79,49 @@ async def extract_metadata(markdown_content: str) -> dict:
 
 def _parse_json_from_text(text: str) -> dict:
     """Extract JSON from LLM response text."""
+    import re
+
+    # Clean the text - remove markdown code blocks if present
+    text = text.strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    elif text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+
     # Try direct parse first
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
 
-    # Try to find JSON block in the text
-    import re
-    json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
-    if json_match:
-        try:
-            return json.loads(json_match.group())
-        except json.JSONDecodeError:
-            pass
+    # Try to find JSON block in the text using a more robust pattern
+    # Match the outermost braces
+    brace_start = text.find('{')
+    if brace_start != -1:
+        # Find matching closing brace
+        depth = 0
+        for i in range(brace_start, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    json_str = text[brace_start:i + 1]
+                    try:
+                        return json.loads(json_str)
+                    except json.JSONDecodeError:
+                        # Try to fix common JSON issues
+                        # Remove trailing commas before closing braces
+                        fixed = re.sub(r',\s*}', '}', json_str)
+                        fixed = re.sub(r',\s*]', ']', fixed)
+                        try:
+                            return json.loads(fixed)
+                        except json.JSONDecodeError:
+                            pass
+                    break
 
     # Return empty dict if parsing fails
     return {

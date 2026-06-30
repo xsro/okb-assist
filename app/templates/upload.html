@@ -18,6 +18,11 @@
         <div class="card">
             <h2 style="margin-bottom:1rem">上传 PDF 文件</h2>
 
+            <div class="form-group">
+                <label for="token-input">上传令牌</label>
+                <input type="password" id="token-input" class="form-control" placeholder="请输入上传令牌">
+            </div>
+
             <div class="upload-area" id="upload-area">
                 <p style="font-size:3rem">📄</p>
                 <p>拖拽 PDF 文件到此处，或点击选择文件</p>
@@ -34,11 +39,21 @@
 
     <script src="/assist/static/app.js"></script>
     <script>
-        if (!checkAuth()) throw new Error('Not authenticated');
-
         const uploadArea = document.getElementById('upload-area');
         const fileInput = document.getElementById('file-input');
+        const tokenInput = document.getElementById('token-input');
         const progressDiv = document.getElementById('upload-progress');
+
+        // Load saved token
+        const savedToken = api.getToken();
+        if (savedToken) {
+            tokenInput.value = savedToken;
+        }
+
+        // Save token on change
+        tokenInput.addEventListener('change', () => {
+            api.setToken(tokenInput.value);
+        });
 
         // Click to select file
         uploadArea.addEventListener('click', () => fileInput.click());
@@ -66,10 +81,19 @@
         });
 
         async function uploadFile(file) {
+            const token = tokenInput.value;
+            if (!token) {
+                showToast('请先输入上传令牌', 'error');
+                return;
+            }
+
             if (!file.name.toLowerCase().endsWith('.pdf')) {
                 showToast('只支持 PDF 文件', 'error');
                 return;
             }
+
+            // Save token
+            api.setToken(token);
 
             progressDiv.style.display = 'block';
             uploadArea.style.display = 'none';

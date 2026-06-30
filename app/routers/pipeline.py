@@ -1,31 +1,45 @@
 import json
 import os
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user
 from app.database import get_db
-from app.models import Document, DocStatus, User
+from app.models import Document, DocStatus
 from app.services.mineru import parse_pdf
 from app.services.ollama import extract_metadata, get_embedding, add_yaml_frontmatter
 from app.services.qdrant import index_document, delete_document_points
 
 router = APIRouter(prefix="/assist/api/pipeline", tags=["pipeline"])
 
+QDRANT_USER_ID = 0  # Default user ID for Qdrant since no auth
+
+
+@router.post("/{doc_id}/reset")
+def reset_document(
+    doc_id: int,
+    db: Session = Depends(get_db),
+):
+    """Reset document status to uploaded for re-processing."""
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="文献不存在")
+
+    doc.status = DocStatus.uploaded
+    doc.markdown_path = None
+    doc.qdrant_collection = None
+    db.commit()
+
+    return {"detail": "状态已重置", "status": doc.status.value}
+
 
 @router.post("/{doc_id}/parse")
 async def parse_document(
     doc_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     """Stage 1: Parse PDF to Markdown using MinerU."""
-    doc = db.query(Document).filter(
-        Document.id == doc_id,
-        Document.user_id == current_user.id,
-    ).first()
+    doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
 
@@ -49,13 +63,9 @@ async def parse_document(
 async def extract_document_meta(
     doc_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     """Stage 2: Extract metadata using Ollama."""
-    doc = db.query(Document).filter(
-        Document.id == doc_id,
-        Document.user_id == current_user.id,
-    ).first()
+    doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
 
@@ -111,13 +121,9 @@ async def extract_document_meta(
 async def index_document_to_qdrant(
     doc_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     """Stage 3: Index document into Qdrant."""
-    doc = db.query(Document).filter(
-        Document.id == doc_id,
-        Document.user_id == current_user.id,
-    ).first()
+    doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
 
@@ -144,7 +150,7 @@ async def index_document_to_qdrant(
         # Index to Qdrant
         collection_name = await index_document(
             doc_id=doc.id,
-            user_id=current_user.id,
+            user_id=QDRANT_USER_ID,
             markdown_content=markdown_content,
             metadata=metadata,
             get_embedding_func=get_embedding,
@@ -163,13 +169,9 @@ async def index_document_to_qdrant(
 async def process_full_pipeline(
     doc_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     """Run all three stages in sequence."""
-    doc = db.query(Document).filter(
-        Document.id == doc_id,
-        Document.user_id == current_user.id,
-    ).first()
+    doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
 
@@ -243,7 +245,7 @@ async def process_full_pipeline(
 
             collection_name = await index_document(
                 doc_id=doc.id,
-                user_id=current_user.id,
+                user_id=QDRANT_USER_ID,
                 markdown_content=markdown_content,
                 metadata=metadata,
                 get_embedding_func=get_embedding,
@@ -264,13 +266,9 @@ async def process_full_pipeline(
 def get_pipeline_status(
     doc_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     """Get current processing status of a document."""
-    doc = db.query(Document).filter(
-        Document.id == doc_id,
-        Document.user_id == current_user.id,
-    ).first()
+    doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
 

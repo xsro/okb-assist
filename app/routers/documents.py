@@ -4,19 +4,27 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Header
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user
+from app.config import get_settings
 from app.database import get_db
-from app.models import Document, DocStatus, User
+from app.models import Document, DocStatus
 
 router = APIRouter(prefix="/assist/api/documents", tags=["documents"])
 
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+settings = get_settings()
+
+
+def verify_token(x_token: str = Header(...)):
+    """Verify upload token from request header."""
+    if x_token != settings.upload_token:
+        raise HTTPException(status_code=401, detail="无效的上传令牌")
 
 
 class DocumentOut(BaseModel):
@@ -99,9 +107,8 @@ def list_documents(
     q: Optional[str] = None,
     status_filter: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
-    query = db.query(Document).filter(Document.user_id == current_user.id)
+    query = db.query(Document)
 
     if q:
         query = query.filter(
@@ -121,8 +128,12 @@ def list_documents(
 async def upload_document(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    x_token: str = Header(...),
 ):
+    # Verify token
+    if x_token != settings.upload_token:
+        raise HTTPException(status_code=401, detail="无效的上传令牌")
+
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="只支持 PDF 文件")
 
@@ -138,7 +149,6 @@ async def upload_document(
 
     # Create DB record
     doc = Document(
-        user_id=current_user.id,
         filename=file.filename,
         file_path=str(file_path),
         status=DocStatus.uploaded,
@@ -154,12 +164,8 @@ async def upload_document(
 def get_document(
     doc_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
-    doc = db.query(Document).filter(
-        Document.id == doc_id,
-        Document.user_id == current_user.id,
-    ).first()
+    doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
     return _doc_to_out(doc)
@@ -170,12 +176,8 @@ def update_document(
     doc_id: int,
     data: DocumentUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
-    doc = db.query(Document).filter(
-        Document.id == doc_id,
-        Document.user_id == current_user.id,
-    ).first()
+    doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
 
@@ -192,12 +194,8 @@ def update_document(
 def delete_document(
     doc_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
-    doc = db.query(Document).filter(
-        Document.id == doc_id,
-        Document.user_id == current_user.id,
-    ).first()
+    doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
 
@@ -216,28 +214,30 @@ def delete_document(
 def get_pdf(
     doc_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
-    doc = db.query(Document).filter(
-        Document.id == doc_id,
-        Document.user_id == current_user.id,
-    ).first()
+    doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc or not doc.file_path or not os.path.exists(doc.file_path):
         raise HTTPException(status_code=404, detail="PDF 文件不存在")
 
-    return FileResponse(doc.file_path, media_type="application/pdf", filename=doc.filename)
+    with open(doc.file_path, "rb") as f:
+        pdf_content = f.read()
+
+    return Response(
+        content=pdf_content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "inline"},
+    )
 
 
 @router.get("/{doc_id}/markdown")
 def get_markdown(
     doc_id: int,
+    page: int = 1,
+    page_size: int = 5000,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
-    doc = db.query(Document).filter(
-        Document.id == doc_id,
-        Document.user_id == current_user.id,
-    ).first()
+    """Get markdown content with pagination. page_size is in characters."""
+    doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
     if not doc.markdown_path or not os.path.exists(doc.markdown_path):
@@ -245,7 +245,74 @@ def get_markdown(
 
     with open(doc.markdown_path, "r", encoding="utf-8") as f:
         content = f.read()
-    return {"content": content}
+
+    # Rewrite image paths to absolute URLs
+    import re
+    # Get the directory containing the markdown file (doc_dir)
+    doc_dir = os.path.dirname(doc.markdown_path)
+    # Get the relative path from uploads/
+    rel_path = os.path.relpath(doc_dir, "uploads")
+
+    # Replace relative image paths: images/xxx.png -> /assist/uploads/{rel_path}/images/xxx.png
+    def rewrite_image(match):
+        img_path = match.group(1)
+        if not img_path.startswith(('http://', 'https://', '/assist/')):
+            # Relative path, rewrite to absolute
+            return f'](/assist/uploads/{rel_path}/{img_path})'
+        return match.group(0)
+
+    content = re.sub(r'\]\(([^)]+)\)', rewrite_image, content)
+
+    # Split into pages by double newline to preserve paragraph structure
+    pages = _split_into_pages(content, page_size)
+    total_pages = len(pages)
+
+    if page < 1 or page > total_pages:
+        page = 1
+
+    return {
+        "content": pages[page - 1] if pages else "",
+        "page": page,
+        "total_pages": total_pages,
+        "total_length": len(content),
+    }
+
+
+def _split_into_pages(content: str, max_chars: int = 5000) -> list[str]:
+    """Split markdown content into pages, trying to break at paragraph boundaries."""
+    if len(content) <= max_chars:
+        return [content]
+
+    pages = []
+    current_pos = 0
+
+    while current_pos < len(content):
+        if current_pos + max_chars >= len(content):
+            pages.append(content[current_pos:])
+            break
+
+        # Find a good break point (double newline)
+        search_start = current_pos + max_chars - 500  # Look back a bit
+        search_end = min(current_pos + max_chars, len(content))
+        chunk = content[search_start:search_end]
+
+        # Try to find paragraph break
+        break_pos = chunk.rfind("\n\n")
+        if break_pos != -1:
+            pages.append(content[current_pos:search_start + break_pos])
+            current_pos = search_start + break_pos + 2
+        else:
+            # Try single newline
+            break_pos = chunk.rfind("\n")
+            if break_pos != -1:
+                pages.append(content[current_pos:search_start + break_pos])
+                current_pos = search_start + break_pos + 1
+            else:
+                # Hard break
+                pages.append(content[current_pos:current_pos + max_chars])
+                current_pos += max_chars
+
+    return pages
 
 
 @router.put("/{doc_id}/markdown")
@@ -253,12 +320,8 @@ def update_markdown(
     doc_id: int,
     data: MarkdownUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
-    doc = db.query(Document).filter(
-        Document.id == doc_id,
-        Document.user_id == current_user.id,
-    ).first()
+    doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
     if not doc.markdown_path:

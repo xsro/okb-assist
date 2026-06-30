@@ -18,10 +18,8 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://127.0.0.1:6333"
     qdrant_collection: str = "documents"
 
-    # JWT
-    jwt_secret: str = "change-me-to-a-random-secret"
-    jwt_algorithm: str = "HS256"
-    jwt_expire_minutes: int = 1440
+    # Upload token
+    upload_token: str = "change-me"
 
     # Database
     database_url: str = "sqlite:///./okb_assist.db"

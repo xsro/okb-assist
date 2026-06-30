@@ -50,8 +50,6 @@
 
     <script src="/assist/static/app.js"></script>
     <script>
-        if (!checkAuth()) throw new Error('Not authenticated');
-
         let documents = [];
 
         async function loadDocuments() {
