@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文献列表 - OKB-Assist</title>
+    <link rel="stylesheet" href="/assist/static/style.css">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>📚 OKB-Assist</h1>
+            <nav id="nav"></nav>
+        </div>
+    </header>
+
+    <main class="container">
+        <div class="search-bar">
+            <input type="text" id="search-input" class="form-control" placeholder="搜索标题、作者、文件名...">
+            <select id="status-filter" class="form-control">
+                <option value="">全部状态</option>
+                <option value="uploaded">已上传</option>
+                <option value="markdown_done">已解析</option>
+                <option value="meta_done">已提取</option>
+                <option value="indexed">已索引</option>
+            </select>
+            <a href="/assist/upload" class="btn btn-primary">上传 PDF</a>
+        </div>
+
+        <div class="card">
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>标题</th>
+                            <th>作者</th>
+                            <th>年份</th>
+                            <th>类型</th>
+                            <th>状态</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="doc-list">
+                        <tr><td colspan="6" style="text-align:center;color:var(--text-muted)">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+
+    <script src="/assist/static/app.js"></script>
+    <script>
+        if (!checkAuth()) throw new Error('Not authenticated');
+
+        let documents = [];
+
+        async function loadDocuments() {
+            const q = document.getElementById('search-input').value;
+            const status = document.getElementById('status-filter').value;
+
+            let url = '/assist/api/documents/?';
+            if (q) url += `q=${encodeURIComponent(q)}&`;
+            if (status) url += `status_filter=${encodeURIComponent(status)}`;
+
+            try {
+                documents = await api.get(url);
+                renderDocuments();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        function renderDocuments() {
+            const tbody = document.getElementById('doc-list');
+
+            if (documents.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted)">暂无文献</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = documents.map(doc => `
+                <tr>
+                    <td>${doc.title || doc.filename || '-'}</td>
+                    <td>${formatAuthors(doc.authors)}</td>
+                    <td>${doc.year || '-'}</td>
+                    <td>${doc.doc_type || '-'}</td>
+                    <td>${statusBadge(doc.status)}</td>
+                    <td>
+                        <a href="/assist/detail/${doc.id}" class="btn btn-sm btn-primary">查看</a>
+                        <button onclick="deleteDoc(${doc.id})" class="btn btn-sm btn-danger">删除</button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        function formatAuthors(authors) {
+            if (!authors) return '-';
+            try {
+                const arr = JSON.parse(authors);
+                return Array.isArray(arr) ? arr.join(', ') : authors;
+            } catch {
+                return authors;
+            }
+        }
+
+        async function deleteDoc(id) {
+            if (!confirm('确定要删除这篇文献及其所有相关文件吗？')) return;
+
+            try {
+                await api.delete(`/assist/api/documents/${id}`);
+                showToast('已删除', 'success');
+                loadDocuments();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        // Search with debounce
+        let searchTimer;
+        document.getElementById('search-input').addEventListener('input', () => {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(loadDocuments, 300);
+        });
+
+        document.getElementById('status-filter').addEventListener('change', loadDocuments);
+
+        // Load on page ready
+        loadDocuments();
+    </script>
+</body>
+</html>

@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文献详情 - OKB-Assist</title>
+    <link rel="stylesheet" href="/assist/static/style.css">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>📚 OKB-Assist</h1>
+            <nav id="nav"></nav>
+        </div>
+    </header>
+
+    <main class="container">
+        <a href="/assist/" style="display:inline-block;margin-bottom:1rem">← 返回列表</a>
+
+        <!-- Pipeline Status -->
+        <div class="card">
+            <h2 style="margin-bottom:1rem">处理流程</h2>
+            <div class="pipeline-steps">
+                <div class="pipeline-step" id="step-upload">
+                    <h3>1. 上传</h3>
+                    <p>PDF 文件</p>
+                </div>
+                <div class="pipeline-step" id="step-parse">
+                    <h3>2. 解析</h3>
+                    <p>MinerU → Markdown</p>
+                </div>
+                <div class="pipeline-step" id="step-extract">
+                    <h3>3. 提取</h3>
+                    <p>Ollama → 元数据</p>
+                </div>
+                <div class="pipeline-step" id="step-index">
+                    <h3>4. 索引</h3>
+                    <p>Qdrant 向量库</p>
+                </div>
+            </div>
+            <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                <button class="btn btn-primary" id="btn-parse" onclick="runStep('parse')">解析 PDF</button>
+                <button class="btn btn-warning" id="btn-extract" onclick="runStep('extract')">提取元数据</button>
+                <button class="btn btn-success" id="btn-index" onclick="runStep('index')">索引到 Qdrant</button>
+                <button class="btn btn-primary" id="btn-process" onclick="runFullProcess()">一键处理</button>
+            </div>
+        </div>
+
+        <!-- Metadata -->
+        <div class="card" id="meta-section">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+                <h2>元数据</h2>
+                <button class="btn btn-sm btn-primary" onclick="toggleEditMeta()">编辑</button>
+            </div>
+            <div id="meta-view"></div>
+            <form id="meta-form" style="display:none">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+                    <div class="form-group">
+                        <label>语言</label>
+                        <select id="meta-language" class="form-control" onchange="toggleEnFields()">
+                            <option value="en">English</option>
+                            <option value="zh">中文 (Chinese)</option>
+                            <option value="ja">日本語 (Japanese)</option>
+                            <option value="ko">한국어 (Korean)</option>
+                            <option value="fr">Français (French)</option>
+                            <option value="de">Deutsch (German)</option>
+                            <option value="es">Español (Spanish)</option>
+                            <option value="pt">Português (Portuguese)</option>
+                            <option value="ru">Русский (Russian)</option>
+                            <option value="ar">العربية (Arabic)</option>
+                            <option value="it">Italiano (Italian)</option>
+                            <option value="nl">Nederlands (Dutch)</option>
+                            <option value="pl">Polski (Polish)</option>
+                            <option value="th">ไทย (Thai)</option>
+                            <option value="vi">Tiếng Việt (Vietnamese)</option>
+                            <option value="tr">Türkçe (Turkish)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>类型</label>
+                        <select id="meta-type" class="form-control">
+                            <option value="">-</option>
+                            <option value="article">article</option>
+                            <option value="book">book</option>
+                            <option value="conference">conference</option>
+                            <option value="thesis">thesis</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>标题</label>
+                        <input type="text" id="meta-title" class="form-control">
+                    </div>
+                    <div class="form-group" id="fg-title-en" style="display:none">
+                        <label>英文标题</label>
+                        <input type="text" id="meta-title-en" class="form-control">
+                    </div>
+                    <div class="form-group">
+                        <label>作者 (JSON 数组)</label>
+                        <input type="text" id="meta-authors" class="form-control" placeholder='["作者1", "作者2"]'>
+                    </div>
+                    <div class="form-group" id="fg-authors-en" style="display:none">
+                        <label>英文作者 (JSON 数组)</label>
+                        <input type="text" id="meta-authors-en" class="form-control" placeholder='["Author1", "Author2"]'>
+                    </div>
+                    <div class="form-group">
+                        <label>年份</label>
+                        <input type="number" id="meta-year" class="form-control">
+                    </div>
+                    <div class="form-group">
+                        <label>DOI</label>
+                        <input type="text" id="meta-doi" class="form-control">
+                    </div>
+                    <div class="form-group">
+                        <label>期刊/会议</label>
+                        <input type="text" id="meta-journal" class="form-control">
+                    </div>
+                    <div class="form-group" id="fg-journal-en" style="display:none">
+                        <label>英文期刊/会议</label>
+                        <input type="text" id="meta-journal-en" class="form-control">
+                    </div>
+                    <div class="form-group">
+                        <label>来源</label>
+                        <input type="text" id="meta-source" class="form-control">
+                    </div>
+                    <div class="form-group">
+                        <label>分类</label>
+                        <input type="text" id="meta-category" class="form-control">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>关键词 (JSON 数组)</label>
+                    <input type="text" id="meta-keywords" class="form-control" placeholder='["关键词1", "关键词2"]'>
+                </div>
+                <div class="form-group" id="fg-keywords-en" style="display:none">
+                    <label>英文关键词 (JSON 数组)</label>
+                    <input type="text" id="meta-keywords-en" class="form-control" placeholder='["keyword1", "keyword2"]'>
+                </div>
+                <div class="form-group">
+                    <label>摘要</label>
+                    <textarea id="meta-abstract" class="form-control" rows="4"></textarea>
+                </div>
+                <div class="form-group" id="fg-abstract-en" style="display:none">
+                    <label>英文摘要</label>
+                    <textarea id="meta-abstract-en" class="form-control" rows="4"></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">保存</button>
+                <button type="button" class="btn" onclick="toggleEditMeta()">取消</button>
+            </form>
+        </div>
+
+        <!-- Content Tabs -->
+        <div class="card">
+            <div class="tabs">
+                <div class="tab active" onclick="switchTab('pdf')">PDF</div>
+                <div class="tab" onclick="switchTab('markdown')">Markdown</div>
+            </div>
+
+            <div id="tab-pdf" class="tab-content active">
+                <div id="pdf-viewer" style="text-align:center;padding:2rem;color:var(--text-muted)">
+                    PDF 预览区域
+                </div>
+            </div>
+
+            <div id="tab-markdown" class="tab-content">
+                <div style="display:flex;justify-content:flex-end;margin-bottom:0.5rem">
+                    <button class="btn btn-sm btn-primary" id="btn-edit-md" onclick="toggleEditMarkdown()">编辑</button>
+                    <button class="btn btn-sm btn-success" id="btn-save-md" onclick="saveMarkdown()" style="display:none">保存</button>
+                </div>
+                <div id="markdown-content" style="white-space:pre-wrap;font-family:monospace;padding:1rem;background:var(--bg);border-radius:6px;max-height:600px;overflow-y:auto">
+                    加载中...
+                </div>
+                <textarea id="markdown-editor" class="form-control" style="display:none;font-family:monospace;min-height:400px"></textarea>
+            </div>
+        </div>
+    </main>
+
+    <script src="/assist/static/app.js"></script>
+    <script>
+        if (!checkAuth()) throw new Error('Not authenticated');
+
+        const docId = {{ doc_id }};
+        let doc = null;
+        let editingMeta = false;
+        let editingMd = false;
+
+        async function loadDocument() {
+            try {
+                doc = await api.get(`/assist/api/documents/${docId}`);
+                renderPipeline();
+                renderMeta();
+                loadPDF();
+                loadMarkdown();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        function renderPipeline() {
+            const steps = ['uploaded', 'markdown_done', 'meta_done', 'indexed'];
+            const stepIds = ['step-upload', 'step-parse', 'step-extract', 'step-index'];
+            const currentIdx = steps.indexOf(doc.status);
+
+            stepIds.forEach((id, i) => {
+                const el = document.getElementById(id);
+                el.classList.remove('active', 'done');
+                if (i < currentIdx) el.classList.add('done');
+                if (i === currentIdx) el.classList.add('active');
+            });
+
+            // Enable/disable buttons
+            document.getElementById('btn-parse').disabled = doc.status !== 'uploaded';
+            document.getElementById('btn-extract').disabled = doc.status !== 'markdown_done';
+            document.getElementById('btn-index').disabled = doc.status !== 'meta_done';
+            document.getElementById('btn-process').disabled = doc.status === 'indexed';
+        }
+
+        const LANG_LABELS = {
+            'en': '🇬🇧 English',
+            'zh': '🇨🇳 中文',
+            'ja': '🇯🇵 日本語',
+            'ko': '🇰🇷 한국어',
+            'fr': '🇫🇷 Français',
+            'de': '🇩🇪 Deutsch',
+            'es': '🇪🇸 Español',
+            'pt': '🇧🇷 Português',
+            'ru': '🇷🇺 Русский',
+            'ar': '🇸🇦 العربية',
+            'it': '🇮🇹 Italiano',
+            'nl': '🇳🇱 Nederlands',
+            'pl': '🇵🇱 Polski',
+            'th': '🇹🇭 ไทย',
+            'vi': '🇻🇳 Tiếng Việt',
+            'tr': '🇹🇷 Türkçe',
+        };
+
+        function getLangLabel(code) {
+            return LANG_LABELS[code] || `🌐 ${code || 'Unknown'}`;
+        }
+
+        function isNonEnglish(lang) {
+            return lang && lang !== 'en';
+        }
+
+        function renderMeta() {
+            const view = document.getElementById('meta-view');
+            const authors = formatAuthors(doc.authors);
+            const keywords = formatKeywords(doc.keywords);
+            const nonEn = isNonEnglish(doc.language);
+            const langLabel = getLangLabel(doc.language);
+
+            let html = `
+                <table style="width:100%">
+                    <tr><td style="width:120px;font-weight:600">语言</td><td>${langLabel}</td></tr>
+                    <tr><td style="font-weight:600">标题</td><td>${doc.title || '-'}</td></tr>
+            `;
+
+            if (nonEn && doc.title_en) {
+                html += `<tr><td style="font-weight:600">英文标题</td><td>${doc.title_en}</td></tr>`;
+            }
+
+            html += `
+                    <tr><td style="font-weight:600">类型</td><td>${doc.doc_type || '-'}</td></tr>
+                    <tr><td style="font-weight:600">作者</td><td>${authors}</td></tr>
+            `;
+
+            if (nonEn && doc.authors_en) {
+                html += `<tr><td style="font-weight:600">英文作者</td><td>${formatAuthors(doc.authors_en)}</td></tr>`;
+            }
+
+            html += `
+                    <tr><td style="font-weight:600">年份</td><td>${doc.year || '-'}</td></tr>
+                    <tr><td style="font-weight:600">DOI</td><td>${doc.doi || '-'}</td></tr>
+                    <tr><td style="font-weight:600">期刊/会议</td><td>${doc.journal || '-'}</td></tr>
+            `;
+
+            if (nonEn && doc.journal_en) {
+                html += `<tr><td style="font-weight:600">英文期刊/会议</td><td>${doc.journal_en}</td></tr>`;
+            }
+
+            html += `
+                    <tr><td style="font-weight:600">来源</td><td>${doc.source || '-'}</td></tr>
+                    <tr><td style="font-weight:600">分类</td><td>${doc.category || '-'}</td></tr>
+                    <tr><td style="font-weight:600">关键词</td><td>${keywords}</td></tr>
+            `;
+
+            if (nonEn && doc.keywords_en) {
+                html += `<tr><td style="font-weight:600">英文关键词</td><td>${formatKeywords(doc.keywords_en)}</td></tr>`;
+            }
+
+            html += `
+                    <tr><td style="font-weight:600">摘要</td><td>${doc.abstract || '-'}</td></tr>
+            `;
+
+            if (nonEn && doc.abstract_en) {
+                html += `<tr><td style="font-weight:600">英文摘要</td><td style="font-size:0.875rem">${doc.abstract_en}</td></tr>`;
+            }
+
+            html += `</table>`;
+            view.innerHTML = html;
+        }
+
+        function toggleEnFields() {
+            const lang = document.getElementById('meta-language').value;
+            const showEn = isNonEnglish(lang);
+            const enFields = ['fg-title-en', 'fg-authors-en', 'fg-journal-en', 'fg-keywords-en', 'fg-abstract-en'];
+            enFields.forEach(id => {
+                document.getElementById(id).style.display = showEn ? 'block' : 'none';
+            });
+        }
+
+        function formatAuthors(authors) {
+            if (!authors) return '-';
+            try {
+                const arr = JSON.parse(authors);
+                return Array.isArray(arr) ? arr.join(', ') : authors;
+            } catch { return authors; }
+        }
+
+        function formatKeywords(keywords) {
+            if (!keywords) return '-';
+            try {
+                const arr = JSON.parse(keywords);
+                return Array.isArray(arr) ? arr.map(k => `<span class="badge badge-uploaded">${k}</span>`).join(' ') : keywords;
+            } catch { return keywords; }
+        }
+
+        function toggleEditMeta() {
+            editingMeta = !editingMeta;
+            document.getElementById('meta-view').style.display = editingMeta ? 'none' : 'block';
+            document.getElementById('meta-form').style.display = editingMeta ? 'block' : 'none';
+
+            if (editingMeta) {
+                document.getElementById('meta-language').value = doc.language || 'en';
+                document.getElementById('meta-title').value = doc.title || '';
+                document.getElementById('meta-type').value = doc.doc_type || '';
+                document.getElementById('meta-authors').value = doc.authors || '[]';
+                document.getElementById('meta-year').value = doc.year || '';
+                document.getElementById('meta-doi').value = doc.doi || '';
+                document.getElementById('meta-journal').value = doc.journal || '';
+                document.getElementById('meta-source').value = doc.source || '';
+                document.getElementById('meta-category').value = doc.category || '';
+                document.getElementById('meta-keywords').value = doc.keywords || '[]';
+                document.getElementById('meta-abstract').value = doc.abstract || '';
+
+                // English fields
+                document.getElementById('meta-title-en').value = doc.title_en || '';
+                document.getElementById('meta-authors-en').value = doc.authors_en || '[]';
+                document.getElementById('meta-journal-en').value = doc.journal_en || '';
+                document.getElementById('meta-keywords-en').value = doc.keywords_en || '[]';
+                document.getElementById('meta-abstract-en').value = doc.abstract_en || '';
+
+                toggleEnFields();
+            }
+        }
+
+        document.getElementById('meta-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            try {
+                const data = {
+                    language: document.getElementById('meta-language').value,
+                    title: document.getElementById('meta-title').value,
+                    doc_type: document.getElementById('meta-type').value,
+                    authors: document.getElementById('meta-authors').value,
+                    year: parseInt(document.getElementById('meta-year').value) || null,
+                    doi: document.getElementById('meta-doi').value,
+                    journal: document.getElementById('meta-journal').value,
+                    source: document.getElementById('meta-source').value,
+                    category: document.getElementById('meta-category').value,
+                    keywords: document.getElementById('meta-keywords').value,
+                    abstract: document.getElementById('meta-abstract').value,
+                    title_en: document.getElementById('meta-title-en').value,
+                    authors_en: document.getElementById('meta-authors-en').value,
+                    journal_en: document.getElementById('meta-journal-en').value,
+                    keywords_en: document.getElementById('meta-keywords-en').value,
+                    abstract_en: document.getElementById('meta-abstract-en').value,
+                };
+                await api.put(`/assist/api/documents/${docId}`, data);
+                showToast('元数据已保存', 'success');
+                await loadDocument();
+                toggleEditMeta();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        });
+
+        function loadPDF() {
+            const viewer = document.getElementById('pdf-viewer');
+            viewer.innerHTML = `<iframe src="/assist/api/documents/${docId}/pdf" style="width:100%;height:600px;border:none;border-radius:6px"></iframe>`;
+        }
+
+        async function loadMarkdown() {
+            try {
+                const data = await api.get(`/assist/api/documents/${docId}/markdown`);
+                document.getElementById('markdown-content').textContent = data.content;
+            } catch {
+                document.getElementById('markdown-content').textContent = 'Markdown 尚未生成';
+            }
+        }
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+
+            event.target.classList.add('active');
+            document.getElementById(`tab-${tab}`).classList.add('active');
+        }
+
+        function toggleEditMarkdown() {
+            editingMd = !editingMd;
+            const content = document.getElementById('markdown-content');
+            const editor = document.getElementById('markdown-editor');
+            const btnEdit = document.getElementById('btn-edit-md');
+            const btnSave = document.getElementById('btn-save-md');
+
+            if (editingMd) {
+                editor.value = content.textContent;
+                content.style.display = 'none';
+                editor.style.display = 'block';
+                btnEdit.style.display = 'none';
+                btnSave.style.display = 'inline-flex';
+            } else {
+                content.style.display = 'block';
+                editor.style.display = 'none';
+                btnEdit.style.display = 'inline-flex';
+                btnSave.style.display = 'none';
+            }
+        }
+
+        async function saveMarkdown() {
+            try {
+                await api.put(`/assist/api/documents/${docId}/markdown`, {
+                    content: document.getElementById('markdown-editor').value,
+                });
+                showToast('Markdown 已保存', 'success');
+                toggleEditMarkdown();
+                loadMarkdown();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        async function runStep(step) {
+            try {
+                showToast(`正在执行: ${step}...`, 'info');
+                const result = await api.post(`/assist/api/pipeline/${docId}/${step}`);
+                showToast(result.detail, 'success');
+                await loadDocument();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        async function runFullProcess() {
+            try {
+                showToast('开始全流程处理...', 'info');
+                const result = await api.post(`/assist/api/pipeline/${docId}/process`);
+                showToast(result.detail, result.results?.every(r => r.status === 'success') ? 'success' : 'error');
+                await loadDocument();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        loadDocument();
+    </script>
+</body>
+</html>

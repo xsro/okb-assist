@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>上传 PDF - OKB-Assist</title>
+    <link rel="stylesheet" href="/assist/static/style.css">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>📚 OKB-Assist</h1>
+            <nav id="nav"></nav>
+        </div>
+    </header>
+
+    <main class="container">
+        <div class="card">
+            <h2 style="margin-bottom:1rem">上传 PDF 文件</h2>
+
+            <div class="upload-area" id="upload-area">
+                <p style="font-size:3rem">📄</p>
+                <p>拖拽 PDF 文件到此处，或点击选择文件</p>
+                <p style="font-size:0.75rem">仅支持 .pdf 格式</p>
+                <input type="file" id="file-input" accept=".pdf" style="display:none">
+            </div>
+
+            <div id="upload-progress" style="display:none;margin-top:1rem">
+                <p>上传中...</p>
+                <progress value="0" max="100" style="width:100%"></progress>
+            </div>
+        </div>
+    </main>
+
+    <script src="/assist/static/app.js"></script>
+    <script>
+        if (!checkAuth()) throw new Error('Not authenticated');
+
+        const uploadArea = document.getElementById('upload-area');
+        const fileInput = document.getElementById('file-input');
+        const progressDiv = document.getElementById('upload-progress');
+
+        // Click to select file
+        uploadArea.addEventListener('click', () => fileInput.click());
+
+        // Drag and drop
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file) uploadFile(file);
+        });
+
+        // File selected
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files[0]) uploadFile(fileInput.files[0]);
+        });
+
+        async function uploadFile(file) {
+            if (!file.name.toLowerCase().endsWith('.pdf')) {
+                showToast('只支持 PDF 文件', 'error');
+                return;
+            }
+
+            progressDiv.style.display = 'block';
+            uploadArea.style.display = 'none';
+
+            try {
+                const result = await api.upload('/assist/api/documents/upload', file);
+                showToast('上传成功', 'success');
+                setTimeout(() => {
+                    window.location.href = `/assist/detail/${result.id}`;
+                }, 500);
+            } catch (err) {
+                showToast(err.message, 'error');
+                progressDiv.style.display = 'none';
+                uploadArea.style.display = 'block';
+            }
+        }
+    </script>
+</body>
+</html>

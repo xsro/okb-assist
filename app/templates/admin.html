@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>管理后台 - OKB-Assist</title>
+    <link rel="stylesheet" href="/assist/static/style.css">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>📚 OKB-Assist</h1>
+            <nav id="nav"></nav>
+        </div>
+    </header>
+
+    <main class="container">
+        <h2 style="margin-bottom:1.5rem">管理后台</h2>
+
+        <!-- Stats -->
+        <div class="stats-grid" id="stats-grid">
+            <div class="stat-card">
+                <h3 id="stat-users">-</h3>
+                <p>用户数</p>
+            </div>
+            <div class="stat-card">
+                <h3 id="stat-docs">-</h3>
+                <p>文献总数</p>
+            </div>
+            <div class="stat-card">
+                <h3 id="stat-indexed">-</h3>
+                <p>已索引</p>
+            </div>
+            <div class="stat-card">
+                <h3 id="stat-qdrant">-</h3>
+                <p>Qdrant 状态</p>
+            </div>
+        </div>
+
+        <!-- Users -->
+        <div class="card">
+            <h2 style="margin-bottom:1rem">用户管理</h2>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>用户名</th>
+                            <th>管理员</th>
+                            <th>注册时间</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="user-list">
+                        <tr><td colspan="5" style="text-align:center;color:var(--text-muted)">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Qdrant Collections -->
+        <div class="card">
+            <h2 style="margin-bottom:1rem">Qdrant 集合</h2>
+            <div id="collections-list" style="color:var(--text-muted)">加载中...</div>
+        </div>
+    </main>
+
+    <script src="/assist/static/app.js"></script>
+    <script>
+        if (!checkAuth()) throw new Error('Not authenticated');
+
+        async function loadStats() {
+            try {
+                const stats = await api.get('/assist/api/admin/stats');
+
+                document.getElementById('stat-users').textContent = stats.users;
+                document.getElementById('stat-docs').textContent = stats.documents;
+                document.getElementById('stat-indexed').textContent = stats.status_counts?.indexed || 0;
+                document.getElementById('stat-qdrant').textContent = stats.qdrant_status === 'connected' ? '✓ 已连接' : '✗ 异常';
+
+                // Collections
+                const collectionsDiv = document.getElementById('collections-list');
+                if (stats.qdrant_collections && stats.qdrant_collections.length > 0) {
+                    collectionsDiv.innerHTML = stats.qdrant_collections.map(c =>
+                        `<span class="badge badge-indexed" style="margin:0.25rem">${c}</span>`
+                    ).join('');
+                } else {
+                    collectionsDiv.textContent = '暂无集合';
+                }
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        async function loadUsers() {
+            try {
+                const users = await api.get('/assist/api/admin/users');
+                const tbody = document.getElementById('user-list');
+
+                if (users.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">暂无用户</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = users.map(u => `
+                    <tr>
+                        <td>${u.id}</td>
+                        <td>${u.username}</td>
+                        <td>${u.is_admin ? '✓' : '-'}</td>
+                        <td>${u.created_at ? new Date(u.created_at).toLocaleString() : '-'}</td>
+                        <td>
+                            <button class="btn btn-sm btn-warning" onclick="toggleAdmin(${u.id})">
+                                ${u.is_admin ? '取消管理员' : '设为管理员'}
+                            </button>
+                            <button class="btn btn-sm btn-danger" onclick="deleteUser(${u.id}, '${u.username}')">删除</button>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        async function toggleAdmin(userId) {
+            try {
+                const result = await api.put(`/assist/api/admin/users/${userId}/toggle-admin`);
+                showToast(result.detail, 'success');
+                loadUsers();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        async function deleteUser(userId, username) {
+            if (!confirm(`确定要删除用户 "${username}" 吗？该用户的所有文献也将被删除。`)) return;
+
+            try {
+                const result = await api.delete(`/assist/api/admin/users/${userId}`);
+                showToast(result.detail, 'success');
+                loadUsers();
+                loadStats();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        loadStats();
+        loadUsers();
+    </script>
+</body>
+</html>
