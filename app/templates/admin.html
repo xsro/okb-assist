@@ -126,16 +126,20 @@
                 </div>
             </div>
 
-            <div class="batch-controls">
+            <div class="batch-controls" id="batch-controls">
                 <button class="btn btn-primary" id="btn-start" onclick="startBatch()">▶ 全部提交处理</button>
                 <button class="btn btn-warning" id="btn-pause" onclick="pauseBatch()" style="display:none">⏸ 暂停处理</button>
                 <button class="btn btn-success" id="btn-resume" onclick="resumeBatch()" style="display:none">▶ 恢复处理</button>
             </div>
+            <p id="batch-hint" style="font-size:0.875rem;color:var(--text-muted);display:none">
+                加载中...
+            </p>
 
             <p style="font-size:0.875rem;color:var(--text-muted)">
-                • 全部提交处理：开始处理所有待处理的文档<br>
+                • 全部提交处理：开始处理所有待处理的文档（最多同时处理 3 个）<br>
                 • 暂停处理：当前任务完成后暂停，不再提交新任务
             </p>
+            <div id="batch-debug" style="margin-top:0.5rem;padding:0.5rem;background:var(--bg);border-radius:4px;font-size:0.75rem;font-family:monospace;display:none"></div>
         </div>
 
         <!-- Processing Tasks -->
@@ -188,7 +192,12 @@
                 document.getElementById('batch-total').textContent = status.total;
                 document.getElementById('batch-running').textContent = `${status.running_tasks}/${status.max_concurrent}`;
 
-                // Update indicator
+                // Show debug info
+                const debugDiv = document.getElementById('batch-debug');
+                debugDiv.style.display = 'block';
+                debugDiv.textContent = `paused=${status.paused} pending=${status.pending} processing=${status.processing} running=${status.running_tasks}`;
+
+                // Update indicator and buttons
                 const indicator = document.getElementById('batch-status-indicator');
                 const btnStart = document.getElementById('btn-start');
                 const btnPause = document.getElementById('btn-pause');
@@ -200,7 +209,7 @@
                     btnStart.style.display = 'none';
                     btnPause.style.display = 'none';
                     btnResume.style.display = 'inline-flex';
-                } else if (status.processing > 0) {
+                } else if (status.processing > 0 || status.running_tasks > 0) {
                     indicator.className = 'status-indicator status-running pulse';
                     indicator.textContent = '运行中';
                     btnStart.style.display = 'none';
@@ -209,13 +218,15 @@
                 } else {
                     indicator.className = 'status-indicator status-idle';
                     indicator.textContent = '空闲';
-                    btnStart.style.display = status.pending > 0 ? 'inline-flex' : 'none';
+                    btnStart.style.display = 'inline-flex';
                     btnPause.style.display = 'none';
                     btnResume.style.display = 'none';
                 }
 
             } catch (err) {
                 console.error('Batch status error:', err);
+                document.getElementById('batch-debug').style.display = 'block';
+                document.getElementById('batch-debug').textContent = `Error: ${err.message}`;
             }
         }
 
