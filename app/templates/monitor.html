@@ -280,8 +280,10 @@
                 // Load services status
                 await loadServicesStatus();
 
-                // Render task list
-                renderTaskList(docs);
+                // Filter and render only processing tasks
+                const processingStatuses = ['parsing', 'extracting', 'indexing'];
+                const processingDocs = docs.filter(d => processingStatuses.includes(d.status));
+                renderTaskList(processingDocs);
 
             } catch (err) {
                 console.error('Load error:', err);
