@@ -160,6 +160,44 @@ async def upload_document(
     return _doc_to_out(doc)
 
 
+class RegisterByPath(BaseModel):
+    file_path: str
+
+
+@router.post("/register")
+def register_document_by_path(
+    data: RegisterByPath,
+    db: Session = Depends(get_db),
+):
+    """Register a PDF file by its absolute path (no copy)."""
+    file_path = data.file_path
+
+    # Validate file exists
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=400, detail=f"文件不存在: {file_path}")
+
+    if not file_path.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="只支持 PDF 文件")
+
+    # Check if already registered
+    existing = db.query(Document).filter(Document.file_path == file_path).first()
+    if existing:
+        return _doc_to_out(existing)
+
+    # Create DB record
+    filename = os.path.basename(file_path)
+    doc = Document(
+        filename=filename,
+        file_path=file_path,
+        status=DocStatus.uploaded,
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+
+    return _doc_to_out(doc)
+
+
 @router.get("/{doc_id}")
 def get_document(
     doc_id: int,
