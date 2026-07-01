@@ -138,6 +138,12 @@
             </p>
         </div>
 
+        <!-- Processing Tasks -->
+        <div class="card" style="margin-bottom:1.5rem">
+            <h2 style="margin-bottom:1rem">处理中的任务</h2>
+            <div id="processing-tasks" style="color:var(--text-muted)">加载中...</div>
+        </div>
+
         <!-- Qdrant Collections -->
         <div class="card">
             <h2 style="margin-bottom:1rem">Qdrant 集合</h2>
@@ -250,6 +256,7 @@
             batchTimer = setInterval(async () => {
                 await loadBatchStatus();
                 await loadStats();
+                await loadProcessingTasks();
 
                 // Stop polling if idle
                 try {
@@ -262,9 +269,44 @@
             }, 3000);
         }
 
+        async function loadProcessingTasks() {
+            try {
+                const docs = await api.get('/assist/api/documents/?status_filter=parsing&status_filter=extracting&status_filter=indexing');
+                const container = document.getElementById('processing-tasks');
+
+                // Filter processing tasks from all documents
+                const processingStatuses = ['parsing', 'extracting', 'indexing'];
+                const processingDocs = docs.filter(d => processingStatuses.includes(d.status));
+
+                if (processingDocs.length === 0) {
+                    container.innerHTML = '<p style="text-align:center;padding:1rem;color:var(--text-muted)">暂无处理中的任务</p>';
+                    return;
+                }
+
+                const statusLabels = {
+                    'parsing': '解析中',
+                    'extracting': '提取中',
+                    'indexing': '索引中',
+                };
+
+                container.innerHTML = processingDocs.map(doc => `
+                    <div style="display:flex;align-items:center;padding:0.75rem;border-bottom:1px solid var(--border)">
+                        <div style="flex:1">
+                            <a href="/assist/detail/${doc.id}" style="font-weight:500">${doc.title || doc.filename || '未命名'}</a>
+                            <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0">ID: ${doc.id}</p>
+                        </div>
+                        <span class="badge badge-${doc.status}">${statusLabels[doc.status] || doc.status}</span>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error('Processing tasks error:', err);
+            }
+        }
+
         // Initial load
         loadStats();
         loadBatchStatus();
+        loadProcessingTasks();
     </script>
 </body>
 </html>
