@@ -122,6 +122,8 @@ def _doc_to_out(doc: Document) -> dict:
 def list_documents(
     q: Optional[str] = None,
     status_filter: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 50,
     db: Session = Depends(get_db),
 ):
     query = db.query(Document)
@@ -134,10 +136,24 @@ def list_documents(
         )
 
     if status_filter:
-        query = query.filter(Document.status == status_filter)
+        # Support multiple status filters separated by comma
+        statuses = status_filter.split(",")
+        query = query.filter(Document.status.in_(statuses))
 
-    docs = query.order_by(Document.created_at.desc()).all()
-    return [_doc_to_out(d) for d in docs]
+    # Get total count
+    total = query.count()
+
+    # Apply pagination
+    offset = (page - 1) * page_size
+    docs = query.order_by(Document.created_at.desc()).offset(offset).limit(page_size).all()
+
+    return {
+        "items": [_doc_to_out(d) for d in docs],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size,
+    }
 
 
 @router.post("/upload")

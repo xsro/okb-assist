@@ -271,12 +271,12 @@
 
         async function loadProcessingTasks() {
             try {
-                const docs = await api.get('/assist/api/documents/?status_filter=parsing&status_filter=extracting&status_filter=indexing');
+                const data = await api.get('/assist/api/documents/?status_filter=parsing,extracting,indexing&page_size=100');
                 const container = document.getElementById('processing-tasks');
 
                 // Filter processing tasks from all documents
                 const processingStatuses = ['parsing', 'extracting', 'indexing'];
-                const processingDocs = docs.filter(d => processingStatuses.includes(d.status));
+                const processingDocs = (data.items || []).filter(d => processingStatuses.includes(d.status));
 
                 if (processingDocs.length === 0) {
                     container.innerHTML = '<p style="text-align:center;padding:1rem;color:var(--text-muted)">暂无处理中的任务</p>';

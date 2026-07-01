@@ -248,9 +248,10 @@
                 document.getElementById('running-tasks').textContent = queue.running_tasks;
                 document.getElementById('available-slots').textContent = queue.available_slots;
 
-                // Load documents
-                const docs = await api.get('/assist/api/documents/');
-                document.getElementById('total-docs').textContent = docs.length;
+                // Load documents (use large page size for stats)
+                const data = await api.get('/assist/api/documents/?page_size=10000');
+                const docs = data.items || [];
+                document.getElementById('total-docs').textContent = data.total;
 
                 // Calculate status distribution
                 const statusCounts = {};

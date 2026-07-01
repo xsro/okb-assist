@@ -5,6 +5,55 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>文献列表 - OKB-Assist</title>
     <link rel="stylesheet" href="/assist/static/style.css">
+    <style>
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 1.5rem;
+            flex-wrap: wrap;
+        }
+        .pagination button {
+            padding: 0.5rem 0.75rem;
+            border: 1px solid var(--border);
+            background: var(--card);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+        }
+        .pagination button:hover:not(:disabled) {
+            background: var(--bg);
+            border-color: var(--primary);
+        }
+        .pagination button.active {
+            background: var(--primary);
+            color: white;
+            border-color: var(--primary);
+        }
+        .pagination button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .pagination-info {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+        }
+        .page-size-select {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+            color: var(--text-muted);
+        }
+        .page-size-select select {
+            padding: 0.25rem 0.5rem;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 0.875rem;
+        }
+    </style>
 </head>
 <body>
     <header>
@@ -20,18 +69,37 @@
             <select id="status-filter" class="form-control">
                 <option value="">全部状态</option>
                 <option value="uploaded">已上传</option>
+                <option value="parsing">解析中</option>
                 <option value="markdown_done">已解析</option>
+                <option value="extracting">提取中</option>
                 <option value="meta_done">已提取</option>
+                <option value="indexing">索引中</option>
                 <option value="indexed">已索引</option>
+                <option value="error">错误</option>
             </select>
             <a href="/assist/upload" class="btn btn-primary">上传 PDF</a>
         </div>
 
         <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+                <div class="page-size-select">
+                    <span>每页显示</span>
+                    <select id="page-size" onchange="changePageSize()">
+                        <option value="20">20</option>
+                        <option value="50" selected>50</option>
+                        <option value="100">100</option>
+                        <option value="200">200</option>
+                    </select>
+                    <span>条</span>
+                </div>
+                <div class="pagination-info" id="pagination-info">-</div>
+            </div>
+
             <div class="table-container">
                 <table>
                     <thead>
                         <tr>
+                            <th>ID</th>
                             <th>标题</th>
                             <th>作者</th>
                             <th>年份</th>
@@ -41,43 +109,55 @@
                         </tr>
                     </thead>
                     <tbody id="doc-list">
-                        <tr><td colspan="6" style="text-align:center;color:var(--text-muted)">加载中...</td></tr>
+                        <tr><td colspan="7" style="text-align:center;color:var(--text-muted)">加载中...</td></tr>
                     </tbody>
                 </table>
             </div>
+
+            <div class="pagination" id="pagination"></div>
         </div>
     </main>
 
     <script src="/assist/static/app.js"></script>
     <script>
-        let documents = [];
+        let currentPage = 1;
+        let pageSize = 50;
+        let totalPages = 1;
+        let totalDocs = 0;
 
         async function loadDocuments() {
             const q = document.getElementById('search-input').value;
             const status = document.getElementById('status-filter').value;
 
-            let url = '/assist/api/documents/?';
-            if (q) url += `q=${encodeURIComponent(q)}&`;
-            if (status) url += `status_filter=${encodeURIComponent(status)}`;
+            let url = `/assist/api/documents/?page=${currentPage}&page_size=${pageSize}`;
+            if (q) url += `&q=${encodeURIComponent(q)}`;
+            if (status) url += `&status_filter=${encodeURIComponent(status)}`;
 
             try {
-                documents = await api.get(url);
-                renderDocuments();
+                const data = await api.get(url);
+                totalPages = data.total_pages;
+                totalDocs = data.total;
+                currentPage = data.page;
+
+                renderDocuments(data.items);
+                renderPagination();
+                renderPaginationInfo();
             } catch (err) {
                 showToast(err.message, 'error');
             }
         }
 
-        function renderDocuments() {
+        function renderDocuments(docs) {
             const tbody = document.getElementById('doc-list');
 
-            if (documents.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted)">暂无文献</td></tr>';
+            if (docs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">暂无文献</td></tr>';
                 return;
             }
 
-            tbody.innerHTML = documents.map(doc => `
+            tbody.innerHTML = docs.map(doc => `
                 <tr>
+                    <td style="color:var(--text-muted);font-size:0.75rem">${doc.id}</td>
                     <td>${doc.title || doc.filename || '-'}</td>
                     <td>${formatAuthors(doc.authors)}</td>
                     <td>${doc.year || '-'}</td>
@@ -89,6 +169,74 @@
                     </td>
                 </tr>
             `).join('');
+        }
+
+        function renderPagination() {
+            const container = document.getElementById('pagination');
+            if (totalPages <= 1) {
+                container.innerHTML = '';
+                return;
+            }
+
+            let html = '';
+
+            // Previous button
+            html += `<button onclick="goToPage(${currentPage - 1})" ${currentPage <= 1 ? 'disabled' : ''}>◀</button>`;
+
+            // Page numbers
+            const maxVisible = 7;
+            let startPage = Math.max(1, currentPage - Math.floor(maxVisible / 2));
+            let endPage = Math.min(totalPages, startPage + maxVisible - 1);
+
+            if (endPage - startPage < maxVisible - 1) {
+                startPage = Math.max(1, endPage - maxVisible + 1);
+            }
+
+            // First page
+            if (startPage > 1) {
+                html += `<button onclick="goToPage(1)">1</button>`;
+                if (startPage > 2) {
+                    html += `<span style="padding:0 0.5rem">...</span>`;
+                }
+            }
+
+            // Page buttons
+            for (let i = startPage; i <= endPage; i++) {
+                html += `<button onclick="goToPage(${i})" class="${i === currentPage ? 'active' : ''}">${i}</button>`;
+            }
+
+            // Last page
+            if (endPage < totalPages) {
+                if (endPage < totalPages - 1) {
+                    html += `<span style="padding:0 0.5rem">...</span>`;
+                }
+                html += `<button onclick="goToPage(${totalPages})">${totalPages}</button>`;
+            }
+
+            // Next button
+            html += `<button onclick="goToPage(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled' : ''}>▶</button>`;
+
+            container.innerHTML = html;
+        }
+
+        function renderPaginationInfo() {
+            const info = document.getElementById('pagination-info');
+            const start = (currentPage - 1) * pageSize + 1;
+            const end = Math.min(currentPage * pageSize, totalDocs);
+            info.textContent = `共 ${totalDocs} 条，显示 ${start}-${end}`;
+        }
+
+        function goToPage(page) {
+            if (page < 1 || page > totalPages) return;
+            currentPage = page;
+            loadDocuments();
+            window.scrollTo(0, 0);
+        }
+
+        function changePageSize() {
+            pageSize = parseInt(document.getElementById('page-size').value);
+            currentPage = 1;
+            loadDocuments();
         }
 
         function formatAuthors(authors) {
@@ -117,10 +265,16 @@
         let searchTimer;
         document.getElementById('search-input').addEventListener('input', () => {
             clearTimeout(searchTimer);
-            searchTimer = setTimeout(loadDocuments, 300);
+            searchTimer = setTimeout(() => {
+                currentPage = 1;
+                loadDocuments();
+            }, 300);
         });
 
-        document.getElementById('status-filter').addEventListener('change', loadDocuments);
+        document.getElementById('status-filter').addEventListener('change', () => {
+            currentPage = 1;
+            loadDocuments();
+        });
 
         // Load on page ready
         loadDocuments();
