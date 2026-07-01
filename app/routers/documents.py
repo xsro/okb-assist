@@ -20,6 +20,7 @@ UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 settings = get_settings()
+QDRANT_USER_ID = 0  # Default user ID for Qdrant since no auth
 
 
 def calculate_file_hash(file_path: str) -> str:
@@ -267,11 +268,19 @@ def delete_document(
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
 
-    # Delete files
-    if doc.file_path and os.path.exists(doc.file_path):
-        doc_dir = os.path.dirname(doc.file_path)
-        import shutil
-        shutil.rmtree(doc_dir, ignore_errors=True)
+    # Delete generated files in uploads/{doc_id}/
+    import shutil
+    doc_upload_dir = os.path.join("uploads", str(doc_id))
+    if os.path.exists(doc_upload_dir):
+        shutil.rmtree(doc_upload_dir, ignore_errors=True)
+
+    # Delete from Qdrant if indexed
+    if doc.qdrant_collection:
+        try:
+            from app.services.qdrant import delete_document_points
+            delete_document_points(QDRANT_USER_ID, doc.id)
+        except Exception:
+            pass
 
     db.delete(doc)
     db.commit()

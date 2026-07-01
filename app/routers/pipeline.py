@@ -67,7 +67,9 @@ async def _do_parse_impl(doc_id: int, file_path: str):
     try:
         _update_doc_status(doc_id, DocStatus.parsing, "正在解析 PDF...", 10)
 
-        output_dir = os.path.dirname(file_path)
+        # Save generated files in uploads/{doc_id}/
+        output_dir = os.path.join("uploads", str(doc_id))
+        os.makedirs(output_dir, exist_ok=True)
         md_path = await parse_pdf(file_path, output_dir)
 
         db = SessionLocal()
