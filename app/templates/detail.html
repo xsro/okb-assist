@@ -83,14 +83,21 @@
         <a href="/assist/" style="display:inline-block;margin-bottom:1rem">← 返回列表</a>
 
         <!-- Document Info Bar -->
-        <div class="card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem">
-            <div>
-                <h2 id="doc-title" style="margin:0">加载中...</h2>
-                <p id="doc-authors" style="color:var(--text-muted);margin:0.25rem 0 0 0;font-size:0.875rem"></p>
-            </div>
-            <div style="display:flex;gap:0.5rem">
-                <a id="btn-pdf" href="#" target="_blank" class="btn btn-primary" style="display:none">📄 查看 PDF</a>
-                <a id="btn-download" href="#" download class="btn" style="display:none">⬇ 下载 PDF</a>
+        <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:1rem">
+                <div style="flex:1">
+                    <h2 id="doc-title" style="margin:0">加载中...</h2>
+                    <p id="doc-authors" style="color:var(--text-muted);margin:0.25rem 0 0 0;font-size:0.875rem"></p>
+                    <!-- File Paths -->
+                    <div style="margin-top:0.75rem;font-size:0.75rem;color:var(--text-muted)">
+                        <p style="margin:0.25rem 0" id="pdf-path">📄 PDF: -</p>
+                        <p style="margin:0.25rem 0" id="md-path">📝 MD: -</p>
+                    </div>
+                </div>
+                <div style="display:flex;gap:0.5rem">
+                    <a id="btn-pdf" href="#" target="_blank" class="btn btn-primary" style="display:none">📄 查看 PDF</a>
+                    <a id="btn-download" href="#" download class="btn" style="display:none">⬇ 下载 PDF</a>
+                </div>
             </div>
         </div>
 
@@ -275,6 +282,12 @@
         function renderDocInfo() {
             document.getElementById('doc-title').textContent = doc.title || doc.filename || '未命名';
             document.getElementById('doc-authors').textContent = formatAuthors(doc.authors);
+
+            // File paths
+            const pdfPath = doc.file_path || '-';
+            const mdPath = doc.markdown_path || '-';
+            document.getElementById('pdf-path').innerHTML = `📄 PDF: <code>${pdfPath}</code>`;
+            document.getElementById('md-path').innerHTML = `📝 MD: <code>${mdPath}</code>`;
 
             // PDF buttons
             const btnPdf = document.getElementById('btn-pdf');

@@ -41,6 +41,8 @@ def verify_token(x_token: str = Header(...)):
 class DocumentOut(BaseModel):
     id: int
     filename: str
+    file_path: Optional[str] = None
+    markdown_path: Optional[str] = None
     file_hash: Optional[str] = None
     title: Optional[str] = None
     authors: Optional[str] = None
