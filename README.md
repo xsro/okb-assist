@@ -76,9 +76,9 @@ docker run -p 6333:6333 -v $(pwd)/qdrant_data:/qdrant/storage docker.1ms.run/qdr
 | 超时时间 | `30` |
 | API Key / Token | 留空（无认证） |
 | 文件集 | `documents_0` |
-| Content Field | `chunk_text` |
+| Content Field | `payload.text` |
 | Vector Field | `vector` (默认) |
-| Metadata Field | `payload` |
+| Metadata Field | `payload.metadata` |
 | Document ID Field | `id` |
 
 **重要提示：**
@@ -88,13 +88,15 @@ docker run -p 6333:6333 -v $(pwd)/qdrant_data:/qdrant/storage docker.1ms.run/qdr
 **Qdrant Payload 结构：**
 ```json
 {
-  "chunk_text": "文档内容片段...",
-  "document_id": 1,
-  "chunk_index": 0,
-  "title": "论文标题",
-  "authors": ["作者1", "作者2"],
-  "year": 2024,
-  "doc_type": "article",
-  "keywords": ["关键词1", "关键词2"]
+  "text": "文档内容片段...",
+  "metadata": {
+    "document_id": 1,
+    "chunk_index": 0,
+    "title": "论文标题",
+    "authors": ["作者1", "作者2"],
+    "year": 2024,
+    "doc_type": "article",
+    "keywords": ["关键词1", "关键词2"]
+  }
 }
 ```

@@ -107,14 +107,16 @@ async def index_document(
             id=str(uuid.uuid4()),
             vector=embedding,
             payload={
-                "document_id": doc_id,
-                "chunk_index": i,
-                "chunk_text": chunk,
-                "title": metadata.get("title", ""),
-                "authors": metadata.get("authors", []),
-                "year": metadata.get("year"),
-                "doc_type": metadata.get("type", ""),
-                "keywords": metadata.get("keywords", []),
+                "text": chunk,
+                "metadata": {
+                    "document_id": doc_id,
+                    "chunk_index": i,
+                    "title": metadata.get("title", ""),
+                    "authors": metadata.get("authors", []),
+                    "year": metadata.get("year"),
+                    "doc_type": metadata.get("type", ""),
+                    "keywords": metadata.get("keywords", []),
+                },
             },
         )
         points.append(point)
@@ -142,7 +144,7 @@ def delete_document_points(user_id: int, doc_id: int):
             points_selector={
                 "filter": {
                     "must": [
-                        {"key": "document_id", "match": {"value": doc_id}}
+                        {"key": "metadata.document_id", "match": {"value": doc_id}}
                     ]
                 }
             },
@@ -182,9 +184,9 @@ async def search_similar(
     return [
         {
             "score": hit.score,
-            "document_id": hit.payload.get("document_id"),
-            "chunk_text": hit.payload.get("chunk_text"),
-            "title": hit.payload.get("title"),
+            "document_id": hit.payload.get("metadata", {}).get("document_id"),
+            "chunk_text": hit.payload.get("text"),
+            "title": hit.payload.get("metadata", {}).get("title"),
         }
         for hit in results
     ]
