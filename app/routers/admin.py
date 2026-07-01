@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Document, DocStatus
-from app.services.qdrant import get_qdrant_client
+from app.services.qdrant import get_qdrant_client, get_point, list_collections
 
 router = APIRouter(prefix="/assist/api/admin", tags=["admin"])
 
@@ -34,3 +34,21 @@ def get_stats(db: Session = Depends(get_db)):
         "qdrant_status": qdrant_status,
         "qdrant_collections": qdrant_collections,
     }
+
+
+@router.get("/qdrant/collections")
+def get_collections():
+    """List all Qdrant collections."""
+    collections = list_collections()
+    return {"collections": collections}
+
+
+@router.get("/qdrant/point/{point_id}")
+def get_point_data(point_id: str, collection: str = None):
+    """Get point data from Qdrant by ID."""
+    result = get_point(point_id, collection)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Point not found")
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result

@@ -82,6 +82,7 @@ document.addEventListener('DOMContentLoaded', () => {
             <a href="/assist/">文献列表</a>
             <a href="/assist/upload">上传</a>
             <a href="/assist/monitor">监控</a>
+            <a href="/assist/point">Point</a>
             <a href="/assist/admin">管理</a>
         `;
     }

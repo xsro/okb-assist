@@ -177,6 +177,68 @@ async def search_similar(
     if not embedding:
         return []
 
+
+def get_point(point_id: str, collection_name: str = None) -> dict:
+    """
+    Get a point by ID from Qdrant.
+    Returns point data or None if not found.
+    """
+    if collection_name is None:
+        collection_name = f"{settings.qdrant_collection}_0"
+
+    client = get_qdrant_client()
+
+    try:
+        # Use scroll to get point with vector
+        result = client.scroll(
+            collection_name=collection_name,
+            scroll_filter={
+                "must": [
+                    {"key": "id", "match": {"value": point_id}}
+                ]
+            },
+            limit=1,
+            with_payload=True,
+            with_vectors=True,
+        )
+
+        points = result[0] if result else []
+        if points:
+            point = points[0]
+            return {
+                "id": point.id,
+                "payload": point.payload,
+                "vector": point.vector,
+            }
+
+        # Try direct retrieve as fallback
+        points = client.retrieve(
+            collection_name=collection_name,
+            ids=[point_id],
+            with_payload=True,
+        )
+        if points:
+            point = points[0]
+            return {
+                "id": point.id,
+                "payload": point.payload,
+                "vector": None,
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+    return None
+
+
+def list_collections() -> list[str]:
+    """List all collections in Qdrant."""
+    client = get_qdrant_client()
+    try:
+        collections = client.get_collections().collections
+        return [c.name for c in collections]
+    except Exception:
+        return []
+
     results = client.search(
         collection_name=collection_name,
         query_vector=("vector", embedding),

@@ -64,6 +64,11 @@ def monitor_page(request: Request):
     return templates.TemplateResponse(name="monitor.html", request=request)
 
 
+@app.get("/assist/point")
+def point_page(request: Request):
+    return templates.TemplateResponse(name="point.html", request=request)
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=5000, reload=True)
