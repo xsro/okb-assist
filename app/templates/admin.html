@@ -5,6 +5,65 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>管理后台 - OKB-Assist</title>
     <link rel="stylesheet" href="/assist/static/style.css">
+    <style>
+        .batch-controls {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-bottom: 1.5rem;
+        }
+        .batch-status {
+            display: flex;
+            gap: 2rem;
+            flex-wrap: wrap;
+            padding: 1rem;
+            background: var(--bg);
+            border-radius: 8px;
+            margin-bottom: 1rem;
+        }
+        .batch-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .batch-item .count {
+            font-size: 2rem;
+            font-weight: 600;
+            color: var(--primary);
+        }
+        .batch-item .label {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+        }
+        .status-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+        .status-running {
+            background: #d1fae5;
+            color: #065f46;
+        }
+        .status-paused {
+            background: #fef3c7;
+            color: #92400e;
+        }
+        .status-idle {
+            background: #e2e8f0;
+            color: #475569;
+        }
+        .pulse {
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
 </head>
 <body>
     <header>
@@ -24,17 +83,59 @@
                 <p>文献总数</p>
             </div>
             <div class="stat-card">
-                <h3 id="stat-uploaded">-</h3>
+                <h3 id="stat-pending">-</h3>
                 <p>待处理</p>
+            </div>
+            <div class="stat-card">
+                <h3 id="stat-processing">-</h3>
+                <p>处理中</p>
             </div>
             <div class="stat-card">
                 <h3 id="stat-indexed">-</h3>
                 <p>已索引</p>
             </div>
-            <div class="stat-card">
-                <h3 id="stat-qdrant">-</h3>
-                <p>Qdrant 状态</p>
+        </div>
+
+        <!-- Batch Processing -->
+        <div class="card" style="margin-bottom:1.5rem">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+                <h2>批量处理</h2>
+                <span id="batch-status-indicator" class="status-indicator status-idle">空闲</span>
             </div>
+
+            <div class="batch-status">
+                <div class="batch-item">
+                    <span class="count" id="batch-pending">-</span>
+                    <span class="label">待处理</span>
+                </div>
+                <div class="batch-item">
+                    <span class="count" id="batch-processing">-</span>
+                    <span class="label">处理中</span>
+                </div>
+                <div class="batch-item">
+                    <span class="count" id="batch-completed">-</span>
+                    <span class="label">已完成</span>
+                </div>
+                <div class="batch-item">
+                    <span class="count" id="batch-total">-</span>
+                    <span class="label">总计</span>
+                </div>
+                <div class="batch-item">
+                    <span class="count" id="batch-running">-</span>
+                    <span class="label">并发任务</span>
+                </div>
+            </div>
+
+            <div class="batch-controls">
+                <button class="btn btn-primary" id="btn-start" onclick="startBatch()">▶ 全部提交处理</button>
+                <button class="btn btn-warning" id="btn-pause" onclick="pauseBatch()" style="display:none">⏸ 暂停处理</button>
+                <button class="btn btn-success" id="btn-resume" onclick="resumeBatch()" style="display:none">▶ 恢复处理</button>
+            </div>
+
+            <p style="font-size:0.875rem;color:var(--text-muted)">
+                • 全部提交处理：开始处理所有待处理的文档<br>
+                • 暂停处理：当前任务完成后暂停，不再提交新任务
+            </p>
         </div>
 
         <!-- Qdrant Collections -->
@@ -46,14 +147,16 @@
 
     <script src="/assist/static/app.js"></script>
     <script>
+        let batchTimer = null;
+
         async function loadStats() {
             try {
                 const stats = await api.get('/assist/api/admin/stats');
 
                 document.getElementById('stat-docs').textContent = stats.documents;
-                document.getElementById('stat-uploaded').textContent = stats.status_counts?.uploaded || 0;
+                document.getElementById('stat-pending').textContent = (stats.status_counts?.uploaded || 0) + (stats.status_counts?.error || 0);
+                document.getElementById('stat-processing').textContent = (stats.status_counts?.parsing || 0) + (stats.status_counts?.extracting || 0) + (stats.status_counts?.indexing || 0);
                 document.getElementById('stat-indexed').textContent = stats.status_counts?.indexed || 0;
-                document.getElementById('stat-qdrant').textContent = stats.qdrant_status === 'connected' ? '✓ 已连接' : '✗ 异常';
 
                 // Collections
                 const collectionsDiv = document.getElementById('collections-list');
@@ -69,7 +172,99 @@
             }
         }
 
+        async function loadBatchStatus() {
+            try {
+                const status = await api.get('/assist/api/pipeline/batch/status');
+
+                document.getElementById('batch-pending').textContent = status.pending;
+                document.getElementById('batch-processing').textContent = status.processing;
+                document.getElementById('batch-completed').textContent = status.completed;
+                document.getElementById('batch-total').textContent = status.total;
+                document.getElementById('batch-running').textContent = `${status.running_tasks}/${status.max_concurrent}`;
+
+                // Update indicator
+                const indicator = document.getElementById('batch-status-indicator');
+                const btnStart = document.getElementById('btn-start');
+                const btnPause = document.getElementById('btn-pause');
+                const btnResume = document.getElementById('btn-resume');
+
+                if (status.paused) {
+                    indicator.className = 'status-indicator status-paused';
+                    indicator.textContent = '已暂停';
+                    btnStart.style.display = 'none';
+                    btnPause.style.display = 'none';
+                    btnResume.style.display = 'inline-flex';
+                } else if (status.processing > 0) {
+                    indicator.className = 'status-indicator status-running pulse';
+                    indicator.textContent = '运行中';
+                    btnStart.style.display = 'none';
+                    btnPause.style.display = 'inline-flex';
+                    btnResume.style.display = 'none';
+                } else {
+                    indicator.className = 'status-indicator status-idle';
+                    indicator.textContent = '空闲';
+                    btnStart.style.display = status.pending > 0 ? 'inline-flex' : 'none';
+                    btnPause.style.display = 'none';
+                    btnResume.style.display = 'none';
+                }
+
+            } catch (err) {
+                console.error('Batch status error:', err);
+            }
+        }
+
+        async function startBatch() {
+            try {
+                const result = await api.post('/assist/api/pipeline/batch/start');
+                showToast(result.detail, 'success');
+                loadBatchStatus();
+                startBatchPolling();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        async function pauseBatch() {
+            try {
+                const result = await api.post('/assist/api/pipeline/batch/pause');
+                showToast(result.detail, 'info');
+                loadBatchStatus();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        async function resumeBatch() {
+            try {
+                const result = await api.post('/assist/api/pipeline/batch/resume');
+                showToast(result.detail, 'success');
+                loadBatchStatus();
+                startBatchPolling();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        function startBatchPolling() {
+            if (batchTimer) clearInterval(batchTimer);
+            batchTimer = setInterval(async () => {
+                await loadBatchStatus();
+                await loadStats();
+
+                // Stop polling if idle
+                try {
+                    const status = await api.get('/assist/api/pipeline/batch/status');
+                    if (status.processing === 0 && !status.paused) {
+                        clearInterval(batchTimer);
+                        batchTimer = null;
+                    }
+                } catch (err) {}
+            }, 3000);
+        }
+
+        // Initial load
         loadStats();
+        loadBatchStatus();
     </script>
 </body>
 </html>
