@@ -24,10 +24,12 @@ def ensure_collection(client: QdrantClient, collection_name: str):
     if collection_name not in existing:
         client.create_collection(
             collection_name=collection_name,
-            vectors_config=VectorParams(
-                size=VECTOR_SIZE,
-                distance=Distance.COSINE,
-            ),
+            vectors_config={
+                "vector": VectorParams(
+                    size=VECTOR_SIZE,
+                    distance=Distance.COSINE,
+                ),
+            },
         )
 
 
@@ -105,7 +107,7 @@ async def index_document(
 
         point = PointStruct(
             id=str(uuid.uuid4()),
-            vector=embedding,
+            vector={"vector": embedding},
             payload={
                 "text": chunk,
                 "metadata": {
@@ -177,7 +179,7 @@ async def search_similar(
 
     results = client.search(
         collection_name=collection_name,
-        query_vector=embedding,
+        query_vector=("vector", embedding),
         limit=limit,
     )
 
