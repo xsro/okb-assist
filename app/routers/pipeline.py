@@ -260,36 +260,63 @@ def get_queue_status():
 
 
 async def _process_batch():
-    """Process all pending documents in batch mode."""
+    """Process all pending documents in batch mode with concurrency."""
     global _batch_paused
 
+    # Track active tasks
+    active_tasks = set()
+
     while not _batch_paused:
-        db = SessionLocal()
-        try:
-            # Find next document to process
-            doc = db.query(Document).filter(
-                Document.status.in_([DocStatus.uploaded, DocStatus.error])
-            ).first()
+        # Clean up completed tasks
+        active_tasks = {t for t in active_tasks if not t.done()}
 
-            if not doc:
-                # No more documents to process
-                break
+        # Check if we can start more tasks
+        available_slots = MAX_CONCURRENT_TASKS - len(active_tasks)
 
-            doc_id = doc.id
-            db.close()
+        if available_slots > 0:
+            db = SessionLocal()
+            try:
+                # Find pending documents
+                docs = db.query(Document).filter(
+                    Document.status.in_([DocStatus.uploaded, DocStatus.error])
+                ).limit(available_slots).all()
 
-            # Process the document
-            await _do_full_pipeline_impl(doc_id)
+                if not docs and not active_tasks:
+                    # No more documents and no active tasks
+                    break
 
-            # Small delay between documents
-            await asyncio.sleep(1)
+                for doc in docs:
+                    doc_id = doc.id
+                    # Create task for each document
+                    task = asyncio.create_task(_run_with_semaphore(doc_id))
+                    active_tasks.add(task)
 
-        except Exception as e:
-            print(f"Batch processing error: {e}")
-            db.close()
-            await asyncio.sleep(5)
+            except Exception as e:
+                print(f"Batch processing error: {e}")
+            finally:
+                db.close()
+
+        # Wait a bit before checking again
+        await asyncio.sleep(2)
+
+    # Wait for all active tasks to complete
+    if active_tasks:
+        await asyncio.gather(*active_tasks, return_exceptions=True)
 
     _batch_paused = False
+
+
+async def _run_with_semaphore(doc_id: int):
+    """Run a single document pipeline with semaphore limiting."""
+    global _running_tasks
+    async with _task_semaphore:
+        _running_tasks += 1
+        try:
+            await _do_full_pipeline_impl(doc_id)
+        except Exception as e:
+            print(f"Pipeline error for doc {doc_id}: {e}")
+        finally:
+            _running_tasks -= 1
 
 
 @router.post("/batch/start")
