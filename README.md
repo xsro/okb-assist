@@ -26,6 +26,7 @@ OLLAMA_MODEL=qcwind/qwen3-8b-instruct-Q4-K-M:latest
 docker pull docker.1ms.run/qdrant/qdrant:latest
 docker run -p 6333:6333 -v $(pwd)/qdrant_data:/qdrant/storage docker.1ms.run/qdrant/qdrant:latest
 ```
+可以访问`http://:6333/dashboard`管理向量数据库
 
 
 技术路线使用fastapi+vanilla js，本地数据库用sqlite。向量数据库使用Qdrant，所有的api和页面都放在`/assist/`路径下，需要设计管理页面。
@@ -58,4 +59,42 @@ docker run -p 6333:6333 -v $(pwd)/qdrant_data:/qdrant/storage docker.1ms.run/qdr
 - `/assist/` — 文献列表页面（查看、搜索、删除）
 - `/assist/upload` — 上传 PDF（需要令牌）
 - `/assist/detail/{id}` — 文献详情（查看、编辑、处理）
+- `/assist/markdown/{id}` — Markdown 查看器（分页、公式渲染）
+- `/assist/monitor` — 任务监控（队列状态、进度跟踪）
 - `/assist/admin` — 管理后台（系统统计、Qdrant 状态）
+
+### Open WebUI 集成
+
+配置 Open WebUI 连接 Qdrant 向量数据库：
+
+| 配置项 | 值 |
+|--------|-----|
+| 名称 | `文献库` |
+| 提供商 | `Qdrant` |
+| 描述 | `学术论文与专著文献库` |
+| Endpoint | `http://<服务器IP>:6333` |
+| 超时时间 | `30` |
+| API Key / Token | 留空（无认证） |
+| 文件集 | `documents_0` |
+| Content Field | `chunk_text` |
+| Vector Field | `vector` (默认) |
+| Metadata Field | `payload` |
+| Document ID Field | `id` |
+
+**重要提示：**
+- Open WebUI 的 embedding 模型必须与本系统一致：`nomic-embed-text`（维度 768）
+- Test Query 示例：`高速动车组控制`
+
+**Qdrant Payload 结构：**
+```json
+{
+  "chunk_text": "文档内容片段...",
+  "document_id": 1,
+  "chunk_index": 0,
+  "title": "论文标题",
+  "authors": ["作者1", "作者2"],
+  "year": 2024,
+  "doc_type": "article",
+  "keywords": ["关键词1", "关键词2"]
+}
+```

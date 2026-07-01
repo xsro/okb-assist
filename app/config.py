@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # Upload token
     upload_token: str = "change-me"
 
+    # Task queue
+    max_concurrent_tasks: int = 3
+
     # Database
     database_url: str = "sqlite:///./okb_assist.db"
 

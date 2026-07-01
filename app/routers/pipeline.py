@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.database import get_db, SessionLocal
 from app.models import Document, DocStatus
 from app.services.mineru import parse_pdf
@@ -15,6 +16,28 @@ from app.services.qdrant import index_document, delete_document_points
 router = APIRouter(prefix="/assist/api/pipeline", tags=["pipeline"])
 
 QDRANT_USER_ID = 0  # Default user ID for Qdrant since no auth
+
+# Concurrency limiting
+settings = get_settings()
+MAX_CONCURRENT_TASKS = getattr(settings, 'max_concurrent_tasks', 3)
+_task_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+_running_tasks = 0
+
+
+def _get_running_tasks() -> int:
+    """Get number of currently running tasks."""
+    return _running_tasks
+
+
+async def _with_semaphore(coro):
+    """Run a coroutine with semaphore limiting."""
+    global _running_tasks
+    async with _task_semaphore:
+        _running_tasks += 1
+        try:
+            return await coro
+        finally:
+            _running_tasks -= 1
 
 
 def _update_doc_status(doc_id: int, status: DocStatus, message: str = None, progress: float = None):
@@ -35,6 +58,11 @@ def _update_doc_status(doc_id: int, status: DocStatus, message: str = None, prog
 
 async def _run_parse(doc_id: int, file_path: str):
     """Background task for parsing PDF."""
+    await _with_semaphore(_do_parse_impl(doc_id, file_path))
+
+
+async def _do_parse_impl(doc_id: int, file_path: str):
+    """Parse implementation."""
     try:
         _update_doc_status(doc_id, DocStatus.parsing, "正在解析 PDF...", 10)
 
@@ -58,6 +86,11 @@ async def _run_parse(doc_id: int, file_path: str):
 
 async def _run_extract(doc_id: int):
     """Background task for extracting metadata."""
+    await _with_semaphore(_do_extract_impl(doc_id))
+
+
+async def _do_extract_impl(doc_id: int):
+    """Extract implementation."""
     try:
         _update_doc_status(doc_id, DocStatus.extracting, "正在提取元数据...", 10)
 
@@ -115,6 +148,11 @@ async def _run_extract(doc_id: int):
 
 async def _run_index(doc_id: int):
     """Background task for indexing to Qdrant."""
+    await _with_semaphore(_do_index_impl(doc_id))
+
+
+async def _do_index_impl(doc_id: int):
+    """Index implementation."""
     try:
         _update_doc_status(doc_id, DocStatus.indexing, "正在索引到 Qdrant...", 10)
 
@@ -161,6 +199,11 @@ async def _run_index(doc_id: int):
 
 async def _run_full_pipeline(doc_id: int):
     """Background task for full pipeline."""
+    await _with_semaphore(_do_full_pipeline_impl(doc_id))
+
+
+async def _do_full_pipeline_impl(doc_id: int):
+    """Full pipeline implementation."""
     try:
         db = SessionLocal()
         doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -173,7 +216,7 @@ async def _run_full_pipeline(doc_id: int):
 
         # Stage 1: Parse
         _update_doc_status(doc_id, DocStatus.parsing, "阶段 1/3: 正在解析 PDF...", 0)
-        await _run_parse(doc_id, file_path)
+        await _do_parse_impl(doc_id, file_path)
 
         # Check if parse succeeded
         db = SessionLocal()
@@ -185,7 +228,7 @@ async def _run_full_pipeline(doc_id: int):
 
         # Stage 2: Extract
         _update_doc_status(doc_id, DocStatus.extracting, "阶段 2/3: 正在提取元数据...", 33)
-        await _run_extract(doc_id)
+        await _do_extract_impl(doc_id)
 
         # Check if extract succeeded
         db = SessionLocal()
@@ -197,10 +240,20 @@ async def _run_full_pipeline(doc_id: int):
 
         # Stage 3: Index
         _update_doc_status(doc_id, DocStatus.indexing, "阶段 3/3: 正在索引到 Qdrant...", 66)
-        await _run_index(doc_id)
+        await _do_index_impl(doc_id)
 
     except Exception as e:
         _update_doc_status(doc_id, DocStatus.error, f"处理失败: {str(e)}")
+
+
+@router.get("/queue/status")
+def get_queue_status():
+    """Get current task queue status."""
+    return {
+        "max_concurrent_tasks": MAX_CONCURRENT_TASKS,
+        "running_tasks": _running_tasks,
+        "available_slots": max(0, MAX_CONCURRENT_TASKS - _running_tasks),
+    }
 
 
 @router.post("/{doc_id}/reset")

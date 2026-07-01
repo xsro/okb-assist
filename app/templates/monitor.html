@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>任务监控 - OKB-Assist</title>
+    <link rel="stylesheet" href="/assist/static/style.css">
+    <style>
+        .monitor-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        .monitor-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            text-align: center;
+        }
+        .monitor-card h3 {
+            font-size: 2.5rem;
+            margin: 0.5rem 0;
+        }
+        .monitor-card p {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+            margin: 0;
+        }
+        .status-dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 0.5rem;
+        }
+        .status-dot.running { background: #22c55e; animation: pulse 1.5s infinite; }
+        .status-dot.idle { background: #94a3b8; }
+        .task-row {
+            display: flex;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border);
+            transition: background 0.2s;
+        }
+        .task-row:hover { background: var(--bg); }
+        .task-row:last-child { border-bottom: none; }
+        .task-info { flex: 1; }
+        .task-title { font-weight: 500; margin-bottom: 0.25rem; }
+        .task-meta { font-size: 0.75rem; color: var(--text-muted); }
+        .task-progress {
+            width: 150px;
+            margin: 0 1rem;
+        }
+        .progress-bar-bg {
+            background: var(--bg);
+            border-radius: 4px;
+            height: 6px;
+            overflow: hidden;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s;
+        }
+        .progress-text {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-align: right;
+            margin-top: 0.25rem;
+        }
+        .task-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        .legend {
+            display: flex;
+            gap: 1.5rem;
+            flex-wrap: wrap;
+            margin-bottom: 1rem;
+            font-size: 0.875rem;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+        .auto-refresh {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>📚 OKB-Assist</h1>
+            <nav id="nav"></nav>
+        </div>
+    </header>
+
+    <main class="container">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
+            <h2>任务监控</h2>
+            <div class="auto-refresh">
+                <label>
+                    <input type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
+                    自动刷新
+                </label>
+                <span id="refresh-countdown" style="color:var(--text-muted)">3s</span>
+            </div>
+        </div>
+
+        <!-- Queue Status -->
+        <div class="monitor-grid">
+            <div class="monitor-card">
+                <p>最大并发数</p>
+                <h3 id="max-tasks">-</h3>
+            </div>
+            <div class="monitor-card">
+                <p>运行中任务</p>
+                <h3 id="running-tasks" style="color:var(--primary)">-</h3>
+            </div>
+            <div class="monitor-card">
+                <p>可用槽位</p>
+                <h3 id="available-slots" style="color:var(--success)">-</h3>
+            </div>
+            <div class="monitor-card">
+                <p>总文献数</p>
+                <h3 id="total-docs">-</h3>
+            </div>
+        </div>
+
+        <!-- Status Distribution -->
+        <div class="card" style="margin-bottom:1.5rem">
+            <h3 style="margin-bottom:1rem">状态分布</h3>
+            <div id="status-distribution" style="display:flex;gap:0.5rem;flex-wrap:wrap"></div>
+        </div>
+
+        <!-- Active Tasks -->
+        <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+                <h3>任务列表</h3>
+                <div class="legend">
+                    <div class="legend-item"><div class="status-dot running"></div> 运行中</div>
+                    <div class="legend-item"><div class="status-dot idle"></div> 空闲</div>
+                </div>
+            </div>
+
+            <div class="legend" style="margin-bottom:1rem">
+                <span class="badge badge-uploaded">已上传</span>
+                <span class="badge badge-parsing">解析中</span>
+                <span class="badge badge-markdown_done">已解析</span>
+                <span class="badge badge-extracting">提取中</span>
+                <span class="badge badge-meta_done">已提取</span>
+                <span class="badge badge-indexing">索引中</span>
+                <span class="badge badge-indexed">已索引</span>
+                <span class="badge badge-error">错误</span>
+            </div>
+
+            <div id="task-list">
+                <p style="text-align:center;color:var(--text-muted);padding:2rem">加载中...</p>
+            </div>
+        </div>
+    </main>
+
+    <script src="/assist/static/app.js"></script>
+    <script>
+        let refreshTimer = null;
+        let countdown = 3;
+        let autoRefresh = true;
+
+        function toggleAutoRefresh() {
+            autoRefresh = document.getElementById('auto-refresh').checked;
+            if (autoRefresh) {
+                startAutoRefresh();
+            } else {
+                stopAutoRefresh();
+            }
+        }
+
+        function startAutoRefresh() {
+            countdown = 3;
+            refreshTimer = setInterval(() => {
+                countdown--;
+                document.getElementById('refresh-countdown').textContent = `${countdown}s`;
+                if (countdown <= 0) {
+                    loadData();
+                    countdown = 3;
+                }
+            }, 1000);
+        }
+
+        function stopAutoRefresh() {
+            if (refreshTimer) {
+                clearInterval(refreshTimer);
+                refreshTimer = null;
+            }
+            document.getElementById('refresh-countdown').textContent = '已暂停';
+        }
+
+        async function loadData() {
+            try {
+                // Load queue status
+                const queue = await api.get('/assist/api/pipeline/queue/status');
+                document.getElementById('max-tasks').textContent = queue.max_concurrent_tasks;
+                document.getElementById('running-tasks').textContent = queue.running_tasks;
+                document.getElementById('available-slots').textContent = queue.available_slots;
+
+                // Load documents
+                const docs = await api.get('/assist/api/documents/');
+                document.getElementById('total-docs').textContent = docs.length;
+
+                // Calculate status distribution
+                const statusCounts = {};
+                docs.forEach(doc => {
+                    statusCounts[doc.status] = (statusCounts[doc.status] || 0) + 1;
+                });
+
+                const statusLabels = {
+                    'uploaded': '已上传',
+                    'parsing': '解析中',
+                    'markdown_done': '已解析',
+                    'extracting': '提取中',
+                    'meta_done': '已提取',
+                    'indexing': '索引中',
+                    'indexed': '已索引',
+                    'error': '错误',
+                };
+
+                const distHtml = Object.entries(statusLabels).map(([status, label]) => {
+                    const count = statusCounts[status] || 0;
+                    if (count === 0) return '';
+                    return `<span class="badge badge-${status}">${label}: ${count}</span>`;
+                }).join('');
+                document.getElementById('status-distribution').innerHTML = distHtml || '<span style="color:var(--text-muted)">暂无数据</span>';
+
+                // Render task list
+                renderTaskList(docs);
+
+            } catch (err) {
+                console.error('Load error:', err);
+            }
+        }
+
+        function renderTaskList(docs) {
+            const container = document.getElementById('task-list');
+
+            if (docs.length === 0) {
+                container.innerHTML = '<p style="text-align:center;color:var(--text-muted);padding:2rem">暂无任务</p>';
+                return;
+            }
+
+            // Sort: processing first, then by updated_at desc
+            const processingStatuses = ['parsing', 'extracting', 'indexing'];
+            docs.sort((a, b) => {
+                const aProcessing = processingStatuses.includes(a.status) ? 0 : 1;
+                const bProcessing = processingStatuses.includes(b.status) ? 0 : 1;
+                if (aProcessing !== bProcessing) return aProcessing - bProcessing;
+                return new Date(b.updated_at) - new Date(a.updated_at);
+            });
+
+            const html = docs.map(doc => {
+                const isProcessing = processingStatuses.includes(doc.status);
+                const statusClass = isProcessing ? 'running' : 'idle';
+                const progressColor = doc.status === 'error' ? 'var(--danger)' : 'var(--primary)';
+
+                return `
+                    <div class="task-row">
+                        <div class="status-dot ${statusClass}"></div>
+                        <div class="task-info">
+                            <div class="task-title">
+                                <a href="/assist/detail/${doc.id}">${doc.title || doc.filename || '未命名'}</a>
+                            </div>
+                            <div class="task-meta">
+                                ID: ${doc.id} · ${doc.status_message || statusLabels[doc.status] || doc.status}
+                            </div>
+                        </div>
+                        <div class="task-progress">
+                            <div class="progress-bar-bg">
+                                <div class="progress-bar-fill" style="width:${doc.progress || 0}%;background:${progressColor}"></div>
+                            </div>
+                            <div class="progress-text">${Math.round(doc.progress || 0)}%</div>
+                        </div>
+                        <span class="badge badge-${doc.status}">${statusLabels[doc.status] || doc.status}</span>
+                        <div class="task-actions">
+                            <a href="/assist/detail/${doc.id}" class="btn btn-sm">查看</a>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            container.innerHTML = html;
+        }
+
+        const statusLabels = {
+            'uploaded': '已上传',
+            'parsing': '解析中',
+            'markdown_done': '已解析',
+            'extracting': '提取中',
+            'meta_done': '已提取',
+            'indexing': '索引中',
+            'indexed': '已索引',
+            'error': '错误',
+        };
+
+        // Initial load
+        loadData();
+        startAutoRefresh();
+    </script>
+</body>
+</html>
