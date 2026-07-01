@@ -257,6 +257,111 @@ def get_queue_status():
     }
 
 
+async def _process_batch():
+    """Process all pending documents in batch mode."""
+    global _batch_paused
+
+    while not _batch_paused:
+        db = SessionLocal()
+        try:
+            # Find next document to process
+            doc = db.query(Document).filter(
+                Document.status.in_([DocStatus.uploaded, DocStatus.error])
+            ).first()
+
+            if not doc:
+                # No more documents to process
+                break
+
+            doc_id = doc.id
+            db.close()
+
+            # Process the document
+            await _do_full_pipeline_impl(doc_id)
+
+            # Small delay between documents
+            await asyncio.sleep(1)
+
+        except Exception as e:
+            print(f"Batch processing error: {e}")
+            db.close()
+            await asyncio.sleep(5)
+
+    _batch_paused = False
+
+
+@router.post("/batch/start")
+async def start_batch_processing(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Start batch processing all pending documents."""
+    global _batch_paused
+
+    # Count pending documents
+    pending_count = db.query(Document).filter(
+        Document.status.in_([DocStatus.uploaded, DocStatus.error])
+    ).count()
+
+    if pending_count == 0:
+        return {"detail": "没有待处理的文档", "pending": 0}
+
+    _batch_paused = False
+    background_tasks.add_task(_process_batch)
+
+    return {
+        "detail": f"批量处理已开始，共 {pending_count} 个文档待处理",
+        "pending": pending_count,
+    }
+
+
+@router.post("/batch/pause")
+def pause_batch_processing():
+    """Pause batch processing after current tasks complete."""
+    global _batch_paused
+    _batch_paused = True
+    return {"detail": "批量处理将在当前任务完成后暂停"}
+
+
+@router.post("/batch/resume")
+async def resume_batch_processing(
+    background_tasks: BackgroundTasks,
+):
+    """Resume batch processing."""
+    global _batch_paused
+    _batch_paused = False
+    background_tasks.add_task(_process_batch)
+    return {"detail": "批量处理已恢复"}
+
+
+@router.get("/batch/status")
+def get_batch_status(db: Session = Depends(get_db)):
+    """Get batch processing status."""
+    pending_count = db.query(Document).filter(
+        Document.status.in_([DocStatus.uploaded, DocStatus.error])
+    ).count()
+
+    processing_count = db.query(Document).filter(
+        Document.status.in_([DocStatus.parsing, DocStatus.extracting, DocStatus.indexing])
+    ).count()
+
+    completed_count = db.query(Document).filter(
+        Document.status == DocStatus.indexed
+    ).count()
+
+    total_count = db.query(Document).count()
+
+    return {
+        "paused": _batch_paused,
+        "pending": pending_count,
+        "processing": processing_count,
+        "completed": completed_count,
+        "total": total_count,
+        "running_tasks": _running_tasks,
+        "max_concurrent": MAX_CONCURRENT_TASKS,
+    }
+
+
 @router.post("/{doc_id}/reset")
 def reset_document(
     doc_id: int,
@@ -420,109 +525,4 @@ def get_pipeline_status(
         "has_markdown": doc.markdown_path is not None and os.path.exists(doc.markdown_path or ""),
         "has_meta": doc.title is not None,
         "is_indexed": doc.qdrant_collection is not None,
-    }
-
-
-async def _process_batch():
-    """Process all pending documents in batch mode."""
-    global _batch_paused
-
-    while not _batch_paused:
-        db = SessionLocal()
-        try:
-            # Find next document to process
-            doc = db.query(Document).filter(
-                Document.status.in_([DocStatus.uploaded, DocStatus.error])
-            ).first()
-
-            if not doc:
-                # No more documents to process
-                break
-
-            doc_id = doc.id
-            db.close()
-
-            # Process the document
-            await _do_full_pipeline_impl(doc_id)
-
-            # Small delay between documents
-            await asyncio.sleep(1)
-
-        except Exception as e:
-            print(f"Batch processing error: {e}")
-            db.close()
-            await asyncio.sleep(5)
-
-    _batch_paused = False
-
-
-@router.post("/batch/start")
-async def start_batch_processing(
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    """Start batch processing all pending documents."""
-    global _batch_paused
-
-    # Count pending documents
-    pending_count = db.query(Document).filter(
-        Document.status.in_([DocStatus.uploaded, DocStatus.error])
-    ).count()
-
-    if pending_count == 0:
-        return {"detail": "没有待处理的文档", "pending": 0}
-
-    _batch_paused = False
-    background_tasks.add_task(_process_batch)
-
-    return {
-        "detail": f"批量处理已开始，共 {pending_count} 个文档待处理",
-        "pending": pending_count,
-    }
-
-
-@router.post("/batch/pause")
-def pause_batch_processing():
-    """Pause batch processing after current tasks complete."""
-    global _batch_paused
-    _batch_paused = True
-    return {"detail": "批量处理将在当前任务完成后暂停"}
-
-
-@router.post("/batch/resume")
-async def resume_batch_processing(
-    background_tasks: BackgroundTasks,
-):
-    """Resume batch processing."""
-    global _batch_paused
-    _batch_paused = False
-    background_tasks.add_task(_process_batch)
-    return {"detail": "批量处理已恢复"}
-
-
-@router.get("/batch/status")
-def get_batch_status(db: Session = Depends(get_db)):
-    """Get batch processing status."""
-    pending_count = db.query(Document).filter(
-        Document.status.in_([DocStatus.uploaded, DocStatus.error])
-    ).count()
-
-    processing_count = db.query(Document).filter(
-        Document.status.in_([DocStatus.parsing, DocStatus.extracting, DocStatus.indexing])
-    ).count()
-
-    completed_count = db.query(Document).filter(
-        Document.status == DocStatus.indexed
-    ).count()
-
-    total_count = db.query(Document).count()
-
-    return {
-        "paused": _batch_paused,
-        "pending": pending_count,
-        "processing": processing_count,
-        "completed": completed_count,
-        "total": total_count,
-        "running_tasks": _running_tasks,
-        "max_concurrent": MAX_CONCURRENT_TASKS,
     }
