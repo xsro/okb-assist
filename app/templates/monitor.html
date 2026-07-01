@@ -144,6 +144,40 @@
             <div id="status-distribution" style="display:flex;gap:0.5rem;flex-wrap:wrap"></div>
         </div>
 
+        <!-- Services Status -->
+        <div class="card" style="margin-bottom:1.5rem">
+            <h3 style="margin-bottom:1rem">服务状态</h3>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem">
+                <!-- MinerU -->
+                <div style="padding:1rem;background:var(--bg);border-radius:8px">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
+                        <strong>MinerU</strong>
+                        <span id="mineru-status" class="badge">检查中...</span>
+                    </div>
+                    <p style="font-size:0.75rem;color:var(--text-muted);margin:0" id="mineru-url">-</p>
+                    <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0" id="mineru-info">-</p>
+                </div>
+                <!-- Ollama -->
+                <div style="padding:1rem;background:var(--bg);border-radius:8px">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
+                        <strong>Ollama</strong>
+                        <span id="ollama-status" class="badge">检查中...</span>
+                    </div>
+                    <p style="font-size:0.75rem;color:var(--text-muted);margin:0" id="ollama-url">-</p>
+                    <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0" id="ollama-info">-</p>
+                </div>
+                <!-- Qdrant -->
+                <div style="padding:1rem;background:var(--bg);border-radius:8px">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
+                        <strong>Qdrant</strong>
+                        <span id="qdrant-status" class="badge">检查中...</span>
+                    </div>
+                    <p style="font-size:0.75rem;color:var(--text-muted);margin:0" id="qdrant-url">-</p>
+                    <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0" id="qdrant-info">-</p>
+                </div>
+            </div>
+        </div>
+
         <!-- Active Tasks -->
         <div class="card">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
@@ -242,11 +276,44 @@
                 }).join('');
                 document.getElementById('status-distribution').innerHTML = distHtml || '<span style="color:var(--text-muted)">暂无数据</span>';
 
+                // Load services status
+                await loadServicesStatus();
+
                 // Render task list
                 renderTaskList(docs);
 
             } catch (err) {
                 console.error('Load error:', err);
+            }
+        }
+
+        async function loadServicesStatus() {
+            try {
+                const services = await api.get('/assist/api/admin/services/status');
+
+                // MinerU
+                const mineru = services.mineru || {};
+                document.getElementById('mineru-url').textContent = mineru.url || '-';
+                document.getElementById('mineru-status').className = `badge badge-${mineru.status === 'connected' ? 'indexed' : 'error'}`;
+                document.getElementById('mineru-status').textContent = mineru.status === 'connected' ? '✓ 已连接' : '✗ 未连接';
+                document.getElementById('mineru-info').textContent = mineru.version ? `版本: ${mineru.version}` : (mineru.error || '');
+
+                // Ollama
+                const ollama = services.ollama || {};
+                document.getElementById('ollama-url').textContent = ollama.url || '-';
+                document.getElementById('ollama-status').className = `badge badge-${ollama.status === 'connected' ? 'indexed' : 'error'}`;
+                document.getElementById('ollama-status').textContent = ollama.status === 'connected' ? '✓ 已连接' : '✗ 未连接';
+                document.getElementById('ollama-info').textContent = ollama.models ? `模型: ${ollama.models.join(', ')}` : (ollama.error || '');
+
+                // Qdrant
+                const qdrant = services.qdrant || {};
+                document.getElementById('qdrant-url').textContent = qdrant.url || '-';
+                document.getElementById('qdrant-status').className = `badge badge-${qdrant.status === 'connected' ? 'indexed' : 'error'}`;
+                document.getElementById('qdrant-status').textContent = qdrant.status === 'connected' ? '✓ 已连接' : '✗ 未连接';
+                document.getElementById('qdrant-info').textContent = qdrant.collections ? `集合: ${qdrant.collections.join(', ')}` : (qdrant.error || '');
+
+            } catch (err) {
+                console.error('Services status error:', err);
             }
         }
 
