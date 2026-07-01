@@ -53,7 +53,7 @@ async def extract_metadata(markdown_content: str) -> dict:
     truncated = markdown_content[:8000]
     prompt = EXTRACT_PROMPT.format(content=truncated)
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{settings.ollama_url}/api/generate",
             json={
@@ -71,10 +71,39 @@ async def extract_metadata(markdown_content: str) -> dict:
     # Extract the response text
     response_text = result.get("response", "")
 
+    # Debug: print response length
+    print(f"Ollama response length: {len(response_text)}")
+
+    if not response_text:
+        # Return empty metadata if no response
+        return _get_empty_metadata()
+
     # Try to parse JSON from the response
     metadata = _parse_json_from_text(response_text)
 
     return metadata
+
+
+def _get_empty_metadata() -> dict:
+    """Return empty metadata dict."""
+    return {
+        "language": "",
+        "type": "",
+        "title": "",
+        "title_en": "",
+        "year": None,
+        "authors": [],
+        "authors_en": [],
+        "abstract": "",
+        "abstract_en": "",
+        "doi": "",
+        "source": "",
+        "journal": "",
+        "journal_en": "",
+        "keywords": [],
+        "keywords_en": [],
+        "category": "",
+    }
 
 
 def _parse_json_from_text(text: str) -> dict:

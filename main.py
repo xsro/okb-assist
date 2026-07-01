@@ -54,6 +54,11 @@ def admin_page(request: Request):
     return templates.TemplateResponse(name="admin.html", request=request)
 
 
+@app.get("/assist/markdown/{doc_id}")
+def markdown_page(request: Request, doc_id: int):
+    return templates.TemplateResponse(name="markdown.html", request=request, context={"doc_id": doc_id})
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=5000, reload=True)

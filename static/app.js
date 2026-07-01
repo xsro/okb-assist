@@ -62,9 +62,13 @@ function showToast(message, type = 'info') {
 function statusBadge(status) {
     const labels = {
         'uploaded': '已上传',
+        'parsing': '解析中',
         'markdown_done': '已解析',
+        'extracting': '提取中',
         'meta_done': '已提取',
+        'indexing': '索引中',
         'indexed': '已索引',
+        'error': '错误',
     };
     return `<span class="badge badge-${status}">${labels[status] || status}</span>`;
 }

@@ -210,9 +210,18 @@ tr:hover {
 }
 
 .badge-uploaded { background: #dbeafe; color: #1e40af; }
+.badge-parsing { background: #fef3c7; color: #92400e; animation: pulse 1.5s infinite; }
 .badge-markdown_done { background: #fef3c7; color: #92400e; }
+.badge-extracting { background: #fef3c7; color: #92400e; animation: pulse 1.5s infinite; }
 .badge-meta_done { background: #d1fae5; color: #065f46; }
+.badge-indexing { background: #ede9fe; color: #5b21b6; animation: pulse 1.5s infinite; }
 .badge-indexed { background: #ede9fe; color: #5b21b6; }
+.badge-error { background: #fee2e2; color: #991b1b; }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
 
 /* Upload area */
 .upload-area {

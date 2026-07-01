@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Markdown - OKB-Assist</title>
+    <link rel="stylesheet" href="/assist/static/style.css">
+    <!-- Marked.js -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- KaTeX -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+    <!-- MathJax -->
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']],
+            },
+            svg: {
+                fontCache: 'global'
+            }
+        };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <style>
+        .markdown-body {
+            padding: 2rem;
+            max-width: 900px;
+            margin: 0 auto;
+            line-height: 1.8;
+            overflow-wrap: break-word;
+        }
+        .markdown-body h1, .markdown-body h2, .markdown-body h3 {
+            margin-top: 1.5rem;
+            margin-bottom: 0.5rem;
+            padding-bottom: 0.3rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .markdown-body h1 { font-size: 1.8rem; }
+        .markdown-body h2 { font-size: 1.5rem; }
+        .markdown-body h3 { font-size: 1.3rem; border-bottom: none; }
+        .markdown-body p { margin-bottom: 1rem; }
+        .markdown-body pre {
+            background: var(--bg);
+            padding: 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+        }
+        .markdown-body code {
+            background: var(--bg);
+            padding: 0.2rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+        .markdown-body pre code { background: none; padding: 0; }
+        .markdown-body table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        .markdown-body th, .markdown-body td {
+            border: 1px solid var(--border);
+            padding: 0.5rem;
+            text-align: left;
+        }
+        .markdown-body th { background: var(--bg); }
+        .markdown-body img { max-width: 100%; }
+        .markdown-body blockquote {
+            border-left: 4px solid var(--primary);
+            padding-left: 1rem;
+            margin: 1rem 0;
+            color: var(--text-muted);
+        }
+        .toolbar {
+            position: sticky;
+            top: 0;
+            background: var(--card);
+            border-bottom: 1px solid var(--border);
+            padding: 0.75rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 100;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .toolbar-left {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .toolbar-right {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        .page-nav {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .page-info {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+        .math-toggle {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+            font-size: 0.875rem;
+        }
+        .math-toggle select {
+            padding: 0.25rem 0.5rem;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            font-size: 0.8rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <div class="toolbar-left">
+            <a href="/assist/detail/{{ doc_id }}" class="btn btn-sm">← 返回详情</a>
+            <div class="math-toggle">
+                <label for="math-engine">公式渲染:</label>
+                <select id="math-engine" onchange="changeMathEngine()">
+                    <option value="none">关闭</option>
+                    <option value="katex">KaTeX</option>
+                    <option value="mathjax">MathJax</option>
+                </select>
+            </div>
+        </div>
+        <div class="toolbar-right">
+            <div class="page-nav">
+                <button class="btn btn-sm" id="btn-prev" onclick="changePage(-1)">◀ 上一页</button>
+                <span class="page-info" id="page-info">加载中...</span>
+                <button class="btn btn-sm" id="btn-next" onclick="changePage(1)">下一页 ▶</button>
+            </div>
+            <button class="btn btn-sm" id="btn-raw" onclick="toggleRaw()">原始文本</button>
+        </div>
+    </div>
+
+    <div id="markdown-content" class="markdown-body">
+        <p style="color:var(--text-muted)">加载中...</p>
+    </div>
+
+    <div id="markdown-raw" class="markdown-body" style="display:none;white-space:pre-wrap;font-family:monospace;font-size:0.875rem"></div>
+
+    <script>
+        const docId = {{ doc_id }};
+        const PAGE_SIZE = 15000;  // 3x original size
+        let currentPage = 1;
+        let totalPages = 1;
+        let showingRaw = false;
+        let rawContent = '';
+        let currentMathEngine = localStorage.getItem('mathEngine') || 'none';
+
+        // Initialize math engine selector
+        document.getElementById('math-engine').value = currentMathEngine;
+
+        async function loadMarkdown(page) {
+            try {
+                const res = await fetch(`/assist/api/documents/${docId}/markdown?page=${page}&page_size=${PAGE_SIZE}`);
+                if (!res.ok) throw new Error('加载失败');
+                const data = await res.json();
+
+                currentPage = data.page;
+                totalPages = data.total_pages;
+                rawContent = data.content;
+
+                // Render markdown
+                const rendered = marked.parse(data.content || '');
+                document.getElementById('markdown-content').innerHTML = rendered;
+                document.getElementById('markdown-raw').textContent = data.content;
+
+                // Apply math rendering
+                renderMath();
+
+                // Update pagination
+                document.getElementById('page-info').textContent = `第 ${currentPage} / ${totalPages} 页`;
+                document.getElementById('btn-prev').disabled = currentPage <= 1;
+                document.getElementById('btn-next').disabled = currentPage >= totalPages;
+            } catch (err) {
+                document.getElementById('markdown-content').innerHTML = `<p style="color:red">加载失败: ${err.message}</p>`;
+            }
+        }
+
+        function renderMath() {
+            const engine = currentMathEngine;
+            const container = document.getElementById('markdown-content');
+
+            if (engine === 'katex') {
+                // Render with KaTeX
+                renderMathInElement(container, {
+                    delimiters: [
+                        {left: '$$', right: '$$', display: true},
+                        {left: '$', right: '$', display: false},
+                        {left: '\\[', right: '\\]', display: true},
+                        {left: '\\(', right: '\\)', display: false},
+                    ],
+                    throwOnError: false,
+                    trust: true,
+                });
+            } else if (engine === 'mathjax') {
+                // Render with MathJax
+                if (window.MathJax && window.MathJax.typesetPromise) {
+                    MathJax.typesetPromise([container]).catch(err => console.warn('MathJax error:', err));
+                }
+            }
+            // 'none' = no math rendering
+        }
+
+        function changeMathEngine() {
+            currentMathEngine = document.getElementById('math-engine').value;
+            localStorage.setItem('mathEngine', currentMathEngine);
+            // Re-render current page
+            loadMarkdown(currentPage);
+        }
+
+        function changePage(delta) {
+            const newPage = currentPage + delta;
+            if (newPage >= 1 && newPage <= totalPages) {
+                loadMarkdown(newPage);
+                window.scrollTo(0, 0);
+            }
+        }
+
+        function toggleRaw() {
+            showingRaw = !showingRaw;
+            document.getElementById('markdown-content').style.display = showingRaw ? 'none' : 'block';
+            document.getElementById('markdown-raw').style.display = showingRaw ? 'block' : 'none';
+            document.getElementById('btn-raw').textContent = showingRaw ? '渲染视图' : '原始文本';
+        }
+
+        // Keyboard navigation
+        document.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                changePage(-1);
+            } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+                e.preventDefault();
+                changePage(1);
+            }
+        });
+
+        loadMarkdown(1);
+    </script>
+</body>
+</html>

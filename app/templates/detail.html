@@ -5,8 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>文献详情 - OKB-Assist</title>
     <link rel="stylesheet" href="/assist/static/style.css">
-    <!-- Marked.js for markdown rendering -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         .markdown-body {
             padding: 1.5rem;
@@ -99,6 +97,18 @@
         <!-- Pipeline Status -->
         <div class="card">
             <h2 style="margin-bottom:1rem">处理流程</h2>
+
+            <!-- Progress Bar -->
+            <div id="progress-container" style="display:none;margin-bottom:1rem">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
+                    <span id="status-message" style="font-size:0.875rem;color:var(--text-muted)">处理中...</span>
+                    <span id="progress-text" style="font-size:0.875rem;color:var(--text-muted)">0%</span>
+                </div>
+                <div style="background:var(--bg);border-radius:4px;height:8px;overflow:hidden">
+                    <div id="progress-bar" style="background:var(--primary);height:100%;width:0%;transition:width 0.3s"></div>
+                </div>
+            </div>
+
             <div class="pipeline-steps">
                 <div class="pipeline-step" id="step-upload">
                     <h3>1. 上传</h3>
@@ -230,32 +240,17 @@
 
         <!-- Markdown Content -->
         <div class="card">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+            <div style="display:flex;justify-content:space-between;align-items:center">
                 <h2>Markdown 内容</h2>
                 <div style="display:flex;gap:0.5rem">
-                    <button class="btn btn-sm" id="btn-raw" onclick="toggleRawView()">原始文本</button>
-                    <button class="btn btn-sm btn-primary" id="btn-edit-md" onclick="toggleEditMarkdown()">编辑</button>
-                    <button class="btn btn-sm btn-success" id="btn-save-md" onclick="saveMarkdown()" style="display:none">保存</button>
+                    <a href="/assist/markdown/{{ doc_id }}" target="_blank" class="btn btn-primary">📖 查看 Markdown</a>
+                    <button class="btn" id="btn-edit-md" onclick="toggleEditMarkdown()">编辑</button>
+                    <button class="btn btn-success" id="btn-save-md" onclick="saveMarkdown()" style="display:none">保存</button>
                 </div>
             </div>
 
-            <!-- Pagination -->
-            <div class="pagination" id="pagination" style="display:none">
-                <button class="btn btn-sm" id="btn-prev" onclick="changePage(-1)">上一页</button>
-                <span class="page-info" id="page-info">第 1 / 1 页</span>
-                <button class="btn btn-sm" id="btn-next" onclick="changePage(1)">下一页</button>
-            </div>
-
-            <!-- Rendered markdown -->
-            <div id="markdown-content" class="markdown-body">
-                <p style="color:var(--text-muted)">加载中...</p>
-            </div>
-
-            <!-- Raw text view -->
-            <div id="markdown-raw" style="display:none;white-space:pre-wrap;font-family:monospace;padding:1rem;background:var(--bg);border-radius:6px;max-height:600px;overflow-y:auto;font-size:0.875rem"></div>
-
-            <!-- Editor -->
-            <textarea id="markdown-editor" class="form-control" style="display:none;font-family:monospace;min-height:400px"></textarea>
+            <!-- Editor (hidden by default) -->
+            <textarea id="markdown-editor" class="form-control" style="display:none;font-family:monospace;min-height:400px;margin-top:1rem"></textarea>
         </div>
     </main>
 
@@ -265,9 +260,6 @@
         let doc = null;
         let editingMeta = false;
         let editingMd = false;
-        let showingRaw = false;
-        let currentPage = 1;
-        let totalPages = 1;
 
         async function loadDocument() {
             try {
@@ -275,7 +267,6 @@
                 renderDocInfo();
                 renderPipeline();
                 renderMeta();
-                loadMarkdown(1);
             } catch (err) {
                 showToast(err.message, 'error');
             }
@@ -297,19 +288,36 @@
         function renderPipeline() {
             const steps = ['uploaded', 'markdown_done', 'meta_done', 'indexed'];
             const stepIds = ['step-upload', 'step-parse', 'step-extract', 'step-index'];
-            const currentIdx = steps.indexOf(doc.status);
+
+            // Map processing states to their target states
+            let displayStatus = doc.status;
+            if (doc.status === 'parsing') displayStatus = 'uploaded';
+            else if (doc.status === 'extracting') displayStatus = 'markdown_done';
+            else if (doc.status === 'indexing') displayStatus = 'meta_done';
+            else if (doc.status === 'error') displayStatus = doc.status;
+
+            const currentIdx = steps.indexOf(displayStatus);
 
             stepIds.forEach((id, i) => {
                 const el = document.getElementById(id);
                 el.classList.remove('active', 'done');
                 if (i < currentIdx) el.classList.add('done');
                 if (i === currentIdx) el.classList.add('active');
+                // Mark as active if currently processing
+                if (doc.status === 'parsing' && id === 'step-parse') el.classList.add('active');
+                if (doc.status === 'extracting' && id === 'step-extract') el.classList.add('active');
+                if (doc.status === 'indexing' && id === 'step-index') el.classList.add('active');
             });
 
-            document.getElementById('btn-parse').disabled = doc.status !== 'uploaded';
-            document.getElementById('btn-extract').disabled = doc.status !== 'markdown_done';
-            document.getElementById('btn-index').disabled = doc.status !== 'meta_done';
-            document.getElementById('btn-process').disabled = doc.status === 'indexed';
+            // Update buttons based on status (only if not processing)
+            const processingStatuses = ['parsing', 'extracting', 'indexing'];
+            if (!processingStatuses.includes(doc.status)) {
+                document.getElementById('btn-parse').disabled = doc.status !== 'uploaded';
+                document.getElementById('btn-extract').disabled = doc.status !== 'markdown_done';
+                document.getElementById('btn-index').disabled = doc.status !== 'meta_done';
+                document.getElementById('btn-process').disabled = doc.status === 'indexed';
+                document.getElementById('btn-reset').disabled = false;
+            }
         }
 
         const LANG_LABELS = {
@@ -406,72 +414,28 @@
             } catch (err) { showToast(err.message, 'error'); }
         });
 
-        async function loadMarkdown(page) {
-            try {
-                const data = await api.get(`/assist/api/documents/${docId}/markdown?page=${page}&page_size=5000`);
-                currentPage = data.page;
-                totalPages = data.total_pages;
-
-                // Render markdown
-                const rendered = marked.parse(data.content || '');
-                document.getElementById('markdown-content').innerHTML = rendered || '<p style="color:var(--text-muted)">无内容</p>';
-                document.getElementById('markdown-raw').textContent = data.content;
-
-                // Update pagination
-                const pagination = document.getElementById('pagination');
-                if (totalPages > 1) {
-                    pagination.style.display = 'flex';
-                    document.getElementById('page-info').textContent = `第 ${currentPage} / ${totalPages} 页`;
-                    document.getElementById('btn-prev').disabled = currentPage <= 1;
-                    document.getElementById('btn-next').disabled = currentPage >= totalPages;
-                } else {
-                    pagination.style.display = 'none';
-                }
-            } catch {
-                document.getElementById('markdown-content').innerHTML = '<p style="color:var(--text-muted)">Markdown 尚未生成</p>';
-                document.getElementById('pagination').style.display = 'none';
-            }
-        }
-
-        function changePage(delta) {
-            const newPage = currentPage + delta;
-            if (newPage >= 1 && newPage <= totalPages) {
-                loadMarkdown(newPage);
-            }
-        }
-
-        function toggleRawView() {
-            showingRaw = !showingRaw;
-            document.getElementById('markdown-content').style.display = showingRaw ? 'none' : 'block';
-            document.getElementById('markdown-raw').style.display = showingRaw ? 'block' : 'none';
-            document.getElementById('btn-raw').textContent = showingRaw ? '渲染视图' : '原始文本';
-        }
-
         function toggleEditMarkdown() {
             editingMd = !editingMd;
-            const content = document.getElementById('markdown-content');
-            const raw = document.getElementById('markdown-raw');
             const editor = document.getElementById('markdown-editor');
             const btnEdit = document.getElementById('btn-edit-md');
             const btnSave = document.getElementById('btn-save-md');
-            const btnRaw = document.getElementById('btn-raw');
 
             if (editingMd) {
-                editor.value = raw.textContent || document.getElementById('markdown-content').textContent;
-                content.style.display = 'none';
-                raw.style.display = 'none';
+                // Load current markdown content
+                api.get(`/assist/api/documents/${docId}/markdown?page=1&page_size=999999`)
+                    .then(data => {
+                        editor.value = data.content || '';
+                    })
+                    .catch(() => {
+                        editor.value = '';
+                    });
                 editor.style.display = 'block';
                 btnEdit.style.display = 'none';
                 btnSave.style.display = 'inline-flex';
-                btnRaw.style.display = 'none';
             } else {
-                content.style.display = 'block';
-                raw.style.display = 'none';
                 editor.style.display = 'none';
                 btnEdit.style.display = 'inline-flex';
                 btnSave.style.display = 'none';
-                btnRaw.style.display = 'inline-flex';
-                showingRaw = false;
             }
         }
 
@@ -482,38 +446,165 @@
                 });
                 showToast('Markdown 已保存', 'success');
                 toggleEditMarkdown();
-                loadMarkdown(currentPage);
             } catch (err) { showToast(err.message, 'error'); }
         }
 
         async function resetDoc() {
-            if (!confirm('确定要重置状态吗？这将清除已生成的 Markdown 和元数据。')) return;
+            // Get current status and valid targets
             try {
-                const result = await api.post(`/assist/api/pipeline/${docId}/reset`);
+                const status = await api.get(`/assist/api/pipeline/${docId}/status`);
+
+                // Define all possible reset targets
+                const allTargets = {
+                    'uploaded': '已上传（完全重置）',
+                    'markdown_done': '已解析（保留 Markdown）',
+                    'meta_done': '已提取（保留元数据）',
+                };
+
+                // Determine valid targets based on current status
+                let validTargets = [];
+                if (['indexed', 'error'].includes(status.status)) {
+                    validTargets = ['uploaded', 'markdown_done', 'meta_done'];
+                } else if (status.status === 'meta_done') {
+                    validTargets = ['uploaded', 'markdown_done'];
+                } else if (status.status === 'markdown_done') {
+                    validTargets = ['uploaded'];
+                } else if (['parsing', 'extracting', 'indexing'].includes(status.status)) {
+                    validTargets = ['uploaded'];
+                } else {
+                    showToast('当前状态不需要重置', 'info');
+                    return;
+                }
+
+                // Build options HTML
+                const optionsHtml = validTargets.map(s =>
+                    `<option value="${s}">${allTargets[s]}</option>`
+                ).join('');
+
+                // Show custom dialog
+                const dialogHtml = `
+                    <div id="reset-dialog" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000">
+                        <div style="background:white;padding:1.5rem;border-radius:8px;max-width:400px;width:90%">
+                            <h3 style="margin-bottom:1rem">重置状态</h3>
+                            <p style="margin-bottom:1rem;color:var(--text-muted)">选择要重置到的状态：</p>
+                            <select id="reset-target" class="form-control" style="margin-bottom:1rem">
+                                ${optionsHtml}
+                            </select>
+                            <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+                                <button class="btn" onclick="closeResetDialog()">取消</button>
+                                <button class="btn btn-primary" onclick="confirmReset()">确认重置</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                // Add dialog to page
+                const div = document.createElement('div');
+                div.innerHTML = dialogHtml;
+                document.body.appendChild(div);
+
+            } catch (err) { showToast(err.message, 'error'); }
+        }
+
+        function closeResetDialog() {
+            const dialog = document.getElementById('reset-dialog');
+            if (dialog) dialog.parentElement.remove();
+        }
+
+        async function confirmReset() {
+            const target = document.getElementById('reset-target').value;
+            closeResetDialog();
+
+            try {
+                const result = await api.post(`/assist/api/pipeline/${docId}/reset?target_status=${target}`);
                 showToast(result.detail, 'success');
                 await loadDocument();
             } catch (err) { showToast(err.message, 'error'); }
         }
 
+        let pollingTimer = null;
+        let isProcessing = false;
+
+        function startPolling() {
+            if (pollingTimer) clearInterval(pollingTimer);
+            isProcessing = true;
+            document.getElementById('progress-container').style.display = 'block';
+            updateButtons(true);
+            pollingTimer = setInterval(pollStatus, 1000); // Poll every second
+        }
+
+        function stopPolling() {
+            if (pollingTimer) {
+                clearInterval(pollingTimer);
+                pollingTimer = null;
+            }
+            isProcessing = false;
+            document.getElementById('progress-container').style.display = 'none';
+            updateButtons(false);
+        }
+
+        function updateButtons(disabled) {
+            document.getElementById('btn-parse').disabled = disabled;
+            document.getElementById('btn-extract').disabled = disabled;
+            document.getElementById('btn-index').disabled = disabled;
+            document.getElementById('btn-process').disabled = disabled;
+            document.getElementById('btn-reset').disabled = disabled;
+        }
+
+        async function pollStatus() {
+            try {
+                const status = await api.get(`/assist/api/pipeline/${docId}/status`);
+
+                // Update progress bar
+                document.getElementById('progress-bar').style.width = `${status.progress || 0}%`;
+                document.getElementById('progress-text').textContent = `${Math.round(status.progress || 0)}%`;
+                document.getElementById('status-message').textContent = status.status_message || '处理中...';
+
+                // Check if task is complete
+                const doneStatuses = ['uploaded', 'markdown_done', 'meta_done', 'indexed', 'error'];
+                if (doneStatuses.includes(status.status)) {
+                    stopPolling();
+                    await loadDocument();
+
+                    if (status.status === 'error') {
+                        showToast(status.status_message || '处理失败', 'error');
+                    } else if (status.status === 'indexed') {
+                        showToast('处理完成！', 'success');
+                    }
+                }
+            } catch (err) {
+                console.error('Poll error:', err);
+            }
+        }
+
         async function runStep(step) {
             try {
-                showToast(`正在执行: ${step}...`, 'info');
                 const result = await api.post(`/assist/api/pipeline/${docId}/${step}`);
-                showToast(result.detail, 'success');
-                await loadDocument();
+                showToast(result.detail, 'info');
+                startPolling();
             } catch (err) { showToast(err.message, 'error'); }
         }
 
         async function runFullProcess() {
             try {
-                showToast('开始全流程处理...', 'info');
                 const result = await api.post(`/assist/api/pipeline/${docId}/process`);
-                showToast(result.detail, result.results?.every(r => r.status === 'success') ? 'success' : 'error');
-                await loadDocument();
+                showToast(result.detail, 'info');
+                startPolling();
             } catch (err) { showToast(err.message, 'error'); }
         }
 
         loadDocument();
+
+        // Check if already processing on page load
+        setTimeout(async () => {
+            try {
+                const status = await api.get(`/assist/api/pipeline/${docId}/status`);
+                const processingStatuses = ['parsing', 'extracting', 'indexing'];
+                if (processingStatuses.includes(status.status)) {
+                    startPolling();
+                }
+            } catch (err) {}
+        }, 500);
     </script>
 </body>
 </html>

@@ -1,14 +1,18 @@
 import enum
 from datetime import datetime, timezone
-from sqlalchemy import Column, Integer, String, DateTime, Text, Enum
+from sqlalchemy import Column, Integer, String, DateTime, Text, Enum, Float
 from app.database import Base
 
 
 class DocStatus(str, enum.Enum):
     uploaded = "uploaded"
+    parsing = "parsing"
     markdown_done = "markdown_done"
+    extracting = "extracting"
     meta_done = "meta_done"
+    indexing = "indexing"
     indexed = "indexed"
+    error = "error"
 
 
 class Document(Base):
@@ -43,6 +47,8 @@ class Document(Base):
 
     # Status
     status = Column(Enum(DocStatus), default=DocStatus.uploaded)
+    status_message = Column(String(500), nullable=True)  # Error or progress message
+    progress = Column(Float, default=0.0)  # 0-100
     qdrant_collection = Column(String(100), nullable=True)
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
