@@ -94,6 +94,8 @@ def _doc_to_out(doc: Document) -> dict:
     return DocumentOut(
         id=doc.id,
         filename=doc.filename,
+        file_path=doc.file_path,
+        markdown_path=doc.markdown_path,
         title=doc.title,
         authors=doc.authors,
         year=doc.year,
