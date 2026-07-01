@@ -1,6 +1,7 @@
 import json
 import os
 import uuid
+import hashlib
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,15 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 settings = get_settings()
 
 
+def calculate_file_hash(file_path: str) -> str:
+    """Calculate SHA256 hash of a file."""
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
+
+
 def verify_token(x_token: str = Header(...)):
     """Verify upload token from request header."""
     if x_token != settings.upload_token:
@@ -30,6 +40,7 @@ def verify_token(x_token: str = Header(...)):
 class DocumentOut(BaseModel):
     id: int
     filename: str
+    file_hash: Optional[str] = None
     title: Optional[str] = None
     authors: Optional[str] = None
     year: Optional[int] = None
@@ -162,6 +173,7 @@ async def upload_document(
 
 class RegisterByPath(BaseModel):
     file_path: str
+    force: bool = False  # Force registration even if hash exists
 
 
 @router.post("/register")
@@ -179,16 +191,34 @@ def register_document_by_path(
     if not file_path.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="只支持 PDF 文件")
 
-    # Check if already registered
+    # Calculate file hash
+    file_hash = calculate_file_hash(file_path)
+
+    # Check if already registered by path
     existing = db.query(Document).filter(Document.file_path == file_path).first()
     if existing:
         return _doc_to_out(existing)
+
+    # Check if hash already exists (duplicate file)
+    if not data.force:
+        duplicate = db.query(Document).filter(Document.file_hash == file_hash).first()
+        if duplicate:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "duplicate",
+                    "message": f"文件已存在 (hash: {file_hash[:16]}...)",
+                    "existing_id": duplicate.id,
+                    "existing_path": duplicate.file_path,
+                }
+            )
 
     # Create DB record
     filename = os.path.basename(file_path)
     doc = Document(
         filename=filename,
         file_path=file_path,
+        file_hash=file_hash,
         status=DocStatus.uploaded,
     )
     db.add(doc)

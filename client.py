@@ -22,13 +22,12 @@ def find_pdfs(directory: str) -> list[str]:
     return sorted(pdf_files)
 
 
-def register_pdf(base_url: str, file_path: str) -> dict:
+def register_pdf(base_url: str, file_path: str, force: bool = False) -> dict:
     """Register a PDF file with the server."""
     url = f"{base_url}/assist/api/documents/register"
-    data = {"file_path": file_path}
+    data = {"file_path": file_path, "force": force}
     response = requests.post(url, json=data)
-    response.raise_for_status()
-    return response.json()
+    return response.json(), response.status_code
 
 
 def start_pipeline(base_url: str, doc_id: int) -> dict:
@@ -65,6 +64,11 @@ def main():
         help="Start processing pipeline after registration"
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force registration even if duplicate hash exists"
+    )
+    parser.add_argument(
         "--list-only",
         action="store_true",
         help="Only list PDF files, don't register"
@@ -88,7 +92,8 @@ def main():
         return
 
     # Register each PDF
-    results = []
+    results = {"registered": 0, "skipped": 0, "duplicate": 0, "error": 0}
+
     for i, pdf_path in enumerate(pdf_files, 1):
         filename = os.path.basename(pdf_path)
         print(f"\n[{i}/{len(pdf_files)}] 处理: {filename}")
@@ -98,27 +103,52 @@ def main():
             continue
 
         try:
-            # Register
-            doc = register_pdf(args.server, pdf_path)
-            print(f"  ✓ 注册成功: ID={doc['id']}, 状态={doc['status']}")
-            results.append({"file": pdf_path, "id": doc["id"], "status": "registered"})
+            doc, status_code = register_pdf(args.server, pdf_path, args.force)
 
-            # Start pipeline if requested
-            if args.process and doc["status"] == "uploaded":
-                result = start_pipeline(args.server, doc["id"])
-                print(f"  ✓ 处理已提交: {result['detail']}")
-                results[-1]["status"] = "processing"
+            if status_code == 200:
+                # Success or existing
+                if doc.get("file_hash"):
+                    print(f"  ✓ 注册成功: ID={doc['id']}, 状态={doc['status']}")
+                    results["registered"] += 1
+
+                    # Start pipeline if requested
+                    if args.process and doc["status"] == "uploaded":
+                        result = start_pipeline(args.server, doc["id"])
+                        print(f"    ✓ 处理已提交: {result['detail']}")
+                else:
+                    print(f"  ⊘ 已存在: ID={doc['id']}")
+                    results["skipped"] += 1
+
+            elif status_code == 409:
+                # Duplicate hash
+                detail = doc.get("detail", {})
+                if isinstance(detail, dict):
+                    print(f"  ⚠ 重复文件: {detail.get('message', 'hash 已存在')}")
+                    print(f"    现有 ID: {detail.get('existing_id')}")
+                    print(f"    现有路径: {detail.get('existing_path')}")
+                else:
+                    print(f"  ⚠ 重复文件: {detail}")
+                results["duplicate"] += 1
+
+            else:
+                print(f"  ✗ 错误: {doc.get('detail', 'Unknown error')}")
+                results["error"] += 1
 
         except requests.exceptions.RequestException as e:
-            print(f"  ✗ 错误: {e}")
-            results.append({"file": pdf_path, "error": str(e)})
+            print(f"  ✗ 网络错误: {e}")
+            results["error"] += 1
 
     # Summary
     print("\n" + "=" * 50)
     print("处理完成!")
     print(f"总计: {len(pdf_files)} 个文件")
-    print(f"成功: {len([r for r in results if 'error' not in r])} 个")
-    print(f"失败: {len([r for r in results if 'error' in r])} 个")
+    print(f"新注册: {results['registered']} 个")
+    print(f"已跳过: {results['skipped']} 个")
+    print(f"重复文件: {results['duplicate']} 个")
+    print(f"失败: {results['error']} 个")
+
+    if results["duplicate"] > 0 and not args.force:
+        print("\n提示: 使用 --force 参数可强制注册重复文件")
 
     if args.process:
         print("\n处理任务已提交，可通过以下方式查看进度:")

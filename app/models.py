@@ -21,6 +21,7 @@ class Document(Base):
     id = Column(Integer, primary_key=True, index=True)
     filename = Column(String(255), nullable=False)
     file_path = Column(String(500), nullable=False)
+    file_hash = Column(String(64), nullable=True, index=True)  # SHA256 hash
 
     # Meta fields
     title = Column(String(500), nullable=True)
