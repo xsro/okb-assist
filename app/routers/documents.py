@@ -91,6 +91,14 @@ class MarkdownUpdate(BaseModel):
 
 
 def _doc_to_out(doc: Document) -> dict:
+    # Handle year field - convert invalid values to None
+    year = doc.year
+    if year is not None and not isinstance(year, int):
+        try:
+            year = int(year) if year else None
+        except (ValueError, TypeError):
+            year = None
+
     return DocumentOut(
         id=doc.id,
         filename=doc.filename,
@@ -98,7 +106,7 @@ def _doc_to_out(doc: Document) -> dict:
         markdown_path=doc.markdown_path,
         title=doc.title,
         authors=doc.authors,
-        year=doc.year,
+        year=year,
         doi=doc.doi,
         source=doc.source,
         journal=doc.journal,
