@@ -1,9 +1,10 @@
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from app.config import get_settings
-from app.database import get_db
+from app.database import get_db, engine
 from app.models import Document, DocStatus
 from app.services.qdrant import get_qdrant_client, get_point, list_collections
 
@@ -120,3 +121,25 @@ def get_point_data(point_id: str, collection: str = None):
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
     return result
+
+
+@router.post("/db/migrate")
+def run_database_migration():
+    """Run database migrations to add missing columns."""
+    migrations_applied = []
+
+    with engine.connect() as conn:
+        # Check if mineru_task_id column exists
+        try:
+            result = conn.execute(text("SELECT mineru_task_id FROM documents LIMIT 1"))
+            migrations_applied.append("mineru_task_id column already exists")
+        except Exception:
+            # Column doesn't exist, add it
+            conn.execute(text("ALTER TABLE documents ADD COLUMN mineru_task_id VARCHAR(100)"))
+            conn.commit()
+            migrations_applied.append("Added mineru_task_id column")
+
+    return {
+        "detail": "Migration completed",
+        "migrations": migrations_applied,
+    }

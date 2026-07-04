@@ -46,6 +46,9 @@ class Document(Base):
     # Paths
     markdown_path = Column(String(500), nullable=True)
 
+    # MinerU task tracking
+    mineru_task_id = Column(String(100), nullable=True)  # MinerU async task ID for resume after timeout
+
     # Status
     status = Column(Enum(DocStatus), default=DocStatus.uploaded)
     status_message = Column(String(500), nullable=True)  # Error or progress message

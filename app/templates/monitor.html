@@ -109,12 +109,17 @@
     <main class="container">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
             <h2>任务监控</h2>
-            <div class="auto-refresh">
-                <label>
-                    <input type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
-                    自动刷新
-                </label>
-                <span id="refresh-countdown" style="color:var(--text-muted)">3s</span>
+            <div style="display:flex;align-items:center;gap:1rem">
+                <button id="btn-batch-start" class="btn btn-primary" onclick="batchStartAll()" style="white-space:nowrap">
+                    🚀 批量开始所有未完成任务 <span id="pending-count" style="opacity:0.8"></span>
+                </button>
+                <div class="auto-refresh">
+                    <label>
+                        <input type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
+                        自动刷新
+                    </label>
+                    <span id="refresh-countdown" style="color:var(--text-muted)">3s</span>
+                </div>
             </div>
         </div>
 
@@ -248,6 +253,18 @@
                 document.getElementById('running-tasks').textContent = queue.running_tasks;
                 document.getElementById('available-slots').textContent = queue.available_slots;
 
+                // Load batch status for pending count
+                const batchStatus = await api.get('/assist/api/pipeline/batch/status');
+                const pendingCount = batchStatus.pending || 0;
+                const pendingEl = document.getElementById('pending-count');
+                if (pendingCount > 0) {
+                    pendingEl.textContent = `(${pendingCount})`;
+                    document.getElementById('btn-batch-start').disabled = false;
+                } else {
+                    pendingEl.textContent = '';
+                    document.getElementById('btn-batch-start').disabled = true;
+                }
+
                 // Load documents (use large page size for stats)
                 const data = await api.get('/assist/api/documents/?page_size=10000');
                 const docs = data.items || [];
@@ -380,6 +397,25 @@
             'indexed': '已索引',
             'error': '错误',
         };
+
+        async function batchStartAll() {
+            const btn = document.getElementById('btn-batch-start');
+            const originalText = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '⏳ 启动中...';
+
+            try {
+                const result = await api.post('/assist/api/pipeline/batch/start', {});
+                alert(result.detail || '批量处理已启动');
+                // Refresh data immediately
+                loadData();
+            } catch (err) {
+                alert('启动失败: ' + (err.message || '未知错误'));
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+            }
+        }
 
         // Initial load
         loadData();

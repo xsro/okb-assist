@@ -27,75 +27,31 @@ def _get_client() -> AuthenticatedClient:
     )
 
 
-async def parse_pdf(file_path: str, output_dir: str) -> str:
+async def check_task_status(task_id: str) -> dict:
     """
-    Call MinerU API asynchronously to parse PDF into Markdown.
+    Check the status of an existing MinerU task.
+    Returns a dict with 'status' key: 'completed', 'failed', 'processing', or 'unknown'.
+    """
+    try:
+        async with _get_client() as client:
+            status_result = await get_router_task_status_tasks_task_id_get.asyncio(
+                task_id=task_id, client=client
+            )
+        if not status_result or not isinstance(status_result, dict):
+            return {"status": "unknown"}
+        return status_result
+    except Exception:
+        return {"status": "unknown"}
+
+
+async def get_task_result(task_id: str, output_dir: str) -> str:
+    """
+    Fetch the result of a completed MinerU task and save to output_dir.
     Returns the path to the generated markdown file.
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Read the PDF file
-    with open(file_path, "rb") as f:
-        pdf_content = f.read()
-
-    # Create file object for upload
-    file_obj = File(
-        payload=BytesIO(pdf_content),
-        file_name=os.path.basename(file_path),
-        mime_type="application/pdf",
-    )
-
-    # Create request body for async task
-    body = BodySubmitParseTaskTasksPost(
-        files=[file_obj],
-        return_md=True,
-        backend="pipeline",
-        parse_method="auto",
-        formula_enable=True,
-        table_enable=True,
-        image_analysis=False,  # Disable image analysis
-        response_format_zip=True,  # Return ZIP to include images
-        return_images=True,  # Include extracted images
-    )
-
-    # Submit async task
-    async with _get_client() as client:
-        task_result = await submit_parse_task_tasks_post.asyncio(client=client, body=body)
-
-    if not task_result or not isinstance(task_result, dict):
-        raise Exception("Failed to submit MinerU task")
-
-    task_id = task_result.get("task_id")
-    if not task_id:
-        raise Exception(f"MinerU task submission failed: {task_result}")
-
-    # Poll for task completion
-    max_wait = 300  # 5 minutes max
-    poll_interval = 2  # 2 seconds between polls
-
-    for _ in range(max_wait // poll_interval):
-        async with _get_client() as client:
-            status_result = await get_router_task_status_tasks_task_id_get.asyncio(
-                task_id=task_id, client=client
-            )
-
-        if not status_result or not isinstance(status_result, dict):
-            await asyncio.sleep(poll_interval)
-            continue
-
-        status = status_result.get("status")
-        if status == "completed":
-            break
-        elif status == "failed":
-            error = status_result.get("error", "Unknown error")
-            raise Exception(f"MinerU task failed: {error}")
-
-        await asyncio.sleep(poll_interval)
-    else:
-        raise Exception("MinerU task timed out")
-
-    # Get result as ZIP using httpx directly (the generated client tries to parse as JSON)
     headers = {"Authorization": f"Bearer {settings.mineru_key}"}
     async with httpx.AsyncClient(timeout=300.0) as http_client:
         response = await http_client.get(
@@ -160,3 +116,80 @@ async def parse_pdf(file_path: str, output_dir: str) -> str:
         f.write(markdown_content)
 
     return str(md_path)
+
+
+async def submit_parse_task(file_path: str) -> str:
+    """
+    Submit a PDF parsing task to MinerU and return the task_id.
+    Does NOT wait for completion.
+    """
+    with open(file_path, "rb") as f:
+        pdf_content = f.read()
+
+    file_obj = File(
+        payload=BytesIO(pdf_content),
+        file_name=os.path.basename(file_path),
+        mime_type="application/pdf",
+    )
+
+    body = BodySubmitParseTaskTasksPost(
+        files=[file_obj],
+        return_md=True,
+        backend="pipeline",
+        parse_method="auto",
+        formula_enable=True,
+        table_enable=True,
+        image_analysis=False,
+        response_format_zip=True,
+        return_images=True,
+    )
+
+    async with _get_client() as client:
+        task_result = await submit_parse_task_tasks_post.asyncio(client=client, body=body)
+
+    if not task_result or not isinstance(task_result, dict):
+        raise Exception("Failed to submit MinerU task")
+
+    task_id = task_result.get("task_id")
+    if not task_id:
+        raise Exception(f"MinerU task submission failed: {task_result}")
+
+    return task_id
+
+
+async def poll_task(task_id: str, max_wait: int = 300, poll_interval: int = 2) -> dict:
+    """
+    Poll a MinerU task until completion, failure, or timeout.
+    Returns the final status result dict.
+    Raises Exception on failure or timeout.
+    """
+    for _ in range(max_wait // poll_interval):
+        async with _get_client() as client:
+            status_result = await get_router_task_status_tasks_task_id_get.asyncio(
+                task_id=task_id, client=client
+            )
+
+        if not status_result or not isinstance(status_result, dict):
+            await asyncio.sleep(poll_interval)
+            continue
+
+        status = status_result.get("status")
+        if status == "completed":
+            return status_result
+        elif status == "failed":
+            error = status_result.get("error", "Unknown error")
+            raise Exception(f"MinerU task failed: {error}")
+
+        await asyncio.sleep(poll_interval)
+
+    raise Exception("MinerU task timed out")
+
+
+async def parse_pdf(file_path: str, output_dir: str) -> str:
+    """
+    Call MinerU API asynchronously to parse PDF into Markdown.
+    Returns the path to the generated markdown file.
+    """
+    task_id = await submit_parse_task(file_path)
+    await poll_task(task_id)
+    return await get_task_result(task_id, output_dir)

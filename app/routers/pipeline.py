@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db, SessionLocal
 from app.models import Document, DocStatus
-from app.services.mineru import parse_pdf
+from app.services.mineru import parse_pdf, submit_parse_task, poll_task, get_task_result, check_task_status
 from app.services.ollama import extract_metadata, get_embedding, add_yaml_frontmatter
 from app.services.qdrant import index_document, delete_document_points
 
@@ -63,28 +63,130 @@ async def _run_parse(doc_id: int, file_path: str):
 
 
 async def _do_parse_impl(doc_id: int, file_path: str):
-    """Parse implementation."""
+    """Parse implementation. Supports resuming from a previously timed-out MinerU task."""
     try:
         _update_doc_status(doc_id, DocStatus.parsing, "正在解析 PDF...", 10)
 
         # Save generated files in uploads/{doc_id}/
         output_dir = os.path.join("uploads", str(doc_id))
         os.makedirs(output_dir, exist_ok=True)
-        md_path = await parse_pdf(file_path, output_dir)
 
+        # Check if there's an existing MinerU task (from a previous timeout)
+        existing_task_id = None
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
-            if doc:
-                doc.markdown_path = md_path
-                doc.status = DocStatus.markdown_done
-                doc.status_message = "PDF 解析完成"
-                doc.progress = 100
-                db.commit()
+            if doc and doc.mineru_task_id:
+                existing_task_id = doc.mineru_task_id
         finally:
             db.close()
+
+        task_id = None
+        if existing_task_id:
+            # Check if the existing task has completed
+            _update_doc_status(doc_id, DocStatus.parsing, "正在检查之前的解析任务...", 15)
+            status_result = await check_task_status(existing_task_id)
+            status = status_result.get("status")
+
+            if status == "completed":
+                # Previous task finished, just get the result
+                _update_doc_status(doc_id, DocStatus.parsing, "之前的任务已完成，正在获取结果...", 50)
+                md_path = await get_task_result(existing_task_id, output_dir)
+                _save_parse_result(doc_id, md_path)
+                return
+            elif status == "failed":
+                # Previous task failed, clear it and submit a new one
+                _update_doc_status(doc_id, DocStatus.parsing, "之前的任务失败，重新提交...", 10)
+                _clear_mineru_task_id(doc_id)
+                existing_task_id = None
+            elif status in ("processing", "pending"):
+                # Previous task still running, resume polling
+                _update_doc_status(doc_id, DocStatus.parsing, "正在等待之前的解析任务完成...", 20)
+                try:
+                    await poll_task(existing_task_id)
+                    md_path = await get_task_result(existing_task_id, output_dir)
+                    _save_parse_result(doc_id, md_path)
+                    return
+                except Exception as e:
+                    if "timed out" in str(e).lower():
+                        # Still timed out, keep the task_id for next attempt
+                        _update_doc_status(doc_id, DocStatus.error, f"解析失败: {str(e)}")
+                        return
+                    else:
+                        # Other error, clear and retry
+                        _clear_mineru_task_id(doc_id)
+                        existing_task_id = None
+            else:
+                # Unknown status, clear and submit new
+                _clear_mineru_task_id(doc_id)
+                existing_task_id = None
+
+        # Submit a new task
+        task_id = await submit_parse_task(file_path)
+
+        # Save the task_id to database for potential resume
+        _save_mineru_task_id(doc_id, task_id)
+
+        _update_doc_status(doc_id, DocStatus.parsing, "正在解析 PDF，已提交任务...", 20)
+
+        # Poll for completion
+        try:
+            await poll_task(task_id)
+        except Exception as e:
+            if "timed out" in str(e).lower():
+                # Timeout - task_id is already saved, can be resumed later
+                _update_doc_status(doc_id, DocStatus.error, f"解析失败: {str(e)}")
+                return
+            raise
+
+        # Get result
+        _update_doc_status(doc_id, DocStatus.parsing, "正在获取解析结果...", 80)
+        md_path = await get_task_result(task_id, output_dir)
+
+        _save_parse_result(doc_id, md_path)
+
     except Exception as e:
         _update_doc_status(doc_id, DocStatus.error, f"解析失败: {str(e)}")
+
+
+def _save_mineru_task_id(doc_id: int, task_id: str):
+    """Save MinerU task ID to database."""
+    db = SessionLocal()
+    try:
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        if doc:
+            doc.mineru_task_id = task_id
+            db.commit()
+    finally:
+        db.close()
+
+
+def _clear_mineru_task_id(doc_id: int):
+    """Clear MinerU task ID from database."""
+    db = SessionLocal()
+    try:
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        if doc:
+            doc.mineru_task_id = None
+            db.commit()
+    finally:
+        db.close()
+
+
+def _save_parse_result(doc_id: int, md_path: str):
+    """Save parse result to database."""
+    db = SessionLocal()
+    try:
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        if doc:
+            doc.markdown_path = md_path
+            doc.status = DocStatus.markdown_done
+            doc.status_message = "PDF 解析完成"
+            doc.progress = 100
+            doc.mineru_task_id = None  # Clear task_id after success
+            db.commit()
+    finally:
+        db.close()
 
 
 async def _run_extract(doc_id: int):
@@ -424,6 +526,7 @@ def reset_document(
 
     doc.status_message = None
     doc.progress = 0
+    doc.mineru_task_id = None  # Clear MinerU task tracking on reset
 
     # Clear downstream data based on target status
     if doc.status == DocStatus.uploaded:
@@ -452,7 +555,8 @@ async def parse_document(
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
 
-    if doc.status != DocStatus.uploaded:
+    # Allow parsing from uploaded or error status (for retry after timeout)
+    if doc.status not in [DocStatus.uploaded, DocStatus.error]:
         raise HTTPException(status_code=400, detail=f"当前状态 {doc.status.value} 不允许解析")
 
     doc.status = DocStatus.parsing
