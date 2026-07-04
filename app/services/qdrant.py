@@ -177,6 +177,22 @@ async def search_similar(
     if not embedding:
         return []
 
+    results = client.search(
+        collection_name=collection_name,
+        query_vector=("vector", embedding),
+        limit=limit,
+    )
+
+    return [
+        {
+            "score": hit.score,
+            "document_id": hit.payload.get("metadata", {}).get("document_id"),
+            "chunk_text": hit.payload.get("text"),
+            "title": hit.payload.get("metadata", {}).get("title"),
+        }
+        for hit in results
+    ]
+
 
 def get_point(point_id: str, collection_name: str = None) -> dict:
     """
@@ -238,19 +254,3 @@ def list_collections() -> list[str]:
         return [c.name for c in collections]
     except Exception:
         return []
-
-    results = client.search(
-        collection_name=collection_name,
-        query_vector=("vector", embedding),
-        limit=limit,
-    )
-
-    return [
-        {
-            "score": hit.score,
-            "document_id": hit.payload.get("metadata", {}).get("document_id"),
-            "chunk_text": hit.payload.get("text"),
-            "title": hit.payload.get("metadata", {}).get("title"),
-        }
-        for hit in results
-    ]

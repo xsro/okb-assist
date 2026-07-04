@@ -9,6 +9,19 @@ from app.routers import documents, pipeline, admin
 
 app = FastAPI(title="OKB-Assist", description="论文与专著数据管理系统")
 
+
+# Mount MCP SSE endpoint
+def _mount_mcp():
+    """Mount MCP server as SSE endpoint (lazy import to avoid circular deps)."""
+    try:
+        from app.mcp_server import mcp
+        mcp_app = mcp.sse_app()
+        app.mount("/assist/mcp", mcp_app)
+    except ImportError:
+        print("Warning: mcp package not installed, MCP endpoint unavailable")
+    except Exception as e:
+        print(f"Warning: Failed to mount MCP: {e}")
+
 # Mount static files
 app.mount("/assist/static", StaticFiles(directory="static"), name="static")
 
@@ -27,6 +40,7 @@ app.include_router(admin.router)
 @app.on_event("startup")
 def startup():
     init_db()
+    _mount_mcp()
 
 
 @app.get("/")
@@ -67,6 +81,11 @@ def monitor_page(request: Request):
 @app.get("/assist/point")
 def point_page(request: Request):
     return templates.TemplateResponse(name="point.html", request=request)
+
+
+@app.get("/assist/tools")
+def tools_page(request: Request):
+    return templates.TemplateResponse(name="tools.html", request=request)
 
 
 if __name__ == "__main__":

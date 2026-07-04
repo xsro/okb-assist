@@ -126,6 +126,49 @@ def _doc_to_out(doc: Document) -> dict:
     ).model_dump()
 
 
+@router.get("/search")
+async def semantic_search(
+    q: str = "",
+    limit: int = 5,
+    db: Session = Depends(get_db),
+):
+    """Semantic search across indexed documents using vector similarity."""
+    if not q.strip():
+        return {"results": [], "query": q}
+
+    from app.services.qdrant import search_similar
+    from app.services.ollama import get_embedding
+
+    results = await search_similar(
+        user_id=QDRANT_USER_ID,
+        query=q,
+        get_embedding_func=get_embedding,
+        limit=limit,
+    )
+
+    # Enrich results with document info from DB
+    enriched = []
+    for hit in results:
+        doc_id = hit.get("document_id")
+        doc_info = {}
+        if doc_id:
+            doc = db.query(Document).filter(Document.id == doc_id).first()
+            if doc:
+                doc_info = {
+                    "filename": doc.filename,
+                    "status": doc.status.value if isinstance(doc.status, DocStatus) else doc.status,
+                    "authors": doc.authors,
+                    "year": doc.year,
+                    "journal": doc.journal,
+                }
+        enriched.append({
+            **hit,
+            **doc_info,
+        })
+
+    return {"results": enriched, "query": q}
+
+
 @router.get("/")
 def list_documents(
     q: Optional[str] = None,
