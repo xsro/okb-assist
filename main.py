@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -7,12 +9,13 @@ from fastapi import FastAPI
 from app.database import init_db
 from app.routers import documents, pipeline, admin
 
-app = FastAPI(title="OKB-Assist", description="论文与专著数据管理系统")
 
-
-# Mount MCP SSE endpoint
-def _mount_mcp():
-    """Mount MCP server as SSE endpoint (lazy import to avoid circular deps)."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan: startup and shutdown."""
+    # Startup
+    init_db()
+    # Mount MCP SSE endpoint
     try:
         from app.mcp_server import mcp
         mcp_app = mcp.sse_app()
@@ -21,6 +24,11 @@ def _mount_mcp():
         print("Warning: mcp package not installed, MCP endpoint unavailable")
     except Exception as e:
         print(f"Warning: Failed to mount MCP: {e}")
+    yield
+    # Shutdown (nothing to clean up)
+
+
+app = FastAPI(title="OKB-Assist", description="论文与专著数据管理系统", lifespan=lifespan)
 
 # Mount static files
 app.mount("/assist/static", StaticFiles(directory="static"), name="static")
@@ -35,12 +43,6 @@ templates = Jinja2Templates(directory="app/templates")
 app.include_router(documents.router)
 app.include_router(pipeline.router)
 app.include_router(admin.router)
-
-
-@app.on_event("startup")
-def startup():
-    init_db()
-    _mount_mcp()
 
 
 @app.get("/")

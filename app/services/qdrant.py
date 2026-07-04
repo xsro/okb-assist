@@ -177,9 +177,10 @@ async def search_similar(
     if not embedding:
         return []
 
-    results = client.search(
+    results = client.query_points(
         collection_name=collection_name,
-        query_vector=("vector", embedding),
+        query=embedding,
+        using="vector",
         limit=limit,
     )
 
@@ -190,7 +191,7 @@ async def search_similar(
             "chunk_text": hit.payload.get("text"),
             "title": hit.payload.get("metadata", {}).get("title"),
         }
-        for hit in results
+        for hit in results.points
     ]
 
 
