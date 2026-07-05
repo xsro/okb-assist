@@ -53,20 +53,29 @@ async def extract_metadata(markdown_content: str) -> dict:
     truncated = markdown_content[:8000]
     prompt = EXTRACT_PROMPT.format(content=truncated)
 
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        response = await client.post(
-            f"{settings.ollama_url}/api/generate",
-            json={
-                "model": settings.ollama_model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.1,
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            response = await client.post(
+                f"{settings.ollama_url}/api/generate",
+                json={
+                    "model": settings.ollama_model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,
+                    },
                 },
-            },
-        )
-        response.raise_for_status()
-        result = response.json()
+            )
+            response.raise_for_status()
+            result = response.json()
+    except httpx.ConnectError as e:
+        raise Exception(f"无法连接到 Ollama 服务 ({settings.ollama_url}): {e}")
+    except httpx.TimeoutException as e:
+        raise Exception(f"Ollama 请求超时 (300秒): {e}")
+    except httpx.HTTPStatusError as e:
+        raise Exception(f"Ollama 返回错误状态码 {e.response.status_code}: {e.response.text[:200]}")
+    except Exception as e:
+        raise Exception(f"Ollama 请求失败: {type(e).__name__}: {e}")
 
     # Extract the response text
     response_text = result.get("response", "")

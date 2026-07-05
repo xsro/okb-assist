@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     # Ollama
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_key: str = ""
-    ollama_model: str = "qcwind/qwen3-8b-instruct-Q4-K-M:latest"
+    ollama_model: str = "qwen3.5:9b"
     ollama_embed_model: str = "nomic-embed-text"
 
     # Qdrant

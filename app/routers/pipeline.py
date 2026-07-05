@@ -196,6 +196,7 @@ async def _run_extract(doc_id: int):
 
 async def _do_extract_impl(doc_id: int):
     """Extract implementation."""
+    import traceback
     try:
         _update_doc_status(doc_id, DocStatus.extracting, "正在提取元数据...", 10)
 
@@ -248,7 +249,10 @@ async def _do_extract_impl(doc_id: int):
         finally:
             db.close()
     except Exception as e:
-        _update_doc_status(doc_id, DocStatus.error, f"元数据提取失败: {str(e)}")
+        error_msg = f"元数据提取失败: {type(e).__name__}: {str(e) or repr(e)}"
+        print(f"[ERROR] Document {doc_id}: {error_msg}")
+        print(traceback.format_exc())
+        _update_doc_status(doc_id, DocStatus.error, error_msg)
 
 
 async def _run_index(doc_id: int):
@@ -621,6 +625,45 @@ def get_batch_status(db: Session = Depends(get_db)):
             "markdown_done": db.query(Document).filter(Document.status == DocStatus.markdown_done).count(),
             "meta_done": db.query(Document).filter(Document.status == DocStatus.meta_done).count(),
         },
+    }
+
+
+@router.post("/batch/reset-errors")
+def batch_reset_errors(target_status: str = None, db: Session = Depends(get_db)):
+    """批量将所有错误状态的文档重置为失败前的状态。
+
+    默认重置逻辑：
+    - 有 markdown_path 的文档 -> markdown_done
+    - 没有 markdown_path 的文档 -> uploaded
+    """
+    # 查询所有错误状态的文档
+    error_docs = db.query(Document).filter(Document.status == DocStatus.error).all()
+
+    if not error_docs:
+        return {"detail": "没有错误状态的文档", "reset_count": 0}
+
+    reset_count = 0
+    for doc in error_docs:
+        # 根据目标状态或默认逻辑确定重置状态
+        if target_status and target_status in ['uploaded', 'markdown_done', 'meta_done']:
+            doc.status = DocStatus(target_status)
+        else:
+            # 默认逻辑：根据是否有 markdown 文件决定
+            if doc.markdown_path:
+                doc.status = DocStatus.markdown_done
+            else:
+                doc.status = DocStatus.uploaded
+
+        doc.status_message = None
+        doc.progress = 0
+        doc.mineru_task_id = None
+        reset_count += 1
+
+    db.commit()
+
+    return {
+        "detail": f"已重置 {reset_count} 个错误状态的文档",
+        "reset_count": reset_count,
     }
 
 

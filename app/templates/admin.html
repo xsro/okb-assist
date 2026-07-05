@@ -44,6 +44,8 @@
         .batch-btn-index:hover:not(:disabled) { background: #ddd6fe; }
         .batch-btn-full { background: #d1fae5; color: #065f46; border-color: #6ee7b7; }
         .batch-btn-full:hover:not(:disabled) { background: #a7f3d0; }
+        .batch-btn-reset { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
+        .batch-btn-reset:hover:not(:disabled) { background: #fecaca; }
         .batch-btn-active {
             border-width: 3px;
             box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
@@ -180,6 +182,11 @@
                     <span>全部上传任务一键处理</span>
                     <span class="count" id="count-full">-</span>
                 </button>
+                <button class="batch-btn batch-btn-reset" id="btn-reset-errors" onclick="resetAllErrors()">
+                    <span class="icon">🔄</span>
+                    <span>重置所有失败任务</span>
+                    <span class="count" id="count-errors">-</span>
+                </button>
             </div>
         </div>
 
@@ -224,11 +231,15 @@
                 document.getElementById('count-index').textContent = `${indexCount} 个待索引`;
                 document.getElementById('count-full').textContent = `${parseCount} 个待处理`;
 
+                const errorCount = sc.error || 0;
+                document.getElementById('count-errors').textContent = `${errorCount} 个失败`;
+
                 // Disable buttons with 0 count or when batch is active
                 document.getElementById('btn-parse').disabled = (parseCount === 0) || activeBatch !== null;
                 document.getElementById('btn-extract').disabled = (extractCount === 0) || activeBatch !== null;
                 document.getElementById('btn-index').disabled = (indexCount === 0) || activeBatch !== null;
                 document.getElementById('btn-full').disabled = (parseCount === 0) || activeBatch !== null;
+                document.getElementById('btn-reset-errors').disabled = (errorCount === 0) || activeBatch !== null;
 
                 // Collections
                 const collectionsDiv = document.getElementById('collections-list');
@@ -282,7 +293,7 @@
         }
 
         function updateButtonStates() {
-            const btns = ['btn-parse', 'btn-extract', 'btn-index', 'btn-full'];
+            const btns = ['btn-parse', 'btn-extract', 'btn-index', 'btn-full', 'btn-reset-errors'];
             btns.forEach(id => {
                 const el = document.getElementById(id);
                 if (activeBatch !== null) {
@@ -334,6 +345,27 @@
                 showToast(result.detail, 'info');
                 activeBatch = null;
                 loadBatchStatus();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        async function resetAllErrors() {
+            const errorCount = parseInt(document.getElementById('count-errors').textContent) || 0;
+            if (errorCount === 0) {
+                showToast('没有失败的任务需要重置', 'info');
+                return;
+            }
+
+            if (!confirm(`确定要重置所有 ${errorCount} 个失败任务的状态吗？\n\n重置后：\n- 有 Markdown 文件的任务将重置为"已解析"状态\n- 没有 Markdown 文件的任务将重置为"已上传"状态`)) {
+                return;
+            }
+
+            try {
+                const result = await api.post('/assist/api/pipeline/batch/reset-errors');
+                showToast(result.detail, 'success');
+                await loadStats();
+                await loadBatchStatus();
             } catch (err) {
                 showToast(err.message, 'error');
             }
