@@ -680,9 +680,10 @@ def reset_document(
 
     # Determine target status based on current status
     # Allow resetting to any previous valid state
+    # markdown_done can be reset to meta_done (user can fill metadata manually)
     reset_map = {
         DocStatus.parsing: [DocStatus.uploaded],
-        DocStatus.markdown_done: [DocStatus.uploaded],
+        DocStatus.markdown_done: [DocStatus.uploaded, DocStatus.meta_done],
         DocStatus.extracting: [DocStatus.uploaded, DocStatus.markdown_done],
         DocStatus.meta_done: [DocStatus.uploaded, DocStatus.markdown_done],
         DocStatus.indexing: [DocStatus.uploaded, DocStatus.markdown_done, DocStatus.meta_done],

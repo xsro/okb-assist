@@ -61,6 +61,7 @@ class DocumentOut(BaseModel):
     abstract_en: Optional[str] = None
     journal_en: Optional[str] = None
     status: str
+    status_message: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -121,6 +122,7 @@ def _doc_to_out(doc: Document) -> dict:
         abstract_en=doc.abstract_en,
         journal_en=doc.journal_en,
         status=doc.status.value if isinstance(doc.status, DocStatus) else doc.status,
+        status_message=doc.status_message,
         created_at=doc.created_at.isoformat() if doc.created_at else None,
         updated_at=doc.updated_at.isoformat() if doc.updated_at else None,
     ).model_dump()
