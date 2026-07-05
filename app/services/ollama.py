@@ -173,25 +173,33 @@ def _parse_json_from_text(text: str) -> dict:
     }
 
 
-async def get_embedding(text: str) -> list[float]:
+async def get_embedding(text: str | list[str]) -> list[float] | list[list[float]]:
     """
-    Get embedding vector from Ollama.
+    Get embedding vector(s) from Ollama.
+    Supports both single text and batch (list of texts).
+
+    - Single text -> returns list[float]
+    - Batch (list) -> returns list[list[float]]
     """
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    is_batch = isinstance(text, list)
+    input_data = text if is_batch else [text]
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
             f"{settings.ollama_url}/api/embed",
             json={
                 "model": settings.ollama_embed_model,
-                "input": text,
+                "input": input_data,
             },
         )
         response.raise_for_status()
         result = response.json()
 
     embeddings = result.get("embeddings", [])
-    if embeddings:
-        return embeddings[0]
-    return []
+
+    if is_batch:
+        return embeddings
+    return embeddings[0] if embeddings else []
 
 
 def add_yaml_frontmatter(markdown_content: str, metadata: dict) -> str:

@@ -60,7 +60,7 @@ async def get_task_result(task_id: str, output_dir: str) -> str:
         )
 
     if response.status_code != 200:
-        raise Exception(f"Failed to get MinerU result: {response.status_code}")
+        raise Exception(f"Failed to get MinerU result [task_id={task_id}]: HTTP {response.status_code}")
 
     # Process ZIP file
     zip_content = response.content
@@ -105,10 +105,10 @@ async def get_task_result(task_id: str, output_dir: str) -> str:
                         markdown_content = data["md_content"]
                         break
         except Exception:
-            raise Exception("Invalid response format from MinerU")
+            raise Exception(f"Invalid response format from MinerU [task_id={task_id}]")
 
     if not markdown_content:
-        raise Exception("No markdown content found in MinerU result")
+        raise Exception(f"No markdown content found in MinerU result [task_id={task_id}]")
 
     # Save markdown
     md_path = output_path / "output.md"
@@ -148,11 +148,11 @@ async def submit_parse_task(file_path: str) -> str:
         task_result = await submit_parse_task_tasks_post.asyncio(client=client, body=body)
 
     if not task_result or not isinstance(task_result, dict):
-        raise Exception("Failed to submit MinerU task")
+        raise Exception(f"Failed to submit MinerU task: invalid response {task_result}")
 
     task_id = task_result.get("task_id")
     if not task_id:
-        raise Exception(f"MinerU task submission failed: {task_result}")
+        raise Exception(f"MinerU task submission failed, no task_id in response: {task_result}")
 
     return task_id
 
@@ -178,11 +178,11 @@ async def poll_task(task_id: str, max_wait: int = 300, poll_interval: int = 2) -
             return status_result
         elif status == "failed":
             error = status_result.get("error", "Unknown error")
-            raise Exception(f"MinerU task failed: {error}")
+            raise Exception(f"MinerU task failed [task_id={task_id}]: {error}")
 
         await asyncio.sleep(poll_interval)
 
-    raise Exception("MinerU task timed out")
+    raise Exception(f"MinerU task timed out [task_id={task_id}, timeout={max_wait}s]")
 
 
 async def parse_pdf(file_path: str, output_dir: str) -> str:

@@ -94,9 +94,10 @@
                         <p style="margin:0.25rem 0" id="md-path">📝 MD: -</p>
                     </div>
                 </div>
-                <div style="display:flex;gap:0.5rem">
+                <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
                     <a id="btn-pdf" href="#" target="_blank" class="btn btn-primary" style="display:none">📄 查看 PDF</a>
                     <a id="btn-download" href="#" download class="btn" style="display:none">⬇ 下载 PDF</a>
+                    <button class="btn" onclick="showRawInfo()">🔍 查看原始信息</button>
                 </div>
             </div>
         </div>
@@ -604,6 +605,47 @@
                 showToast(result.detail, 'info');
                 startPolling();
             } catch (err) { showToast(err.message, 'error'); }
+        }
+
+        function showRawInfo() {
+            if (!doc) return;
+            const json = JSON.stringify(doc, null, 2);
+            const dialogHtml = `
+                <div id="raw-info-dialog" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000" onclick="if(event.target===this)closeRawInfo()">
+                    <div style="background:white;border-radius:8px;max-width:800px;width:90%;max-height:85vh;display:flex;flex-direction:column">
+                        <div style="display:flex;justify-content:space-between;align-items:center;padding:1rem 1.5rem;border-bottom:1px solid var(--border)">
+                            <h3 style="margin:0">📋 文档原始信息</h3>
+                            <div style="display:flex;gap:0.5rem">
+                                <button class="btn btn-sm" onclick="copyRawInfo()">复制 JSON</button>
+                                <button class="btn btn-sm" onclick="closeRawInfo()">✕ 关闭</button>
+                            </div>
+                        </div>
+                        <pre style="padding:1.5rem;margin:0;overflow:auto;flex:1;font-size:0.8rem;line-height:1.5;background:var(--bg)">${escapeHtmlForPre(json)}</pre>
+                    </div>
+                </div>
+            `;
+            const div = document.createElement('div');
+            div.innerHTML = dialogHtml;
+            document.body.appendChild(div);
+        }
+
+        function closeRawInfo() {
+            const dialog = document.getElementById('raw-info-dialog');
+            if (dialog) dialog.parentElement.remove();
+        }
+
+        function copyRawInfo() {
+            if (!doc) return;
+            const json = JSON.stringify(doc, null, 2);
+            navigator.clipboard.writeText(json).then(() => {
+                showToast('已复制到剪贴板', 'success');
+            }).catch(() => {
+                showToast('复制失败', 'error');
+            });
+        }
+
+        function escapeHtmlForPre(str) {
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         }
 
         loadDocument();

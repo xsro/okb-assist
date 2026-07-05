@@ -54,8 +54,14 @@ async def get_services_status():
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{settings.mineru_url}/health")
             if response.status_code == 200:
+                health = response.json()
                 result["mineru"]["status"] = "connected"
-                result["mineru"]["version"] = response.json().get("version", "unknown")
+                result["mineru"]["version"] = health.get("version", "unknown")
+                result["mineru"]["queued_tasks"] = health.get("queued_tasks", 0)
+                result["mineru"]["processing_tasks"] = health.get("processing_tasks", 0)
+                result["mineru"]["completed_tasks"] = health.get("completed_tasks", 0)
+                result["mineru"]["failed_tasks"] = health.get("failed_tasks", 0)
+                result["mineru"]["max_concurrent"] = health.get("max_concurrent_requests", 0)
             else:
                 result["mineru"]["status"] = "error"
                 result["mineru"]["error"] = f"HTTP {response.status_code}"

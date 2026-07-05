@@ -465,6 +465,131 @@ async def resume_batch_processing(
     return {"detail": "批量处理已恢复"}
 
 
+async def _process_stage_batch(stage: str, filter_statuses: list[DocStatus], task_func):
+    """Generic stage-specific batch processor with concurrency control."""
+    global _batch_paused
+    active_tasks = set()
+
+    while not _batch_paused:
+        active_tasks = {t for t in active_tasks if not t.done()}
+        available_slots = MAX_CONCURRENT_TASKS - len(active_tasks)
+
+        if available_slots > 0:
+            db = SessionLocal()
+            try:
+                docs = db.query(Document).filter(
+                    Document.status.in_(filter_statuses)
+                ).limit(available_slots).all()
+
+                if not docs and not active_tasks:
+                    break
+
+                for doc in docs:
+                    task = asyncio.create_task(task_func(doc.id, doc.file_path if hasattr(doc, 'file_path') else None))
+                    active_tasks.add(task)
+            except Exception as e:
+                print(f"Batch {stage} error: {e}")
+            finally:
+                db.close()
+
+        await asyncio.sleep(2)
+
+    if active_tasks:
+        await asyncio.gather(*active_tasks, return_exceptions=True)
+    _batch_paused = False
+
+
+async def _run_parse_only(doc_id: int, file_path: str = None):
+    """Run only the parse stage."""
+    global _running_tasks
+    async with _task_semaphore:
+        _running_tasks += 1
+        try:
+            if not file_path:
+                db = SessionLocal()
+                try:
+                    doc = db.query(Document).filter(Document.id == doc_id).first()
+                    if doc:
+                        file_path = doc.file_path
+                finally:
+                    db.close()
+            await _do_parse_impl(doc_id, file_path)
+        finally:
+            _running_tasks -= 1
+
+
+async def _run_extract_only(doc_id: int, _: str = None):
+    """Run only the extract stage."""
+    global _running_tasks
+    async with _task_semaphore:
+        _running_tasks += 1
+        try:
+            await _do_extract_impl(doc_id)
+        finally:
+            _running_tasks -= 1
+
+
+async def _run_index_only(doc_id: int, _: str = None):
+    """Run only the index stage."""
+    global _running_tasks
+    async with _task_semaphore:
+        _running_tasks += 1
+        try:
+            await _do_index_impl(doc_id)
+        finally:
+            _running_tasks -= 1
+
+
+@router.post("/batch/start-parse")
+async def start_batch_parse(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Start batch parsing for all uploaded documents."""
+    global _batch_paused
+    count = db.query(Document).filter(Document.status.in_([DocStatus.uploaded, DocStatus.error])).count()
+    if count == 0:
+        return {"detail": "没有待解析的文档", "pending": 0}
+    _batch_paused = False
+    background_tasks.add_task(_process_stage_batch, "parse", [DocStatus.uploaded, DocStatus.error], _run_parse_only)
+    return {"detail": f"批量解析已开始，共 {count} 个文档", "pending": count}
+
+
+@router.post("/batch/start-extract")
+async def start_batch_extract(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Start batch metadata extraction for all parsed documents."""
+    global _batch_paused
+    count = db.query(Document).filter(Document.status == DocStatus.markdown_done).count()
+    if count == 0:
+        return {"detail": "没有待提取元数据的文档", "pending": 0}
+    _batch_paused = False
+    background_tasks.add_task(_process_stage_batch, "extract", [DocStatus.markdown_done], _run_extract_only)
+    return {"detail": f"批量提取已开始，共 {count} 个文档", "pending": count}
+
+
+@router.post("/batch/start-index")
+async def start_batch_index(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Start batch indexing for all metadata-extracted documents."""
+    global _batch_paused
+    count = db.query(Document).filter(Document.status == DocStatus.meta_done).count()
+    if count == 0:
+        return {"detail": "没有待索引的文档", "pending": 0}
+    _batch_paused = False
+    background_tasks.add_task(_process_stage_batch, "index", [DocStatus.meta_done], _run_index_only)
+    return {"detail": f"批量索引已开始，共 {count} 个文档", "pending": count}
+
+
+@router.post("/batch/start-full")
+async def start_batch_full(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Start full pipeline batch for all pending documents."""
+    global _batch_paused
+    count = db.query(Document).filter(
+        Document.status.in_([DocStatus.uploaded, DocStatus.error])
+    ).count()
+    if count == 0:
+        return {"detail": "没有待处理的文档", "pending": 0}
+    _batch_paused = False
+    background_tasks.add_task(_process_batch)
+    return {"detail": f"全流程批量处理已开始，共 {count} 个文档", "pending": count}
+
+
 @router.get("/batch/status")
 def get_batch_status(db: Session = Depends(get_db)):
     """Get batch processing status."""
@@ -490,6 +615,12 @@ def get_batch_status(db: Session = Depends(get_db)):
         "total": total_count,
         "running_tasks": _running_tasks,
         "max_concurrent": MAX_CONCURRENT_TASKS,
+        "stage_counts": {
+            "uploaded": db.query(Document).filter(Document.status == DocStatus.uploaded).count(),
+            "error": db.query(Document).filter(Document.status == DocStatus.error).count(),
+            "markdown_done": db.query(Document).filter(Document.status == DocStatus.markdown_done).count(),
+            "meta_done": db.query(Document).filter(Document.status == DocStatus.meta_done).count(),
+        },
     }
 
 

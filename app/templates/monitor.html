@@ -28,73 +28,44 @@
             font-size: 0.875rem;
             margin: 0;
         }
-        .status-dot {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            margin-right: 0.5rem;
-        }
-        .status-dot.running { background: #22c55e; animation: pulse 1.5s infinite; }
-        .status-dot.idle { background: #94a3b8; }
-        .task-row {
-            display: flex;
-            align-items: center;
-            padding: 0.75rem 1rem;
-            border-bottom: 1px solid var(--border);
-            transition: background 0.2s;
-        }
-        .task-row:hover { background: var(--bg); }
-        .task-row:last-child { border-bottom: none; }
-        .task-info { flex: 1; }
-        .task-title { font-weight: 500; margin-bottom: 0.25rem; }
-        .task-meta { font-size: 0.75rem; color: var(--text-muted); }
-        .task-progress {
-            width: 150px;
-            margin: 0 1rem;
-        }
-        .progress-bar-bg {
-            background: var(--bg);
-            border-radius: 4px;
-            height: 6px;
-            overflow: hidden;
-        }
-        .progress-bar-fill {
-            height: 100%;
-            border-radius: 4px;
-            transition: width 0.3s;
-        }
-        .progress-text {
-            font-size: 0.75rem;
-            color: var(--text-muted);
-            text-align: right;
-            margin-top: 0.25rem;
-        }
-        .task-actions {
-            display: flex;
-            gap: 0.5rem;
-        }
-        .legend {
-            display: flex;
-            gap: 1.5rem;
-            flex-wrap: wrap;
-            margin-bottom: 1rem;
-            font-size: 0.875rem;
-        }
-        .legend-item {
-            display: flex;
-            align-items: center;
-            gap: 0.25rem;
-        }
         .auto-refresh {
             display: flex;
             align-items: center;
             gap: 0.5rem;
             font-size: 0.875rem;
         }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
+        .mineru-stats {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+        }
+        .mineru-stat {
+            background: var(--card);
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            text-align: center;
+        }
+        .mineru-stat .value {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+        .mineru-stat .label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+        .admin-hint {
+            background: rgba(37, 99, 235, 0.08);
+            border: 1px solid rgba(37, 99, 235, 0.2);
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .admin-hint a {
+            white-space: nowrap;
         }
     </style>
 </head>
@@ -109,18 +80,19 @@
     <main class="container">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
             <h2>任务监控</h2>
-            <div style="display:flex;align-items:center;gap:1rem">
-                <button id="btn-batch-start" class="btn btn-primary" onclick="batchStartAll()" style="white-space:nowrap">
-                    🚀 批量开始所有未完成任务 <span id="pending-count" style="opacity:0.8"></span>
-                </button>
-                <div class="auto-refresh">
-                    <label>
-                        <input type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
-                        自动刷新
-                    </label>
-                    <span id="refresh-countdown" style="color:var(--text-muted)">3s</span>
-                </div>
+            <div class="auto-refresh">
+                <label>
+                    <input type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
+                    自动刷新
+                </label>
+                <span id="refresh-countdown" style="color:var(--text-muted)">3s</span>
             </div>
+        </div>
+
+        <div class="admin-hint">
+            <span>💡</span>
+            <span>如需管理任务（启动批量处理、重置任务状态等），请前往</span>
+            <a href="/assist/admin" class="btn btn-sm btn-primary">管理页面</a>
         </div>
 
         <!-- Queue Status -->
@@ -160,7 +132,25 @@
                         <span id="mineru-status" class="badge">检查中...</span>
                     </div>
                     <p style="font-size:0.75rem;color:var(--text-muted);margin:0" id="mineru-url">-</p>
-                    <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0" id="mineru-info">-</p>
+                    <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0" id="mineru-version">-</p>
+                    <div class="mineru-stats" id="mineru-stats" style="display:none">
+                        <div class="mineru-stat">
+                            <div class="value" id="mineru-processing" style="color:var(--warning)">0</div>
+                            <div class="label">处理中</div>
+                        </div>
+                        <div class="mineru-stat">
+                            <div class="value" id="mineru-queued">0</div>
+                            <div class="label">排队中</div>
+                        </div>
+                        <div class="mineru-stat">
+                            <div class="value" id="mineru-completed" style="color:var(--success)">0</div>
+                            <div class="label">已完成</div>
+                        </div>
+                        <div class="mineru-stat">
+                            <div class="value" id="mineru-failed" style="color:var(--danger)">0</div>
+                            <div class="label">失败</div>
+                        </div>
+                    </div>
                 </div>
                 <!-- Ollama -->
                 <div style="padding:1rem;background:var(--bg);border-radius:8px">
@@ -180,32 +170,6 @@
                     <p style="font-size:0.75rem;color:var(--text-muted);margin:0" id="qdrant-url">-</p>
                     <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0" id="qdrant-info">-</p>
                 </div>
-            </div>
-        </div>
-
-        <!-- Active Tasks -->
-        <div class="card">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
-                <h3>任务列表</h3>
-                <div class="legend">
-                    <div class="legend-item"><div class="status-dot running"></div> 运行中</div>
-                    <div class="legend-item"><div class="status-dot idle"></div> 空闲</div>
-                </div>
-            </div>
-
-            <div class="legend" style="margin-bottom:1rem">
-                <span class="badge badge-uploaded">已上传</span>
-                <span class="badge badge-parsing">解析中</span>
-                <span class="badge badge-markdown_done">已解析</span>
-                <span class="badge badge-extracting">提取中</span>
-                <span class="badge badge-meta_done">已提取</span>
-                <span class="badge badge-indexing">索引中</span>
-                <span class="badge badge-indexed">已索引</span>
-                <span class="badge badge-error">错误</span>
-            </div>
-
-            <div id="task-list">
-                <p style="text-align:center;color:var(--text-muted);padding:2rem">加载中...</p>
             </div>
         </div>
     </main>
@@ -253,26 +217,13 @@
                 document.getElementById('running-tasks').textContent = queue.running_tasks;
                 document.getElementById('available-slots').textContent = queue.available_slots;
 
-                // Load batch status for pending count
-                const batchStatus = await api.get('/assist/api/pipeline/batch/status');
-                const pendingCount = batchStatus.pending || 0;
-                const pendingEl = document.getElementById('pending-count');
-                if (pendingCount > 0) {
-                    pendingEl.textContent = `(${pendingCount})`;
-                    document.getElementById('btn-batch-start').disabled = false;
-                } else {
-                    pendingEl.textContent = '';
-                    document.getElementById('btn-batch-start').disabled = true;
-                }
-
                 // Load documents (use large page size for stats)
                 const data = await api.get('/assist/api/documents/?page_size=10000');
-                const docs = data.items || [];
                 document.getElementById('total-docs').textContent = data.total;
 
                 // Calculate status distribution
                 const statusCounts = {};
-                docs.forEach(doc => {
+                (data.items || []).forEach(doc => {
                     statusCounts[doc.status] = (statusCounts[doc.status] || 0) + 1;
                 });
 
@@ -297,11 +248,6 @@
                 // Load services status
                 await loadServicesStatus();
 
-                // Filter and render only processing tasks
-                const processingStatuses = ['parsing', 'extracting', 'indexing'];
-                const processingDocs = docs.filter(d => processingStatuses.includes(d.status));
-                renderTaskList(processingDocs);
-
             } catch (err) {
                 console.error('Load error:', err);
             }
@@ -316,7 +262,19 @@
                 document.getElementById('mineru-url').textContent = mineru.url || '-';
                 document.getElementById('mineru-status').className = `badge badge-${mineru.status === 'connected' ? 'indexed' : 'error'}`;
                 document.getElementById('mineru-status').textContent = mineru.status === 'connected' ? '✓ 已连接' : '✗ 未连接';
-                document.getElementById('mineru-info').textContent = mineru.version ? `版本: ${mineru.version}` : (mineru.error || '');
+
+                const statsEl = document.getElementById('mineru-stats');
+                if (mineru.status === 'connected') {
+                    document.getElementById('mineru-version').textContent = `版本: ${mineru.version || 'unknown'} · 最大并发: ${mineru.max_concurrent || '-'}`;
+                    document.getElementById('mineru-processing').textContent = mineru.processing_tasks || 0;
+                    document.getElementById('mineru-queued').textContent = mineru.queued_tasks || 0;
+                    document.getElementById('mineru-completed').textContent = mineru.completed_tasks || 0;
+                    document.getElementById('mineru-failed').textContent = mineru.failed_tasks || 0;
+                    statsEl.style.display = 'grid';
+                } else {
+                    document.getElementById('mineru-version').textContent = mineru.error || '';
+                    statsEl.style.display = 'none';
+                }
 
                 // Ollama
                 const ollama = services.ollama || {};
@@ -334,86 +292,6 @@
 
             } catch (err) {
                 console.error('Services status error:', err);
-            }
-        }
-
-        function renderTaskList(docs) {
-            const container = document.getElementById('task-list');
-
-            if (docs.length === 0) {
-                container.innerHTML = '<p style="text-align:center;color:var(--text-muted);padding:2rem">暂无任务</p>';
-                return;
-            }
-
-            // Sort: processing first, then by updated_at desc
-            const processingStatuses = ['parsing', 'extracting', 'indexing'];
-            docs.sort((a, b) => {
-                const aProcessing = processingStatuses.includes(a.status) ? 0 : 1;
-                const bProcessing = processingStatuses.includes(b.status) ? 0 : 1;
-                if (aProcessing !== bProcessing) return aProcessing - bProcessing;
-                return new Date(b.updated_at) - new Date(a.updated_at);
-            });
-
-            const html = docs.map(doc => {
-                const isProcessing = processingStatuses.includes(doc.status);
-                const statusClass = isProcessing ? 'running' : 'idle';
-                const progressColor = doc.status === 'error' ? 'var(--danger)' : 'var(--primary)';
-
-                return `
-                    <div class="task-row">
-                        <div class="status-dot ${statusClass}"></div>
-                        <div class="task-info">
-                            <div class="task-title">
-                                <a href="/assist/detail/${doc.id}">${doc.title || doc.filename || '未命名'}</a>
-                            </div>
-                            <div class="task-meta">
-                                ID: ${doc.id} · ${doc.status_message || statusLabels[doc.status] || doc.status}
-                            </div>
-                        </div>
-                        <div class="task-progress">
-                            <div class="progress-bar-bg">
-                                <div class="progress-bar-fill" style="width:${doc.progress || 0}%;background:${progressColor}"></div>
-                            </div>
-                            <div class="progress-text">${Math.round(doc.progress || 0)}%</div>
-                        </div>
-                        <span class="badge badge-${doc.status}">${statusLabels[doc.status] || doc.status}</span>
-                        <div class="task-actions">
-                            <a href="/assist/detail/${doc.id}" class="btn btn-sm">查看</a>
-                        </div>
-                    </div>
-                `;
-            }).join('');
-
-            container.innerHTML = html;
-        }
-
-        const statusLabels = {
-            'uploaded': '已上传',
-            'parsing': '解析中',
-            'markdown_done': '已解析',
-            'extracting': '提取中',
-            'meta_done': '已提取',
-            'indexing': '索引中',
-            'indexed': '已索引',
-            'error': '错误',
-        };
-
-        async function batchStartAll() {
-            const btn = document.getElementById('btn-batch-start');
-            const originalText = btn.innerHTML;
-            btn.disabled = true;
-            btn.innerHTML = '⏳ 启动中...';
-
-            try {
-                const result = await api.post('/assist/api/pipeline/batch/start', {});
-                alert(result.detail || '批量处理已启动');
-                // Refresh data immediately
-                loadData();
-            } catch (err) {
-                alert('启动失败: ' + (err.message || '未知错误'));
-            } finally {
-                btn.disabled = false;
-                btn.innerHTML = originalText;
             }
         }
 
