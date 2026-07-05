@@ -5,9 +5,10 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import init_db
-from app.routers import documents, pipeline, admin
+from app.routers import documents, pipeline, admin, openapi
 
 
 @asynccontextmanager
@@ -30,6 +31,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="OKB-Assist", description="论文与专著数据管理系统", lifespan=lifespan)
 
+# CORS middleware - 允许所有来源（开发环境）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Mount static files
 app.mount("/assist/static", StaticFiles(directory="static"), name="static")
 
@@ -43,6 +53,7 @@ templates = Jinja2Templates(directory="app/templates")
 app.include_router(documents.router)
 app.include_router(pipeline.router)
 app.include_router(admin.router)
+app.include_router(openapi.router)
 
 
 @app.get("/")

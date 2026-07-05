@@ -6,3 +6,4 @@ __pycache__/
 uploads/
 qdrant_data/
 .swp
+.webui_secret_key
