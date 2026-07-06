@@ -6,40 +6,40 @@ from app.config import get_settings
 
 settings = get_settings()
 
-EXTRACT_PROMPT = """请从以下学术文献内容中提取元数据，严格按照 JSON 格式返回，不要包含任何其他文字。
+EXTRACT_PROMPT = """Extract metadata from the following academic document content. Return strictly in JSON format without any additional text.
 
-重要规则：
-1. 首先判断文献的主要语言（language字段），使用 ISO 639-1 语言代码：
+Important Rules:
+1. First determine the primary language of the document (language field) using ISO 639-1 codes:
    - en = English
-   - zh = 中文
-   - ja = 日本語
-   - fr = Français
-   - ru = Русский
-   - de = Deutsch
-   - ko = 한국어
-   - es = Español
-   - pt = Português
-   - ar = العربية
-   - 其他语言请使用对应的 ISO 639-1 代码
+   - zh = Chinese
+   - ja = Japanese
+   - fr = French
+   - ru = Russian
+   - de = German
+   - ko = Korean
+   - es = Spanish
+   - pt = Portuguese
+   - ar = Arabic
+   - Use the corresponding ISO 639-1 code for other languages
 
-2. 如果是非英文文献（language != "en"），需要同时提供原文和英文版本的元数据：
-   - title: 原文标题
-   - title_en: 英文标题
-   - authors: 原文作者名列表
-   - authors_en: 英文作者名列表（拼音或翻译）
-   - abstract: 原文摘要
-   - abstract_en: 英文摘要
-   - journal: 原文期刊/会议名
-   - journal_en: 英文期刊/会议名
-   - keywords: 原文关键词列表
-   - keywords_en: 英文关键词列表
+2. For non-English documents (language != "en"), provide both original and English versions:
+   - title: Original title
+   - title_en: English title
+   - authors: Original author names (list)
+   - authors_en: English author names (romanized or translated)
+   - abstract: Original abstract
+   - abstract_en: English abstract
+   - journal: Original journal/conference name
+   - journal_en: English journal/conference name
+   - keywords: Original keywords (list)
+   - keywords_en: English keywords (list)
 
-3. 如果是英文文献（language="en"），*_en字段留空即可
+3. For English documents (language="en"), leave *_en fields empty
 
-请返回以下JSON格式：
-{{"language": "语言代码", "type": "book 或 article 或 conference 或 thesis", "title": "标题（原文）", "title_en": "英文标题（非英文文献必填）", "year": 发表年份(整数), "authors": ["作者1", "作者2"], "authors_en": ["Author1", "Author2"], "abstract": "摘要（原文）", "abstract_en": "英文摘要（非英文文献必填）", "doi": "DOI号", "source": "来源", "journal": "期刊名或会议名（原文）", "journal_en": "英文期刊/会议名（非英文文献必填）", "keywords": ["关键词1", "关键词2"], "keywords_en": ["keyword1", "keyword2"], "category": "分类"}}
+Return the following JSON format:
+{{"language": "language_code", "type": "book|article|conference|thesis", "title": "Title (original)", "title_en": "English title (required for non-English)", "year": publication_year (integer), "authors": ["Author1", "Author2"], "authors_en": ["Author1", "Author2"], "abstract": "Abstract (original)", "abstract_en": "English abstract (required for non-English)", "doi": "DOI", "source": "Source", "journal": "Journal/Conference name (original)", "journal_en": "English journal/conference (required for non-English)", "keywords": ["keyword1", "keyword2"], "keywords_en": ["keyword1", "keyword2"], "category": "Category"}}
 
-文献内容：
+Document Content:
 {content}
 """
 
@@ -71,13 +71,13 @@ async def extract_metadata(markdown_content: str) -> dict:
             response.raise_for_status()
             result = response.json()
     except httpx.ConnectError as e:
-        raise Exception(f"无法连接到 Ollama 服务 ({settings.ollama_url}): {e}")
+        raise Exception(f"Failed to connect to Ollama service ({settings.ollama_url}): {e}")
     except httpx.TimeoutException as e:
-        raise Exception(f"Ollama 请求超时 (600秒): {e}")
+        raise Exception(f"Ollama request timed out (600s): {e}")
     except httpx.HTTPStatusError as e:
-        raise Exception(f"Ollama 返回错误状态码 {e.response.status_code}: {e.response.text[:200]}")
+        raise Exception(f"Ollama returned error status {e.response.status_code}: {e.response.text[:200]}")
     except Exception as e:
-        raise Exception(f"Ollama 请求失败: {type(e).__name__}: {e}")
+        raise Exception(f"Ollama request failed: {type(e).__name__}: {e}")
 
     # Extract the response text
     response_text = result.get("response", "")
