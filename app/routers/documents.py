@@ -24,6 +24,19 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 QDRANT_USER_ID = 0  # Default user ID for Qdrant since no auth
 
 
+def _next_available_id(db: Session) -> int | None:
+    """查找最小的可用 ID（复用已删除文档的 ID）。"""
+    existing_ids = [r[0] for r in db.query(Document.id).order_by(Document.id).all()]
+    if not existing_ids:
+        return None
+    expected = 1
+    for eid in existing_ids:
+        if eid != expected:
+            return expected
+        expected += 1
+    return None
+
+
 class DocumentOut(BaseModel):
     id: int
     filename: str
@@ -251,28 +264,35 @@ async def upload_document(
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="只支持 PDF 文件")
 
-    # Save file
-    doc_uuid = str(uuid.uuid4())
-    doc_dir = UPLOAD_DIR / doc_uuid
-    doc_dir.mkdir(parents=True, exist_ok=True)
-    file_path = doc_dir / file.filename
-
     content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
 
     # Calculate hash from the bytes already in memory
     import hashlib
     file_hash = hashlib.sha256(content).hexdigest()
 
-    # Create DB record
+    # Create DB record, reuse smallest available ID
     doc = Document(
         filename=file.filename,
-        file_path=str(file_path),
+        file_path="",
         file_hash=file_hash,
         status=DocStatus.uploaded,
     )
+    available_id = _next_available_id(db)
+    if available_id is not None:
+        doc.id = available_id
     db.add(doc)
+    db.commit()
+    db.refresh(doc)
+
+    # Save file as uploads/{id}/{id}.pdf
+    doc_dir = UPLOAD_DIR / str(doc.id)
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    file_path = doc_dir / f"{doc.id}.pdf"
+
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    doc.file_path = str(file_path)
     db.commit()
     db.refresh(doc)
 
@@ -289,7 +309,7 @@ def register_document_by_path(
     data: RegisterByPath,
     db: Session = Depends(get_db),
 ):
-    """Register a PDF file by its absolute path (no copy)."""
+    """通过绝对路径注册 PDF 文件（复制到 uploads 目录）。"""
     file_path = data.file_path
 
     # Validate file exists
@@ -301,11 +321,6 @@ def register_document_by_path(
 
     # Calculate file hash
     file_hash = calculate_file_hash(file_path)
-
-    # Check if already registered by path
-    existing = db.query(Document).filter(Document.file_path == file_path).first()
-    if existing:
-        return _doc_to_out(existing)
 
     # Check if hash already exists (duplicate file)
     if not data.force:
@@ -321,15 +336,29 @@ def register_document_by_path(
                 }
             )
 
-    # Create DB record
+    # Create DB record, reuse smallest available ID
     filename = os.path.basename(file_path)
     doc = Document(
         filename=filename,
-        file_path=file_path,
+        file_path="",
         file_hash=file_hash,
         status=DocStatus.uploaded,
     )
+    available_id = _next_available_id(db)
+    if available_id is not None:
+        doc.id = available_id
     db.add(doc)
+    db.commit()
+    db.refresh(doc)
+
+    # Copy file to uploads/{id}/{id}.pdf
+    import shutil
+    doc_dir = UPLOAD_DIR / str(doc.id)
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = doc_dir / f"{doc.id}.pdf"
+    shutil.copy2(file_path, dest_path)
+
+    doc.file_path = str(dest_path)
     db.commit()
     db.refresh(doc)
 

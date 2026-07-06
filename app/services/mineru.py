@@ -44,7 +44,7 @@ async def check_task_status(task_id: str) -> dict:
         return {"status": "unknown"}
 
 
-async def get_task_result(task_id: str, output_dir: str) -> str:
+async def get_task_result(task_id: str, output_dir: str, doc_id: int = None) -> str:
     """
     Fetch the result of a completed MinerU task and save to output_dir.
     Returns the path to the generated markdown file.
@@ -110,8 +110,9 @@ async def get_task_result(task_id: str, output_dir: str) -> str:
     if not markdown_content:
         raise Exception(f"No markdown content found in MinerU result [task_id={task_id}]")
 
-    # Save markdown
-    md_path = output_path / "output.md"
+    # Save markdown as {id}.md
+    md_filename = f"{doc_id}.md" if doc_id else "output.md"
+    md_path = output_path / md_filename
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(markdown_content)
 
@@ -185,7 +186,7 @@ async def poll_task(task_id: str, max_wait: int = 300, poll_interval: int = 2) -
     raise Exception(f"MinerU task timed out [task_id={task_id}, timeout={max_wait}s]")
 
 
-async def parse_pdf(file_path: str, output_dir: str) -> str:
+async def parse_pdf(file_path: str, output_dir: str, doc_id: int = None) -> str:
     """
     Call MinerU API asynchronously to parse PDF into Markdown.
     Returns the path to the generated markdown file.

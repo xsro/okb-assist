@@ -119,24 +119,25 @@ def check_exists_by_hash(base_url: str, file_hash: str, token: str = None) -> di
     return None
 
 
-def register_document(base_url: str, file_path: str, token: str = None) -> dict | None:
-    """注册文档（不复制文件）。"""
+def upload_document(base_url: str, file_path: str, token: str = None) -> dict | None:
+    """上传 PDF 文件到服务器。"""
     try:
-        with httpx.Client(timeout=30) as client:
-            resp = client.post(
-                f"{base_url}/assist/api/documents/register",
-                json={"file_path": file_path, "force": False},
-                headers=_headers(token),
-            )
+        headers = {}
+        if token:
+            headers["X-Token"] = token
+        with httpx.Client(timeout=120) as client:
+            with open(file_path, "rb") as f:
+                resp = client.post(
+                    f"{base_url}/assist/api/documents/upload",
+                    files={"file": (os.path.basename(file_path), f, "application/pdf")},
+                    headers=headers,
+                )
             if resp.status_code == 200:
                 return resp.json()
-            if resp.status_code == 409:
-                detail = resp.json().get("detail", {})
-                print(f"  文件已存在 (ID: {detail.get('existing_id')})")
             else:
-                print(f"  注册失败: {resp.status_code} - {resp.text[:200]}")
+                print(f"  上传失败: {resp.status_code} - {resp.text[:200]}")
     except Exception as e:
-        print(f"  注册失败: {e}")
+        print(f"  上传失败: {e}")
     return None
 
 
@@ -312,14 +313,14 @@ def main():
             stats["uploaded"] += 1
             continue
 
-        # ── 注册文档 ──
-        result = register_document(args.base_url, newest_file, token)
+        # ── 上传文档 ──
+        result = upload_document(args.base_url, newest_file, token)
         if not result:
             stats["failed"] += 1
             continue
 
         doc_id = result["id"]
-        print(f"  已注册: ID={doc_id}")
+        print(f"  已上传: ID={doc_id}")
 
         # ── 更新元数据 ──
         metadata = parse_zotero_row(row)

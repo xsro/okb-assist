@@ -91,7 +91,7 @@ async def _do_parse_impl(doc_id: int, file_path: str):
             if status == "completed":
                 # Previous task finished, just get the result
                 _update_doc_status(doc_id, DocStatus.parsing, "之前的任务已完成，正在获取结果...", 50)
-                md_path = await get_task_result(existing_task_id, output_dir)
+                md_path = await get_task_result(existing_task_id, output_dir, doc_id)
                 _save_parse_result(doc_id, md_path)
                 return
             elif status == "failed":
@@ -104,7 +104,7 @@ async def _do_parse_impl(doc_id: int, file_path: str):
                 _update_doc_status(doc_id, DocStatus.parsing, "正在等待之前的解析任务完成...", 20)
                 try:
                     await poll_task(existing_task_id)
-                    md_path = await get_task_result(existing_task_id, output_dir)
+                    md_path = await get_task_result(existing_task_id, output_dir, doc_id)
                     _save_parse_result(doc_id, md_path)
                     return
                 except Exception as e:
@@ -141,7 +141,7 @@ async def _do_parse_impl(doc_id: int, file_path: str):
 
         # Get result
         _update_doc_status(doc_id, DocStatus.parsing, "正在获取解析结果...", 80)
-        md_path = await get_task_result(task_id, output_dir)
+        md_path = await get_task_result(task_id, output_dir, doc_id)
 
         _save_parse_result(doc_id, md_path)
 
