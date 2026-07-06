@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import Request, HTTPException, Depends
@@ -17,6 +18,7 @@ from app.auth import (
     is_trusted_lan_client,
     verify_token,
 )
+from app.config import get_settings
 from app.routers import documents, pipeline, admin, openapi
 
 
@@ -142,7 +144,10 @@ app.add_middleware(AuthMiddleware)
 
 # Mount static files
 app.mount("/assist/static", StaticFiles(directory="static"), name="static")
-app.mount("/assist/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+_settings = get_settings()
+os.makedirs(_settings.uploads_folder, exist_ok=True)
+app.mount("/assist/uploads", StaticFiles(directory=_settings.uploads_folder), name="uploads")
 
 # Templates
 templates = Jinja2Templates(directory="app/templates")

@@ -11,13 +11,15 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.config import get_settings
 from app.database import get_db
 from app.models import Document, DocStatus
 
 router = APIRouter(prefix="/assist/api/documents", tags=["documents"])
 
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+settings = get_settings()
+UPLOAD_DIR = Path(settings.uploads_folder)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 QDRANT_USER_ID = 0  # Default user ID for Qdrant since no auth
 
@@ -332,7 +334,7 @@ def delete_document(
 
     # Delete generated files in uploads/{doc_id}/
     import shutil
-    doc_upload_dir = os.path.join("uploads", str(doc_id))
+    doc_upload_dir = os.path.join(settings.uploads_folder, str(doc_id))
     if os.path.exists(doc_upload_dir):
         shutil.rmtree(doc_upload_dir, ignore_errors=True)
 
@@ -390,7 +392,7 @@ def get_markdown(
     # Get the directory containing the markdown file (doc_dir)
     doc_dir = os.path.dirname(doc.markdown_path)
     # Get the relative path from uploads/
-    rel_path = os.path.relpath(doc_dir, "uploads")
+    rel_path = os.path.relpath(doc_dir, settings.uploads_folder)
 
     # Replace relative image paths: images/xxx.png -> /assist/uploads/{rel_path}/images/xxx.png
     def rewrite_image(match):

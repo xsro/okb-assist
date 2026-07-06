@@ -68,7 +68,7 @@ async def _do_parse_impl(doc_id: int, file_path: str):
         _update_doc_status(doc_id, DocStatus.parsing, "正在解析 PDF...", 10)
 
         # Save generated files in uploads/{doc_id}/
-        output_dir = os.path.join("uploads", str(doc_id))
+        output_dir = os.path.join(settings.uploads_folder, str(doc_id))
         os.makedirs(output_dir, exist_ok=True)
 
         # Check if there's an existing MinerU task (from a previous timeout)

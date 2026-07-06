@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite:///./okb_assist.db"
 
+    # 文件存储目录（PDF + Markdown + 解析产物）
+    uploads_folder: str = "uploads"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

@@ -162,10 +162,11 @@ def _format_document(doc: Document) -> DocumentInfo:
 
 def _get_document_links(doc_id: int) -> DocumentLinks:
     """获取文献链接（只返回路径部分）"""
+    base_url="http://192.168.1.183:5001"
     return DocumentLinks(
-        detail_page=f"/assist/detail/{doc_id}",
-        pdf_download=f"/assist/api/documents/{doc_id}/pdf",
-        markdown_content=f"/assist/api/documents/{doc_id}/markdown",
+        detail_page=f"{base_url}/assist/detail/{doc_id}",
+        pdf_download=f"{base_url}/assist/api/documents/{doc_id}/pdf",
+        markdown_content=f"{base_url}/assist/api/documents/{doc_id}/markdown",
     )
 
 
