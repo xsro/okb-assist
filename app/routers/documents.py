@@ -1,7 +1,6 @@
 import json
 import os
 import uuid
-import hashlib
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +13,7 @@ from app.auth import get_current_user
 from app.config import get_settings
 from app.database import get_db
 from app.models import Document, DocStatus
+from app.utils import calculate_file_hash
 
 router = APIRouter(prefix="/assist/api/documents", tags=["documents"])
 
@@ -22,15 +22,6 @@ UPLOAD_DIR = Path(settings.uploads_folder)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 QDRANT_USER_ID = 0  # Default user ID for Qdrant since no auth
-
-
-def calculate_file_hash(file_path: str) -> str:
-    """Calculate SHA256 hash of a file."""
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
 
 
 class DocumentOut(BaseModel):
@@ -100,6 +91,7 @@ def _doc_to_out(doc: Document) -> dict:
         filename=doc.filename,
         file_path=doc.file_path,
         markdown_path=doc.markdown_path,
+        file_hash=doc.file_hash,
         title=doc.title,
         authors=doc.authors,
         year=year,
@@ -223,10 +215,15 @@ async def upload_document(
     with open(file_path, "wb") as f:
         f.write(content)
 
+    # Calculate hash from the bytes already in memory
+    import hashlib
+    file_hash = hashlib.sha256(content).hexdigest()
+
     # Create DB record
     doc = Document(
         filename=file.filename,
         file_path=str(file_path),
+        file_hash=file_hash,
         status=DocStatus.uploaded,
     )
     db.add(doc)
@@ -289,6 +286,22 @@ def register_document_by_path(
     db.add(doc)
     db.commit()
     db.refresh(doc)
+
+    return _doc_to_out(doc)
+
+
+@router.get("/by-hash/{file_hash}")
+def get_document_by_hash(
+    file_hash: str,
+    db: Session = Depends(get_db),
+):
+    """根据文件 SHA256 哈希查找已注册的文档。"""
+    if len(file_hash) != 64:
+        raise HTTPException(status_code=400, detail="哈希格式无效，需要 64 位 SHA256")
+
+    doc = db.query(Document).filter(Document.file_hash == file_hash).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="未找到匹配的文档")
 
     return _doc_to_out(doc)
 

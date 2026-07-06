@@ -1,3 +1,5 @@
+import os
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -7,6 +9,7 @@ from app.config import get_settings
 from app.database import get_db, engine
 from app.models import Document, DocStatus
 from app.services.qdrant import get_qdrant_client, get_point, list_collections
+from app.utils import calculate_file_hash
 
 router = APIRouter(prefix="/assist/api/admin", tags=["admin"])
 settings = get_settings()
@@ -148,4 +151,32 @@ def run_database_migration():
     return {
         "detail": "Migration completed",
         "migrations": migrations_applied,
+    }
+
+
+@router.post("/recalculate-hashes")
+def recalculate_hashes(db: Session = Depends(get_db)):
+    """重新计算所有文档的文件哈希。"""
+    docs = db.query(Document).all()
+    updated = 0
+    skipped = 0
+    errors = []
+
+    for doc in docs:
+        if not doc.file_path or not os.path.exists(doc.file_path):
+            skipped += 1
+            continue
+        try:
+            doc.file_hash = calculate_file_hash(doc.file_path)
+            updated += 1
+        except Exception as e:
+            errors.append({"id": doc.id, "error": str(e)})
+
+    db.commit()
+
+    return {
+        "detail": f"哈希重算完成: 更新 {updated} 条，跳过 {skipped} 条",
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
     }

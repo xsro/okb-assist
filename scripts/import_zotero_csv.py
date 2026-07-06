@@ -25,7 +25,10 @@ import httpx
 
 
 def calculate_file_hash(file_path: str) -> str:
-    """计算文件 SHA256 哈希"""
+    """计算文件 SHA256 哈希
+
+    算法与服务端 app/utils.py 保持一致：SHA256 + 4096 字节缓冲区。
+    """
     sha256_hash = hashlib.sha256()
     with open(file_path, "rb") as f:
         for byte_block in iter(lambda: f.read(4096), b""):
@@ -54,13 +57,7 @@ def parse_file_paths(file_field: str) -> list[str]:
         if not part:
             continue
 
-        # 移除可能的 MIME 类型和 ID 后缀 (如 :application/pdf:1234)
-        if ":" in part:
-            # 只取第一个冒号前的部分（路径可能包含冒号，如 Windows 路径）
-            # 但对于 Unix 路径，直接取第一部分
-            path = part.split(":")[0]
-        else:
-            path = part
+        path = part
 
         path = path.strip()
         if path and os.path.exists(path):
@@ -83,7 +80,7 @@ def get_newest_file(file_paths: list[str]) -> str | None:
 
 
 def check_hash_exists(base_url: str, file_hash: str, token: str = None) -> dict | None:
-    """检查哈希是否已存在"""
+    """通过哈希查询接口检查文件是否已注册"""
     headers = {}
     if token:
         headers["X-Token"] = token
@@ -91,18 +88,17 @@ def check_hash_exists(base_url: str, file_hash: str, token: str = None) -> dict 
     try:
         with httpx.Client(timeout=30) as client:
             response = client.get(
-                f"{base_url}/assist/api/documents/",
-                params={"page_size": 10000},
+                f"{base_url}/assist/api/documents/by-hash/{file_hash}",
                 headers=headers,
             )
 
             if response.status_code == 200:
-                data = response.json()
-                for doc in data.get("items", []):
-                    if doc.get("file_hash") == file_hash:
-                        return doc
+                return response.json()
+            # 404 表示未找到，其他状态码视为错误
+            if response.status_code != 404:
+                print(f"  警告: 查询哈希失败: {response.status_code}")
     except Exception as e:
-        print(f"  警告: 检查哈希失败: {e}")
+        print(f"  警告: 查询哈希失败: {e}")
 
     return None
 

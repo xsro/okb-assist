@@ -46,6 +46,8 @@
         .batch-btn-full:hover:not(:disabled) { background: #a7f3d0; }
         .batch-btn-reset { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
         .batch-btn-reset:hover:not(:disabled) { background: #fecaca; }
+        .batch-btn-hash { background: #e0e7ff; color: #3730a3; border-color: #a5b4fc; }
+        .batch-btn-hash:hover:not(:disabled) { background: #c7d2fe; }
         .batch-btn-active {
             border-width: 3px;
             box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
@@ -205,6 +207,11 @@
                     <span>重置所有失败任务</span>
                     <span class="count" id="count-errors">-</span>
                 </button>
+                <button class="batch-btn batch-btn-hash" id="btn-recalc-hash" onclick="recalculateHashes()">
+                    <span class="icon">🔢</span>
+                    <span>全部重算哈希</span>
+                    <span class="count" id="count-hash">-</span>
+                </button>
             </div>
         </div>
 
@@ -259,6 +266,10 @@
                 document.getElementById('btn-full').disabled = (parseCount === 0) || activeBatch !== null;
                 document.getElementById('btn-reset-errors').disabled = (errorCount === 0) || activeBatch !== null;
 
+                // Hash button - always enabled
+                document.getElementById('count-hash').textContent = `${stats.documents} 个文档`;
+                document.getElementById('btn-recalc-hash').disabled = activeBatch !== null;
+
                 // Collections
                 const collectionsDiv = document.getElementById('collections-list');
                 if (stats.qdrant_collections && stats.qdrant_collections.length > 0) {
@@ -311,7 +322,7 @@
         }
 
         function updateButtonStates() {
-            const btns = ['btn-parse', 'btn-extract', 'btn-index', 'btn-full', 'btn-reset-errors'];
+            const btns = ['btn-parse', 'btn-extract', 'btn-index', 'btn-full', 'btn-reset-errors', 'btn-recalc-hash'];
             btns.forEach(id => {
                 const el = document.getElementById(id);
                 if (activeBatch !== null) {
@@ -386,6 +397,27 @@
                 await loadBatchStatus();
             } catch (err) {
                 showToast(err.message, 'error');
+            }
+        }
+
+        async function recalculateHashes() {
+            if (!confirm('确定要重新计算所有文档的文件哈希吗？\n\n这可能需要一些时间，期间请勿关闭页面。')) {
+                return;
+            }
+
+            const btn = document.getElementById('btn-recalc-hash');
+            btn.disabled = true;
+            btn.classList.add('batch-btn-active');
+
+            try {
+                const result = await api.post('/assist/api/admin/recalculate-hashes');
+                showToast(result.detail, 'success');
+                await loadStats();
+            } catch (err) {
+                showToast(err.message, 'error');
+            } finally {
+                btn.classList.remove('batch-btn-active');
+                btn.disabled = false;
             }
         }
 
