@@ -172,6 +172,33 @@
         .tab-content.active {
             display: block;
         }
+
+        @media (max-width: 768px) {
+            .task-item {
+                align-items: flex-start;
+                gap: 0.75rem;
+            }
+            .service-header {
+                align-items: flex-start;
+                gap: 0.5rem;
+            }
+            .service-stats {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .task-item,
+            .service-header {
+                flex-direction: column;
+            }
+            .task-item .btn {
+                width: 100%;
+            }
+            .service-stats {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
 <body>
@@ -183,7 +210,7 @@
     </header>
 
     <main class="container">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
+        <div class="page-toolbar" style="margin-bottom:1.5rem">
             <h2>任务监控</h2>
             <div class="auto-refresh">
                 <label>
@@ -266,7 +293,7 @@
         <!-- Services Status -->
         <div class="card" style="margin-bottom:1.5rem">
             <h3 style="margin-bottom:1rem">服务状态</h3>
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem">
+            <div class="services-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem">
                 <!-- MinerU -->
                 <div class="service-card">
                     <div class="service-header">
@@ -507,7 +534,7 @@
 
             container.innerHTML = errors.map(doc => `
                 <div class="error-item">
-                    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:0.5rem">
+                    <div class="mobile-stack" style="justify-content:space-between;align-items:flex-start;gap:0.5rem">
                         <div>
                             <div class="error-title">${doc.title || doc.filename || '未命名'}</div>
                             <div class="error-message">${doc.status_message || '未知错误'}</div>

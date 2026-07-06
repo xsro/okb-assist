@@ -81,7 +81,7 @@
         </div>
 
         <div class="card">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+            <div class="page-toolbar" style="margin-bottom:1rem">
                 <div class="page-size-select">
                     <span>每页显示</span>
                     <select id="page-size" onchange="changePageSize()">
@@ -169,8 +169,10 @@
                     <td>${doc.doc_type || '-'}</td>
                     <td>${statusHtml}</td>
                     <td>
-                        <a href="/assist/detail/${doc.id}" class="btn btn-sm btn-primary">查看</a>
-                        <a href="/assist/doc/${doc.id}" class="btn btn-sm">管理</a>
+                        <div class="btn-row">
+                            <a href="/assist/detail/${doc.id}" class="btn btn-sm btn-primary">查看</a>
+                            <a href="/assist/doc/${doc.id}" class="btn btn-sm">管理</a>
+                        </div>
                     </td>
                 </tr>
             `}).join('');

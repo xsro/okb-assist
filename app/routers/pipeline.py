@@ -214,11 +214,21 @@ async def _do_extract_impl(doc_id: int):
 
             metadata = await extract_metadata(markdown_content)
 
+            # 检查元数据是否有效
+            title = metadata.get("title", "")
+            authors = metadata.get("authors", [])
+            doc_type = metadata.get("type", "")
+
+            if not title and not authors:
+                # 元数据提取失败，返回空内容
+                _update_doc_status(doc_id, DocStatus.error, "元数据提取失败: 未能获取到标题和作者信息")
+                return
+
             _update_doc_status(doc_id, DocStatus.extracting, "正在保存元数据...", 80)
 
             # Update document fields
-            doc.title = metadata.get("title", "")
-            doc.authors = json.dumps(metadata.get("authors", []), ensure_ascii=False)
+            doc.title = title
+            doc.authors = json.dumps(authors, ensure_ascii=False)
             doc.year = metadata.get("year")
             doc.doi = metadata.get("doi", "")
             doc.source = metadata.get("source", "")
@@ -226,7 +236,7 @@ async def _do_extract_impl(doc_id: int):
             doc.keywords = json.dumps(metadata.get("keywords", []), ensure_ascii=False)
             doc.abstract = metadata.get("abstract", "")
             doc.category = metadata.get("category", "")
-            doc.doc_type = metadata.get("type", "")
+            doc.doc_type = doc_type
             doc.language = metadata.get("language", "en")
 
             # English fields for non-English documents

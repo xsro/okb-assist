@@ -22,26 +22,31 @@ def find_pdfs(directory: str) -> list[str]:
     return sorted(pdf_files)
 
 
-def register_pdf(base_url: str, file_path: str, force: bool = False) -> dict:
+def auth_headers(token: str = "") -> dict:
+    """Build auth headers for protected OKB-Assist APIs."""
+    return {"X-Token": token} if token else {}
+
+
+def register_pdf(base_url: str, file_path: str, force: bool = False, token: str = "") -> dict:
     """Register a PDF file with the server."""
     url = f"{base_url}/assist/api/documents/register"
     data = {"file_path": file_path, "force": force}
-    response = requests.post(url, json=data)
+    response = requests.post(url, json=data, headers=auth_headers(token))
     return response.json(), response.status_code
 
 
-def start_pipeline(base_url: str, doc_id: int) -> dict:
+def start_pipeline(base_url: str, doc_id: int, token: str = "") -> dict:
     """Start full pipeline for a document."""
     url = f"{base_url}/assist/api/pipeline/{doc_id}/process"
-    response = requests.post(url)
+    response = requests.post(url, headers=auth_headers(token))
     response.raise_for_status()
     return response.json()
 
 
-def get_status(base_url: str, doc_id: int) -> dict:
+def get_status(base_url: str, doc_id: int, token: str = "") -> dict:
     """Get document processing status."""
     url = f"{base_url}/assist/api/pipeline/{doc_id}/status"
-    response = requests.get(url)
+    response = requests.get(url, headers=auth_headers(token))
     response.raise_for_status()
     return response.json()
 
@@ -62,6 +67,11 @@ def main():
         "--process",
         action="store_true",
         help="Start processing pipeline after registration"
+    )
+    parser.add_argument(
+        "--token",
+        default=os.getenv("OKB_ASSIST_TOKEN", ""),
+        help="Access token for protected APIs (defaults to OKB_ASSIST_TOKEN)"
     )
     parser.add_argument(
         "--force",
@@ -103,7 +113,7 @@ def main():
             continue
 
         try:
-            doc, status_code = register_pdf(args.server, pdf_path, args.force)
+            doc, status_code = register_pdf(args.server, pdf_path, args.force, args.token)
 
             if status_code == 200:
                 # Success or existing
@@ -113,7 +123,7 @@ def main():
 
                     # Start pipeline if requested
                     if args.process and doc["status"] == "uploaded":
-                        result = start_pipeline(args.server, doc["id"])
+                        result = start_pipeline(args.server, doc["id"], args.token)
                         print(f"    ✓ 处理已提交: {result['detail']}")
                 else:
                     print(f"  ⊘ 已存在: ID={doc['id']}")

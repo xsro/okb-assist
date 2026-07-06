@@ -95,6 +95,24 @@
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
+
+        @media (max-width: 768px) {
+            .batch-controls {
+                grid-template-columns: 1fr;
+                gap: 0.75rem;
+            }
+            .batch-btn {
+                padding: 1rem;
+            }
+            .batch-status {
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 0.75rem;
+            }
+            .batch-item .count {
+                font-size: 1.5rem;
+            }
+        }
     </style>
 </head>
 <body>
@@ -130,9 +148,9 @@
 
         <!-- Batch Processing -->
         <div class="card" style="margin-bottom:1.5rem">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+            <div class="section-header" style="margin-bottom:1rem">
                 <h2>批量处理</h2>
-                <div style="display:flex;align-items:center;gap:1rem">
+                <div class="action-row" style="align-items:center;gap:1rem">
                     <span id="batch-status-indicator" class="status-indicator status-idle">空闲</span>
                     <button class="btn btn-warning btn-sm" id="btn-pause" onclick="pauseBatch()" style="display:none">⏸ 暂停</button>
                 </div>
@@ -411,8 +429,8 @@
                 };
 
                 container.innerHTML = processingDocs.map(doc => `
-                    <div style="display:flex;align-items:center;padding:0.75rem;border-bottom:1px solid var(--border)">
-                        <div style="flex:1">
+                    <div class="task-item">
+                        <div class="task-info">
                             <a href="/assist/detail/${doc.id}" style="font-weight:500">${doc.title || doc.filename || '未命名'}</a>
                             <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0">ID: ${doc.id}</p>
                         </div>

@@ -118,6 +118,39 @@
             border-radius: 4px;
             font-size: 0.8rem;
         }
+
+        @media (max-width: 768px) {
+            .toolbar {
+                position: static;
+                align-items: stretch;
+                padding: 0.6rem;
+            }
+            .toolbar-left,
+            .toolbar-right,
+            .page-nav {
+                width: 100%;
+                flex-wrap: wrap;
+            }
+            .toolbar-left > *,
+            .toolbar-right > *,
+            .page-nav > * {
+                flex: 1 1 auto;
+            }
+            .math-toggle {
+                justify-content: space-between;
+            }
+            .markdown-body {
+                padding: 1rem 0.75rem;
+                font-size: 0.95rem;
+            }
+            .markdown-body h1 { font-size: 1.45rem; }
+            .markdown-body h2 { font-size: 1.25rem; }
+            .markdown-body h3 { font-size: 1.1rem; }
+            .markdown-body pre,
+            .markdown-body table {
+                overflow-x: auto;
+            }
+        }
     </style>
 </head>
 <body>

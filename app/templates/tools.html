@@ -235,6 +235,66 @@
         .filter-bar input {
             flex: 1;
         }
+
+        @media (max-width: 900px) {
+            .tools-layout {
+                flex-direction: column;
+                min-height: auto;
+                gap: 1rem;
+            }
+            .tools-sidebar {
+                width: 100%;
+            }
+            .tool-nav {
+                flex-direction: row;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                padding-bottom: 0.15rem;
+            }
+            .tool-nav-item {
+                flex: 0 0 auto;
+                white-space: nowrap;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .search-result-score {
+                float: none;
+                display: inline-block;
+                margin-bottom: 0.5rem;
+            }
+            .search-result-actions,
+            .md-pagination {
+                flex-wrap: wrap;
+            }
+            .doc-list-item {
+                align-items: flex-start;
+                gap: 0.75rem;
+            }
+            .info-grid {
+                grid-template-columns: 1fr;
+                gap: 0.25rem;
+            }
+            .info-label {
+                margin-top: 0.5rem;
+            }
+            .md-viewer {
+                padding: 1rem;
+                max-height: none;
+            }
+            .empty-state {
+                padding: 2rem 1rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .doc-list-item {
+                flex-direction: column;
+            }
+            .doc-list-item .btn {
+                width: 100%;
+            }
+        }
     </style>
 </head>
 <body>
@@ -469,7 +529,7 @@
                                 · ${statusBadge(doc.status)}
                             </div>
                         </div>
-                        <div style="display:flex; gap:0.5rem;">
+                        <div class="action-row">
                             <a href="/assist/detail/${doc.id}" class="btn btn-sm btn-primary" onclick="event.stopPropagation()">详情</a>
                         </div>
                     </div>
@@ -568,7 +628,7 @@
                             <div class="info-value">${value || '-'}</div>
                         `).join('')}
                     </div>
-                    <div style="margin-top: 1.5rem; display: flex; gap: 0.75rem;">
+                    <div class="action-row" style="margin-top: 1.5rem;">
                         <a href="/assist/detail/${doc.id}" class="btn btn-primary">详情页</a>
                         <a href="/assist/markdown/${doc.id}" class="btn btn-success">阅读 Markdown</a>
                         <a href="/assist/api/documents/${doc.id}/pdf" target="_blank" class="btn btn-warning">打开 PDF</a>

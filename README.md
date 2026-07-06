@@ -47,10 +47,12 @@ docker run -p 6333:6333 -v $(pwd)/qdrant_data:/qdrant/storage docker.1ms.run/qdr
 ## 补充说明
 
 ### 认证方式
-- 无需登录，所有页面可直接访问
-- 仅**上传 PDF** 时需要提供令牌（token）
+- `192.168.0.0/16` 来源默认无需令牌访问
+- `192.168.1.162` 不在免认证范围内，必须提供令牌
+- 其他来源访问页面和 API 都必须提供令牌
 - 令牌通过环境变量 `UPLOAD_TOKEN` 配置
-- 上传时通过 `X-Token` 请求头传递令牌
+- API 可通过 `X-Token`、`Authorization: Bearer <token>`、`x_token` cookie 或 `token` 查询参数传递令牌
+- Web UI 登录后会保存令牌，后续页面导航和 API 请求会自动携带
 
 ### 向量化策略
 - 使用 **Ollama embedding 模型**（如 `nomic-embed-text`）生成向量
@@ -62,7 +64,7 @@ docker run -p 6333:6333 -v $(pwd)/qdrant_data:/qdrant/storage docker.1ms.run/qdr
 
 ### 页面结构
 - `/assist/` — 文献列表页面（查看、搜索、删除）
-- `/assist/upload` — 上传 PDF（需要令牌）
+- `/assist/upload` — 上传 PDF（非可信 LAN 需要令牌）
 - `/assist/detail/{id}` — 文献详情（查看、编辑、处理）
 - `/assist/markdown/{id}` — Markdown 查看器（分页、公式渲染）
 - `/assist/monitor` — 任务监控（队列状态、进度跟踪）

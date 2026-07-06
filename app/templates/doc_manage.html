@@ -54,13 +54,13 @@
 
         <!-- Document Info -->
         <div class="card">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:1rem">
+            <div class="mobile-stack" style="justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:1rem">
                 <div style="flex:1">
                     <h2 id="doc-title" style="margin:0">加载中...</h2>
                     <p id="doc-authors" style="color:var(--text-muted);margin:0.25rem 0 0 0;font-size:0.875rem"></p>
                     <p id="doc-id" style="color:var(--text-muted);margin:0.25rem 0 0 0;font-size:0.75rem"></p>
                 </div>
-                <div style="display:flex;gap:0.5rem">
+                <div class="action-row">
                     <a id="btn-view" href="#" class="btn">📄 查看详情</a>
                     <button class="btn btn-danger" onclick="deleteDoc()">🗑️ 删除文献</button>
                 </div>
@@ -111,7 +111,7 @@
                     <p>Qdrant 向量库</p>
                 </div>
             </div>
-            <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+            <div class="action-row" style="flex-wrap:wrap">
                 <button class="btn btn-primary" id="btn-parse" onclick="runStep('parse')">📄 解析 PDF</button>
                 <button class="btn btn-warning" id="btn-extract" onclick="runStep('extract')">📋 提取元数据</button>
                 <button class="btn btn-success" id="btn-index" onclick="runStep('index')">🔍 索引到 Qdrant</button>
@@ -130,9 +130,9 @@
 
         <!-- Markdown Editor -->
         <div class="card">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+            <div class="section-header" style="margin-bottom:1rem">
                 <h2>Markdown 编辑</h2>
-                <div style="display:flex;gap:0.5rem">
+                <div class="action-row">
                     <a id="btn-view-md" href="#" target="_blank" class="btn">📖 查看</a>
                     <button class="btn" id="btn-edit-md" onclick="toggleEditMarkdown()">✏️ 编辑</button>
                     <button class="btn btn-success" id="btn-save-md" onclick="saveMarkdown()" style="display:none">💾 保存</button>
@@ -295,7 +295,7 @@
 
             const info = document.getElementById('status-info');
             info.innerHTML = `
-                <table style="width:100%">
+                <table class="info-table">
                     <tr><td style="width:100px;font-weight:600">当前状态</td><td>${statusLabels[doc.status] || doc.status}</td></tr>
                     <tr><td style="font-weight:600">状态消息</td><td>${doc.status_message || '-'}</td></tr>
                     <tr><td style="font-weight:600">创建时间</td><td>${doc.created_at || '-'}</td></tr>
@@ -363,7 +363,7 @@
                             <select id="reset-target" class="form-control" style="margin-bottom:1rem">
                                 ${optionsHtml}
                             </select>
-                            <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+                            <div class="action-row" style="justify-content:flex-end">
                                 <button class="btn" onclick="closeResetDialog()">取消</button>
                                 <button class="btn btn-primary" onclick="confirmReset()">确认重置</button>
                             </div>

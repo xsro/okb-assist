@@ -84,7 +84,7 @@
 
         <!-- Document Info Bar -->
         <div class="card">
-            <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:1rem">
+            <div class="mobile-stack" style="justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:1rem">
                 <div style="flex:1">
                     <h2 id="doc-title" style="margin:0">加载中...</h2>
                     <p id="doc-authors" style="color:var(--text-muted);margin:0.25rem 0 0 0;font-size:0.875rem"></p>
@@ -94,7 +94,7 @@
                         <p style="margin:0.25rem 0" id="md-path">📝 MD: -</p>
                     </div>
                 </div>
-                <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                <div class="action-row" style="flex-wrap:wrap">
                     <a id="btn-pdf" href="#" target="_blank" class="btn btn-primary" style="display:none">📄 查看 PDF</a>
                     <a id="btn-markdown" href="#" target="_blank" class="btn btn-primary" style="display:none">📝 查看 Markdown</a>
                     <a id="btn-manage" href="#" class="btn">⚙️ 管理</a>
@@ -126,13 +126,13 @@
 
         <!-- Metadata -->
         <div class="card" id="meta-section">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+            <div class="section-header" style="margin-bottom:1rem">
                 <h2>元数据</h2>
                 <button class="btn btn-sm btn-primary" onclick="toggleEditMeta()">编辑</button>
             </div>
             <div id="meta-view"></div>
             <form id="meta-form" style="display:none">
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+                <div class="form-grid">
                     <div class="form-group">
                         <label>语言</label>
                         <select id="meta-language" class="form-control" onchange="toggleEnFields()">
@@ -328,7 +328,7 @@
 
             const info = document.getElementById('status-info');
             info.innerHTML = `
-                <table style="width:100%">
+                <table class="info-table">
                     <tr><td style="width:100px;font-weight:600">当前状态</td><td>${statusLabels[doc.status] || doc.status}</td></tr>
                     ${doc.status_message ? `<tr><td style="font-weight:600">状态消息</td><td>${doc.status_message}</td></tr>` : ''}
                     <tr><td style="font-weight:600">创建时间</td><td>${doc.created_at || '-'}</td></tr>
@@ -354,7 +354,7 @@
             const nonEn = isNonEnglish(doc.language);
             const langLabel = getLangLabel(doc.language);
 
-            let html = `<table style="width:100%"><tr><td style="width:120px;font-weight:600">语言</td><td>${langLabel}</td></tr><tr><td style="font-weight:600">标题</td><td>${doc.title || '-'}</td></tr>`;
+            let html = `<table class="info-table"><tr><td style="width:120px;font-weight:600">语言</td><td>${langLabel}</td></tr><tr><td style="font-weight:600">标题</td><td>${doc.title || '-'}</td></tr>`;
             if (nonEn && doc.title_en) html += `<tr><td style="font-weight:600">英文标题</td><td>${doc.title_en}</td></tr>`;
             html += `<tr><td style="font-weight:600">类型</td><td>${doc.doc_type || '-'}</td></tr><tr><td style="font-weight:600">作者</td><td>${authors}</td></tr>`;
             if (nonEn && doc.authors_en) html += `<tr><td style="font-weight:600">英文作者</td><td>${formatAuthors(doc.authors_en)}</td></tr>`;
@@ -436,10 +436,10 @@
             const json = JSON.stringify(doc, null, 2);
             const dialogHtml = `
                 <div id="raw-info-dialog" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000" onclick="if(event.target===this)closeRawInfo()">
-                    <div style="background:white;border-radius:8px;max-width:800px;width:90%;max-height:85vh;display:flex;flex-direction:column">
-                        <div style="display:flex;justify-content:space-between;align-items:center;padding:1rem 1.5rem;border-bottom:1px solid var(--border)">
+                    <div class="dialog-panel" style="max-width:800px;width:90%">
+                        <div class="dialog-header">
                             <h3 style="margin:0">📋 文档原始信息</h3>
-                            <div style="display:flex;gap:0.5rem">
+                            <div class="btn-row">
                                 <button class="btn btn-sm" onclick="copyRawInfo()">复制 JSON</button>
                                 <button class="btn btn-sm" onclick="closeRawInfo()">✕ 关闭</button>
                             </div>

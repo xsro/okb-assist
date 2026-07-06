@@ -1,0 +1,3 @@
+Title,Author,Publication Year,DOI,Journal,Abstract Note,Tags,Type,File Attachments
+"Example Paper 1","Doe, John; Smith, Jane",2024,"10.1234/example1","Journal of Examples","This is an example abstract.","tag1; tag2;journalArticle","/path/to/paper1.pdf"
+"Example Paper 2","Wang, Li; Zhang, Wei",2023,"10.5678/example2","Example Conference","Another abstract here.","tag3; tag4;conferencePaper","/path/to/paper2.pdf;/path/to/paper2_supplement.pdf"

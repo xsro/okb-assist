@@ -5,12 +5,12 @@ import hashlib
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Header
-from fastapi.responses import FileResponse, Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
+from app.auth import get_current_user
 from app.database import get_db
 from app.models import Document, DocStatus
 
@@ -19,7 +19,6 @@ router = APIRouter(prefix="/assist/api/documents", tags=["documents"])
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-settings = get_settings()
 QDRANT_USER_ID = 0  # Default user ID for Qdrant since no auth
 
 
@@ -30,12 +29,6 @@ def calculate_file_hash(file_path: str) -> str:
         for byte_block in iter(lambda: f.read(4096), b""):
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
-
-
-def verify_token(x_token: str = Header(...)):
-    """Verify upload token from request header."""
-    if x_token != settings.upload_token:
-        raise HTTPException(status_code=401, detail="无效的上传令牌")
 
 
 class DocumentOut(BaseModel):
@@ -213,12 +206,8 @@ def list_documents(
 async def upload_document(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    x_token: str = Header(...),
+    user: str = Depends(get_current_user),
 ):
-    # Verify token
-    if x_token != settings.upload_token:
-        raise HTTPException(status_code=401, detail="无效的上传令牌")
-
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="只支持 PDF 文件")
 

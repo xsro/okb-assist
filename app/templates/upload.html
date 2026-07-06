@@ -18,9 +18,9 @@
         <div class="card">
             <h2 style="margin-bottom:1rem">上传 PDF 文件</h2>
 
-            <div class="form-group">
-                <label for="token-input">上传令牌</label>
-                <input type="password" id="token-input" class="form-control" placeholder="请输入上传令牌">
+            <div class="form-group" id="token-group">
+                <label for="token-input">访问令牌</label>
+                <input type="password" id="token-input" class="form-control" placeholder="请输入访问令牌">
             </div>
 
             <div class="upload-area" id="upload-area">
@@ -42,15 +42,24 @@
         const uploadArea = document.getElementById('upload-area');
         const fileInput = document.getElementById('file-input');
         const tokenInput = document.getElementById('token-input');
+        const tokenGroup = document.getElementById('token-group');
         const progressDiv = document.getElementById('upload-progress');
 
-        // Load saved token
-        const savedToken = api.getToken();
-        if (savedToken) {
-            tokenInput.value = savedToken;
-        }
+        const authReady = api.refreshAuthStatus().then((status) => {
+            const savedToken = api.getToken();
+            if (savedToken) {
+                tokenInput.value = savedToken;
+            }
+            if (!status.auth_required) {
+                tokenGroup.style.display = 'none';
+            }
+        }).catch(() => {
+            const savedToken = api.getToken();
+            if (savedToken) {
+                tokenInput.value = savedToken;
+            }
+        });
 
-        // Save token on change
         tokenInput.addEventListener('change', () => {
             api.setToken(tokenInput.value);
         });
@@ -81,9 +90,11 @@
         });
 
         async function uploadFile(file) {
-            const token = tokenInput.value;
-            if (!token) {
-                showToast('请先输入上传令牌', 'error');
+            await authReady;
+
+            const token = tokenInput.value.trim() || api.getToken();
+            if (api.authState.auth_required && !token) {
+                showToast('请先输入访问令牌', 'error');
                 return;
             }
 
@@ -92,8 +103,9 @@
                 return;
             }
 
-            // Save token
-            api.setToken(token);
+            if (token) {
+                api.setToken(token);
+            }
 
             progressDiv.style.display = 'block';
             uploadArea.style.display = 'none';

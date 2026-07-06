@@ -31,6 +31,9 @@
             .info-grid {
                 grid-template-columns: 1fr;
             }
+            .action-buttons {
+                flex-wrap: wrap;
+            }
         }
         .info-card {
             background: var(--card);
@@ -126,7 +129,7 @@
                 <div class="info-card">
                     <h3>📋 元数据</h3>
                     <div id="metadata-content"></div>
-                    <div class="action-buttons">
+                    <div class="action-buttons action-row">
                         <a id="btn-view-doc" href="#" target="_blank" class="btn btn-sm btn-primary" style="display:none">查看文献详情</a>
                         <a id="btn-view-md" href="#" target="_blank" class="btn btn-sm" style="display:none">查看 Markdown</a>
                         <a id="btn-view-pdf" href="#" target="_blank" class="btn btn-sm" style="display:none">查看 PDF</a>
