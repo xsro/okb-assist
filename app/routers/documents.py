@@ -115,6 +115,52 @@ def _doc_to_out(doc: Document) -> dict:
     ).model_dump()
 
 
+@router.get("/similar-titles")
+def find_similar_titles(
+    min_group_size: int = 2,
+    db: Session = Depends(get_db),
+):
+    """查找标题相似的文档（用于去重）。
+
+    按归一化标题分组，返回每组包含的文档列表。
+    """
+    import re
+    from collections import defaultdict
+
+    docs = db.query(Document).filter(Document.title.isnot(None), Document.title != "").all()
+
+    def normalize(title: str) -> str:
+        """归一化标题：小写、去除标点空白。"""
+        t = title.lower().strip()
+        t = re.sub(r'[^a-z0-9一-鿿]+', '', t)  # 保留字母数字中文
+        return t
+
+    groups = defaultdict(list)
+    for doc in docs:
+        key = normalize(doc.title)
+        if key:
+            groups[key].append(doc)
+
+    # 过滤出有多个文档的组
+    result = []
+    for key, group_docs in groups.items():
+        if len(group_docs) >= min_group_size:
+            result.append({
+                "normalized_title": key,
+                "count": len(group_docs),
+                "documents": [_doc_to_out(d) for d in group_docs],
+            })
+
+    # 按组大小降序
+    result.sort(key=lambda g: g["count"], reverse=True)
+
+    return {
+        "groups": result,
+        "total_groups": len(result),
+        "total_documents": sum(g["count"] for g in result),
+    }
+
+
 @router.get("/search")
 async def semantic_search(
     q: str = "",
@@ -300,6 +346,22 @@ def get_document_by_hash(
         raise HTTPException(status_code=400, detail="哈希格式无效，需要 64 位 SHA256")
 
     doc = db.query(Document).filter(Document.file_hash == file_hash).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="未找到匹配的文档")
+
+    return _doc_to_out(doc)
+
+
+@router.get("/by-doi/{doi:path}")
+def get_document_by_doi(
+    doi: str,
+    db: Session = Depends(get_db),
+):
+    """根据 DOI 查找已注册的文档。"""
+    if not doi.strip():
+        raise HTTPException(status_code=400, detail="DOI 不能为空")
+
+    doc = db.query(Document).filter(Document.doi == doi).first()
     if not doc:
         raise HTTPException(status_code=404, detail="未找到匹配的文档")
 
