@@ -10,7 +10,7 @@ from app.config import get_settings
 from app.database import get_db, SessionLocal
 from app.models import Document, DocStatus
 from app.services.mineru import parse_pdf, submit_parse_task, poll_task, get_task_result, check_task_status
-from app.services.ollama import extract_metadata, get_embedding, add_yaml_frontmatter
+from app.services.ollama import extract_metadata, get_embedding
 from app.services.qdrant import index_document, delete_document_points
 
 router = APIRouter(prefix="/assist/api/pipeline", tags=["pipeline"])
@@ -207,6 +207,14 @@ async def _do_extract_impl(doc_id: int):
                 _update_doc_status(doc_id, DocStatus.error, "Markdown 文件不存在")
                 return
 
+            # 已有标题、作者、年份则跳过提取
+            if doc.title and doc.authors and doc.year:
+                doc.status = DocStatus.meta_done
+                doc.status_message = "元数据已存在，跳过提取"
+                doc.progress = 100
+                db.commit()
+                return
+
             with open(doc.markdown_path, "r", encoding="utf-8") as f:
                 markdown_content = f.read()
 
@@ -220,37 +228,47 @@ async def _do_extract_impl(doc_id: int):
             doc_type = metadata.get("type", "")
 
             if not title and not authors:
-                # 元数据提取失败，返回空内容
                 _update_doc_status(doc_id, DocStatus.error, "元数据提取失败: 未能获取到标题和作者信息")
                 return
 
             _update_doc_status(doc_id, DocStatus.extracting, "正在保存元数据...", 80)
 
-            # Update document fields
-            doc.title = title
-            doc.authors = json.dumps(authors, ensure_ascii=False)
-            doc.year = metadata.get("year")
-            doc.doi = metadata.get("doi", "")
-            doc.source = metadata.get("source", "")
-            doc.journal = metadata.get("journal", "")
-            doc.keywords = json.dumps(metadata.get("keywords", []), ensure_ascii=False)
-            doc.abstract = metadata.get("abstract", "")
-            doc.category = metadata.get("category", "")
-            doc.doc_type = doc_type
-            doc.language = metadata.get("language", "en")
+            # 仅填充空字段
+            if not doc.title:
+                doc.title = title
+            if not doc.authors:
+                doc.authors = json.dumps(authors, ensure_ascii=False)
+            if not doc.year:
+                doc.year = metadata.get("year")
+            if not doc.doi:
+                doc.doi = metadata.get("doi", "")
+            if not doc.source:
+                doc.source = metadata.get("source", "")
+            if not doc.journal:
+                doc.journal = metadata.get("journal", "")
+            if not doc.keywords:
+                doc.keywords = json.dumps(metadata.get("keywords", []), ensure_ascii=False)
+            if not doc.abstract:
+                doc.abstract = metadata.get("abstract", "")
+            if not doc.category:
+                doc.category = metadata.get("category", "")
+            if not doc.doc_type:
+                doc.doc_type = doc_type
+            if not doc.language:
+                doc.language = metadata.get("language", "en")
 
             # English fields for non-English documents
             if doc.language and doc.language != "en":
-                doc.title_en = metadata.get("title_en", "")
-                doc.authors_en = json.dumps(metadata.get("authors_en", []), ensure_ascii=False)
-                doc.keywords_en = json.dumps(metadata.get("keywords_en", []), ensure_ascii=False)
-                doc.abstract_en = metadata.get("abstract_en", "")
-                doc.journal_en = metadata.get("journal_en", "")
-
-            # Add YAML frontmatter to markdown
-            updated_markdown = add_yaml_frontmatter(markdown_content, metadata)
-            with open(doc.markdown_path, "w", encoding="utf-8") as f:
-                f.write(updated_markdown)
+                if not doc.title_en:
+                    doc.title_en = metadata.get("title_en", "")
+                if not doc.authors_en:
+                    doc.authors_en = json.dumps(metadata.get("authors_en", []), ensure_ascii=False)
+                if not doc.keywords_en:
+                    doc.keywords_en = json.dumps(metadata.get("keywords_en", []), ensure_ascii=False)
+                if not doc.abstract_en:
+                    doc.abstract_en = metadata.get("abstract_en", "")
+                if not doc.journal_en:
+                    doc.journal_en = metadata.get("journal_en", "")
 
             doc.status = DocStatus.meta_done
             doc.status_message = "元数据提取完成"
