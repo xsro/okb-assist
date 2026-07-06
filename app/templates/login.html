@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - OKB-Assist</title>
+    <link rel="stylesheet" href="/assist/static/style.css">
+    <style>
+        body {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg);
+        }
+        .login-container {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2.5rem;
+            max-width: 400px;
+            width: 90%;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .login-header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        .login-header h1 {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+        .login-header p {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+        .btn-login {
+            width: 100%;
+            padding: 0.75rem;
+            font-size: 1rem;
+        }
+        .error-message {
+            color: var(--danger);
+            font-size: 0.875rem;
+            margin-top: 0.5rem;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-header">
+            <h1>📚 OKB-Assist</h1>
+            <p>论文与专著数据管理系统</p>
+        </div>
+
+        <form id="login-form">
+            <div class="form-group">
+                <label for="token">访问令牌</label>
+                <input type="password" id="token" class="form-control" placeholder="请输入访问令牌" autofocus required>
+                <p class="error-message" id="error-msg">令牌无效，请重新输入</p>
+            </div>
+            <button type="submit" class="btn btn-primary btn-login">登录</button>
+        </form>
+    </div>
+
+    <script>
+        async function verifyToken(token) {
+            try {
+                const res = await fetch('/assist/api/documents/?page_size=1', {
+                    headers: { 'X-Token': token }
+                });
+                return res.ok;
+            } catch {
+                return false;
+            }
+        }
+
+        document.getElementById('login-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const token = document.getElementById('token').value;
+            const errorMsg = document.getElementById('error-msg');
+
+            if (!token) {
+                errorMsg.textContent = '请输入访问令牌';
+                errorMsg.style.display = 'block';
+                return;
+            }
+
+            // 验证token
+            const valid = await verifyToken(token);
+            if (valid) {
+                // 保存token，显示成功提示
+                localStorage.setItem('upload_token', token);
+                document.querySelector('.login-container').innerHTML = `
+                    <div style="text-align:center">
+                        <h2 style="margin-bottom:1rem">✅ 登录成功</h2>
+                        <p style="margin-bottom:1.5rem;color:var(--text-muted)">令牌已保存</p>
+                        <a href="/assist/" class="btn btn-primary">进入首页</a>
+                    </div>
+                `;
+            } else {
+                errorMsg.textContent = '令牌无效，请重新输入';
+                errorMsg.style.display = 'block';
+                document.getElementById('token').value = '';
+                document.getElementById('token').focus();
+            }
+        });
+    </script>
+</body>
+</html>

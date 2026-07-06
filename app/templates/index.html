@@ -155,20 +155,30 @@
                 return;
             }
 
-            tbody.innerHTML = docs.map(doc => `
+            tbody.innerHTML = docs.map(doc => {
+                const statusHtml = doc.status === 'error' && doc.status_message
+                    ? `<span class="badge badge-error" title="${escapeHtml(doc.status_message)}" style="cursor:help">⚠️ 错误</span>`
+                    : statusBadge(doc.status);
+
+                return `
                 <tr>
                     <td style="color:var(--text-muted);font-size:0.75rem">${doc.id}</td>
                     <td>${doc.title || doc.filename || '-'}</td>
                     <td>${formatAuthors(doc.authors)}</td>
                     <td>${doc.year || '-'}</td>
                     <td>${doc.doc_type || '-'}</td>
-                    <td>${statusBadge(doc.status)}</td>
+                    <td>${statusHtml}</td>
                     <td>
                         <a href="/assist/detail/${doc.id}" class="btn btn-sm btn-primary">查看</a>
-                        <button onclick="deleteDoc(${doc.id})" class="btn btn-sm btn-danger">删除</button>
+                        <a href="/assist/doc/${doc.id}" class="btn btn-sm">管理</a>
                     </td>
                 </tr>
-            `).join('');
+            `}).join('');
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
         }
 
         function renderPagination() {
@@ -246,18 +256,6 @@
                 return Array.isArray(arr) ? arr.join(', ') : authors;
             } catch {
                 return authors;
-            }
-        }
-
-        async function deleteDoc(id) {
-            if (!confirm('确定要删除这篇文献及其所有相关文件吗？')) return;
-
-            try {
-                await api.delete(`/assist/api/documents/${id}`);
-                showToast('已删除', 'success');
-                loadDocuments();
-            } catch (err) {
-                showToast(err.message, 'error');
             }
         }
 

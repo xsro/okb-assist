@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文献管理 - OKB-Assist</title>
+    <link rel="stylesheet" href="/assist/static/style.css">
+    <style>
+        .pipeline-steps {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+        .pipeline-step {
+            flex: 1;
+            min-width: 120px;
+            padding: 1rem;
+            background: var(--bg);
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            text-align: center;
+            transition: all 0.2s;
+        }
+        .pipeline-step.active {
+            border-color: var(--primary);
+            background: rgba(37, 99, 235, 0.05);
+        }
+        .pipeline-step.done {
+            border-color: var(--success);
+            background: rgba(16, 185, 129, 0.05);
+        }
+        .pipeline-step h3 {
+            font-size: 0.875rem;
+            margin-bottom: 0.25rem;
+        }
+        .pipeline-step p {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin: 0;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>📚 OKB-Assist</h1>
+            <nav id="nav"></nav>
+        </div>
+    </header>
+
+    <main class="container">
+        <a href="/assist/" style="display:inline-block;margin-bottom:1rem">← 返回列表</a>
+
+        <!-- Document Info -->
+        <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:1rem">
+                <div style="flex:1">
+                    <h2 id="doc-title" style="margin:0">加载中...</h2>
+                    <p id="doc-authors" style="color:var(--text-muted);margin:0.25rem 0 0 0;font-size:0.875rem"></p>
+                    <p id="doc-id" style="color:var(--text-muted);margin:0.25rem 0 0 0;font-size:0.75rem"></p>
+                </div>
+                <div style="display:flex;gap:0.5rem">
+                    <a id="btn-view" href="#" class="btn">📄 查看详情</a>
+                    <button class="btn btn-danger" onclick="deleteDoc()">🗑️ 删除文献</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Pipeline Status -->
+        <div class="card">
+            <h2 style="margin-bottom:1rem">处理流程</h2>
+
+            <!-- Error Message -->
+            <div id="error-container" style="display:none;margin-bottom:1rem;padding:1rem;background:#fee2e2;border:1px solid #fca5a5;border-radius:8px">
+                <div style="display:flex;align-items:flex-start;gap:0.75rem">
+                    <span style="font-size:1.25rem">⚠️</span>
+                    <div style="flex:1">
+                        <strong style="color:#991b1b">错误信息</strong>
+                        <p id="error-message" style="margin:0.5rem 0 0 0;color:#7f1d1d;font-size:0.875rem;word-break:break-all"></p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Progress Bar -->
+            <div id="progress-container" style="display:none;margin-bottom:1rem">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
+                    <span id="status-message" style="font-size:0.875rem;color:var(--text-muted)">处理中...</span>
+                    <span id="progress-text" style="font-size:0.875rem;color:var(--text-muted)">0%</span>
+                </div>
+                <div style="background:var(--bg);border-radius:4px;height:8px;overflow:hidden">
+                    <div id="progress-bar" style="background:var(--primary);height:100%;width:0%;transition:width 0.3s"></div>
+                </div>
+            </div>
+
+            <div class="pipeline-steps">
+                <div class="pipeline-step" id="step-upload">
+                    <h3>1. 上传</h3>
+                    <p>PDF 文件</p>
+                </div>
+                <div class="pipeline-step" id="step-parse">
+                    <h3>2. 解析</h3>
+                    <p>MinerU → Markdown</p>
+                </div>
+                <div class="pipeline-step" id="step-extract">
+                    <h3>3. 提取</h3>
+                    <p>Ollama → 元数据</p>
+                </div>
+                <div class="pipeline-step" id="step-index">
+                    <h3>4. 索引</h3>
+                    <p>Qdrant 向量库</p>
+                </div>
+            </div>
+            <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+                <button class="btn btn-primary" id="btn-parse" onclick="runStep('parse')">📄 解析 PDF</button>
+                <button class="btn btn-warning" id="btn-extract" onclick="runStep('extract')">📋 提取元数据</button>
+                <button class="btn btn-success" id="btn-index" onclick="runStep('index')">🔍 索引到 Qdrant</button>
+                <button class="btn btn-primary" id="btn-process" onclick="runFullProcess()">🚀 一键处理</button>
+                <button class="btn" id="btn-reset" onclick="resetDoc()" style="margin-left:auto">🔄 重置状态</button>
+            </div>
+        </div>
+
+        <!-- Status Info -->
+        <div class="card">
+            <h2 style="margin-bottom:1rem">状态信息</h2>
+            <div id="status-info" style="font-size:0.875rem">
+                <p>加载中...</p>
+            </div>
+        </div>
+
+        <!-- Markdown Editor -->
+        <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+                <h2>Markdown 编辑</h2>
+                <div style="display:flex;gap:0.5rem">
+                    <a id="btn-view-md" href="#" target="_blank" class="btn">📖 查看</a>
+                    <button class="btn" id="btn-edit-md" onclick="toggleEditMarkdown()">✏️ 编辑</button>
+                    <button class="btn btn-success" id="btn-save-md" onclick="saveMarkdown()" style="display:none">💾 保存</button>
+                </div>
+            </div>
+            <div id="markdown-preview" style="max-height:300px;overflow-y:auto;padding:1rem;background:var(--bg);border-radius:8px;font-family:monospace;font-size:0.875rem;line-height:1.6">
+                <p style="color:var(--text-muted)">加载中...</p>
+            </div>
+            <textarea id="markdown-editor" class="form-control" style="display:none;font-family:monospace;min-height:400px;margin-top:0.5rem"></textarea>
+        </div>
+    </main>
+
+    <script src="/assist/static/app.js"></script>
+    <script>
+        const docId = {{ doc_id }};
+        let doc = null;
+        let editingMd = false;
+
+        async function loadDocument() {
+            try {
+                doc = await api.get(`/assist/api/documents/${docId}`);
+                renderDocInfo();
+                renderPipeline();
+                renderStatusInfo();
+                loadMarkdownPreview();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        function renderDocInfo() {
+            document.getElementById('doc-title').textContent = doc.title || doc.filename || '未命名';
+            document.getElementById('doc-authors').textContent = formatAuthors(doc.authors);
+            document.getElementById('doc-id').textContent = `ID: ${doc.id}`;
+            document.getElementById('btn-view').href = `/assist/detail/${doc.id}`;
+
+            // Markdown view button
+            const btnViewMd = document.getElementById('btn-view-md');
+            if (doc.markdown_path) {
+                btnViewMd.href = `/assist/markdown/${docId}`;
+            } else {
+                btnViewMd.style.display = 'none';
+            }
+        }
+
+        async function loadMarkdownPreview() {
+            const preview = document.getElementById('markdown-preview');
+            if (!doc.markdown_path) {
+                preview.innerHTML = '<p style="color:var(--text-muted)">暂无 Markdown 内容</p>';
+                return;
+            }
+
+            try {
+                const data = await api.get(`/assist/api/documents/${docId}/markdown?page=1&page_size=3000`);
+                const content = data.content || '';
+                preview.innerHTML = content
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/\n/g, '<br>')
+                    .substring(0, 3000) + (content.length > 3000 ? '<p style="color:var(--text-muted)">... (内容已截断)</p>' : '');
+            } catch (err) {
+                preview.innerHTML = '<p style="color:var(--danger)">加载失败</p>';
+            }
+        }
+
+        function toggleEditMarkdown() {
+            editingMd = !editingMd;
+            const editor = document.getElementById('markdown-editor');
+            const preview = document.getElementById('markdown-preview');
+            const btnEdit = document.getElementById('btn-edit-md');
+            const btnSave = document.getElementById('btn-save-md');
+
+            if (editingMd) {
+                // Load current markdown content
+                api.get(`/assist/api/documents/${docId}/markdown?page=1&page_size=999999`)
+                    .then(data => {
+                        editor.value = data.content || '';
+                    })
+                    .catch(() => {
+                        editor.value = '';
+                    });
+                editor.style.display = 'block';
+                preview.style.display = 'none';
+                btnEdit.style.display = 'none';
+                btnSave.style.display = 'inline-flex';
+            } else {
+                editor.style.display = 'none';
+                preview.style.display = 'block';
+                btnEdit.style.display = 'inline-flex';
+                btnSave.style.display = 'none';
+                loadMarkdownPreview();
+            }
+        }
+
+        async function saveMarkdown() {
+            try {
+                await api.put(`/assist/api/documents/${docId}/markdown`, {
+                    content: document.getElementById('markdown-editor').value,
+                });
+                showToast('Markdown 已保存', 'success');
+                toggleEditMarkdown();
+            } catch (err) { showToast(err.message, 'error'); }
+        }
+
+        function renderPipeline() {
+            const steps = ['uploaded', 'markdown_done', 'meta_done', 'indexed'];
+            const stepIds = ['step-upload', 'step-parse', 'step-extract', 'step-index'];
+
+            let displayStatus = doc.status;
+            if (doc.status === 'parsing') displayStatus = 'uploaded';
+            else if (doc.status === 'extracting') displayStatus = 'markdown_done';
+            else if (doc.status === 'indexing') displayStatus = 'meta_done';
+            else if (doc.status === 'error') displayStatus = doc.status;
+
+            const currentIdx = steps.indexOf(displayStatus);
+
+            stepIds.forEach((id, i) => {
+                const el = document.getElementById(id);
+                el.classList.remove('active', 'done');
+                if (i < currentIdx) el.classList.add('done');
+                if (i === currentIdx) el.classList.add('active');
+                if (doc.status === 'parsing' && id === 'step-parse') el.classList.add('active');
+                if (doc.status === 'extracting' && id === 'step-extract') el.classList.add('active');
+                if (doc.status === 'indexing' && id === 'step-index') el.classList.add('active');
+            });
+
+            // Show error message
+            const errorContainer = document.getElementById('error-container');
+            const errorMessage = document.getElementById('error-message');
+            if (doc.status === 'error' && doc.status_message) {
+                errorContainer.style.display = 'block';
+                errorMessage.textContent = doc.status_message;
+            } else {
+                errorContainer.style.display = 'none';
+            }
+
+            // Update buttons
+            const processingStatuses = ['parsing', 'extracting', 'indexing'];
+            if (!processingStatuses.includes(doc.status)) {
+                document.getElementById('btn-parse').disabled = doc.status !== 'uploaded';
+                document.getElementById('btn-extract').disabled = doc.status !== 'markdown_done';
+                document.getElementById('btn-index').disabled = doc.status !== 'meta_done';
+                document.getElementById('btn-process').disabled = doc.status === 'indexed';
+                document.getElementById('btn-reset').disabled = false;
+            }
+        }
+
+        function renderStatusInfo() {
+            const statusLabels = {
+                'uploaded': '已上传',
+                'parsing': '解析中',
+                'markdown_done': '已解析',
+                'extracting': '提取中',
+                'meta_done': '已提取',
+                'indexing': '索引中',
+                'indexed': '已索引',
+                'error': '错误',
+            };
+
+            const info = document.getElementById('status-info');
+            info.innerHTML = `
+                <table style="width:100%">
+                    <tr><td style="width:100px;font-weight:600">当前状态</td><td>${statusLabels[doc.status] || doc.status}</td></tr>
+                    <tr><td style="font-weight:600">状态消息</td><td>${doc.status_message || '-'}</td></tr>
+                    <tr><td style="font-weight:600">创建时间</td><td>${doc.created_at || '-'}</td></tr>
+                    <tr><td style="font-weight:600">更新时间</td><td>${doc.updated_at || '-'}</td></tr>
+                    <tr><td style="font-weight:600">文件路径</td><td><code>${doc.file_path || '-'}</code></td></tr>
+                    <tr><td style="font-weight:600">Markdown</td><td><code>${doc.markdown_path || '-'}</code></td></tr>
+                </table>
+            `;
+        }
+
+        function formatAuthors(a) {
+            if (!a) return '-';
+            try { const arr = JSON.parse(a); return Array.isArray(arr) ? arr.join(', ') : a; } catch { return a; }
+        }
+
+        async function runStep(step) {
+            try {
+                const result = await api.post(`/assist/api/pipeline/${docId}/${step}`);
+                showToast(result.detail, 'info');
+                startPolling();
+            } catch (err) { showToast(err.message, 'error'); }
+        }
+
+        async function runFullProcess() {
+            try {
+                const result = await api.post(`/assist/api/pipeline/${docId}/process`);
+                showToast(result.detail, 'info');
+                startPolling();
+            } catch (err) { showToast(err.message, 'error'); }
+        }
+
+        async function resetDoc() {
+            try {
+                const status = await api.get(`/assist/api/pipeline/${docId}/status`);
+
+                const allTargets = {
+                    'uploaded': '已上传（完全重置）',
+                    'markdown_done': '已解析（保留 Markdown）',
+                    'meta_done': '已提取（保留元数据）',
+                };
+
+                let validTargets = [];
+                if (['indexed', 'error'].includes(status.status)) {
+                    validTargets = ['uploaded', 'markdown_done', 'meta_done'];
+                } else if (status.status === 'meta_done') {
+                    validTargets = ['uploaded', 'markdown_done'];
+                } else if (status.status === 'markdown_done') {
+                    validTargets = ['uploaded', 'meta_done'];
+                } else if (['parsing', 'extracting', 'indexing'].includes(status.status)) {
+                    validTargets = ['uploaded'];
+                } else {
+                    showToast('当前状态不需要重置', 'info');
+                    return;
+                }
+
+                const optionsHtml = validTargets.map(s =>
+                    `<option value="${s}">${allTargets[s]}</option>`
+                ).join('');
+
+                const dialogHtml = `
+                    <div id="reset-dialog" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000">
+                        <div style="background:white;padding:1.5rem;border-radius:8px;max-width:400px;width:90%">
+                            <h3 style="margin-bottom:1rem">重置状态</h3>
+                            <p style="margin-bottom:1rem;color:var(--text-muted)">选择要重置到的状态：</p>
+                            <select id="reset-target" class="form-control" style="margin-bottom:1rem">
+                                ${optionsHtml}
+                            </select>
+                            <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+                                <button class="btn" onclick="closeResetDialog()">取消</button>
+                                <button class="btn btn-primary" onclick="confirmReset()">确认重置</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                const div = document.createElement('div');
+                div.innerHTML = dialogHtml;
+                document.body.appendChild(div);
+
+            } catch (err) { showToast(err.message, 'error'); }
+        }
+
+        function closeResetDialog() {
+            const dialog = document.getElementById('reset-dialog');
+            if (dialog) dialog.parentElement.remove();
+        }
+
+        async function confirmReset() {
+            const target = document.getElementById('reset-target').value;
+            closeResetDialog();
+
+            try {
+                const result = await api.post(`/assist/api/pipeline/${docId}/reset?target_status=${target}`);
+                showToast(result.detail, 'success');
+                await loadDocument();
+            } catch (err) { showToast(err.message, 'error'); }
+        }
+
+        async function deleteDoc() {
+            if (!confirm(`确定要删除文献 "${doc.title || doc.filename}" 及其所有相关文件吗？此操作不可恢复。`)) return;
+
+            try {
+                await api.delete(`/assist/api/documents/${docId}`);
+                showToast('文献已删除', 'success');
+                window.location.href = '/assist/';
+            } catch (err) { showToast(err.message, 'error'); }
+        }
+
+        // Polling
+        let pollingTimer = null;
+
+        function startPolling() {
+            if (pollingTimer) clearInterval(pollingTimer);
+            document.getElementById('progress-container').style.display = 'block';
+            updateButtons(true);
+            pollingTimer = setInterval(pollStatus, 1000);
+        }
+
+        function stopPolling() {
+            if (pollingTimer) {
+                clearInterval(pollingTimer);
+                pollingTimer = null;
+            }
+            document.getElementById('progress-container').style.display = 'none';
+            updateButtons(false);
+        }
+
+        function updateButtons(disabled) {
+            document.getElementById('btn-parse').disabled = disabled;
+            document.getElementById('btn-extract').disabled = disabled;
+            document.getElementById('btn-index').disabled = disabled;
+            document.getElementById('btn-process').disabled = disabled;
+            document.getElementById('btn-reset').disabled = disabled;
+        }
+
+        async function pollStatus() {
+            try {
+                const status = await api.get(`/assist/api/pipeline/${docId}/status`);
+
+                document.getElementById('progress-bar').style.width = `${status.progress || 0}%`;
+                document.getElementById('progress-text').textContent = `${Math.round(status.progress || 0)}%`;
+                document.getElementById('status-message').textContent = status.status_message || '处理中...';
+
+                const doneStatuses = ['uploaded', 'markdown_done', 'meta_done', 'indexed', 'error'];
+                if (doneStatuses.includes(status.status)) {
+                    stopPolling();
+                    await loadDocument();
+
+                    if (status.status === 'error') {
+                        showToast(status.status_message || '处理失败', 'error');
+                    } else if (status.status === 'indexed') {
+                        showToast('处理完成！', 'success');
+                    }
+                }
+            } catch (err) {
+                console.error('Poll error:', err);
+            }
+        }
+
+        // Init
+        loadDocument();
+
+        setTimeout(async () => {
+            try {
+                const status = await api.get(`/assist/api/pipeline/${docId}/status`);
+                const processingStatuses = ['parsing', 'extracting', 'indexing'];
+                if (processingStatuses.includes(status.status)) {
+                    startPolling();
+                }
+            } catch (err) {}
+        }, 500);
+    </script>
+</body>
+</html>

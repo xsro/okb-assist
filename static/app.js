@@ -8,10 +8,12 @@ const api = {
         localStorage.setItem('upload_token', token);
     },
 
-    headers(includeToken = false) {
+    headers() {
         const h = { 'Content-Type': 'application/json' };
-        if (includeToken) {
-            h['X-Token'] = this.getToken();
+        // 所有请求都携带token
+        const token = this.getToken();
+        if (token) {
+            h['X-Token'] = token;
         }
         return h;
     },
@@ -21,6 +23,11 @@ const api = {
             ...options,
             headers: { ...this.headers(), ...options.headers },
         });
+        if (res.status === 401) {
+            // 未授权，跳转到登录页面
+            window.location.href = '/assist/login';
+            throw new Error('请先登录');
+        }
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: '请求失败' }));
             throw new Error(err.detail || '请求失败');
@@ -41,6 +48,10 @@ const api = {
             headers: { 'X-Token': this.getToken() },
             body: formData,
         });
+        if (res.status === 401) {
+            showTokenDialog();
+            throw new Error('请先输入访问令牌');
+        }
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: '上传失败' }));
             throw new Error(err.detail || '上传失败');

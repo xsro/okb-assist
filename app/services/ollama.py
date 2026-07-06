@@ -49,12 +49,13 @@ async def extract_metadata(markdown_content: str) -> dict:
     Use Ollama to extract metadata from markdown content.
     Returns a dict with metadata fields including language detection.
     """
-    # Truncate content if too long (keep first 8000 chars for context)
-    truncated = markdown_content[:8000]
+    # Truncate content if too long (keep first 4000 chars for faster processing)
+    truncated = markdown_content[:4000]
     prompt = EXTRACT_PROMPT.format(content=truncated)
 
     try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        # Use longer timeout (600s) for large documents
+        async with httpx.AsyncClient(timeout=600.0) as client:
             response = await client.post(
                 f"{settings.ollama_url}/api/generate",
                 json={
@@ -63,6 +64,7 @@ async def extract_metadata(markdown_content: str) -> dict:
                     "stream": False,
                     "options": {
                         "temperature": 0.1,
+                        "num_predict": 1024,  # Limit response length
                     },
                 },
             )
@@ -71,7 +73,7 @@ async def extract_metadata(markdown_content: str) -> dict:
     except httpx.ConnectError as e:
         raise Exception(f"无法连接到 Ollama 服务 ({settings.ollama_url}): {e}")
     except httpx.TimeoutException as e:
-        raise Exception(f"Ollama 请求超时 (300秒): {e}")
+        raise Exception(f"Ollama 请求超时 (600秒): {e}")
     except httpx.HTTPStatusError as e:
         raise Exception(f"Ollama 返回错误状态码 {e.response.status_code}: {e.response.text[:200]}")
     except Exception as e:
