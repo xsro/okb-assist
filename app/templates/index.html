@@ -53,32 +53,6 @@
             border-radius: 4px;
             font-size: 0.875rem;
         }
-        .similar-group {
-            margin-bottom: 1.5rem;
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            overflow: hidden;
-        }
-        .similar-group-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0.75rem 1rem;
-            background: var(--bg);
-            font-weight: 600;
-            font-size: 0.875rem;
-            cursor: pointer;
-        }
-        .similar-group-header:hover {
-            background: var(--border);
-        }
-        .similar-group-header .count {
-            background: var(--primary);
-            color: white;
-            padding: 0.15rem 0.5rem;
-            border-radius: 9999px;
-            font-size: 0.75rem;
-        }
     </style>
 </head>
 <body>
@@ -103,9 +77,6 @@
                 <option value="indexed">已索引</option>
                 <option value="error">错误</option>
             </select>
-            <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;white-space:nowrap;font-size:0.875rem">
-                <input type="checkbox" id="similar-filter"> 标题查重
-            </label>
             <a href="/assist/upload" class="btn btn-primary">上传 PDF</a>
         </div>
 
@@ -153,19 +124,8 @@
         let pageSize = 50;
         let totalPages = 1;
         let totalDocs = 0;
-        let similarMode = false;
 
         async function loadDocuments() {
-            const isSimilar = document.getElementById('similar-filter').checked;
-            similarMode = isSimilar;
-
-            if (isSimilar) {
-                return loadSimilarTitles();
-            }
-
-            // 隐藏分页工具栏中的分页信息，显示正常列表
-            document.getElementById('pagination').parentElement.style.display = '';
-
             const q = document.getElementById('search-input').value;
             const status = document.getElementById('status-filter').value;
 
@@ -185,81 +145,6 @@
             } catch (err) {
                 showToast(err.message, 'error');
             }
-        }
-
-        async function loadSimilarTitles() {
-            const tbody = document.getElementById('doc-list');
-            const pagination = document.getElementById('pagination');
-            const info = document.getElementById('pagination-info');
-
-            tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">正在查找相似标题...</td></tr>';
-            pagination.innerHTML = '';
-            info.textContent = '';
-
-            try {
-                const data = await api.get('/assist/api/documents/similar-titles');
-                renderSimilarTitles(data);
-            } catch (err) {
-                tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--danger)">加载失败: ${escapeHtml(err.message)}</td></tr>`;
-            }
-        }
-
-        function renderSimilarTitles(data) {
-            const tbody = document.getElementById('doc-list');
-            const info = document.getElementById('pagination-info');
-
-            info.textContent = `共 ${data.total_groups} 组，${data.total_documents} 条重复`;
-
-            if (data.groups.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">未发现标题相似的文档</td></tr>';
-                return;
-            }
-
-            let html = '';
-            data.groups.forEach((group, idx) => {
-                // 组标题行
-                const sampleTitle = group.documents[0]?.title || group.normalized_title;
-                html += `<tr><td colspan="7" style="padding:0;border:none">
-                    <div class="similar-group">
-                        <div class="similar-group-header" onclick="toggleGroup(${idx})">
-                            <span>📋 ${escapeHtml(sampleTitle)}</span>
-                            <span class="count">${group.count} 条</span>
-                        </div>
-                        <table style="width:100%;margin:0" id="group-${idx}">
-                `;
-
-                // 组内文档
-                group.documents.forEach(doc => {
-                    const statusHtml = doc.status === 'error' && doc.status_message
-                        ? `<span class="badge badge-error" title="${escapeHtml(doc.status_message)}" style="cursor:help">⚠️ 错误</span>`
-                        : statusBadge(doc.status);
-
-                    html += `
-                    <tr>
-                        <td style="color:var(--text-muted);font-size:0.75rem">${doc.id}</td>
-                        <td>${doc.title || doc.filename || '-'}</td>
-                        <td>${formatAuthors(doc.authors)}</td>
-                        <td>${doc.year || '-'}</td>
-                        <td>${doc.doc_type || '-'}</td>
-                        <td>${statusHtml}</td>
-                        <td>
-                            <div class="btn-row">
-                                <a href="/assist/detail/${doc.id}" class="btn btn-sm btn-primary">查看</a>
-                                <a href="/assist/doc/${doc.id}" class="btn btn-sm">管理</a>
-                            </div>
-                        </td>
-                    </tr>`;
-                });
-
-                html += `</table></div></td></tr>`;
-            });
-
-            tbody.innerHTML = html;
-        }
-
-        function toggleGroup(idx) {
-            const table = document.getElementById(`group-${idx}`);
-            table.style.display = table.style.display === 'none' ? '' : 'none';
         }
 
         function renderDocuments(docs) {
@@ -387,11 +272,6 @@
         });
 
         document.getElementById('status-filter').addEventListener('change', () => {
-            currentPage = 1;
-            loadDocuments();
-        });
-
-        document.getElementById('similar-filter').addEventListener('change', () => {
             currentPage = 1;
             loadDocuments();
         });

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>标题查重 - OKB-Assist</title>
+    <link rel="stylesheet" href="/assist/static/style.css">
+    <style>
+        .stats-bar {
+            display: flex;
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+        }
+        .stat-item {
+            padding: 0.75rem 1.25rem;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 0.875rem;
+        }
+        .stat-item strong {
+            color: var(--primary);
+            font-size: 1.1rem;
+        }
+        .similar-group {
+            margin-bottom: 1.5rem;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .similar-group-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.75rem 1rem;
+            background: var(--bg);
+            font-weight: 600;
+            font-size: 0.875rem;
+            cursor: pointer;
+            user-select: none;
+        }
+        .similar-group-header:hover {
+            background: var(--border);
+        }
+        .similar-group-header .count {
+            background: var(--primary);
+            color: white;
+            padding: 0.15rem 0.5rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+        }
+        .group-table {
+            width: 100%;
+            margin: 0;
+        }
+        .group-table td {
+            vertical-align: middle;
+        }
+        .btn-delete {
+            background: var(--danger);
+            color: white;
+            border: none;
+            padding: 0.3rem 0.75rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            transition: opacity 0.2s;
+        }
+        .btn-delete:hover {
+            opacity: 0.85;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 3rem 1rem;
+            color: var(--text-muted);
+        }
+        .empty-state .icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+        .loading-state {
+            text-align: center;
+            padding: 3rem 1rem;
+            color: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>📚 OKB-Assist</h1>
+            <nav id="nav"></nav>
+        </div>
+    </header>
+
+    <main class="container">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem">
+            <h2 style="margin:0">📋 标题查重</h2>
+            <button class="btn btn-primary" onclick="loadDuplicates()">🔄 刷新</button>
+        </div>
+
+        <div class="stats-bar" id="stats-bar"></div>
+
+        <div class="card">
+            <div id="duplicate-list" class="loading-state">加载中...</div>
+        </div>
+    </main>
+
+    <script src="/assist/static/app.js"></script>
+    <script>
+        async function loadDuplicates() {
+            const container = document.getElementById('duplicate-list');
+            const statsBar = document.getElementById('stats-bar');
+            container.innerHTML = '<div class="loading-state">正在查找相似标题...</div>';
+            statsBar.innerHTML = '';
+
+            try {
+                const data = await api.get('/assist/api/documents/similar-titles');
+
+                // 统计信息
+                statsBar.innerHTML = `
+                    <div class="stat-item">重复组数：<strong>${data.total_groups}</strong></div>
+                    <div class="stat-item">重复文档数：<strong>${data.total_documents}</strong></div>
+                `;
+
+                if (data.groups.length === 0) {
+                    container.innerHTML = `
+                        <div class="empty-state">
+                            <div class="icon">✅</div>
+                            <p>未发现标题相似的文档</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                let html = '';
+                data.groups.forEach((group, idx) => {
+                    const sampleTitle = group.documents[0]?.title || group.normalized_title;
+                    html += `
+                        <div class="similar-group">
+                            <div class="similar-group-header" onclick="toggleGroup(${idx})">
+                                <span>📋 ${escapeHtml(sampleTitle)}</span>
+                                <span class="count">${group.count} 条</span>
+                            </div>
+                            <table class="group-table" id="group-${idx}">
+                                <thead>
+                                    <tr>
+                                        <th style="width:50px">ID</th>
+                                        <th>标题</th>
+                                        <th>作者</th>
+                                        <th style="width:60px">年份</th>
+                                        <th style="width:80px">类型</th>
+                                        <th style="width:80px">状态</th>
+                                        <th style="width:160px">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody>`;
+
+                    group.documents.forEach(doc => {
+                        const statusHtml = doc.status === 'error' && doc.status_message
+                            ? `<span class="badge badge-error" title="${escapeHtml(doc.status_message)}" style="cursor:help">⚠️ 错误</span>`
+                            : statusBadge(doc.status);
+
+                        html += `
+                            <tr id="doc-row-${doc.id}">
+                                <td style="color:var(--text-muted);font-size:0.75rem">${doc.id}</td>
+                                <td>${escapeHtml(doc.title || doc.filename || '-')}</td>
+                                <td>${formatAuthors(doc.authors)}</td>
+                                <td>${doc.year || '-'}</td>
+                                <td>${doc.doc_type || '-'}</td>
+                                <td>${statusHtml}</td>
+                                <td>
+                                    <div class="btn-row">
+                                        <a href="/assist/detail/${doc.id}" class="btn btn-sm btn-primary">查看</a>
+                                        <a href="/assist/doc/${doc.id}" class="btn btn-sm">管理</a>
+                                        <button class="btn-delete" onclick="deleteDoc(${doc.id})">删除</button>
+                                    </div>
+                                </td>
+                            </tr>`;
+                    });
+
+                    html += `</tbody></table></div>`;
+                });
+
+                container.innerHTML = html;
+            } catch (err) {
+                container.innerHTML = `<div class="empty-state" style="color:var(--danger)">加载失败: ${escapeHtml(err.message)}</div>`;
+            }
+        }
+
+        function toggleGroup(idx) {
+            const table = document.getElementById(`group-${idx}`);
+            table.style.display = table.style.display === 'none' ? '' : 'none';
+        }
+
+        async function deleteDoc(docId) {
+            if (!confirm(`确定要删除文档 #${docId} 吗？此操作不可撤销。`)) return;
+
+            try {
+                await api.delete(`/assist/api/documents/${docId}`);
+                showToast(`文档 #${docId} 已删除`, 'success');
+
+                // 移除该行
+                const row = document.getElementById(`doc-row-${docId}`);
+                if (row) {
+                    // 检查所属组是否还有其他行
+                    const tbody = row.parentElement;
+                    row.remove();
+
+                    // 如果组内没有文档了，移除整个组
+                    if (tbody && tbody.children.length === 0) {
+                        const group = tbody.closest('.similar-group');
+                        if (group) group.remove();
+                    }
+                }
+
+                // 刷新统计
+                refreshStats();
+            } catch (err) {
+                showToast(`删除失败: ${err.message}`, 'error');
+            }
+        }
+
+        function refreshStats() {
+            const groups = document.querySelectorAll('.similar-group');
+            let totalDocs = 0;
+            groups.forEach(g => {
+                const rows = g.querySelectorAll('tbody tr');
+                totalDocs += rows.length;
+            });
+
+            const statsBar = document.getElementById('stats-bar');
+            if (groups.length === 0) {
+                statsBar.innerHTML = '';
+                document.getElementById('duplicate-list').innerHTML = `
+                    <div class="empty-state">
+                        <div class="icon">✅</div>
+                        <p>未发现标题相似的文档</p>
+                    </div>
+                `;
+            } else {
+                statsBar.innerHTML = `
+                    <div class="stat-item">重复组数：<strong>${groups.length}</strong></div>
+                    <div class="stat-item">重复文档数：<strong>${totalDocs}</strong></div>
+                `;
+            }
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+        }
+
+        function formatAuthors(authors) {
+            if (!authors) return '-';
+            try {
+                const arr = JSON.parse(authors);
+                return Array.isArray(arr) ? arr.join(', ') : authors;
+            } catch {
+                return authors;
+            }
+        }
+
+        // 页面加载时获取数据
+        loadDuplicates();
+    </script>
+</body>
+</html>

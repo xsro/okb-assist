@@ -257,6 +257,11 @@ def tools_page(request: Request, user: str = Depends(get_current_user)):
     return templates.TemplateResponse(name="tools.html", request=request)
 
 
+@app.get("/assist/duplicates")
+def duplicates_page(request: Request, user: str = Depends(get_current_user)):
+    return templates.TemplateResponse(name="duplicates.html", request=request)
+
+
 @app.get("/assist/doc/{doc_id}")
 def doc_manage_page(request: Request, doc_id: int, user: str = Depends(get_current_user)):
     return templates.TemplateResponse(name="doc_manage.html", request=request, context={"doc_id": doc_id})

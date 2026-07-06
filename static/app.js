@@ -191,6 +191,7 @@ function renderNav() {
     const authLinks = `
         <a href="/assist/upload">上传</a>
         <a href="/assist/tools">工具</a>
+        <a href="/assist/duplicates">查重</a>
         <a href="/assist/admin">管理</a>
     `;
 
