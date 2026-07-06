@@ -6,6 +6,18 @@ const api = {
 
     setToken(token) {
         localStorage.setItem('upload_token', token);
+        // 同时存储到 cookie，这样页面请求也会自动携带
+        document.cookie = `x_token=${token}; path=/assist; max-age=86400`;
+    },
+
+    removeToken() {
+        localStorage.removeItem('upload_token');
+        // 删除 cookie
+        document.cookie = 'x_token=; path=/assist; max-age=0';
+    },
+
+    isAuthenticated() {
+        return !!this.getToken();
     },
 
     headers() {
@@ -18,8 +30,18 @@ const api = {
         return h;
     },
 
+    // 获取带token的URL
+    urlWithToken(url) {
+        const token = this.getToken();
+        if (!token) return url;
+        const separator = url.includes('?') ? '&' : '?';
+        return `${url}${separator}token=${encodeURIComponent(token)}`;
+    },
+
     async request(url, options = {}) {
-        const res = await fetch(url, {
+        // 同时在header和URL中携带token
+        const tokenUrl = this.urlWithToken(url);
+        const res = await fetch(tokenUrl, {
             ...options,
             headers: { ...this.headers(), ...options.headers },
         });
@@ -49,8 +71,8 @@ const api = {
             body: formData,
         });
         if (res.status === 401) {
-            showTokenDialog();
-            throw new Error('请先输入访问令牌');
+            window.location.href = '/assist/login';
+            throw new Error('请先登录');
         }
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: '上传失败' }));
@@ -84,18 +106,47 @@ function statusBadge(status) {
     return `<span class="badge badge-${status}">${labels[status] || status}</span>`;
 }
 
+// Navigation
+function renderNav() {
+    const nav = document.getElementById('nav');
+    if (!nav) return;
+
+    const authenticated = api.isAuthenticated();
+
+    // 无需认证的页面
+    const publicLinks = `
+        <a href="/assist/">文献列表</a>
+        <a href="/assist/monitor">监控</a>
+    `;
+
+    // 需要认证的页面
+    const authLinks = `
+        <a href="/assist/upload">上传</a>
+        <a href="/assist/tools">工具</a>
+        <a href="/assist/admin">管理</a>
+    `;
+
+    // 登录/登出按钮
+    const authButton = authenticated
+        ? `<a href="#" onclick="logout()" style="margin-left:auto;color:var(--danger)">登出</a>`
+        : `<a href="/assist/login" style="margin-left:auto">登录</a>`;
+
+    nav.innerHTML = publicLinks + (authenticated ? authLinks : '') + authButton;
+}
+
+function logout() {
+    api.removeToken();
+    showToast('已登出', 'info');
+    renderNav();
+    // 如果当前页面需要认证，跳转到首页
+    const path = window.location.pathname;
+    const protectedPaths = ['/assist/upload', '/assist/tools', '/assist/admin', '/assist/doc/'];
+    if (protectedPaths.some(p => path.startsWith(p))) {
+        window.location.href = '/assist/';
+    }
+}
+
 // Init on page load
 document.addEventListener('DOMContentLoaded', () => {
-    // Update nav
-    const nav = document.getElementById('nav');
-    if (nav) {
-        nav.innerHTML = `
-            <a href="/assist/">文献列表</a>
-            <a href="/assist/upload">上传</a>
-            <a href="/assist/tools">工具</a>
-            <a href="/assist/monitor">监控</a>
-            <a href="/assist/point">Point</a>
-            <a href="/assist/admin">管理</a>
-        `;
-    }
+    renderNav();
 });
