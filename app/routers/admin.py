@@ -8,7 +8,7 @@ from sqlalchemy import text
 from app.config import get_settings
 from app.database import get_db, engine
 from app.models import Document, DocStatus
-from app.services.qdrant import get_qdrant_client, get_point, list_collections
+from app.services.qdrant import get_qdrant_client, get_point, list_collections, delete_collection
 from app.utils import calculate_file_hash
 
 router = APIRouter(prefix="/assist/api/admin", tags=["admin"])
@@ -179,4 +179,41 @@ def recalculate_hashes(db: Session = Depends(get_db)):
         "updated": updated,
         "skipped": skipped,
         "errors": errors,
+    }
+
+
+@router.post("/reset-index")
+def reset_index(db: Session = Depends(get_db)):
+    """重置索引：删除 Qdrant 集合并将所有已索引文档重置为已提取状态。"""
+    # Find all indexed documents
+    indexed_docs = db.query(Document).filter(Document.status == DocStatus.indexed).all()
+    count = len(indexed_docs)
+
+    # Collect unique collection names to delete
+    collections_to_delete = set()
+    for doc in indexed_docs:
+        if doc.qdrant_collection:
+            collections_to_delete.add(doc.qdrant_collection)
+
+    # Delete Qdrant collections
+    deleted_collections = []
+    for col_name in collections_to_delete:
+        if delete_collection(col_name):
+            deleted_collections.append(col_name)
+
+    # Reset all indexed documents to meta_done
+    db.query(Document).filter(Document.status == DocStatus.indexed).update(
+        {
+            Document.status: DocStatus.meta_done,
+            Document.qdrant_collection: None,
+            Document.status_message: None,
+            Document.progress: 0.0,
+        }
+    )
+    db.commit()
+
+    return {
+        "detail": f"索引重置完成: {count} 个文档已重置为已提取状态",
+        "reset_count": count,
+        "deleted_collections": deleted_collections,
     }

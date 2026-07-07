@@ -1,6 +1,14 @@
 ```bash
-uv run main.py --host 0.0.0.0
+uv run okb_assist_main.py --host 0.0.0.0
+bash scripts/start-openwebui.sh
 ```
+
+
+```
+sudo docker pull docker.1ms.run/qdrant/qdrant:latest
+sudo docker run -p 6333:6333 -v $(pwd)/qdrant_data:/qdrant/storage docker.1ms.run/qdrant/qdrant:latest
+```
+可以访问`http://:6333/dashboard`管理向量数据库
 
 
 请帮我设计一个用于存储我的所有论文和专著数据的系统，主要功能为：
@@ -25,13 +33,6 @@ OLLAMA_KEY=
 OLLAMA_MODEL=qcwind/qwen3-8b-instruct-Q4-K-M:latest
 ```
 
-并且我已经运行了`qdrant`
-
-```
-docker pull docker.1ms.run/qdrant/qdrant:latest
-docker run -p 6333:6333 -v $(pwd)/qdrant_data:/qdrant/storage docker.1ms.run/qdrant/qdrant:latest
-```
-可以访问`http://:6333/dashboard`管理向量数据库
 
 
 技术路线使用fastapi+vanilla js，本地数据库用sqlite。向量数据库使用Qdrant，所有的api和页面都放在`/assist/`路径下，需要设计管理页面。

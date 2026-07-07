@@ -269,4 +269,4 @@ def doc_manage_page(request: Request, doc_id: int, user: str = Depends(get_curre
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=5001, reload=True)
+    uvicorn.run("okb_assist_main:app", host="0.0.0.0", port=5001, reload=True)

@@ -305,6 +305,18 @@ def get_point(point_id: str, collection_name: str = None) -> dict:
     return None
 
 
+def delete_collection(collection_name: str) -> bool:
+    """Delete a collection from Qdrant. Returns True if successful."""
+    global _collection_cache
+    client = get_qdrant_client()
+    try:
+        client.delete_collection(collection_name=collection_name)
+        _collection_cache.discard(collection_name)
+        return True
+    except Exception:
+        return False
+
+
 def list_collections() -> list[str]:
     """List all collections in Qdrant."""
     client = get_qdrant_client()

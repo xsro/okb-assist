@@ -48,6 +48,8 @@
         .batch-btn-reset:hover:not(:disabled) { background: #fecaca; }
         .batch-btn-hash { background: #e0e7ff; color: #3730a3; border-color: #a5b4fc; }
         .batch-btn-hash:hover:not(:disabled) { background: #c7d2fe; }
+        .batch-btn-reset-index { background: #fce7f3; color: #9d174d; border-color: #f9a8d4; }
+        .batch-btn-reset-index:hover:not(:disabled) { background: #fbcfe8; }
         .batch-btn-active {
             border-width: 3px;
             box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
@@ -212,6 +214,11 @@
                     <span>全部重算哈希</span>
                     <span class="count" id="count-hash">-</span>
                 </button>
+                <button class="batch-btn batch-btn-reset-index" id="btn-reset-index" onclick="resetIndex()">
+                    <span class="icon">💥</span>
+                    <span>重置索引</span>
+                    <span class="count" id="count-indexed">-</span>
+                </button>
             </div>
         </div>
 
@@ -270,6 +277,11 @@
                 document.getElementById('count-hash').textContent = `${stats.documents} 个文档`;
                 document.getElementById('btn-recalc-hash').disabled = activeBatch !== null;
 
+                // Reset index button
+                const indexedCount = stats.status_counts?.indexed || 0;
+                document.getElementById('count-indexed').textContent = `${indexedCount} 个已索引`;
+                document.getElementById('btn-reset-index').disabled = (indexedCount === 0) || activeBatch !== null;
+
                 // Collections
                 const collectionsDiv = document.getElementById('collections-list');
                 if (stats.qdrant_collections && stats.qdrant_collections.length > 0) {
@@ -322,7 +334,7 @@
         }
 
         function updateButtonStates() {
-            const btns = ['btn-parse', 'btn-extract', 'btn-index', 'btn-full', 'btn-reset-errors', 'btn-recalc-hash'];
+            const btns = ['btn-parse', 'btn-extract', 'btn-index', 'btn-full', 'btn-reset-errors', 'btn-recalc-hash', 'btn-reset-index'];
             btns.forEach(id => {
                 const el = document.getElementById(id);
                 if (activeBatch !== null) {
@@ -411,6 +423,33 @@
 
             try {
                 const result = await api.post('/assist/api/admin/recalculate-hashes');
+                showToast(result.detail, 'success');
+                await loadStats();
+            } catch (err) {
+                showToast(err.message, 'error');
+            } finally {
+                btn.classList.remove('batch-btn-active');
+                btn.disabled = false;
+            }
+        }
+
+        async function resetIndex() {
+            const indexedCount = parseInt(document.getElementById('count-indexed').textContent) || 0;
+            if (indexedCount === 0) {
+                showToast('没有已索引的文档需要重置', 'info');
+                return;
+            }
+
+            if (!confirm(`确定要重置索引吗？\n\n此操作将会：\n- 删除 Qdrant 中对应的向量集合\n- 将所有 ${indexedCount} 个已索引文档重置为"已提取"状态\n\n重置后需要重新批量索引才能使用语义搜索。`)) {
+                return;
+            }
+
+            const btn = document.getElementById('btn-reset-index');
+            btn.disabled = true;
+            btn.classList.add('batch-btn-active');
+
+            try {
+                const result = await api.post('/assist/api/admin/reset-index');
                 showToast(result.detail, 'success');
                 await loadStats();
             } catch (err) {
