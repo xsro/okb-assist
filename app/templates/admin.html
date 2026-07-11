@@ -1081,6 +1081,13 @@
             document.getElementById('status-legend').innerHTML = legendHtml;
         }
 
+        function formatIndexedDbs(indexedDbs) {
+            if (!indexedDbs || indexedDbs.length === 0) return '';
+            return `<div style="margin-top:0.25rem;display:flex;gap:0.25rem;flex-wrap:wrap">
+                ${indexedDbs.map(db => `<span style="font-size:0.65rem;padding:0.1rem 0.4rem;background:var(--success);color:white;border-radius:4px">${db}</span>`).join('')}
+            </div>`;
+        }
+
         function renderProcessingList() {
             const processing = allDocs.filter(d => ['parsing', 'extracting', 'indexing'].includes(d.status));
             const container = document.getElementById('processing-list');
@@ -1095,6 +1102,7 @@
                     <div class="task-info">
                         <div class="task-title">${doc.title || doc.filename || '未命名'}</div>
                         <div class="task-meta">ID: ${doc.id} · 状态: ${STATUS_LABELS[doc.status] || doc.status}</div>
+                        ${formatIndexedDbs(doc.indexed_dbs)}
                     </div>
                     <a href="/assist/doc/${doc.id}" class="btn btn-sm">查看</a>
                 </div>
@@ -1115,6 +1123,7 @@
                     <div class="task-info">
                         <div class="task-title">${doc.title || doc.filename || '未命名'}</div>
                         <div class="task-meta">ID: ${doc.id} · 状态: ${STATUS_LABELS[doc.status] || doc.status}</div>
+                        ${formatIndexedDbs(doc.indexed_dbs)}
                     </div>
                     <a href="/assist/doc/${doc.id}" class="btn btn-sm">处理</a>
                 </div>
@@ -1137,6 +1146,7 @@
                             <div class="error-title">${doc.title || doc.filename || '未命名'}</div>
                             <div class="error-message">${doc.status_message || '未知错误'}</div>
                             <div class="task-meta" style="margin-top:0.25rem">ID: ${doc.id}</div>
+                            ${formatIndexedDbs(doc.indexed_dbs)}
                         </div>
                         <a href="/assist/doc/${doc.id}" class="btn btn-sm">处理</a>
                     </div>
@@ -1163,6 +1173,7 @@
                         <div class="task-info">
                             <div class="task-title">${doc.title || doc.filename || '未命名'}</div>
                             <div class="task-meta">ID: ${doc.id} · 完成时间: ${time}</div>
+                            ${formatIndexedDbs(doc.indexed_dbs)}
                         </div>
                         <a href="/assist/detail/${doc.id}" class="btn btn-sm">查看</a>
                     </div>

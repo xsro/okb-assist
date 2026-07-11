@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.config import get_settings
 from app.database import get_db
-from app.models import Document, DocStatus
+from app.models import Document, DocStatus, DocumentVectorIndex, IndexStatus
 from app.utils import calculate_file_hash, to_relative_path, to_absolute_path
 
 router = APIRouter(prefix="/assist/api/documents", tags=["documents"])
@@ -61,6 +61,7 @@ class DocumentOut(BaseModel):
     journal_en: Optional[str] = None
     status: str
     status_message: Optional[str] = None
+    indexed_dbs: Optional[list[str]] = None  # 已索引的数据库列表
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -90,7 +91,7 @@ class MarkdownUpdate(BaseModel):
     content: str
 
 
-def _doc_to_out(doc: Document) -> dict:
+def _doc_to_out(doc: Document, db: Session = None) -> dict:
     # Handle year field - convert invalid values to None
     year = doc.year
     if year is not None and not isinstance(year, int):
@@ -98,6 +99,15 @@ def _doc_to_out(doc: Document) -> dict:
             year = int(year) if year else None
         except (ValueError, TypeError):
             year = None
+
+    # 查询索引数据库信息
+    indexed_dbs = []
+    if db and doc.id:
+        indexes = db.query(DocumentVectorIndex).filter(
+            DocumentVectorIndex.document_id == doc.id,
+            DocumentVectorIndex.status == IndexStatus.indexed,
+        ).all()
+        indexed_dbs = [idx.vector_db_id for idx in indexes]
 
     return DocumentOut(
         id=doc.id,
@@ -123,6 +133,7 @@ def _doc_to_out(doc: Document) -> dict:
         journal_en=doc.journal_en,
         status=doc.status.value if isinstance(doc.status, DocStatus) else doc.status,
         status_message=doc.status_message,
+        indexed_dbs=indexed_dbs if indexed_dbs else None,
         created_at=doc.created_at.isoformat() if doc.created_at else None,
         updated_at=doc.updated_at.isoformat() if doc.updated_at else None,
     ).model_dump()
@@ -161,7 +172,7 @@ def find_similar_titles(
             result.append({
                 "normalized_title": key,
                 "count": len(group_docs),
-                "documents": [_doc_to_out(d) for d in group_docs],
+                "documents": [_doc_to_out(d, db) for d in group_docs],
             })
 
     # 按组大小降序
@@ -247,7 +258,7 @@ def list_documents(
     docs = query.order_by(Document.created_at.desc()).offset(offset).limit(page_size).all()
 
     return {
-        "items": [_doc_to_out(d) for d in docs],
+        "items": [_doc_to_out(d, db) for d in docs],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -297,7 +308,7 @@ async def upload_document(
     db.commit()
     db.refresh(doc)
 
-    return _doc_to_out(doc)
+    return _doc_to_out(doc, db)
 
 
 class RegisterByPath(BaseModel):
@@ -364,7 +375,7 @@ def register_document_by_path(
     db.commit()
     db.refresh(doc)
 
-    return _doc_to_out(doc)
+    return _doc_to_out(doc, db)
 
 
 @router.get("/by-hash/{file_hash}")
@@ -380,7 +391,7 @@ def get_document_by_hash(
     if not doc:
         raise HTTPException(status_code=404, detail="未找到匹配的文档")
 
-    return _doc_to_out(doc)
+    return _doc_to_out(doc, db)
 
 
 @router.get("/by-doi/{doi:path}")
@@ -396,7 +407,7 @@ def get_document_by_doi(
     if not doc:
         raise HTTPException(status_code=404, detail="未找到匹配的文档")
 
-    return _doc_to_out(doc)
+    return _doc_to_out(doc, db)
 
 
 @router.get("/{doc_id}")
@@ -407,7 +418,7 @@ def get_document(
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
-    return _doc_to_out(doc)
+    return _doc_to_out(doc, db)
 
 
 @router.put("/{doc_id}")
@@ -426,7 +437,7 @@ def update_document(
 
     db.commit()
     db.refresh(doc)
-    return _doc_to_out(doc)
+    return _doc_to_out(doc, db)
 
 
 @router.delete("/{doc_id}")
