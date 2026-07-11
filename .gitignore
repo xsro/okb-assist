@@ -1,3 +1,7 @@
+data/storage
+data/qdrant
+data/.qdrant-initialized
+
 .env
 .venv/
 __pycache__/
@@ -7,3 +11,4 @@ uploads/
 qdrant_data/
 .swp
 .webui_secret_key
+
