@@ -100,6 +100,208 @@
             50% { opacity: 0.5; }
         }
 
+        /* 监控相关样式 */
+        .monitor-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        .monitor-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
+        }
+        .monitor-card h3 {
+            font-size: 1.75rem;
+            margin: 0.5rem 0;
+        }
+        .monitor-card p {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            margin: 0;
+        }
+        .status-bar {
+            height: 24px;
+            background: var(--bg);
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            margin-bottom: 0.5rem;
+        }
+        .status-bar-segment {
+            height: 100%;
+            transition: width 0.3s;
+            position: relative;
+        }
+        .status-bar-segment:hover {
+            opacity: 0.8;
+        }
+        .status-legend {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            font-size: 0.75rem;
+        }
+        .status-legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+        .status-legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+        .task-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .task-item {
+            display: flex;
+            align-items: center;
+            padding: 0.75rem;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.875rem;
+        }
+        .task-item:last-child {
+            border-bottom: none;
+        }
+        .task-info {
+            flex: 1;
+            min-width: 0;
+        }
+        .task-title {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-weight: 500;
+        }
+        .task-meta {
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            margin-top: 0.25rem;
+        }
+        .service-card {
+            padding: 1rem;
+            background: var(--bg);
+            border-radius: 8px;
+        }
+        .service-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+        .service-stats {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+        }
+        .service-stat {
+            background: var(--card);
+            border-radius: 6px;
+            padding: 0.5rem;
+            text-align: center;
+        }
+        .service-stat .value {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+        .service-stat .label {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+        }
+        .error-item {
+            background: #fee2e2;
+            border-left: 3px solid var(--danger);
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            border-radius: 0 4px 4px 0;
+        }
+        .error-title {
+            font-weight: 500;
+            color: #991b1b;
+            font-size: 0.875rem;
+        }
+        .error-message {
+            color: #7f1d1d;
+            font-size: 0.75rem;
+            margin-top: 0.25rem;
+            word-break: break-all;
+        }
+
+        /* 主标签页 */
+        .main-tabs {
+            display: flex;
+            gap: 0;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 1.5rem;
+        }
+        .main-tab {
+            padding: 0.875rem 1.5rem;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            font-size: 0.95rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            transition: all 0.2s;
+        }
+        .main-tab:hover {
+            color: var(--text);
+        }
+        .main-tab.active {
+            color: var(--primary);
+            border-bottom-color: var(--primary);
+        }
+        .main-tab-content {
+            display: none;
+        }
+        .main-tab-content.active {
+            display: block;
+        }
+
+        /* 子标签页 */
+        .sub-tabs {
+            display: flex;
+            gap: 0;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 1rem;
+        }
+        .sub-tab {
+            padding: 0.75rem 1.25rem;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            transition: all 0.2s;
+        }
+        .sub-tab:hover {
+            color: var(--text);
+        }
+        .sub-tab.active {
+            color: var(--primary);
+            border-bottom-color: var(--primary);
+        }
+        .sub-tab-content {
+            display: none;
+        }
+        .sub-tab-content.active {
+            display: block;
+        }
+
+        .auto-refresh {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+        }
+
         @media (max-width: 768px) {
             .batch-controls {
                 grid-template-columns: 1fr;
@@ -116,6 +318,33 @@
             .batch-item .count {
                 font-size: 1.5rem;
             }
+            .monitor-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .task-item {
+                align-items: flex-start;
+                gap: 0.75rem;
+            }
+            .main-tab {
+                padding: 0.75rem 1rem;
+                font-size: 0.85rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .task-item,
+            .service-header {
+                flex-direction: column;
+            }
+            .task-item .btn {
+                width: 100%;
+            }
+            .service-stats {
+                grid-template-columns: 1fr;
+            }
+            .monitor-grid {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
@@ -130,116 +359,350 @@
     <main class="container">
         <h2 style="margin-bottom:1.5rem">管理后台</h2>
 
-        <!-- Stats -->
-        <div class="stats-grid" id="stats-grid">
-            <div class="stat-card">
-                <h3 id="stat-docs">-</h3>
-                <p>文献总数</p>
+        <!-- 主标签页 -->
+        <div class="main-tabs">
+            <div class="main-tab active" onclick="switchMainTab('batch')">批量处理</div>
+            <div class="main-tab" onclick="switchMainTab('monitor')">任务监控</div>
+            <div class="main-tab" onclick="switchMainTab('services')">服务状态</div>
+        </div>
+
+        <!-- 批量处理标签页 -->
+        <div id="main-tab-batch" class="main-tab-content active">
+            <!-- Stats -->
+            <div class="stats-grid" id="stats-grid">
+                <div class="stat-card">
+                    <h3 id="stat-docs">-</h3>
+                    <p>文献总数</p>
+                </div>
+                <div class="stat-card">
+                    <h3 id="stat-pending">-</h3>
+                    <p>待处理</p>
+                </div>
+                <div class="stat-card">
+                    <h3 id="stat-processing">-</h3>
+                    <p>处理中</p>
+                </div>
+                <div class="stat-card">
+                    <h3 id="stat-indexed">-</h3>
+                    <p>已索引</p>
+                </div>
             </div>
-            <div class="stat-card">
-                <h3 id="stat-pending">-</h3>
-                <p>待处理</p>
+
+            <!-- Batch Processing -->
+            <div class="card" style="margin-bottom:1.5rem">
+                <div class="section-header" style="margin-bottom:1rem">
+                    <h2>批量处理</h2>
+                    <div class="action-row" style="align-items:center;gap:1rem">
+                        <span id="batch-status-indicator" class="status-indicator status-idle">空闲</span>
+                        <button class="btn btn-warning btn-sm" id="btn-pause" onclick="pauseBatch()" style="display:none">⏸ 暂停</button>
+                    </div>
+                </div>
+
+                <div class="batch-status">
+                    <div class="batch-item">
+                        <span class="count" id="batch-pending">-</span>
+                        <span class="label">待处理</span>
+                    </div>
+                    <div class="batch-item">
+                        <span class="count" id="batch-processing">-</span>
+                        <span class="label">处理中</span>
+                    </div>
+                    <div class="batch-item">
+                        <span class="count" id="batch-completed">-</span>
+                        <span class="label">已完成</span>
+                    </div>
+                    <div class="batch-item">
+                        <span class="count" id="batch-total">-</span>
+                        <span class="label">总计</span>
+                    </div>
+                    <div class="batch-item">
+                        <span class="count" id="batch-running">-</span>
+                        <span class="label">并发任务</span>
+                    </div>
+                </div>
+
+                <div class="batch-controls" id="batch-controls">
+                    <button class="batch-btn batch-btn-parse" id="btn-parse" onclick="startBatch('parse')">
+                        <span class="icon">📄</span>
+                        <span>全部上传任务解析 PDF</span>
+                        <span class="count" id="count-parse">-</span>
+                    </button>
+                    <button class="batch-btn batch-btn-extract" id="btn-extract" onclick="startBatch('extract')">
+                        <span class="icon">📋</span>
+                        <span>全部已解析任务提取元数据</span>
+                        <span class="count" id="count-extract">-</span>
+                    </button>
+                    <button class="batch-btn batch-btn-index" id="btn-index" onclick="startBatch('index')">
+                        <span class="icon">🔍</span>
+                        <span>全部已提取任务进行索引</span>
+                        <span class="count" id="count-index">-</span>
+                    </button>
+                    <button class="batch-btn batch-btn-full" id="btn-full" onclick="startBatch('full')">
+                        <span class="icon">🚀</span>
+                        <span>全部上传任务一键处理</span>
+                        <span class="count" id="count-full">-</span>
+                    </button>
+                    <button class="batch-btn batch-btn-reset" id="btn-reset-errors" onclick="resetAllErrors()">
+                        <span class="icon">🔄</span>
+                        <span>重置所有失败任务</span>
+                        <span class="count" id="count-errors">-</span>
+                    </button>
+                    <button class="batch-btn batch-btn-hash" id="btn-recalc-hash" onclick="recalculateHashes()">
+                        <span class="icon">🔢</span>
+                        <span>全部重算哈希</span>
+                        <span class="count" id="count-hash">-</span>
+                    </button>
+                    <button class="batch-btn batch-btn-reset-index" id="btn-reset-index" onclick="resetIndex()">
+                        <span class="icon">💥</span>
+                        <span>重置索引</span>
+                        <span class="count" id="count-indexed">-</span>
+                    </button>
+                </div>
             </div>
-            <div class="stat-card">
-                <h3 id="stat-processing">-</h3>
-                <p>处理中</p>
+
+            <!-- Processing Tasks -->
+            <div class="card" style="margin-bottom:1.5rem">
+                <h2 style="margin-bottom:1rem">处理中的任务</h2>
+                <div id="processing-tasks" style="color:var(--text-muted)">加载中...</div>
             </div>
-            <div class="stat-card">
-                <h3 id="stat-indexed">-</h3>
-                <p>已索引</p>
+
+            <!-- Qdrant Collections -->
+            <div class="card">
+                <h2 style="margin-bottom:1rem">Qdrant 集合</h2>
+                <div id="collections-list" style="color:var(--text-muted)">加载中...</div>
             </div>
         </div>
 
-        <!-- Batch Processing -->
-        <div class="card" style="margin-bottom:1.5rem">
-            <div class="section-header" style="margin-bottom:1rem">
-                <h2>批量处理</h2>
-                <div class="action-row" style="align-items:center;gap:1rem">
-                    <span id="batch-status-indicator" class="status-indicator status-idle">空闲</span>
-                    <button class="btn btn-warning btn-sm" id="btn-pause" onclick="pauseBatch()" style="display:none">⏸ 暂停</button>
+        <!-- 任务监控标签页 -->
+        <div id="main-tab-monitor" class="main-tab-content">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+                <div></div>
+                <div class="auto-refresh">
+                    <label>
+                        <input type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
+                        自动刷新
+                    </label>
+                    <span id="refresh-countdown" style="color:var(--text-muted)">3s</span>
                 </div>
             </div>
 
-            <div class="batch-status">
-                <div class="batch-item">
-                    <span class="count" id="batch-pending">-</span>
-                    <span class="label">待处理</span>
+            <!-- Queue Status -->
+            <div class="monitor-grid">
+                <div class="monitor-card">
+                    <p>总文献数</p>
+                    <h3 id="total-docs">-</h3>
                 </div>
-                <div class="batch-item">
-                    <span class="count" id="batch-processing">-</span>
-                    <span class="label">处理中</span>
+                <div class="monitor-card">
+                    <p>已索引</p>
+                    <h3 id="indexed-docs" style="color:var(--success)">-</h3>
                 </div>
-                <div class="batch-item">
-                    <span class="count" id="batch-completed">-</span>
-                    <span class="label">已完成</span>
+                <div class="monitor-card">
+                    <p>处理中</p>
+                    <h3 id="processing-docs" style="color:var(--primary)">-</h3>
                 </div>
-                <div class="batch-item">
-                    <span class="count" id="batch-total">-</span>
-                    <span class="label">总计</span>
+                <div class="monitor-card">
+                    <p>待处理</p>
+                    <h3 id="pending-docs" style="color:var(--warning)">-</h3>
                 </div>
-                <div class="batch-item">
-                    <span class="count" id="batch-running">-</span>
-                    <span class="label">并发任务</span>
+                <div class="monitor-card">
+                    <p>错误</p>
+                    <h3 id="error-docs" style="color:var(--danger)">-</h3>
+                </div>
+                <div class="monitor-card">
+                    <p>运行中任务</p>
+                    <h3 id="running-tasks">-</h3>
                 </div>
             </div>
 
-            <div class="batch-controls" id="batch-controls">
-                <button class="batch-btn batch-btn-parse" id="btn-parse" onclick="startBatch('parse')">
-                    <span class="icon">📄</span>
-                    <span>全部上传任务解析 PDF</span>
-                    <span class="count" id="count-parse">-</span>
-                </button>
-                <button class="batch-btn batch-btn-extract" id="btn-extract" onclick="startBatch('extract')">
-                    <span class="icon">📋</span>
-                    <span>全部已解析任务提取元数据</span>
-                    <span class="count" id="count-extract">-</span>
-                </button>
-                <button class="batch-btn batch-btn-index" id="btn-index" onclick="startBatch('index')">
-                    <span class="icon">🔍</span>
-                    <span>全部已提取任务进行索引</span>
-                    <span class="count" id="count-index">-</span>
-                </button>
-                <button class="batch-btn batch-btn-full" id="btn-full" onclick="startBatch('full')">
-                    <span class="icon">🚀</span>
-                    <span>全部上传任务一键处理</span>
-                    <span class="count" id="count-full">-</span>
-                </button>
-                <button class="batch-btn batch-btn-reset" id="btn-reset-errors" onclick="resetAllErrors()">
-                    <span class="icon">🔄</span>
-                    <span>重置所有失败任务</span>
-                    <span class="count" id="count-errors">-</span>
-                </button>
-                <button class="batch-btn batch-btn-hash" id="btn-recalc-hash" onclick="recalculateHashes()">
-                    <span class="icon">🔢</span>
-                    <span>全部重算哈希</span>
-                    <span class="count" id="count-hash">-</span>
-                </button>
-                <button class="batch-btn batch-btn-reset-index" id="btn-reset-index" onclick="resetIndex()">
-                    <span class="icon">💥</span>
-                    <span>重置索引</span>
-                    <span class="count" id="count-indexed">-</span>
-                </button>
+            <!-- Status Distribution Bar -->
+            <div class="card" style="margin-bottom:1.5rem">
+                <h3 style="margin-bottom:1rem">状态分布</h3>
+                <div id="status-bar" class="status-bar"></div>
+                <div id="status-legend" class="status-legend"></div>
+            </div>
+
+            <!-- Tabs for Tasks -->
+            <div class="card" style="margin-bottom:1.5rem">
+                <div class="sub-tabs">
+                    <div class="sub-tab active" onclick="switchSubTab('processing')">处理中</div>
+                    <div class="sub-tab" onclick="switchSubTab('pending')">待处理</div>
+                    <div class="sub-tab" onclick="switchSubTab('errors')">错误</div>
+                    <div class="sub-tab" onclick="switchSubTab('recent')">最近完成</div>
+                </div>
+
+                <div id="sub-tab-processing" class="sub-tab-content active">
+                    <div id="processing-list" class="task-list">
+                        <p style="text-align:center;color:var(--text-muted);padding:2rem">加载中...</p>
+                    </div>
+                </div>
+
+                <div id="sub-tab-pending" class="sub-tab-content">
+                    <div id="pending-list" class="task-list">
+                        <p style="text-align:center;color:var(--text-muted);padding:2rem">加载中...</p>
+                    </div>
+                </div>
+
+                <div id="sub-tab-errors" class="sub-tab-content">
+                    <div id="errors-list" class="task-list">
+                        <p style="text-align:center;color:var(--text-muted);padding:2rem">加载中...</p>
+                    </div>
+                </div>
+
+                <div id="sub-tab-recent" class="sub-tab-content">
+                    <div id="recent-list" class="task-list">
+                        <p style="text-align:center;color:var(--text-muted);padding:2rem">加载中...</p>
+                    </div>
+                </div>
             </div>
         </div>
 
-        <!-- Processing Tasks -->
-        <div class="card" style="margin-bottom:1.5rem">
-            <h2 style="margin-bottom:1rem">处理中的任务</h2>
-            <div id="processing-tasks" style="color:var(--text-muted)">加载中...</div>
-        </div>
-
-        <!-- Qdrant Collections -->
-        <div class="card">
-            <h2 style="margin-bottom:1rem">Qdrant 集合</h2>
-            <div id="collections-list" style="color:var(--text-muted)">加载中...</div>
+        <!-- 服务状态标签页 -->
+        <div id="main-tab-services" class="main-tab-content">
+            <div class="card">
+                <h3 style="margin-bottom:1rem">服务状态</h3>
+                <div class="services-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem">
+                    <!-- MinerU -->
+                    <div class="service-card">
+                        <div class="service-header">
+                            <strong>📄 MinerU (PDF解析)</strong>
+                            <span id="mineru-status" class="badge">检查中...</span>
+                        </div>
+                        <p style="font-size:0.75rem;color:var(--text-muted);margin:0" id="mineru-url">-</p>
+                        <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0" id="mineru-version">-</p>
+                        <div class="service-stats" id="mineru-stats" style="display:none">
+                            <div class="service-stat">
+                                <div class="value" id="mineru-processing" style="color:var(--warning)">0</div>
+                                <div class="label">处理中</div>
+                            </div>
+                            <div class="service-stat">
+                                <div class="value" id="mineru-queued">0</div>
+                                <div class="label">排队中</div>
+                            </div>
+                            <div class="service-stat">
+                                <div class="value" id="mineru-completed" style="color:var(--success)">0</div>
+                                <div class="label">已完成</div>
+                            </div>
+                            <div class="service-stat">
+                                <div class="value" id="mineru-failed" style="color:var(--danger)">0</div>
+                                <div class="label">失败</div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Ollama -->
+                    <div class="service-card">
+                        <div class="service-header">
+                            <strong>🤖 Ollama (AI模型)</strong>
+                            <span id="ollama-status" class="badge">检查中...</span>
+                        </div>
+                        <p style="font-size:0.75rem;color:var(--text-muted);margin:0" id="ollama-url">-</p>
+                        <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0" id="ollama-info">-</p>
+                    </div>
+                    <!-- Qdrant -->
+                    <div class="service-card">
+                        <div class="service-header">
+                            <strong>🔍 Qdrant (向量数据库)</strong>
+                            <span id="qdrant-status" class="badge">检查中...</span>
+                        </div>
+                        <p style="font-size:0.75rem;color:var(--text-muted);margin:0" id="qdrant-url">-</p>
+                        <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0" id="qdrant-info">-</p>
+                    </div>
+                </div>
+            </div>
         </div>
     </main>
 
     <script src="/assist/static/app.js"></script>
     <script>
         let batchTimer = null;
-        let activeBatch = null; // 'parse' | 'extract' | 'index' | 'full' | null
+        let activeBatch = null;
+        let refreshTimer = null;
+        let countdown = 3;
+        let autoRefresh = true;
+        let allDocs = [];
 
+        // Status colors and labels
+        const STATUS_COLORS = {
+            'uploaded': '#94a3b8',
+            'parsing': '#3b82f6',
+            'markdown_done': '#8b5cf6',
+            'extracting': '#f59e0b',
+            'meta_done': '#10b981',
+            'indexing': '#06b6d4',
+            'indexed': '#22c55e',
+            'error': '#ef4444',
+        };
+
+        const STATUS_LABELS = {
+            'uploaded': '已上传',
+            'parsing': '解析中',
+            'markdown_done': '已解析',
+            'extracting': '提取中',
+            'meta_done': '已提取',
+            'indexing': '索引中',
+            'indexed': '已索引',
+            'error': '错误',
+        };
+
+        // ── 主标签页切换 ──
+        function switchMainTab(tabName) {
+            document.querySelectorAll('.main-tab').forEach(tab => tab.classList.remove('active'));
+            event.target.classList.add('active');
+
+            document.querySelectorAll('.main-tab-content').forEach(content => content.classList.remove('active'));
+            document.getElementById(`main-tab-${tabName}`).classList.add('active');
+
+            // 切换到监控标签页时加载数据
+            if (tabName === 'monitor') {
+                loadMonitorData();
+                startAutoRefresh();
+            } else if (tabName === 'services') {
+                loadServicesStatus();
+            } else {
+                stopAutoRefresh();
+            }
+        }
+
+        // ── 子标签页切换 ──
+        function switchSubTab(tabName) {
+            document.querySelectorAll('.sub-tab').forEach(tab => tab.classList.remove('active'));
+            event.target.classList.add('active');
+
+            document.querySelectorAll('.sub-tab-content').forEach(content => content.classList.remove('active'));
+            document.getElementById(`sub-tab-${tabName}`).classList.add('active');
+        }
+
+        // ── 自动刷新 ──
+        function toggleAutoRefresh() {
+            autoRefresh = document.getElementById('auto-refresh').checked;
+            if (autoRefresh) {
+                startAutoRefresh();
+            } else {
+                stopAutoRefresh();
+            }
+        }
+
+        function startAutoRefresh() {
+            if (refreshTimer) clearInterval(refreshTimer);
+            countdown = 3;
+            refreshTimer = setInterval(() => {
+                countdown--;
+                document.getElementById('refresh-countdown').textContent = `${countdown}s`;
+                if (countdown <= 0) {
+                    loadMonitorData();
+                    countdown = 3;
+                }
+            }, 1000);
+        }
+
+        function stopAutoRefresh() {
+            if (refreshTimer) {
+                clearInterval(refreshTimer);
+                refreshTimer = null;
+            }
+            document.getElementById('refresh-countdown').textContent = '已暂停';
+        }
+
+        // ── 批量处理相关函数 ──
         async function loadStats() {
             try {
                 const [stats, batchStatus] = await Promise.all([
@@ -325,7 +788,6 @@
                     activeBatch = null;
                 }
 
-                // Update button active states
                 updateButtonStates();
 
             } catch (err) {
@@ -356,13 +818,6 @@
                 'extract': '/assist/api/pipeline/batch/start-extract',
                 'index': '/assist/api/pipeline/batch/start-index',
                 'full': '/assist/api/pipeline/batch/start-full',
-            };
-
-            const labels = {
-                'parse': '批量解析',
-                'extract': '批量提取',
-                'index': '批量索引',
-                'full': '全流程处理',
             };
 
             try {
@@ -398,7 +853,7 @@
                 return;
             }
 
-            if (!confirm(`确定要重置所有 ${errorCount} 个失败任务的状态吗？\n\n重置后：\n- 有 Markdown 文件的任务将重置为"已解析"状态\n- 没有 Markdown 文件的任务将重置为"已上传"状态`)) {
+            if (!confirm(`确定要重置所有 ${errorCount} 个失败任务的状态吗？`)) {
                 return;
             }
 
@@ -413,9 +868,7 @@
         }
 
         async function recalculateHashes() {
-            if (!confirm('确定要重新计算所有文档的文件哈希吗？\n\n这可能需要一些时间，期间请勿关闭页面。')) {
-                return;
-            }
+            if (!confirm('确定要重新计算所有文档的文件哈希吗？')) return;
 
             const btn = document.getElementById('btn-recalc-hash');
             btn.disabled = true;
@@ -440,7 +893,7 @@
                 return;
             }
 
-            if (!confirm(`确定要重置索引吗？\n\n此操作将会：\n- 删除 Qdrant 中对应的向量集合\n- 将所有 ${indexedCount} 个已索引文档重置为"已提取"状态\n\n重置后需要重新批量索引才能使用语义搜索。`)) {
+            if (!confirm(`确定要重置索引吗？\n\n此操作将会删除 Qdrant 中对应的向量集合，并将所有 ${indexedCount} 个已索引文档重置为"已提取"状态。`)) {
                 return;
             }
 
@@ -467,7 +920,6 @@
                 await loadStats();
                 await loadProcessingTasks();
 
-                // Stop polling if idle
                 try {
                     const status = await api.get('/assist/api/pipeline/batch/status');
                     if (status.processing === 0 && status.running_tasks === 0 && !status.paused) {
@@ -493,23 +945,217 @@
                     return;
                 }
 
-                const statusLabels = {
-                    'parsing': '解析中',
-                    'extracting': '提取中',
-                    'indexing': '索引中',
-                };
-
                 container.innerHTML = processingDocs.map(doc => `
                     <div class="task-item">
                         <div class="task-info">
                             <a href="/assist/detail/${doc.id}" style="font-weight:500">${doc.title || doc.filename || '未命名'}</a>
                             <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0">ID: ${doc.id}</p>
                         </div>
-                        <span class="badge badge-${doc.status}">${statusLabels[doc.status] || doc.status}</span>
+                        <span class="badge badge-${doc.status}">${STATUS_LABELS[doc.status] || doc.status}</span>
                     </div>
                 `).join('');
             } catch (err) {
                 console.error('Processing tasks error:', err);
+            }
+        }
+
+        // ── 监控相关函数 ──
+        async function loadMonitorData() {
+            try {
+                // Load queue status
+                const queue = await api.get('/assist/api/pipeline/queue/status');
+                document.getElementById('running-tasks').textContent = `${queue.running_tasks}/${queue.max_concurrent_tasks}`;
+
+                // Load documents
+                const data = await api.get('/assist/api/documents/?page_size=10000');
+                allDocs = data.items || [];
+                document.getElementById('total-docs').textContent = data.total;
+
+                // Calculate status counts
+                const statusCounts = {};
+                Object.keys(STATUS_LABELS).forEach(s => statusCounts[s] = 0);
+                allDocs.forEach(doc => {
+                    statusCounts[doc.status] = (statusCounts[doc.status] || 0) + 1;
+                });
+
+                // Update summary cards
+                document.getElementById('indexed-docs').textContent = statusCounts['indexed'] || 0;
+                document.getElementById('processing-docs').textContent = (statusCounts['parsing'] || 0) + (statusCounts['extracting'] || 0) + (statusCounts['indexing'] || 0);
+                document.getElementById('pending-docs').textContent = (statusCounts['uploaded'] || 0) + (statusCounts['markdown_done'] || 0) + (statusCounts['meta_done'] || 0);
+                document.getElementById('error-docs').textContent = statusCounts['error'] || 0;
+
+                // Render status bar
+                renderStatusBar(statusCounts);
+
+                // Render task lists
+                renderProcessingList();
+                renderPendingList();
+                renderErrorsList();
+                renderRecentList();
+
+            } catch (err) {
+                console.error('Load monitor error:', err);
+            }
+        }
+
+        function renderStatusBar(statusCounts) {
+            const total = Object.values(statusCounts).reduce((a, b) => a + b, 0);
+            if (total === 0) {
+                document.getElementById('status-bar').innerHTML = '';
+                document.getElementById('status-legend').innerHTML = '<span style="color:var(--text-muted)">暂无数据</span>';
+                return;
+            }
+
+            let barHtml = '';
+            let legendHtml = '';
+
+            Object.entries(STATUS_LABELS).forEach(([status, label]) => {
+                const count = statusCounts[status] || 0;
+                if (count > 0) {
+                    const percent = (count / total * 100).toFixed(1);
+                    barHtml += `<div class="status-bar-segment" style="width:${percent}%;background:${STATUS_COLORS[status]}" title="${label}: ${count} (${percent}%)"></div>`;
+                    legendHtml += `
+                        <div class="status-legend-item">
+                            <div class="status-legend-dot" style="background:${STATUS_COLORS[status]}"></div>
+                            <span>${label}: ${count}</span>
+                        </div>
+                    `;
+                }
+            });
+
+            document.getElementById('status-bar').innerHTML = barHtml;
+            document.getElementById('status-legend').innerHTML = legendHtml;
+        }
+
+        function renderProcessingList() {
+            const processing = allDocs.filter(d => ['parsing', 'extracting', 'indexing'].includes(d.status));
+            const container = document.getElementById('processing-list');
+
+            if (processing.length === 0) {
+                container.innerHTML = '<p style="text-align:center;color:var(--text-muted);padding:2rem">暂无处理中的任务</p>';
+                return;
+            }
+
+            container.innerHTML = processing.map(doc => `
+                <div class="task-item">
+                    <div class="task-info">
+                        <div class="task-title">${doc.title || doc.filename || '未命名'}</div>
+                        <div class="task-meta">ID: ${doc.id} · 状态: ${STATUS_LABELS[doc.status] || doc.status}</div>
+                    </div>
+                    <a href="/assist/doc/${doc.id}" class="btn btn-sm">查看</a>
+                </div>
+            `).join('');
+        }
+
+        function renderPendingList() {
+            const pending = allDocs.filter(d => ['uploaded', 'markdown_done', 'meta_done'].includes(d.status));
+            const container = document.getElementById('pending-list');
+
+            if (pending.length === 0) {
+                container.innerHTML = '<p style="text-align:center;color:var(--text-muted);padding:2rem">暂无待处理任务</p>';
+                return;
+            }
+
+            container.innerHTML = pending.map(doc => `
+                <div class="task-item">
+                    <div class="task-info">
+                        <div class="task-title">${doc.title || doc.filename || '未命名'}</div>
+                        <div class="task-meta">ID: ${doc.id} · 状态: ${STATUS_LABELS[doc.status] || doc.status}</div>
+                    </div>
+                    <a href="/assist/doc/${doc.id}" class="btn btn-sm">处理</a>
+                </div>
+            `).join('');
+        }
+
+        function renderErrorsList() {
+            const errors = allDocs.filter(d => d.status === 'error');
+            const container = document.getElementById('errors-list');
+
+            if (errors.length === 0) {
+                container.innerHTML = '<p style="text-align:center;color:var(--text-muted);padding:2rem">暂无错误任务</p>';
+                return;
+            }
+
+            container.innerHTML = errors.map(doc => `
+                <div class="error-item">
+                    <div style="justify-content:space-between;align-items:flex-start;gap:0.5rem">
+                        <div>
+                            <div class="error-title">${doc.title || doc.filename || '未命名'}</div>
+                            <div class="error-message">${doc.status_message || '未知错误'}</div>
+                            <div class="task-meta" style="margin-top:0.25rem">ID: ${doc.id}</div>
+                        </div>
+                        <a href="/assist/doc/${doc.id}" class="btn btn-sm">处理</a>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderRecentList() {
+            const recent = allDocs
+                .filter(d => d.status === 'indexed')
+                .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+                .slice(0, 20);
+            const container = document.getElementById('recent-list');
+
+            if (recent.length === 0) {
+                container.innerHTML = '<p style="text-align:center;color:var(--text-muted);padding:2rem">暂无已完成任务</p>';
+                return;
+            }
+
+            container.innerHTML = recent.map(doc => {
+                const time = doc.updated_at ? new Date(doc.updated_at).toLocaleString('zh-CN') : '-';
+                return `
+                    <div class="task-item">
+                        <div class="task-info">
+                            <div class="task-title">${doc.title || doc.filename || '未命名'}</div>
+                            <div class="task-meta">ID: ${doc.id} · 完成时间: ${time}</div>
+                        </div>
+                        <a href="/assist/detail/${doc.id}" class="btn btn-sm">查看</a>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // ── 服务状态相关函数 ──
+        async function loadServicesStatus() {
+            try {
+                const services = await api.get('/assist/api/admin/services/status');
+
+                // MinerU
+                const mineru = services.mineru || {};
+                document.getElementById('mineru-url').textContent = mineru.url || '-';
+                document.getElementById('mineru-status').className = `badge badge-${mineru.status === 'connected' ? 'indexed' : 'error'}`;
+                document.getElementById('mineru-status').textContent = mineru.status === 'connected' ? '✓ 已连接' : '✗ 未连接';
+
+                const statsEl = document.getElementById('mineru-stats');
+                if (mineru.status === 'connected') {
+                    document.getElementById('mineru-version').textContent = `版本: ${mineru.version || 'unknown'} · 最大并发: ${mineru.max_concurrent || '-'}`;
+                    document.getElementById('mineru-processing').textContent = mineru.processing_tasks || 0;
+                    document.getElementById('mineru-queued').textContent = mineru.queued_tasks || 0;
+                    document.getElementById('mineru-completed').textContent = mineru.completed_tasks || 0;
+                    document.getElementById('mineru-failed').textContent = mineru.failed_tasks || 0;
+                    statsEl.style.display = 'grid';
+                } else {
+                    document.getElementById('mineru-version').textContent = mineru.error || '';
+                    statsEl.style.display = 'none';
+                }
+
+                // Ollama
+                const ollama = services.ollama || {};
+                document.getElementById('ollama-url').textContent = ollama.url || '-';
+                document.getElementById('ollama-status').className = `badge badge-${ollama.status === 'connected' ? 'indexed' : 'error'}`;
+                document.getElementById('ollama-status').textContent = ollama.status === 'connected' ? '✓ 已连接' : '✗ 未连接';
+                document.getElementById('ollama-info').textContent = ollama.models ? `模型: ${ollama.models.join(', ')}` : (ollama.error || '');
+
+                // Qdrant
+                const qdrant = services.qdrant || {};
+                document.getElementById('qdrant-url').textContent = qdrant.url || '-';
+                document.getElementById('qdrant-status').className = `badge badge-${qdrant.status === 'connected' ? 'indexed' : 'error'}`;
+                document.getElementById('qdrant-status').textContent = qdrant.status === 'connected' ? '✓ 已连接' : '✗ 未连接';
+                document.getElementById('qdrant-info').textContent = qdrant.collections ? `集合: ${qdrant.collections.join(', ')}` : (qdrant.error || '');
+
+            } catch (err) {
+                console.error('Services status error:', err);
             }
         }
 

@@ -1,9 +1,11 @@
 data/storage
+data/storage2
 data/qdrant
 data/.qdrant-initialized
 
 .env
 config.json
+system.json
 .venv/
 __pycache__/
 *.pyc

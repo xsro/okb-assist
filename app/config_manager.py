@@ -1,7 +1,8 @@
 """JSON 配置文件管理模块。
 
-所有配置项统一存储在 config.json 中，支持运行时读写。
-替代原 .env + pydantic-settings 方案。
+配置分为两个文件：
+- config.json: 服务配置（MinerU、Ollama、向量数据库），可通过前端修改
+- system.json: 系统配置（token、并发数、数据库、上传目录），仅限手动修改
 """
 
 import json
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 CONFIG_FILE = Path("config.json")
+SYSTEM_FILE = Path("system.json")
 
 DEFAULT_CONFIG = {
     "mineru": {
@@ -21,7 +23,6 @@ DEFAULT_CONFIG = {
         "url": "http://127.0.0.1:11434",
         "key": "",
         "model": "qwen3.5:9b",
-        "embed_model": "nomic-embed-text",
     },
     "vector_dbs": [
         {
@@ -31,8 +32,15 @@ DEFAULT_CONFIG = {
             "enabled": True,
             "url": "http://127.0.0.1:6333",
             "collection": "documents",
+            "embedding": {
+                "source": "ollama",
+                "model": "nomic-embed-text",
+            },
         }
     ],
+}
+
+DEFAULT_SYSTEM = {
     "upload_token": "change-me",
     "max_concurrent_tasks": 3,
     "database_url": "sqlite:///./okb_assist.db",
@@ -40,7 +48,8 @@ DEFAULT_CONFIG = {
 }
 
 # 进程内缓存
-_cache: dict | None = None
+_config_cache: dict | None = None
+_system_cache: dict | None = None
 _lock = threading.Lock()
 
 
@@ -55,56 +64,87 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def _load_json_file(filepath: Path, defaults: dict) -> dict:
+    """从 JSON 文件读取配置，不存在则用默认值创建。"""
+    if filepath.exists():
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return _deep_merge(defaults, data)
+        except (json.JSONDecodeError, OSError):
+            return defaults.copy()
+    else:
+        _write_json_file(filepath, defaults)
+        return defaults.copy()
+
+
+def _write_json_file(filepath: Path, data: dict) -> None:
+    """写入 JSON 文件。"""
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
 def load_config() -> dict:
-    """从 config.json 读取配置。文件不存在则用默认值创建。"""
-    global _cache
-    if _cache is not None:
-        return _cache
+    """从 config.json 读取服务配置。"""
+    global _config_cache
+    if _config_cache is not None:
+        return _config_cache
 
     with _lock:
-        if _cache is not None:
-            return _cache
+        if _config_cache is not None:
+            return _config_cache
+        _config_cache = _load_json_file(CONFIG_FILE, DEFAULT_CONFIG)
+        return _config_cache
 
-        if CONFIG_FILE.exists():
-            try:
-                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                # 用默认值补充缺失字段
-                _cache = _deep_merge(DEFAULT_CONFIG, data)
-            except (json.JSONDecodeError, OSError):
-                _cache = DEFAULT_CONFIG.copy()
-        else:
-            _cache = DEFAULT_CONFIG.copy()
-            _write_config(_cache)
 
-        return _cache
+def load_system_config() -> dict:
+    """从 system.json 读取系统配置。"""
+    global _system_cache
+    if _system_cache is not None:
+        return _system_cache
+
+    with _lock:
+        if _system_cache is not None:
+            return _system_cache
+        _system_cache = _load_json_file(SYSTEM_FILE, DEFAULT_SYSTEM)
+        return _system_cache
 
 
 def get_config() -> dict:
-    """获取当前配置（带缓存）。"""
+    """获取完整配置（服务配置 + 系统配置）。"""
+    config = load_config().copy()
+    config.update(load_system_config())
+    return config
+
+
+def get_service_config() -> dict:
+    """仅获取服务配置（可通过前端修改）。"""
     return load_config()
 
 
+def get_system_config() -> dict:
+    """仅获取系统配置（仅限手动修改）。"""
+    return load_system_config()
+
+
 def save_config(config: dict) -> None:
-    """保存配置到文件并刷新缓存。"""
-    global _cache
+    """保存服务配置到文件并刷新缓存。仅保存 config.json 中的字段。"""
+    global _config_cache
     with _lock:
-        _write_config(config)
-        _cache = config
-
-
-def _write_config(config: dict) -> None:
-    """写入 config.json 文件。"""
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
+        # 只保留服务配置字段
+        service_keys = set(DEFAULT_CONFIG.keys())
+        service_config = {k: v for k, v in config.items() if k in service_keys}
+        _write_json_file(CONFIG_FILE, service_config)
+        _config_cache = service_config
 
 
 def reload_config() -> dict:
     """强制重新从文件加载配置。"""
-    global _cache
+    global _config_cache, _system_cache
     with _lock:
-        _cache = None
-    return load_config()
+        _config_cache = None
+        _system_cache = None
+    return get_config()
 
 
 def get_active_vector_db() -> dict | None:
@@ -140,7 +180,7 @@ def mask_sensitive(config: dict) -> dict:
         key = masked["ollama"]["key"]
         masked["ollama"]["key"] = key[:4] + "***" if len(key) > 4 else "***"
 
-    # Upload token
+    # Upload token (来自系统配置)
     if masked.get("upload_token"):
         token = masked["upload_token"]
         masked["upload_token"] = token[:4] + "***" if len(token) > 4 else "***"
@@ -150,5 +190,18 @@ def mask_sensitive(config: dict) -> dict:
         if db.get("api_key"):
             key = db["api_key"]
             db["api_key"] = key[:4] + "***" if len(key) > 4 else "***"
+
+    return masked
+
+
+def mask_system_config(config: dict) -> dict:
+    """返回脱敏后的系统配置副本。"""
+    import copy
+    masked = copy.deepcopy(config)
+
+    # Upload token
+    if masked.get("upload_token"):
+        token = masked["upload_token"]
+        masked["upload_token"] = token[:4] + "***" if len(token) > 4 else "***"
 
     return masked

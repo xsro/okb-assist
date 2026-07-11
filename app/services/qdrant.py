@@ -11,7 +11,44 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 
 from app.services.vector_db import VectorDBAdapter
 
-VECTOR_SIZE = 768  # nomic-embed-text default dimension
+# 常见 embedding 模型的维度
+MODEL_DIMENSIONS = {
+    "nomic-embed-text": 768,
+    "nomic-ai/nomic-embed-text-v1.5": 768,
+    "BAAI/bge-small-en-v1.5": 384,
+    "BAAI/bge-base-en-v1.5": 768,
+    "BAAI/bge-large-en-v1.5": 1024,
+    "BAAI/bge-small-zh-v1.5": 512,
+    "BAAI/bge-base-zh-v1.5": 768,
+    "BAAI/bge-large-zh-v1.5": 1024,
+    "sentence-transformers/all-MiniLM-L6-v2": 384,
+    "sentence-transformers/all-mpnet-base-v2": 768,
+    "mxbai-embed-large": 1024,
+    "all-minilm": 384,
+    "bge-m3": 1024,
+}
+
+DEFAULT_VECTOR_SIZE = 768  # 默认维度
+
+
+def get_vector_size(db_config: dict) -> int:
+    """根据配置获取向量维度。"""
+    embedding = db_config.get("embedding", {})
+    model = embedding.get("model", "")
+
+    # 从预定义的维度表中查找
+    if model in MODEL_DIMENSIONS:
+        return MODEL_DIMENSIONS[model]
+
+    # 尝试从模型名称推断
+    if "small" in model.lower():
+        return 384
+    elif "base" in model.lower():
+        return 768
+    elif "large" in model.lower():
+        return 1024
+
+    return DEFAULT_VECTOR_SIZE
 
 
 class QdrantAdapter(VectorDBAdapter):
@@ -20,6 +57,7 @@ class QdrantAdapter(VectorDBAdapter):
     def __init__(self, db_config: dict):
         self.url = db_config.get("url", "http://127.0.0.1:6333")
         self.base_collection = db_config.get("collection", "documents")
+        self.vector_size = get_vector_size(db_config)
         self._client: Optional[QdrantClient] = None
         self._collection_cache: set[str] = set()
 
@@ -44,7 +82,7 @@ class QdrantAdapter(VectorDBAdapter):
                 collection_name=collection_name,
                 vectors_config={
                     "vector": VectorParams(
-                        size=VECTOR_SIZE,
+                        size=self.vector_size,
                         distance=Distance.COSINE,
                     ),
                 },
@@ -319,9 +357,28 @@ async def index_document(
     markdown_content: str,
     metadata: dict,
     get_embedding_func,
+    vector_db_id: str = None,
 ) -> str:
-    """兼容旧代码：索引文档。"""
-    adapter = _get_default_adapter()
+    """索引文档到指定的向量数据库。
+
+    Args:
+        doc_id: 文档 ID
+        user_id: 用户 ID
+        markdown_content: Markdown 内容
+        metadata: 元数据
+        get_embedding_func: 获取 embedding 的函数
+        vector_db_id: 向量数据库 ID，默认使用活跃的向量数据库
+    """
+    # 获取适配器
+    if vector_db_id:
+        from app.config_manager import get_vector_db_by_id
+        db_config = get_vector_db_by_id(vector_db_id)
+        if not db_config:
+            raise ValueError(f"向量数据库 {vector_db_id} 配置不存在")
+        adapter = QdrantAdapter(db_config)
+    else:
+        adapter = _get_default_adapter()
+
     chunks = chunk_text(markdown_content)
     if not chunks:
         return adapter.get_collection_name(user_id)

@@ -4,20 +4,19 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.config_manager import get_config, save_config, mask_sensitive, reload_config
+from app.config_manager import (
+    get_config, get_service_config, get_system_config,
+    save_config, mask_sensitive, mask_system_config, reload_config
+)
 
 router = APIRouter(prefix="/assist/api/config", tags=["config"])
 
 
 class ConfigUpdateRequest(BaseModel):
-    """配置更新请求体。"""
+    """服务配置更新请求体（仅服务配置可修改）。"""
     mineru: dict | None = None
     ollama: dict | None = None
     vector_dbs: list[dict] | None = None
-    upload_token: str | None = None
-    max_concurrent_tasks: int | None = None
-    database_url: str | None = None
-    uploads_folder: str | None = None
 
 
 class TestConnectionRequest(BaseModel):
@@ -37,10 +36,17 @@ def get_current_config():
     return mask_sensitive(config)
 
 
+@router.get("/system")
+def get_system_config_api():
+    """获取系统配置（只读，敏感字段脱敏）。"""
+    config = get_system_config()
+    return mask_system_config(config)
+
+
 @router.put("")
 def update_config(req: ConfigUpdateRequest):
-    """更新配置。仅更新请求中非 null 的字段。"""
-    config = get_config()
+    """更新服务配置。仅更新请求中非 null 的字段。"""
+    config = get_service_config()
 
     if req.mineru is not None:
         config["mineru"] = {**config.get("mineru", {}), **req.mineru}
@@ -59,25 +65,13 @@ def update_config(req: ConfigUpdateRequest):
                 raise HTTPException(status_code=400, detail=f"不支持的向量数据库类型: {db['type']}")
         config["vector_dbs"] = req.vector_dbs
 
-    if req.upload_token is not None:
-        config["upload_token"] = req.upload_token
-
-    if req.max_concurrent_tasks is not None:
-        config["max_concurrent_tasks"] = req.max_concurrent_tasks
-
-    if req.database_url is not None:
-        config["database_url"] = req.database_url
-
-    if req.uploads_folder is not None:
-        config["uploads_folder"] = req.uploads_folder
-
     save_config(config)
-    return {"detail": "配置已保存", "config": mask_sensitive(config)}
+    return {"detail": "配置已保存", "config": mask_sensitive(get_config())}
 
 
 @router.post("/reload")
 def reload():
-    """强制重新从 config.json 加载配置。"""
+    """强制重新从文件加载配置。"""
     config = reload_config()
     return {"detail": "配置已重新加载", "config": mask_sensitive(config)}
 

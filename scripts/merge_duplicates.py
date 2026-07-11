@@ -25,6 +25,7 @@ from pathlib import Path
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import Document, DocStatus
+from app.utils import to_relative_path, to_absolute_path
 
 settings = get_settings()
 UPLOADS_DIR = Path(settings.uploads_folder)
@@ -56,7 +57,12 @@ def normalize(title: str) -> str:
 
 
 def file_exists(path: str | None) -> bool:
-    return bool(path) and os.path.exists(path)
+    """检查文件是否存在，支持相对路径。"""
+    if not path:
+        return False
+    # 将相对路径转换为绝对路径
+    abs_path = to_absolute_path(path)
+    return os.path.exists(abs_path)
 
 
 def higher_status(a: DocStatus, b: DocStatus) -> DocStatus:
@@ -120,24 +126,27 @@ def main():
                     merged_items.append("status")
 
                 # 合并 PDF 文件
-                src_pdf = f"uploads/{src.id}/{src.id}.md".replace(".md", ".pdf")
-                src_pdf = str(UPLOADS_DIR / str(src.id) / f"{src.id}.pdf")
-                keeper_pdf = str(UPLOADS_DIR / str(keeper.id) / f"{keeper.id}.pdf")
-                if not file_exists(keeper_pdf) and file_exists(src_pdf):
+                src_pdf_rel = f"{src.id}/{src.id}.pdf"
+                src_pdf_abs = str(UPLOADS_DIR / str(src.id) / f"{src.id}.pdf")
+                keeper_pdf_rel = f"{keeper.id}/{keeper.id}.pdf"
+                keeper_pdf_abs = str(UPLOADS_DIR / str(keeper.id) / f"{keeper.id}.pdf")
+                if not file_exists(keeper_pdf_rel) and os.path.exists(src_pdf_abs):
                     keeper_dir = UPLOADS_DIR / str(keeper.id)
                     keeper_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src_pdf, keeper_pdf)
-                    keeper.file_path = keeper_pdf
+                    shutil.copy2(src_pdf_abs, keeper_pdf_abs)
+                    keeper.file_path = keeper_pdf_rel
                     merged_items.append("pdf")
 
                 # 合并 markdown 文件
-                src_md = str(UPLOADS_DIR / str(src.id) / f"{src.id}.md")
-                keeper_md = str(UPLOADS_DIR / str(keeper.id) / f"{keeper.id}.md")
-                if not file_exists(keeper_md) and file_exists(src_md):
+                src_md_rel = f"{src.id}/{src.id}.md"
+                src_md_abs = str(UPLOADS_DIR / str(src.id) / f"{src.id}.md")
+                keeper_md_rel = f"{keeper.id}/{keeper.id}.md"
+                keeper_md_abs = str(UPLOADS_DIR / str(keeper.id) / f"{keeper.id}.md")
+                if not file_exists(keeper_md_rel) and os.path.exists(src_md_abs):
                     keeper_dir = UPLOADS_DIR / str(keeper.id)
                     keeper_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src_md, keeper_md)
-                    keeper.markdown_path = keeper_md
+                    shutil.copy2(src_md_abs, keeper_md_abs)
+                    keeper.markdown_path = keeper_md_rel
                     merged_items.append("markdown")
 
                 # 合并 qdrant_collection

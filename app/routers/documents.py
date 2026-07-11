@@ -13,7 +13,7 @@ from app.auth import get_current_user
 from app.config import get_settings
 from app.database import get_db
 from app.models import Document, DocStatus
-from app.utils import calculate_file_hash
+from app.utils import calculate_file_hash, to_relative_path, to_absolute_path
 
 router = APIRouter(prefix="/assist/api/documents", tags=["documents"])
 
@@ -292,7 +292,8 @@ async def upload_document(
     with open(file_path, "wb") as f:
         f.write(content)
 
-    doc.file_path = str(file_path)
+    # 存储相对路径
+    doc.file_path = to_relative_path(str(file_path))
     db.commit()
     db.refresh(doc)
 
@@ -358,7 +359,8 @@ def register_document_by_path(
     dest_path = doc_dir / f"{doc.id}.pdf"
     shutil.copy2(file_path, dest_path)
 
-    doc.file_path = str(dest_path)
+    # 存储相对路径
+    doc.file_path = to_relative_path(str(dest_path))
     db.commit()
     db.refresh(doc)
 
@@ -438,7 +440,8 @@ def delete_document(
 
     # Delete generated files in uploads/{doc_id}/
     import shutil
-    doc_upload_dir = os.path.join(settings.uploads_folder, str(doc_id))
+    # 使用绝对路径删除文件
+    doc_upload_dir = to_absolute_path(str(doc_id))
     if os.path.exists(doc_upload_dir):
         shutil.rmtree(doc_upload_dir, ignore_errors=True)
 
@@ -461,10 +464,15 @@ def get_pdf(
     db: Session = Depends(get_db),
 ):
     doc = db.query(Document).filter(Document.id == doc_id).first()
-    if not doc or not doc.file_path or not os.path.exists(doc.file_path):
+    if not doc or not doc.file_path:
         raise HTTPException(status_code=404, detail="PDF 文件不存在")
 
-    with open(doc.file_path, "rb") as f:
+    # 将相对路径转换为绝对路径
+    abs_file_path = to_absolute_path(doc.file_path)
+    if not os.path.exists(abs_file_path):
+        raise HTTPException(status_code=404, detail="PDF 文件不存在")
+
+    with open(abs_file_path, "rb") as f:
         pdf_content = f.read()
 
     return Response(
@@ -485,16 +493,19 @@ def get_markdown(
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
-    if not doc.markdown_path or not os.path.exists(doc.markdown_path):
+
+    # 将相对路径转换为绝对路径
+    abs_markdown_path = to_absolute_path(doc.markdown_path) if doc.markdown_path else None
+    if not abs_markdown_path or not os.path.exists(abs_markdown_path):
         raise HTTPException(status_code=404, detail="Markdown 文件尚未生成")
 
-    with open(doc.markdown_path, "r", encoding="utf-8") as f:
+    with open(abs_markdown_path, "r", encoding="utf-8") as f:
         content = f.read()
 
     # Rewrite image paths to absolute URLs
     import re
     # Get the directory containing the markdown file (doc_dir)
-    doc_dir = os.path.dirname(doc.markdown_path)
+    doc_dir = os.path.dirname(abs_markdown_path)
     # Get the relative path from uploads/
     rel_path = os.path.relpath(doc_dir, settings.uploads_folder)
 
@@ -572,6 +583,8 @@ def update_markdown(
     if not doc.markdown_path:
         raise HTTPException(status_code=400, detail="Markdown 文件尚未生成")
 
-    with open(doc.markdown_path, "w", encoding="utf-8") as f:
+    # 将相对路径转换为绝对路径
+    abs_markdown_path = to_absolute_path(doc.markdown_path)
+    with open(abs_markdown_path, "w", encoding="utf-8") as f:
         f.write(data.content)
     return {"detail": "Markdown 已更新"}

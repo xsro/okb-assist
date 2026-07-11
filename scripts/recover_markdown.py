@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models import Document
 from app.services.qdrant import get_qdrant_client
+from app.utils import to_relative_path
 
 settings = get_settings()
 UPLOADS_DIR = settings.uploads_folder
@@ -82,10 +83,10 @@ def main():
                 with open(md_path, "w", encoding="utf-8") as f:
                     f.write(markdown)
 
-                # Update database
+                # Update database (存储相对路径)
                 doc = doc_map.get(doc_id)
                 if doc:
-                    doc.markdown_path = md_path
+                    doc.markdown_path = to_relative_path(md_path)
 
                 success += 1
                 print(f"\r  已恢复 {success} 个文档...", end="", flush=True)

@@ -162,6 +162,16 @@
         .db-type-specific {
             margin-top: 0.75rem;
         }
+        .embedding-section {
+            margin-top: 1rem;
+            padding-top: 1rem;
+            border-top: 1px dashed var(--border);
+        }
+        .embedding-section h5 {
+            margin: 0 0 0.75rem 0;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
         @media (max-width: 768px) {
             .form-grid {
                 grid-template-columns: 1fr;
@@ -208,7 +218,7 @@
 
         <!-- Ollama 配置 -->
         <div class="card config-section">
-            <h3>🤖 Ollama (LLM / Embedding)</h3>
+            <h3>🤖 Ollama (LLM)</h3>
             <div class="form-grid">
                 <div class="form-group">
                     <label>服务地址</label>
@@ -221,10 +231,6 @@
                 <div class="form-group">
                     <label>LLM 模型（元数据提取）</label>
                     <input type="text" id="ollama-model" placeholder="qwen3.5:9b">
-                </div>
-                <div class="form-group">
-                    <label>Embedding 模型（向量化）</label>
-                    <input type="text" id="ollama-embed-model" placeholder="nomic-embed-text">
                 </div>
             </div>
             <div style="margin-top:0.75rem">
@@ -244,27 +250,30 @@
             </button>
         </div>
 
-        <!-- 系统配置 -->
+        <!-- 系统配置（只读） -->
         <div class="card config-section">
-            <h3>🔧 系统设置</h3>
+            <h3>🔧 系统设置 <span style="font-size:0.75rem;color:var(--text-muted);font-weight:normal">（仅限手动修改 system.json）</span></h3>
             <div class="form-grid">
                 <div class="form-group">
                     <label>访问 Token</label>
-                    <input type="password" id="upload-token" placeholder="系统访问密钥">
+                    <input type="text" id="upload-token" readonly style="background:var(--bg-muted);cursor:not-allowed">
                 </div>
                 <div class="form-group">
                     <label>最大并发处理数</label>
-                    <input type="number" id="max-concurrent" min="1" max="20" value="3">
+                    <input type="text" id="max-concurrent" readonly style="background:var(--bg-muted);cursor:not-allowed">
                 </div>
                 <div class="form-group">
                     <label>数据库 URL</label>
-                    <input type="text" id="database-url" placeholder="sqlite:///./okb_assist.db">
+                    <input type="text" id="database-url" readonly style="background:var(--bg-muted);cursor:not-allowed">
                 </div>
                 <div class="form-group">
                     <label>上传文件目录</label>
-                    <input type="text" id="uploads-folder" placeholder="uploads">
+                    <input type="text" id="uploads-folder" readonly style="background:var(--bg-muted);cursor:not-allowed">
                 </div>
             </div>
+            <p style="margin-top:0.75rem;font-size:0.8rem;color:var(--text-muted)">
+                💡 这些配置存储在 <code>system.json</code> 文件中，需要手动编辑文件并重启服务来修改。
+            </p>
         </div>
 
         <!-- 操作栏 -->
@@ -285,30 +294,73 @@
                 fields: [
                     { key: 'url', label: '服务地址', placeholder: 'http://127.0.0.1:6333', type: 'text' },
                     { key: 'collection', label: '集合名称', placeholder: 'documents', type: 'text' },
-                ]
+                ],
+                embeddingSources: ['builtin', 'ollama'],
             },
             milvus: {
                 fields: [
                     { key: 'url', label: '服务地址', placeholder: 'http://127.0.0.1:19530', type: 'text' },
                     { key: 'collection', label: '集合名称', placeholder: 'documents', type: 'text' },
                     { key: 'api_key', label: 'API Key', placeholder: '可选', type: 'password' },
-                ]
+                ],
+                embeddingSources: ['ollama'],
             },
             chroma: {
                 fields: [
                     { key: 'url', label: '服务地址', placeholder: 'http://127.0.0.1:8000', type: 'text' },
                     { key: 'collection', label: '集合名称', placeholder: 'documents', type: 'text' },
-                ]
+                ],
+                embeddingSources: ['ollama'],
             }
         };
 
         const DB_TYPE_LABELS = { qdrant: 'Qdrant', milvus: 'Milvus', chroma: 'ChromaDB' };
 
+        // ── Embedding 模型列表 ──
+        const EMBEDDING_MODELS = {
+            builtin: {
+                label: 'Qdrant 内置 (FastEmbed)',
+                models: [
+                    { value: 'BAAI/bge-small-en-v1.5', label: 'BGE Small EN (384维)', lang: 'en' },
+                    { value: 'BAAI/bge-base-en-v1.5', label: 'BGE Base EN (768维)', lang: 'en' },
+                    { value: 'BAAI/bge-large-en-v1.5', label: 'BGE Large EN (1024维)', lang: 'en' },
+                    { value: 'BAAI/bge-small-zh-v1.5', label: 'BGE Small ZH (512维)', lang: 'zh' },
+                    { value: 'BAAI/bge-base-zh-v1.5', label: 'BGE Base ZH (768维)', lang: 'zh' },
+                    { value: 'BAAI/bge-large-zh-v1.5', label: 'BGE Large ZH (1024维)', lang: 'zh' },
+                    { value: 'sentence-transformers/all-MiniLM-L6-v2', label: 'All-MiniLM-L6 (384维)', lang: 'en' },
+                    { value: 'sentence-transformers/all-mpnet-base-v2', label: 'All-MPNet-Base (768维)', lang: 'en' },
+                    { value: 'nomic-ai/nomic-embed-text-v1.5', label: 'Nomic Embed Text (768维)', lang: 'en' },
+                    { value: 'jinaai/jina-embeddings-v2-base-en', label: 'Jina V2 Base (768维)', lang: 'en' },
+                    { value: 'jinaai/jina-embeddings-v2-small-en', label: 'Jina V2 Small (512维)', lang: 'en' },
+                ]
+            },
+            ollama: {
+                label: 'Ollama',
+                models: [
+                    { value: 'nomic-embed-text', label: 'Nomic Embed Text (768维)' },
+                    { value: 'mxbai-embed-large', label: 'MxBai Embed Large (1024维)' },
+                    { value: 'all-minilm', label: 'All-MiniLM (384维)' },
+                    { value: 'bge-m3', label: 'BGE M3 (1024维)' },
+                    { value: 'snowflake-arctic-embed', label: 'Snowflake Arctic Embed' },
+                    { value: 'snowflake-arctic-embed:xs', label: 'Snowflake Arctic XS (384维)' },
+                    { value: 'snowflake-arctic-embed:s', label: 'Snowflake Arctic S (384维)' },
+                    { value: 'snowflake-arctic-embed:m', label: 'Snowflake Arctic M (768维)' },
+                    { value: 'snowflake-arctic-embed:l', label: 'Snowflake Arctic L (1024维)' },
+                ]
+            }
+        };
+
         // ── 初始化 ──
         async function init() {
             try {
-                currentConfig = await api.get('/assist/api/config');
-                fillForm(currentConfig);
+                // 并行加载服务配置和系统配置
+                const [config, sysConfig] = await Promise.all([
+                    api.get('/assist/api/config'),
+                    api.get('/assist/api/config/system')
+                ]);
+                currentConfig = config;
+                fillForm(config);
+                fillSystemForm(sysConfig);
             } catch (err) {
                 showToast('加载配置失败: ' + err.message, 'error');
             }
@@ -324,7 +376,6 @@
             document.getElementById('ollama-url').value = cfg.ollama?.url || '';
             document.getElementById('ollama-key').value = cfg.ollama?.key || '';
             document.getElementById('ollama-model').value = cfg.ollama?.model || '';
-            document.getElementById('ollama-embed-model').value = cfg.ollama?.embed_model || '';
 
             // Vector DBs
             const list = document.getElementById('vectordb-list');
@@ -333,12 +384,14 @@
             (cfg.vector_dbs || []).forEach(db => {
                 addVectorDB(db);
             });
+        }
 
-            // System
-            document.getElementById('upload-token').value = cfg.upload_token || '';
-            document.getElementById('max-concurrent').value = cfg.max_concurrent_tasks ?? 3;
-            document.getElementById('database-url').value = cfg.database_url || '';
-            document.getElementById('uploads-folder').value = cfg.uploads_folder || '';
+        function fillSystemForm(sysCfg) {
+            // 系统配置（只读显示）
+            document.getElementById('upload-token').value = sysCfg.upload_token || '';
+            document.getElementById('max-concurrent').value = sysCfg.max_concurrent_tasks ?? 3;
+            document.getElementById('database-url').value = sysCfg.database_url || '';
+            document.getElementById('uploads-folder').value = sysCfg.uploads_folder || '';
         }
 
         // ── 向量数据库卡片管理 ──
@@ -376,6 +429,24 @@
                     </div>
                 </div>
                 <div class="db-type-specific" id="vdb-fields-${id}"></div>
+                <div class="embedding-section" id="vdb-embedding-section-${id}">
+                    <h5>🧠 Embedding 模型配置</h5>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>Embedding 来源</label>
+                            <select id="vdb-embed-source-${id}" onchange="onEmbedSourceChange(${id})">
+                                <option value="ollama">Ollama</option>
+                                <option value="builtin">Qdrant 内置 (FastEmbed)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Embedding 模型</label>
+                            <select id="vdb-embed-model-${id}">
+                                <!-- 动态渲染 -->
+                            </select>
+                        </div>
+                    </div>
+                </div>
                 <div style="margin-top:0.5rem">
                     <button class="btn btn-secondary btn-sm" onclick="testVectorDB(${id})">🔗 测试连接</button>
                     <div class="test-result" id="test-vdb-${id}"></div>
@@ -389,6 +460,7 @@
                 document.getElementById(`vdb-type-${id}`).value = data.type;
             }
             renderTypeFields(id, data);
+            renderEmbeddingFields(id, data);
 
             // 设置 enabled 状态
             if (data && data.enabled === false) {
@@ -398,6 +470,61 @@
 
         function onTypeChange(id) {
             renderTypeFields(id);
+            renderEmbeddingFields(id);
+        }
+
+        function onEmbedSourceChange(id) {
+            renderEmbeddingFields(id);
+        }
+
+        function renderEmbeddingFields(id, data = null) {
+            const type = document.getElementById(`vdb-type-${id}`).value;
+            const source = document.getElementById(`vdb-embed-source-${id}`).value;
+            const modelSelect = document.getElementById(`vdb-embed-model-${id}`);
+            const section = document.getElementById(`vdb-embedding-section-${id}`);
+
+            // 根据数据库类型显示/隐藏 embedding 配置
+            const dbConfig = DB_TYPE_FIELDS[type];
+            if (!dbConfig.embeddingSources || dbConfig.embeddingSources.length === 0) {
+                section.style.display = 'none';
+                return;
+            }
+            section.style.display = 'block';
+
+            // 更新来源选项
+            const sourceSelect = document.getElementById(`vdb-embed-source-${id}`);
+            const currentSource = sourceSelect.value;
+            sourceSelect.innerHTML = dbConfig.embeddingSources.map(s =>
+                `<option value="${s}" ${s === currentSource ? 'selected' : ''}>${EMBEDDING_MODELS[s]?.label || s}</option>`
+            ).join('');
+
+            // 更新模型选项
+            const selectedSource = sourceSelect.value;
+            const models = EMBEDDING_MODELS[selectedSource]?.models || [];
+            const savedModel = data?.embedding?.model || '';
+
+            // 如果是 ollama，添加自定义输入选项
+            if (selectedSource === 'ollama') {
+                modelSelect.innerHTML = `
+                    <option value="">-- 选择或输入模型 --</option>
+                    ${models.map(m => `<option value="${m.value}" ${m.value === savedModel ? 'selected' : ''}>${m.label}</option>`).join('')}
+                    <option value="__custom__">自定义模型...</option>
+                `;
+            } else {
+                modelSelect.innerHTML = `
+                    <option value="">-- 选择模型 --</option>
+                    ${models.map(m => `<option value="${m.value}" ${m.value === savedModel ? 'selected' : ''}>${m.label}</option>`).join('')}
+                `;
+            }
+
+            // 如果有保存的模型且不在列表中，添加它
+            if (savedModel && !models.find(m => m.value === savedModel)) {
+                const option = document.createElement('option');
+                option.value = savedModel;
+                option.textContent = savedModel;
+                option.selected = true;
+                modelSelect.insertBefore(option, modelSelect.firstChild.nextSibling);
+            }
         }
 
         function renderTypeFields(id, data = null) {
@@ -443,6 +570,28 @@
                     const el = document.getElementById(`vdb-${f.key}-${id}`);
                     if (el) db[f.key] = el.value.trim();
                 });
+
+                // 收集 embedding 配置
+                const embedSection = document.getElementById(`vdb-embedding-section-${id}`);
+                if (embedSection && embedSection.style.display !== 'none') {
+                    const embedSource = document.getElementById(`vdb-embed-source-${id}`)?.value;
+                    let embedModel = document.getElementById(`vdb-embed-model-${id}`)?.value;
+
+                    // 如果选择了自定义模型，提示用户输入
+                    if (embedModel === '__custom__') {
+                        embedModel = prompt('请输入自定义模型名称:');
+                        if (!embedModel) {
+                            embedModel = EMBEDDING_MODELS[embedSource]?.models[0]?.value || '';
+                        }
+                    }
+
+                    if (embedSource) {
+                        db.embedding = {
+                            source: embedSource,
+                            model: embedModel || '',
+                        };
+                    }
+                }
 
                 dbs.push(db);
             });
@@ -519,6 +668,7 @@
                 }
             }
 
+            // 只保存服务配置（系统配置不可通过前端修改）
             const payload = {
                 mineru: {
                     url: document.getElementById('mineru-url').value.trim(),
@@ -529,18 +679,13 @@
                     url: document.getElementById('ollama-url').value.trim(),
                     key: document.getElementById('ollama-key').value.trim(),
                     model: document.getElementById('ollama-model').value.trim(),
-                    embed_model: document.getElementById('ollama-embed-model').value.trim(),
                 },
                 vector_dbs: vectorDbs,
-                upload_token: document.getElementById('upload-token').value.trim(),
-                max_concurrent_tasks: parseInt(document.getElementById('max-concurrent').value) || 3,
-                database_url: document.getElementById('database-url').value.trim(),
-                uploads_folder: document.getElementById('uploads-folder').value.trim(),
             };
 
             try {
                 const result = await api.put('/assist/api/config', payload);
-                showToast('配置已保存', 'success');
+                showToast('服务配置已保存', 'success');
                 currentConfig = result.config;
             } catch (err) {
                 showToast('保存失败: ' + err.message, 'error');

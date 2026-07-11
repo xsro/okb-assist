@@ -185,7 +185,6 @@ function renderNav() {
 
     const publicLinks = `
         <a href="/assist/">文献列表</a>
-        <a href="/assist/monitor">监控</a>
     `;
 
     const authLinks = `

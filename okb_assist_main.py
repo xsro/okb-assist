@@ -1,4 +1,9 @@
 import os
+
+# 设置 HuggingFace 镜像环境变量（用于 FastEmbed）
+os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
+os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
+
 from contextlib import asynccontextmanager
 
 from fastapi import Request, HTTPException, Depends

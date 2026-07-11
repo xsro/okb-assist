@@ -184,22 +184,51 @@ def _parse_json_from_text(text: str) -> dict:
     }
 
 
-async def get_embedding(text: str | list[str]) -> list[float] | list[list[float]]:
+async def get_embedding(text: str | list[str], vector_db_id: str = None) -> list[float] | list[list[float]]:
     """
-    Get embedding vector(s) from Ollama.
+    Get embedding vector(s) based on configuration.
     Supports both single text and batch (list of texts).
 
     - Single text -> returns list[float]
     - Batch (list) -> returns list[list[float]]
+
+    Args:
+        text: Text or list of texts to embed
+        vector_db_id: Optional vector database ID to use specific embedding config
     """
     is_batch = isinstance(text, list)
+
+    # 获取 embedding 配置
+    if vector_db_id:
+        from app.config_manager import get_vector_db_by_id
+        vdb_config = get_vector_db_by_id(vector_db_id)
+        if vdb_config and 'embedding' in vdb_config:
+            emb_config = vdb_config['embedding']
+            source = emb_config.get('source', 'ollama')
+            model = emb_config.get('model', 'nomic-embed-text')
+        else:
+            source = settings.embedding_source
+            model = settings.embedding_model
+    else:
+        source = settings.embedding_source
+        model = settings.embedding_model
+
+    if source == "builtin":
+        return await _get_embedding_builtin(text, is_batch, model)
+    else:
+        return await _get_embedding_ollama(text, is_batch, model)
+
+
+async def _get_embedding_ollama(text: str | list[str], is_batch: bool, model_name: str = None) -> list[float] | list[list[float]]:
+    """Get embedding from Ollama API."""
     input_data = text if is_batch else [text]
+    model = model_name or settings.embedding_model
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
             f"{settings.ollama_url}/api/embed",
             json={
-                "model": settings.ollama_embed_model,
+                "model": model,
                 "input": input_data,
             },
         )
@@ -211,6 +240,34 @@ async def get_embedding(text: str | list[str]) -> list[float] | list[list[float]
     if is_batch:
         return embeddings
     return embeddings[0] if embeddings else []
+
+
+async def _get_embedding_builtin(text: str | list[str], is_batch: bool, model_name: str = None) -> list[float] | list[list[float]]:
+    """Get embedding using FastEmbed library (local embedding)."""
+    import os
+
+    # 设置 HuggingFace 镜像（如果需要）
+    if not os.environ.get('HF_ENDPOINT'):
+        os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+    if not os.environ.get('HF_HUB_DISABLE_XET'):
+        os.environ['HF_HUB_DISABLE_XET'] = '1'
+
+    try:
+        from fastembed import TextEmbedding
+    except ImportError:
+        raise ImportError("fastembed 库未安装，请运行: pip install fastembed")
+
+    # 使用 fastembed 进行本地 embedding
+    model = TextEmbedding(model_name=model_name or settings.embedding_model)
+
+    if is_batch:
+        # Batch embedding
+        embeddings = list(model.embed(text))
+        return [emb.tolist() for emb in embeddings]
+    else:
+        # Single embedding
+        embeddings = list(model.embed([text]))
+        return embeddings[0].tolist() if embeddings else []
 
 
 def add_yaml_frontmatter(markdown_content: str, metadata: dict) -> str:

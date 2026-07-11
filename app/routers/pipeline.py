@@ -1,17 +1,20 @@
 import json
 import os
 import asyncio
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.config_manager import get_vector_db_by_id
 from app.database import get_db, SessionLocal
-from app.models import Document, DocStatus
+from app.models import Document, DocStatus, DocumentVectorIndex, IndexStatus
 from app.services.mineru import parse_pdf, submit_parse_task, poll_task, get_task_result, check_task_status
 from app.services.ollama import extract_metadata, get_embedding
 from app.services.qdrant import index_document, delete_document_points
+from app.utils import to_absolute_path
 
 router = APIRouter(prefix="/assist/api/pipeline", tags=["pipeline"])
 
@@ -67,6 +70,9 @@ async def _do_parse_impl(doc_id: int, file_path: str):
     try:
         _update_doc_status(doc_id, DocStatus.parsing, "正在解析 PDF...", 10)
 
+        # 将相对路径转换为绝对路径
+        abs_file_path = to_absolute_path(file_path)
+
         # Save generated files in uploads/{doc_id}/
         output_dir = os.path.join(settings.uploads_folder, str(doc_id))
         os.makedirs(output_dir, exist_ok=True)
@@ -121,8 +127,8 @@ async def _do_parse_impl(doc_id: int, file_path: str):
                 _clear_mineru_task_id(doc_id)
                 existing_task_id = None
 
-        # Submit a new task
-        task_id = await submit_parse_task(file_path)
+        # Submit a new task (使用绝对路径)
+        task_id = await submit_parse_task(abs_file_path)
 
         # Save the task_id to database for potential resume
         _save_mineru_task_id(doc_id, task_id)
@@ -175,11 +181,13 @@ def _clear_mineru_task_id(doc_id: int):
 
 def _save_parse_result(doc_id: int, md_path: str):
     """Save parse result to database."""
+    from app.utils import to_relative_path
     db = SessionLocal()
     try:
         doc = db.query(Document).filter(Document.id == doc_id).first()
         if doc:
-            doc.markdown_path = md_path
+            # 存储相对路径
+            doc.markdown_path = to_relative_path(md_path)
             doc.status = DocStatus.markdown_done
             doc.status_message = "PDF 解析完成"
             doc.progress = 100
@@ -215,7 +223,9 @@ async def _do_extract_impl(doc_id: int):
                 db.commit()
                 return
 
-            with open(doc.markdown_path, "r", encoding="utf-8") as f:
+            # 将相对路径转换为绝对路径
+            abs_markdown_path = to_absolute_path(doc.markdown_path)
+            with open(abs_markdown_path, "r", encoding="utf-8") as f:
                 markdown_content = f.read()
 
             _update_doc_status(doc_id, DocStatus.extracting, "正在调用 Ollama...", 30)
@@ -283,55 +293,106 @@ async def _do_extract_impl(doc_id: int):
         _update_doc_status(doc_id, DocStatus.error, error_msg)
 
 
-async def _run_index(doc_id: int):
-    """Background task for indexing to Qdrant."""
-    await _with_semaphore(_do_index_impl(doc_id))
+async def _run_index(doc_id: int, vector_db_id: str = "default"):
+    """Background task for indexing to specified vector database."""
+    await _with_semaphore(_do_index_impl(doc_id, vector_db_id))
 
 
-async def _do_index_impl(doc_id: int):
-    """Index implementation."""
+async def _do_index_impl(doc_id: int, vector_db_id: str = "default"):
+    """Index implementation for a specific vector database."""
+    db = SessionLocal()
     try:
-        _update_doc_status(doc_id, DocStatus.indexing, "正在索引到 Qdrant...", 10)
+        # 获取或创建索引状态记录
+        index_record = db.query(DocumentVectorIndex).filter(
+            DocumentVectorIndex.document_id == doc_id,
+            DocumentVectorIndex.vector_db_id == vector_db_id
+        ).first()
 
-        db = SessionLocal()
-        try:
-            doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc or not doc.markdown_path:
-                _update_doc_status(doc_id, DocStatus.error, "Markdown 文件不存在")
-                return
-
-            with open(doc.markdown_path, "r", encoding="utf-8") as f:
-                markdown_content = f.read()
-
-            _update_doc_status(doc_id, DocStatus.indexing, "正在生成向量...", 30)
-
-            metadata = {
-                "title": doc.title or "",
-                "authors": json.loads(doc.authors) if doc.authors else [],
-                "year": doc.year,
-                "type": doc.doc_type or "",
-                "keywords": json.loads(doc.keywords) if doc.keywords else [],
-            }
-
-            _update_doc_status(doc_id, DocStatus.indexing, "正在上传到 Qdrant...", 60)
-
-            collection_name = await index_document(
-                doc_id=doc.id,
-                user_id=QDRANT_USER_ID,
-                markdown_content=markdown_content,
-                metadata=metadata,
-                get_embedding_func=get_embedding,
+        if not index_record:
+            index_record = DocumentVectorIndex(
+                document_id=doc_id,
+                vector_db_id=vector_db_id,
+                status=IndexStatus.pending
             )
-
-            doc.qdrant_collection = collection_name
-            doc.status = DocStatus.indexed
-            doc.status_message = "已索引到向量数据库"
-            doc.progress = 100
+            db.add(index_record)
             db.commit()
-        finally:
-            db.close()
+
+        # 更新索引状态为 indexing
+        index_record.status = IndexStatus.indexing
+        index_record.error_message = None
+        db.commit()
+
+        _update_doc_status(doc_id, DocStatus.indexing, f"正在索引到 {vector_db_id}...", 10)
+
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        if not doc or not doc.markdown_path:
+            index_record.status = IndexStatus.error
+            index_record.error_message = "Markdown 文件不存在"
+            db.commit()
+            _update_doc_status(doc_id, DocStatus.error, "Markdown 文件不存在")
+            return
+
+        # 获取向量数据库配置
+        vdb_config = get_vector_db_by_id(vector_db_id)
+        if not vdb_config:
+            index_record.status = IndexStatus.error
+            index_record.error_message = f"向量数据库 {vector_db_id} 配置不存在"
+            db.commit()
+            _update_doc_status(doc_id, DocStatus.error, f"向量数据库 {vector_db_id} 配置不存在")
+            return
+
+        # 将相对路径转换为绝对路径
+        abs_markdown_path = to_absolute_path(doc.markdown_path)
+        with open(abs_markdown_path, "r", encoding="utf-8") as f:
+            markdown_content = f.read()
+
+        _update_doc_status(doc_id, DocStatus.indexing, "正在生成向量...", 30)
+
+        metadata = {
+            "title": doc.title or "",
+            "authors": json.loads(doc.authors) if doc.authors else [],
+            "year": doc.year,
+            "type": doc.doc_type or "",
+            "keywords": json.loads(doc.keywords) if doc.keywords else [],
+        }
+
+        _update_doc_status(doc_id, DocStatus.indexing, "正在上传到向量数据库...", 60)
+
+        # 创建绑定 vector_db_id 的 embedding 函数
+        async def embedding_func(text):
+            return await get_embedding(text, vector_db_id=vector_db_id)
+
+        collection_name = await index_document(
+            doc_id=doc.id,
+            user_id=QDRANT_USER_ID,
+            markdown_content=markdown_content,
+            metadata=metadata,
+            get_embedding_func=embedding_func,
+            vector_db_id=vector_db_id,
+        )
+
+        # 更新索引记录
+        index_record.collection_name = collection_name
+        index_record.status = IndexStatus.indexed
+        index_record.updated_at = datetime.now(timezone.utc)
+
+        # 兼容：更新文档的旧字段（指向最新的索引）
+        doc.qdrant_collection = collection_name
+        doc.vector_db_id = vector_db_id
+        doc.status = DocStatus.indexed
+        doc.status_message = f"已索引到 {vector_db_id}"
+        doc.progress = 100
+
+        db.commit()
     except Exception as e:
+        # 更新索引记录为错误状态
+        if index_record:
+            index_record.status = IndexStatus.error
+            index_record.error_message = str(e)
+            db.commit()
         _update_doc_status(doc_id, DocStatus.error, f"索引失败: {str(e)}")
+    finally:
+        db.close()
 
 
 async def _run_full_pipeline(doc_id: int):
@@ -799,25 +860,75 @@ async def extract_document_meta(
 @router.post("/{doc_id}/index")
 async def index_document_to_qdrant(
     doc_id: int,
-    background_tasks: BackgroundTasks,
+    vector_db_id: str = "default",
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
 ):
-    """Stage 3: Index document into Qdrant (async)."""
+    """Stage 3: Index document into specified vector database (async).
+
+    Args:
+        doc_id: 文档 ID
+        vector_db_id: 向量数据库 ID，默认为 "default"
+    """
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
 
-    if doc.status != DocStatus.meta_done:
+    # 允许从以下状态进行索引：
+    # - meta_done: 元数据已提取
+    # - indexed: 已索引到其他数据库，支持索引到更多数据库
+    # - markdown_done: 有 markdown 文件即可索引
+    # - error: 重试索引
+    allowed_statuses = [DocStatus.meta_done, DocStatus.indexed, DocStatus.error, DocStatus.markdown_done]
+    if doc.status not in allowed_statuses:
         raise HTTPException(status_code=400, detail=f"当前状态 {doc.status.value} 不允许索引")
 
+    # 检查是否有 markdown 文件
+    if not doc.markdown_path:
+        raise HTTPException(status_code=400, detail="Markdown 文件不存在，无法索引")
+
+    # 验证向量数据库配置是否存在
+    vdb_config = get_vector_db_by_id(vector_db_id)
+    if not vdb_config:
+        raise HTTPException(status_code=400, detail=f"向量数据库 {vector_db_id} 配置不存在")
+
     doc.status = DocStatus.indexing
-    doc.status_message = "任务已提交，等待处理..."
+    doc.status_message = f"正在索引到 {vector_db_id}..."
     doc.progress = 0
     db.commit()
 
-    background_tasks.add_task(_run_index, doc_id)
+    background_tasks.add_task(_run_index, doc_id, vector_db_id)
 
-    return {"detail": "索引任务已提交", "status": "indexing"}
+    return {"detail": f"索引任务已提交到 {vector_db_id}", "status": "indexing"}
+
+
+@router.get("/{doc_id}/indexes")
+async def get_document_indexes(
+    doc_id: int,
+    db: Session = Depends(get_db),
+):
+    """获取文档在各向量数据库中的索引状态。"""
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="文献不存在")
+
+    indexes = db.query(DocumentVectorIndex).filter(
+        DocumentVectorIndex.document_id == doc_id
+    ).all()
+
+    return {
+        "document_id": doc_id,
+        "indexes": [
+            {
+                "vector_db_id": idx.vector_db_id,
+                "collection_name": idx.collection_name,
+                "status": idx.status.value if isinstance(idx.status, IndexStatus) else idx.status,
+                "error_message": idx.error_message,
+                "updated_at": idx.updated_at.isoformat() if idx.updated_at else None,
+            }
+            for idx in indexes
+        ]
+    }
 
 
 @router.post("/{doc_id}/process")
@@ -854,11 +965,32 @@ def get_pipeline_status(
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
 
+    # 检查 markdown 文件是否存在
+    has_markdown = False
+    if doc.markdown_path:
+        abs_markdown_path = to_absolute_path(doc.markdown_path)
+        has_markdown = os.path.exists(abs_markdown_path)
+
+    # 获取索引状态
+    indexes = db.query(DocumentVectorIndex).filter(
+        DocumentVectorIndex.document_id == doc_id
+    ).all()
+
+    indexed_dbs = [
+        {
+            "vector_db_id": idx.vector_db_id,
+            "status": idx.status.value if isinstance(idx.status, IndexStatus) else idx.status,
+        }
+        for idx in indexes
+        if idx.status == IndexStatus.indexed
+    ]
+
     return {
         "status": doc.status.value if isinstance(doc.status, DocStatus) else doc.status,
         "status_message": doc.status_message,
         "progress": doc.progress,
-        "has_markdown": doc.markdown_path is not None and os.path.exists(doc.markdown_path or ""),
+        "has_markdown": has_markdown,
         "has_meta": doc.title is not None,
-        "is_indexed": doc.qdrant_collection is not None,
+        "is_indexed": len(indexed_dbs) > 0,
+        "indexed_dbs": indexed_dbs,
     }

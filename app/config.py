@@ -4,7 +4,7 @@
 原有 `from app.config import get_settings` 的调用方无需改动。
 """
 
-from app.config_manager import get_config, get_active_vector_db
+from app.config_manager import get_config, get_system_config, get_active_vector_db
 
 
 class Settings:
@@ -36,9 +36,22 @@ class Settings:
     def ollama_model(self) -> str:
         return get_config()["ollama"]["model"]
 
+    # ── Embedding 配置（从活跃向量数据库配置中获取） ──
     @property
-    def ollama_embed_model(self) -> str:
-        return get_config()["ollama"]["embed_model"]
+    def embedding_source(self) -> str:
+        """获取 embedding 来源: 'ollama' 或 'builtin'。"""
+        db = get_active_vector_db()
+        if db and "embedding" in db:
+            return db["embedding"].get("source", "ollama")
+        return "ollama"
+
+    @property
+    def embedding_model(self) -> str:
+        """获取 embedding 模型名称。"""
+        db = get_active_vector_db()
+        if db and "embedding" in db:
+            return db["embedding"].get("model", "nomic-embed-text")
+        return "nomic-embed-text"
 
     # ── Qdrant（兼容旧代码，默认取第一个 enabled 的 qdrant 类型） ──
     @property
@@ -55,22 +68,22 @@ class Settings:
             return db.get("collection", "documents")
         return "documents"
 
-    # ── 系统配置 ──
+    # ── 系统配置（从 system.json 读取） ──
     @property
     def upload_token(self) -> str:
-        return get_config().get("upload_token", "change-me")
+        return get_system_config().get("upload_token", "change-me")
 
     @property
     def max_concurrent_tasks(self) -> int:
-        return get_config().get("max_concurrent_tasks", 3)
+        return get_system_config().get("max_concurrent_tasks", 3)
 
     @property
     def database_url(self) -> str:
-        return get_config().get("database_url", "sqlite:///./okb_assist.db")
+        return get_system_config().get("database_url", "sqlite:///./okb_assist.db")
 
     @property
     def uploads_folder(self) -> str:
-        return get_config().get("uploads_folder", "uploads")
+        return get_system_config().get("uploads_folder", "uploads")
 
 
 _settings_instance = Settings()

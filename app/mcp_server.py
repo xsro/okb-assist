@@ -20,6 +20,7 @@ from app.database import SessionLocal
 from app.models import Document, DocStatus
 from app.services.qdrant import search_similar, list_collections
 from app.services.ollama import get_embedding
+from app.utils import to_absolute_path
 
 settings = get_settings()
 
@@ -40,6 +41,12 @@ def _format_doc(doc: Document) -> dict:
         except (ValueError, TypeError):
             year = None
 
+    # 检查 markdown 文件是否存在
+    has_markdown = False
+    if doc.markdown_path:
+        abs_markdown_path = to_absolute_path(doc.markdown_path)
+        has_markdown = os.path.exists(abs_markdown_path)
+
     return {
         "id": doc.id,
         "filename": doc.filename,
@@ -54,7 +61,7 @@ def _format_doc(doc: Document) -> dict:
         "doc_type": doc.doc_type,
         "language": doc.language,
         "status": doc.status.value if isinstance(doc.status, DocStatus) else doc.status,
-        "has_markdown": doc.markdown_path is not None and os.path.exists(doc.markdown_path or ""),
+        "has_markdown": has_markdown,
         "pdf_url": f"/assist/api/documents/{doc.id}/pdf",
         "markdown_url": f"/assist/markdown/{doc.id}",
         "detail_url": f"/assist/detail/{doc.id}",
@@ -131,10 +138,13 @@ def read_markdown(doc_id: int, page: int = 1, page_size: int = 5000) -> str:
         doc = db.query(Document).filter(Document.id == doc_id).first()
         if not doc:
             return json.dumps({"error": f"文档 {doc_id} 不存在"}, ensure_ascii=False)
-        if not doc.markdown_path or not os.path.exists(doc.markdown_path):
+
+        # 将相对路径转换为绝对路径
+        abs_markdown_path = to_absolute_path(doc.markdown_path) if doc.markdown_path else None
+        if not abs_markdown_path or not os.path.exists(abs_markdown_path):
             return json.dumps({"error": "Markdown 文件尚未生成，请先解析 PDF"}, ensure_ascii=False)
 
-        with open(doc.markdown_path, "r", encoding="utf-8") as f:
+        with open(abs_markdown_path, "r", encoding="utf-8") as f:
             content = f.read()
 
         # Simple pagination
@@ -229,7 +239,10 @@ def get_pdf_url(doc_id: int) -> str:
         doc = db.query(Document).filter(Document.id == doc_id).first()
         if not doc:
             return json.dumps({"error": f"文档 {doc_id} 不存在"}, ensure_ascii=False)
-        if not doc.file_path or not os.path.exists(doc.file_path):
+
+        # 将相对路径转换为绝对路径
+        abs_file_path = to_absolute_path(doc.file_path) if doc.file_path else None
+        if not abs_file_path or not os.path.exists(abs_file_path):
             return json.dumps({"error": "PDF 文件不存在"}, ensure_ascii=False)
 
         base_url = settings.mineru_url.rstrip("/assist")  # Get base URL
@@ -296,10 +309,13 @@ def get_markdown_resource(doc_id: int) -> str:
         doc = db.query(Document).filter(Document.id == doc_id).first()
         if not doc:
             return f"Error: 文档 {doc_id} 不存在"
-        if not doc.markdown_path or not os.path.exists(doc.markdown_path):
+
+        # 将相对路径转换为绝对路径
+        abs_markdown_path = to_absolute_path(doc.markdown_path) if doc.markdown_path else None
+        if not abs_markdown_path or not os.path.exists(abs_markdown_path):
             return "Error: Markdown 文件尚未生成"
 
-        with open(doc.markdown_path, "r", encoding="utf-8") as f:
+        with open(abs_markdown_path, "r", encoding="utf-8") as f:
             return f.read()
     finally:
         db.close()

@@ -17,6 +17,7 @@ import shutil
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import Document
+from app.utils import to_relative_path
 
 settings = get_settings()
 UPLOADS_DIR = settings.uploads_folder
@@ -107,7 +108,8 @@ def main():
 
             try:
                 shutil.copy2(pdf_path, dest)
-                doc.file_path = dest
+                # 存储相对路径
+                doc.file_path = to_relative_path(dest)
                 success += 1
                 print(f"\r  已恢复 {success}/{len(matched)}", end="", flush=True)
             except Exception as e:
