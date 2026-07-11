@@ -19,7 +19,7 @@ from app.auth import (
     verify_token,
 )
 from app.config import get_settings
-from app.routers import documents, pipeline, admin, openapi
+from app.routers import documents, pipeline, admin, openapi, config
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -157,6 +157,7 @@ app.include_router(documents.router)
 app.include_router(pipeline.router)
 app.include_router(admin.router)
 app.include_router(openapi.router)
+app.include_router(config.router)
 
 
 # ==================== 认证端点 ====================
@@ -265,6 +266,11 @@ def duplicates_page(request: Request, user: str = Depends(get_current_user)):
 @app.get("/assist/doc/{doc_id}")
 def doc_manage_page(request: Request, doc_id: int, user: str = Depends(get_current_user)):
     return templates.TemplateResponse(name="doc_manage.html", request=request, context={"doc_id": doc_id})
+
+
+@app.get("/assist/config")
+def config_page(request: Request, user: str = Depends(get_current_user)):
+    return templates.TemplateResponse(name="config.html", request=request)
 
 
 if __name__ == "__main__":

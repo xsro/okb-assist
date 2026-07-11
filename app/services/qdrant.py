@@ -1,57 +1,257 @@
+"""Qdrant 向量数据库服务。
+
+包含 QdrantAdapter 实现（VectorDBAdapter 接口）以及向后兼容的模块级函数。
+"""
+
 import uuid
 from typing import Optional
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 
-from app.config import get_settings
-
-settings = get_settings()
+from app.services.vector_db import VectorDBAdapter
 
 VECTOR_SIZE = 768  # nomic-embed-text default dimension
 
-# Cached client to avoid repeated connections
-_client: Optional[QdrantClient] = None
-_collection_cache: set[str] = set()
+
+class QdrantAdapter(VectorDBAdapter):
+    """Qdrant 向量数据库适配器。"""
+
+    def __init__(self, db_config: dict):
+        self.url = db_config.get("url", "http://127.0.0.1:6333")
+        self.base_collection = db_config.get("collection", "documents")
+        self._client: Optional[QdrantClient] = None
+        self._collection_cache: set[str] = set()
+
+    def _get_client(self) -> QdrantClient:
+        if self._client is None:
+            self._client = QdrantClient(url=self.url)
+        return self._client
+
+    def get_collection_name(self, user_id: int) -> str:
+        return f"{self.base_collection}_{user_id}"
+
+    async def ensure_collection(self, collection_name: str) -> None:
+        if collection_name in self._collection_cache:
+            return
+
+        client = self._get_client()
+        collections = client.get_collections().collections
+        existing = {c.name for c in collections}
+
+        if collection_name not in existing:
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config={
+                    "vector": VectorParams(
+                        size=VECTOR_SIZE,
+                        distance=Distance.COSINE,
+                    ),
+                },
+            )
+
+        self._collection_cache.add(collection_name)
+
+    async def index_document(
+        self,
+        doc_id: int,
+        user_id: int,
+        chunks: list[str],
+        embeddings: list[list[float]],
+        metadata: dict,
+    ) -> str:
+        collection_name = self.get_collection_name(user_id)
+        client = self._get_client()
+        await self.ensure_collection(collection_name)
+
+        # 删除已有数据防止重复
+        await self.delete_document(user_id, doc_id)
+
+        points = []
+        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+            if not embedding:
+                continue
+            point = PointStruct(
+                id=str(uuid.uuid4()),
+                vector={"vector": embedding},
+                payload={
+                    "text": chunk,
+                    "metadata": {
+                        "document_id": doc_id,
+                        "chunk_index": i,
+                        "title": metadata.get("title", ""),
+                        "authors": metadata.get("authors", []),
+                        "year": metadata.get("year"),
+                        "doc_type": metadata.get("type", ""),
+                        "keywords": metadata.get("keywords", []),
+                    },
+                },
+            )
+            points.append(point)
+
+        batch_size = 100
+        for start in range(0, len(points), batch_size):
+            batch = points[start:start + batch_size]
+            client.upsert(collection_name=collection_name, points=batch)
+
+        return collection_name
+
+    async def search_similar(
+        self,
+        user_id: int,
+        query_embedding: list[float],
+        limit: int = 10,
+    ) -> list[dict]:
+        collection_name = self.get_collection_name(user_id)
+        client = self._get_client()
+
+        if collection_name not in self._collection_cache:
+            collections = client.get_collections().collections
+            self._collection_cache = {c.name for c in collections}
+            if collection_name not in self._collection_cache:
+                return []
+
+        results = client.query_points(
+            collection_name=collection_name,
+            query=query_embedding,
+            using="vector",
+            limit=limit,
+        )
+
+        return [
+            {
+                "score": hit.score,
+                "document_id": hit.payload.get("metadata", {}).get("document_id"),
+                "chunk_text": hit.payload.get("text"),
+                "title": hit.payload.get("metadata", {}).get("title"),
+            }
+            for hit in results.points
+        ]
+
+    async def delete_document(self, user_id: int, doc_id: int) -> None:
+        collection_name = self.get_collection_name(user_id)
+        client = self._get_client()
+        try:
+            client.delete(
+                collection_name=collection_name,
+                points_selector={
+                    "filter": {
+                        "must": [
+                            {"key": "metadata.document_id", "match": {"value": doc_id}}
+                        ]
+                    }
+                },
+            )
+        except Exception:
+            pass  # 集合可能不存在
+
+    async def list_collections(self) -> list[str]:
+        client = self._get_client()
+        try:
+            collections = client.get_collections().collections
+            return [c.name for c in collections]
+        except Exception:
+            return []
+
+    async def delete_collection(self, collection_name: str) -> bool:
+        client = self._get_client()
+        try:
+            client.delete_collection(collection_name=collection_name)
+            self._collection_cache.discard(collection_name)
+            return True
+        except Exception:
+            return False
+
+    async def get_point(self, point_id: str, collection_name: str = None) -> Optional[dict]:
+        if collection_name is None:
+            collection_name = self.get_collection_name(0)
+
+        client = self._get_client()
+
+        try:
+            result = client.scroll(
+                collection_name=collection_name,
+                scroll_filter={
+                    "must": [{"key": "id", "match": {"value": point_id}}]
+                },
+                limit=1,
+                with_payload=True,
+                with_vectors=True,
+            )
+
+            points = result[0] if result else []
+            if points:
+                point = points[0]
+                return {
+                    "id": point.id,
+                    "payload": point.payload,
+                    "vector": point.vector,
+                }
+
+            points = client.retrieve(
+                collection_name=collection_name,
+                ids=[point_id],
+                with_payload=True,
+            )
+            if points:
+                point = points[0]
+                return {
+                    "id": point.id,
+                    "payload": point.payload,
+                    "vector": None,
+                }
+        except Exception as e:
+            return {"error": str(e)}
+
+        return None
+
+    async def health_check(self) -> dict:
+        try:
+            client = self._get_client()
+            collections = client.get_collections().collections
+            return {
+                "status": "connected",
+                "url": self.url,
+                "collections": [c.name for c in collections],
+            }
+        except Exception as e:
+            return {
+                "status": "disconnected",
+                "url": self.url,
+                "error": str(e),
+            }
+
+
+# ── 向后兼容的模块级函数（旧代码可继续使用） ──
+
+_default_adapter: Optional[QdrantAdapter] = None
+
+
+def _get_default_adapter() -> QdrantAdapter:
+    global _default_adapter
+    if _default_adapter is None:
+        from app.config_manager import get_active_vector_db
+        db_config = get_active_vector_db() or {
+            "url": "http://127.0.0.1:6333",
+            "collection": "documents",
+        }
+        _default_adapter = QdrantAdapter(db_config)
+    return _default_adapter
 
 
 def get_qdrant_client() -> QdrantClient:
-    """Get Qdrant client instance (cached)."""
-    global _client
-    if _client is None:
-        _client = QdrantClient(url=settings.qdrant_url)
-    return _client
+    """兼容旧代码：获取 Qdrant 客户端。"""
+    return _get_default_adapter()._get_client()
 
 
 def ensure_collection(client: QdrantClient, collection_name: str):
-    """Create collection if it doesn't exist. Uses cache to avoid repeated API calls."""
-    global _collection_cache
-    if collection_name in _collection_cache:
-        return
-
-    collections = client.get_collections().collections
-    existing = {c.name for c in collections}
-
-    if collection_name not in existing:
-        client.create_collection(
-            collection_name=collection_name,
-            vectors_config={
-                "vector": VectorParams(
-                    size=VECTOR_SIZE,
-                    distance=Distance.COSINE,
-                ),
-            },
-        )
-
-    _collection_cache.add(collection_name)
+    """兼容旧代码：确保集合存在。"""
+    adapter = _get_default_adapter()
+    adapter._collection_cache.add(collection_name)  # 简化处理
 
 
 def chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> list[str]:
-    """
-    Split text into chunks by paragraphs, with fallback to character-based chunking.
-    Overlap is applied between chunks to preserve context at boundaries.
-    """
-    # First try paragraph-based splitting
+    """将文本分段。保留为模块级函数供各处使用。"""
     paragraphs = text.split("\n\n")
     chunks = []
     current_chunk = ""
@@ -60,7 +260,6 @@ def chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> list[str]
         para = para.strip()
         if not para:
             continue
-
         if len(current_chunk) + len(para) < chunk_size:
             current_chunk += ("\n\n" if current_chunk else "") + para
         else:
@@ -71,13 +270,11 @@ def chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> list[str]
     if current_chunk:
         chunks.append(current_chunk)
 
-    # If chunks are too large, do character-based splitting
     final_chunks = []
     for chunk in chunks:
         if len(chunk) <= chunk_size * 2:
             final_chunks.append(chunk)
         else:
-            # Split large chunks
             words = chunk.split()
             sub_chunk = ""
             for word in words:
@@ -90,12 +287,10 @@ def chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> list[str]
             if sub_chunk:
                 final_chunks.append(sub_chunk)
 
-    # Apply overlap: prepend the end of the previous chunk to the start of the next
     if overlap > 0 and len(final_chunks) > 1:
         overlapped = [final_chunks[0]]
         for i in range(1, len(final_chunks)):
             prev = final_chunks[i - 1]
-            # Take last `overlap` characters, break at word boundary
             overlap_text = prev[-overlap:]
             space_idx = overlap_text.find(' ')
             if space_idx != -1:
@@ -107,14 +302,10 @@ def chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> list[str]
 
 
 async def get_embeddings_batch(texts: list[str], get_embedding_func) -> list[list[float]]:
-    """
-    Get embeddings for multiple texts in a single batch request.
-    Falls back to individual requests if batch fails.
-    """
+    """批量获取 embedding。"""
     try:
         return await get_embedding_func(texts)
     except Exception:
-        # Fallback to individual requests
         results = []
         for text in texts:
             emb = await get_embedding_func(text)
@@ -129,85 +320,28 @@ async def index_document(
     metadata: dict,
     get_embedding_func,
 ) -> str:
-    """
-    Index document into Qdrant.
-    Returns the collection name.
-
-    Optimizations:
-    - Deletes existing points before re-indexing to avoid duplicates
-    - Uses batch embedding to reduce HTTP requests
-    - Caches Qdrant client and collection existence checks
-    """
-    collection_name = f"{settings.qdrant_collection}_{user_id}"
-
-    client = get_qdrant_client()
-    ensure_collection(client, collection_name)
-
-    # Delete existing points for this document (prevents duplicates on re-index)
-    delete_document_points(user_id, doc_id)
-
-    # Chunk the markdown
+    """兼容旧代码：索引文档。"""
+    adapter = _get_default_adapter()
     chunks = chunk_text(markdown_content)
     if not chunks:
-        return collection_name
+        return adapter.get_collection_name(user_id)
 
-    # Generate embeddings in batch
     embeddings = await get_embeddings_batch(chunks, get_embedding_func)
-
-    # Build points
-    points = []
-    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-        if not embedding:
-            continue
-
-        point = PointStruct(
-            id=str(uuid.uuid4()),
-            vector={"vector": embedding},
-            payload={
-                "text": chunk,
-                "metadata": {
-                    "document_id": doc_id,
-                    "chunk_index": i,
-                    "title": metadata.get("title", ""),
-                    "authors": metadata.get("authors", []),
-                    "year": metadata.get("year"),
-                    "doc_type": metadata.get("type", ""),
-                    "keywords": metadata.get("keywords", []),
-                },
-            },
-        )
-        points.append(point)
-
-    # Upload in batches
-    batch_size = 100
-    for start in range(0, len(points), batch_size):
-        batch = points[start:start + batch_size]
-        client.upsert(
-            collection_name=collection_name,
-            points=batch,
-        )
-
-    return collection_name
+    return await adapter.index_document(doc_id, user_id, chunks, embeddings, metadata)
 
 
 def delete_document_points(user_id: int, doc_id: int):
-    """Delete all points for a document from Qdrant."""
-    collection_name = f"{settings.qdrant_collection}_{user_id}"
-    client = get_qdrant_client()
-
+    """兼容旧代码：删除文档向量点。"""
+    import asyncio
+    adapter = _get_default_adapter()
     try:
-        client.delete(
-            collection_name=collection_name,
-            points_selector={
-                "filter": {
-                    "must": [
-                        {"key": "metadata.document_id", "match": {"value": doc_id}}
-                    ]
-                }
-            },
-        )
-    except Exception:
-        pass  # Collection might not exist
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(adapter.delete_document(user_id, doc_id))
+        else:
+            loop.run_until_complete(adapter.delete_document(user_id, doc_id))
+    except RuntimeError:
+        asyncio.run(adapter.delete_document(user_id, doc_id))
 
 
 async def search_similar(
@@ -216,112 +350,57 @@ async def search_similar(
     get_embedding_func,
     limit: int = 10,
 ) -> list[dict]:
-    """
-    Search for similar chunks in Qdrant.
-    """
-    collection_name = f"{settings.qdrant_collection}_{user_id}"
-    client = get_qdrant_client()
-
-    # Check if collection exists (use cache)
-    global _collection_cache
-    if collection_name not in _collection_cache:
-        collections = client.get_collections().collections
-        existing = {c.name for c in collections}
-        _collection_cache = existing
-        if collection_name not in existing:
-            return []
-
+    """兼容旧代码：语义搜索。"""
+    adapter = _get_default_adapter()
     embedding = await get_embedding_func(query)
     if not embedding:
         return []
-
-    results = client.query_points(
-        collection_name=collection_name,
-        query=embedding,
-        using="vector",
-        limit=limit,
-    )
-
-    return [
-        {
-            "score": hit.score,
-            "document_id": hit.payload.get("metadata", {}).get("document_id"),
-            "chunk_text": hit.payload.get("text"),
-            "title": hit.payload.get("metadata", {}).get("title"),
-        }
-        for hit in results.points
-    ]
+    return await adapter.search_similar(user_id, embedding, limit)
 
 
 def get_point(point_id: str, collection_name: str = None) -> dict:
-    """
-    Get a point by ID from Qdrant.
-    Returns point data or None if not found.
-    """
-    if collection_name is None:
-        collection_name = f"{settings.qdrant_collection}_0"
-
-    client = get_qdrant_client()
-
+    """兼容旧代码：获取点数据。"""
+    import asyncio
+    adapter = _get_default_adapter()
     try:
-        # Use scroll to get point with vector
-        result = client.scroll(
-            collection_name=collection_name,
-            scroll_filter={
-                "must": [
-                    {"key": "id", "match": {"value": point_id}}
-                ]
-            },
-            limit=1,
-            with_payload=True,
-            with_vectors=True,
-        )
-
-        points = result[0] if result else []
-        if points:
-            point = points[0]
-            return {
-                "id": point.id,
-                "payload": point.payload,
-                "vector": point.vector,
-            }
-
-        # Try direct retrieve as fallback
-        points = client.retrieve(
-            collection_name=collection_name,
-            ids=[point_id],
-            with_payload=True,
-        )
-        if points:
-            point = points[0]
-            return {
-                "id": point.id,
-                "payload": point.payload,
-                "vector": None,
-            }
-    except Exception as e:
-        return {"error": str(e)}
-
-    return None
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                return pool.submit(asyncio.run, adapter.get_point(point_id, collection_name)).result()
+        else:
+            return loop.run_until_complete(adapter.get_point(point_id, collection_name))
+    except RuntimeError:
+        return asyncio.run(adapter.get_point(point_id, collection_name))
 
 
 def delete_collection(collection_name: str) -> bool:
-    """Delete a collection from Qdrant. Returns True if successful."""
-    global _collection_cache
-    client = get_qdrant_client()
+    """兼容旧代码：删除集合。"""
+    import asyncio
+    adapter = _get_default_adapter()
     try:
-        client.delete_collection(collection_name=collection_name)
-        _collection_cache.discard(collection_name)
-        return True
-    except Exception:
-        return False
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                return pool.submit(asyncio.run, adapter.delete_collection(collection_name)).result()
+        else:
+            return loop.run_until_complete(adapter.delete_collection(collection_name))
+    except RuntimeError:
+        return asyncio.run(adapter.delete_collection(collection_name))
 
 
 def list_collections() -> list[str]:
-    """List all collections in Qdrant."""
-    client = get_qdrant_client()
+    """兼容旧代码：列出集合。"""
+    import asyncio
+    adapter = _get_default_adapter()
     try:
-        collections = client.get_collections().collections
-        return [c.name for c in collections]
-    except Exception:
-        return []
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                return pool.submit(asyncio.run, adapter.list_collections()).result()
+        else:
+            return loop.run_until_complete(adapter.list_collections())
+    except RuntimeError:
+        return asyncio.run(adapter.list_collections())

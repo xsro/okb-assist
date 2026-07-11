@@ -3,6 +3,7 @@ data/qdrant
 data/.qdrant-initialized
 
 .env
+config.json
 .venv/
 __pycache__/
 *.pyc

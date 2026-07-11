@@ -1,38 +1,80 @@
-from pydantic_settings import BaseSettings
-from functools import lru_cache
+"""配置模块 — 桥接层。
+
+所有属性动态从 config_manager 读取，保证运行时修改即时生效。
+原有 `from app.config import get_settings` 的调用方无需改动。
+"""
+
+from app.config_manager import get_config, get_active_vector_db
 
 
-class Settings(BaseSettings):
-    # MinerU
-    mineru_url: str = "http://127.0.0.1:8002"
-    mineru_key: str = "key"
-    mineru_tasks: int = 3
+class Settings:
+    """动态配置代理，属性从 JSON 配置实时读取。"""
 
-    # Ollama
-    ollama_url: str = "http://127.0.0.1:11434"
-    ollama_key: str = ""
-    ollama_model: str = "qwen3.5:9b"
-    ollama_embed_model: str = "nomic-embed-text"
+    # ── MinerU ──
+    @property
+    def mineru_url(self) -> str:
+        return get_config()["mineru"]["url"]
 
-    # Qdrant
-    qdrant_url: str = "http://127.0.0.1:6333"
-    qdrant_collection: str = "documents"
+    @property
+    def mineru_key(self) -> str:
+        return get_config()["mineru"]["key"]
 
-    # Upload token
-    upload_token: str = "change-me"
+    @property
+    def mineru_tasks(self) -> int:
+        return get_config()["mineru"].get("max_tasks", 3)
 
-    # Task queue
-    max_concurrent_tasks: int = 3
+    # ── Ollama ──
+    @property
+    def ollama_url(self) -> str:
+        return get_config()["ollama"]["url"]
 
-    # Database
-    database_url: str = "sqlite:///./okb_assist.db"
+    @property
+    def ollama_key(self) -> str:
+        return get_config()["ollama"].get("key", "")
 
-    # 文件存储目录（PDF + Markdown + 解析产物）
-    uploads_folder: str = "uploads"
+    @property
+    def ollama_model(self) -> str:
+        return get_config()["ollama"]["model"]
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    @property
+    def ollama_embed_model(self) -> str:
+        return get_config()["ollama"]["embed_model"]
+
+    # ── Qdrant（兼容旧代码，默认取第一个 enabled 的 qdrant 类型） ──
+    @property
+    def qdrant_url(self) -> str:
+        db = get_active_vector_db()
+        if db and db["type"] == "qdrant":
+            return db.get("url", "http://127.0.0.1:6333")
+        return "http://127.0.0.1:6333"
+
+    @property
+    def qdrant_collection(self) -> str:
+        db = get_active_vector_db()
+        if db and db["type"] == "qdrant":
+            return db.get("collection", "documents")
+        return "documents"
+
+    # ── 系统配置 ──
+    @property
+    def upload_token(self) -> str:
+        return get_config().get("upload_token", "change-me")
+
+    @property
+    def max_concurrent_tasks(self) -> int:
+        return get_config().get("max_concurrent_tasks", 3)
+
+    @property
+    def database_url(self) -> str:
+        return get_config().get("database_url", "sqlite:///./okb_assist.db")
+
+    @property
+    def uploads_folder(self) -> str:
+        return get_config().get("uploads_folder", "uploads")
 
 
-@lru_cache
+_settings_instance = Settings()
+
+
 def get_settings() -> Settings:
-    return Settings()
+    return _settings_instance

@@ -54,6 +54,7 @@ class Document(Base):
     status_message = Column(String(500), nullable=True)  # Error or progress message
     progress = Column(Float, default=0.0)  # 0-100
     qdrant_collection = Column(String(100), nullable=True)
+    vector_db_id = Column(String(50), nullable=True)  # 对应 config.json 中 vector_dbs 的 id
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

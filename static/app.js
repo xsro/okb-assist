@@ -193,6 +193,7 @@ function renderNav() {
         <a href="/assist/tools">工具</a>
         <a href="/assist/duplicates">查重</a>
         <a href="/assist/admin">管理</a>
+        <a href="/assist/config">配置</a>
     `;
 
     const authButton = hasToken

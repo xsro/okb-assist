@@ -6,13 +6,14 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.config import get_settings
+from app.config_manager import get_config
 from app.database import get_db, engine
 from app.models import Document, DocStatus
 from app.services.qdrant import get_qdrant_client, get_point, list_collections, delete_collection
+from app.services.vector_db import get_vector_db
 from app.utils import calculate_file_hash
 
 router = APIRouter(prefix="/assist/api/admin", tags=["admin"])
-settings = get_settings()
 
 
 @router.get("/stats")
@@ -45,17 +46,21 @@ def get_stats(db: Session = Depends(get_db)):
 
 @router.get("/services/status")
 async def get_services_status():
-    """Check status of all external services (MinerU, Ollama, Qdrant)."""
+    """Check status of all external services (MinerU, Ollama, VectorDBs)."""
+    cfg = get_config()
+
     result = {
-        "mineru": {"status": "unknown", "url": settings.mineru_url},
-        "ollama": {"status": "unknown", "url": settings.ollama_url},
-        "qdrant": {"status": "unknown", "url": settings.qdrant_url},
+        "mineru": {"status": "unknown", "url": cfg["mineru"]["url"]},
+        "ollama": {"status": "unknown", "url": cfg["ollama"]["url"]},
     }
 
     # Check MinerU
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{settings.mineru_url}/health")
+            headers = {}
+            if cfg["mineru"].get("key"):
+                headers["Authorization"] = f"Bearer {cfg['mineru']['key']}"
+            response = await client.get(f"{cfg['mineru']['url']}/health", headers=headers)
             if response.status_code == 200:
                 health = response.json()
                 result["mineru"]["status"] = "connected"
@@ -75,7 +80,7 @@ async def get_services_status():
     # Check Ollama
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{settings.ollama_url}/api/tags")
+            response = await client.get(f"{cfg['ollama']['url']}/api/tags")
             if response.status_code == 200:
                 models = response.json().get("models", [])
                 result["ollama"]["status"] = "connected"
@@ -87,15 +92,34 @@ async def get_services_status():
         result["ollama"]["status"] = "disconnected"
         result["ollama"]["error"] = str(e)
 
-    # Check Qdrant
-    try:
-        client = get_qdrant_client()
-        collections = client.get_collections().collections
-        result["qdrant"]["status"] = "connected"
-        result["qdrant"]["collections"] = [c.name for c in collections]
-    except Exception as e:
-        result["qdrant"]["status"] = "disconnected"
-        result["qdrant"]["error"] = str(e)
+    # Check all configured vector databases
+    result["vector_dbs"] = []
+    for db_cfg in cfg.get("vector_dbs", []):
+        db_info = {
+            "id": db_cfg.get("id"),
+            "name": db_cfg.get("name"),
+            "type": db_cfg.get("type"),
+            "enabled": db_cfg.get("enabled"),
+            "url": db_cfg.get("url"),
+        }
+        if db_cfg.get("enabled"):
+            try:
+                adapter = get_vector_db(db_cfg["id"])
+                health = await adapter.health_check()
+                db_info.update(health)
+            except Exception as e:
+                db_info["status"] = "error"
+                db_info["error"] = str(e)
+        else:
+            db_info["status"] = "disabled"
+        result["vector_dbs"].append(db_info)
+
+    # 兼容旧代码：保留顶层 qdrant 字段
+    qdrant_db = next((d for d in result["vector_dbs"] if d["type"] == "qdrant" and d.get("enabled")), None)
+    if qdrant_db:
+        result["qdrant"] = qdrant_db
+    else:
+        result["qdrant"] = {"status": "not_configured"}
 
     return result
 
@@ -147,6 +171,15 @@ def run_database_migration():
             conn.execute(text("ALTER TABLE documents ADD COLUMN mineru_task_id VARCHAR(100)"))
             conn.commit()
             migrations_applied.append("Added mineru_task_id column")
+
+        # Check if vector_db_id column exists
+        try:
+            result = conn.execute(text("SELECT vector_db_id FROM documents LIMIT 1"))
+            migrations_applied.append("vector_db_id column already exists")
+        except Exception:
+            conn.execute(text("ALTER TABLE documents ADD COLUMN vector_db_id VARCHAR(50)"))
+            conn.commit()
+            migrations_applied.append("Added vector_db_id column")
 
     return {
         "detail": "Migration completed",
