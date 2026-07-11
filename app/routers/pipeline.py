@@ -622,15 +622,60 @@ async def _run_extract_only(doc_id: int, _: str = None):
             _running_tasks -= 1
 
 
-async def _run_index_only(doc_id: int, _: str = None):
-    """Run only the index stage."""
+async def _run_index_only(doc_id: int, vector_db_id: str = "default"):
+    """Run only the index stage for a specific vector database."""
     global _running_tasks
     async with _task_semaphore:
         _running_tasks += 1
         try:
-            await _do_index_impl(doc_id)
+            await _do_index_impl(doc_id, vector_db_id)
         finally:
             _running_tasks -= 1
+
+
+async def _process_stage_batch_for_db(stage: str, filter_statuses: list[DocStatus], vector_db_id: str):
+    """Batch processor for indexing to a specific vector database."""
+    global _batch_paused
+    active_tasks = set()
+
+    while not _batch_paused:
+        active_tasks = {t for t in active_tasks if not t.done()}
+        available_slots = MAX_CONCURRENT_TASKS - len(active_tasks)
+
+        if available_slots > 0:
+            db = SessionLocal()
+            try:
+                # 查找需要索引到该数据库的文档
+                # 条件：状态为 meta_done 或 indexed，且未索引到该数据库
+                from app.models import DocumentVectorIndex, IndexStatus
+
+                # 子查询：已索引到该数据库的文档 ID
+                indexed_subq = db.query(DocumentVectorIndex.document_id).filter(
+                    DocumentVectorIndex.vector_db_id == vector_db_id,
+                    DocumentVectorIndex.status == IndexStatus.indexed,
+                ).subquery()
+
+                docs = db.query(Document).filter(
+                    Document.status.in_(filter_statuses),
+                    ~Document.id.in_(indexed_subq),
+                ).limit(available_slots).all()
+
+                if not docs and not active_tasks:
+                    break
+
+                for doc in docs:
+                    task = asyncio.create_task(_run_index_only(doc.id, vector_db_id))
+                    active_tasks.add(task)
+            except Exception as e:
+                print(f"Batch {stage} error: {e}")
+            finally:
+                db.close()
+
+        await asyncio.sleep(2)
+
+    if active_tasks:
+        await asyncio.gather(*active_tasks, return_exceptions=True)
+    _batch_paused = False
 
 
 @router.post("/batch/start-parse")
@@ -658,15 +703,35 @@ async def start_batch_extract(background_tasks: BackgroundTasks, db: Session = D
 
 
 @router.post("/batch/start-index")
-async def start_batch_index(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    """Start batch indexing for all metadata-extracted documents."""
+async def start_batch_index(
+    vector_db_id: str = "default",
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    db: Session = Depends(get_db),
+):
+    """Start batch indexing for all metadata-extracted documents to specified vector database."""
     global _batch_paused
-    count = db.query(Document).filter(Document.status == DocStatus.meta_done).count()
+
+    # 验证向量数据库配置
+    vdb_config = get_vector_db_by_id(vector_db_id)
+    if not vdb_config:
+        raise HTTPException(status_code=400, detail=f"向量数据库 {vector_db_id} 配置不存在")
+
+    # 查找可索引的文档（meta_done 或已有索引但需要索引到新数据库的）
+    count = db.query(Document).filter(
+        Document.status.in_([DocStatus.meta_done, DocStatus.indexed])
+    ).count()
+
     if count == 0:
         return {"detail": "没有待索引的文档", "pending": 0}
+
     _batch_paused = False
-    background_tasks.add_task(_process_stage_batch, "index", [DocStatus.meta_done], _run_index_only)
-    return {"detail": f"批量索引已开始，共 {count} 个文档", "pending": count}
+    background_tasks.add_task(
+        _process_stage_batch_for_db,
+        "index",
+        [DocStatus.meta_done, DocStatus.indexed],
+        vector_db_id,
+    )
+    return {"detail": f"批量索引到 {vector_db_id} 已开始，共 {count} 个文档", "pending": count}
 
 
 @router.post("/batch/start-full")

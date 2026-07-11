@@ -108,14 +108,13 @@
                 </div>
                 <div class="pipeline-step" id="step-index">
                     <h3>4. 索引</h3>
-                    <p>Qdrant 向量库</p>
+                    <p>向量数据库</p>
                 </div>
             </div>
             <div class="action-row" style="flex-wrap:wrap">
                 <button class="btn btn-primary" id="btn-parse" onclick="runStep('parse')">📄 解析 PDF</button>
                 <button class="btn btn-warning" id="btn-extract" onclick="runStep('extract')">📋 提取元数据</button>
-                <button class="btn btn-success" id="btn-index" onclick="runStep('index')">🔍 索引到 Qdrant</button>
-                <button class="btn btn-primary" id="btn-process" onclick="runFullProcess()">🚀 一键处理</button>
+                <div id="index-buttons" style="display:contents"></div>
                 <button class="btn" id="btn-reset" onclick="resetDoc()" style="margin-left:auto">🔄 重置状态</button>
             </div>
         </div>
@@ -150,6 +149,29 @@
         const docId = {{ doc_id }};
         let doc = null;
         let editingMd = false;
+        let vectorDBs = [];
+
+        async function loadVectorDBs() {
+            try {
+                const config = await api.get('/assist/api/config');
+                vectorDBs = (config.vector_dbs || []).filter(db => db.enabled);
+                renderIndexButtons();
+            } catch (err) {
+                console.error('加载向量数据库配置失败:', err);
+            }
+        }
+
+        function renderIndexButtons() {
+            const container = document.getElementById('index-buttons');
+            if (!vectorDBs.length) {
+                container.innerHTML = '<button class="btn btn-success" id="btn-index" onclick="runStep(\'index\')">🔍 索引</button>';
+                return;
+            }
+
+            container.innerHTML = vectorDBs.map(db =>
+                `<button class="btn btn-success" onclick="runIndex('${db.id}')">🔍 索引到 ${db.name || db.id}</button>`
+            ).join('');
+        }
 
         async function loadDocument() {
             try {
@@ -269,16 +291,6 @@
             } else {
                 errorContainer.style.display = 'none';
             }
-
-            // Update buttons
-            const processingStatuses = ['parsing', 'extracting', 'indexing'];
-            if (!processingStatuses.includes(doc.status)) {
-                document.getElementById('btn-parse').disabled = doc.status !== 'uploaded';
-                document.getElementById('btn-extract').disabled = doc.status !== 'markdown_done';
-                document.getElementById('btn-index').disabled = doc.status !== 'meta_done';
-                document.getElementById('btn-process').disabled = doc.status === 'indexed';
-                document.getElementById('btn-reset').disabled = false;
-            }
         }
 
         function renderStatusInfo() {
@@ -319,9 +331,9 @@
             } catch (err) { showToast(err.message, 'error'); }
         }
 
-        async function runFullProcess() {
+        async function runIndex(vectorDbId) {
             try {
-                const result = await api.post(`/assist/api/pipeline/${docId}/process`);
+                const result = await api.post(`/assist/api/pipeline/${docId}/index?vector_db_id=${vectorDbId}`);
                 showToast(result.detail, 'info');
                 startPolling();
             } catch (err) { showToast(err.message, 'error'); }
@@ -410,7 +422,6 @@
         function startPolling() {
             if (pollingTimer) clearInterval(pollingTimer);
             document.getElementById('progress-container').style.display = 'block';
-            updateButtons(true);
             pollingTimer = setInterval(pollStatus, 1000);
         }
 
@@ -420,15 +431,6 @@
                 pollingTimer = null;
             }
             document.getElementById('progress-container').style.display = 'none';
-            updateButtons(false);
-        }
-
-        function updateButtons(disabled) {
-            document.getElementById('btn-parse').disabled = disabled;
-            document.getElementById('btn-extract').disabled = disabled;
-            document.getElementById('btn-index').disabled = disabled;
-            document.getElementById('btn-process').disabled = disabled;
-            document.getElementById('btn-reset').disabled = disabled;
         }
 
         async function pollStatus() {
@@ -455,8 +457,10 @@
             }
         }
 
-        // Init
-        loadDocument();
+        // Init - 先加载向量数据库配置，再加载文档
+        loadVectorDBs().then(() => {
+            loadDocument();
+        });
 
         setTimeout(async () => {
             try {

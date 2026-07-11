@@ -25,10 +25,6 @@
             transition: all 0.2s;
             border: 2px solid transparent;
         }
-        .batch-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
         .batch-btn .icon {
             font-size: 1.5rem;
         }
@@ -37,19 +33,17 @@
             opacity: 0.8;
         }
         .batch-btn-parse { background: #dbeafe; color: #1e40af; border-color: #93c5fd; }
-        .batch-btn-parse:hover:not(:disabled) { background: #bfdbfe; }
+        .batch-btn-parse:hover { background: #bfdbfe; }
         .batch-btn-extract { background: #fef3c7; color: #92400e; border-color: #fcd34d; }
-        .batch-btn-extract:hover:not(:disabled) { background: #fde68a; }
+        .batch-btn-extract:hover { background: #fde68a; }
         .batch-btn-index { background: #ede9fe; color: #5b21b6; border-color: #c4b5fd; }
-        .batch-btn-index:hover:not(:disabled) { background: #ddd6fe; }
-        .batch-btn-full { background: #d1fae5; color: #065f46; border-color: #6ee7b7; }
-        .batch-btn-full:hover:not(:disabled) { background: #a7f3d0; }
+        .batch-btn-index:hover { background: #ddd6fe; }
         .batch-btn-reset { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
-        .batch-btn-reset:hover:not(:disabled) { background: #fecaca; }
+        .batch-btn-reset:hover { background: #fecaca; }
         .batch-btn-hash { background: #e0e7ff; color: #3730a3; border-color: #a5b4fc; }
-        .batch-btn-hash:hover:not(:disabled) { background: #c7d2fe; }
+        .batch-btn-hash:hover { background: #c7d2fe; }
         .batch-btn-reset-index { background: #fce7f3; color: #9d174d; border-color: #f9a8d4; }
-        .batch-btn-reset-index:hover:not(:disabled) { background: #fbcfe8; }
+        .batch-btn-reset-index:hover { background: #fbcfe8; }
         .batch-btn-active {
             border-width: 3px;
             box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
@@ -432,16 +426,6 @@
                         <span>全部已解析任务提取元数据</span>
                         <span class="count" id="count-extract">-</span>
                     </button>
-                    <button class="batch-btn batch-btn-index" id="btn-index" onclick="startBatch('index')">
-                        <span class="icon">🔍</span>
-                        <span>全部已提取任务进行索引</span>
-                        <span class="count" id="count-index">-</span>
-                    </button>
-                    <button class="batch-btn batch-btn-full" id="btn-full" onclick="startBatch('full')">
-                        <span class="icon">🚀</span>
-                        <span>全部上传任务一键处理</span>
-                        <span class="count" id="count-full">-</span>
-                    </button>
                     <button class="batch-btn batch-btn-reset" id="btn-reset-errors" onclick="resetAllErrors()">
                         <span class="icon">🔄</span>
                         <span>重置所有失败任务</span>
@@ -452,11 +436,25 @@
                         <span>全部重算哈希</span>
                         <span class="count" id="count-hash">-</span>
                     </button>
-                    <button class="batch-btn batch-btn-reset-index" id="btn-reset-index" onclick="resetIndex()">
-                        <span class="icon">💥</span>
-                        <span>重置索引</span>
-                        <span class="count" id="count-indexed">-</span>
-                    </button>
+                </div>
+
+                <!-- 向量数据库索引按钮 -->
+                <div style="margin-top:1.5rem">
+                    <h3 style="margin-bottom:1rem;font-size:1rem;color:var(--text-muted)">批量索引到向量数据库</h3>
+                    <div class="batch-controls" id="index-buttons">
+                        <!-- 动态生成 -->
+                    </div>
+                </div>
+
+                <!-- 重置索引 -->
+                <div style="margin-top:1rem">
+                    <div class="batch-controls">
+                        <button class="batch-btn batch-btn-reset-index" id="btn-reset-index" onclick="resetIndex()">
+                            <span class="icon">💥</span>
+                            <span>重置所有索引</span>
+                            <span class="count" id="count-indexed">-</span>
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -619,6 +617,7 @@
         let countdown = 3;
         let autoRefresh = true;
         let allDocs = [];
+        let vectorDBs = [];  // 向量数据库配置列表
 
         // Status colors and labels
         const STATUS_COLORS = {
@@ -703,6 +702,46 @@
         }
 
         // ── 批量处理相关函数 ──
+        async function loadVectorDBs() {
+            try {
+                const config = await api.get('/assist/api/config');
+                vectorDBs = (config.vector_dbs || []).filter(db => db.enabled);
+                renderIndexButtons();
+            } catch (err) {
+                console.error('加载向量数据库配置失败:', err);
+            }
+        }
+
+        function renderIndexButtons() {
+            const container = document.getElementById('index-buttons');
+            if (!vectorDBs.length) {
+                container.innerHTML = '<p style="color:var(--text-muted);font-size:0.875rem">暂无可用的向量数据库</p>';
+                return;
+            }
+
+            // 索引按钮颜色映射
+            const colors = [
+                { bg: '#ede9fe', color: '#5b21b6', border: '#c4b5fd' },
+                { bg: '#dbeafe', color: '#1e40af', border: '#93c5fd' },
+                { bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
+                { bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+                { bg: '#fce7f3', color: '#9d174d', border: '#f9a8d4' },
+            ];
+
+            container.innerHTML = vectorDBs.map((db, i) => {
+                const colorSet = colors[i % colors.length];
+                return `
+                    <button class="batch-btn" id="btn-index-${db.id}"
+                            onclick="startBatchIndex('${db.id}')"
+                            style="background:${colorSet.bg};color:${colorSet.color};border-color:${colorSet.border}">
+                        <span class="icon">🔍</span>
+                        <span>索引到 ${db.name || db.id}</span>
+                        <span class="count" id="count-index-${db.id}">-</span>
+                    </button>
+                `;
+            }).join('');
+        }
+
         async function loadStats() {
             try {
                 const [stats, batchStatus] = await Promise.all([
@@ -721,29 +760,25 @@
                 const extractCount = sc.markdown_done || 0;
                 const indexCount = sc.meta_done || 0;
 
+                // 更新计数显示（按钮始终可点击，不禁用）
                 document.getElementById('count-parse').textContent = `${parseCount} 个待解析`;
                 document.getElementById('count-extract').textContent = `${extractCount} 个待提取`;
-                document.getElementById('count-index').textContent = `${indexCount} 个待索引`;
-                document.getElementById('count-full').textContent = `${parseCount} 个待处理`;
 
                 const errorCount = sc.error || 0;
                 document.getElementById('count-errors').textContent = `${errorCount} 个失败`;
 
-                // Disable buttons with 0 count or when batch is active
-                document.getElementById('btn-parse').disabled = (parseCount === 0) || activeBatch !== null;
-                document.getElementById('btn-extract').disabled = (extractCount === 0) || activeBatch !== null;
-                document.getElementById('btn-index').disabled = (indexCount === 0) || activeBatch !== null;
-                document.getElementById('btn-full').disabled = (parseCount === 0) || activeBatch !== null;
-                document.getElementById('btn-reset-errors').disabled = (errorCount === 0) || activeBatch !== null;
-
-                // Hash button - always enabled
                 document.getElementById('count-hash').textContent = `${stats.documents} 个文档`;
-                document.getElementById('btn-recalc-hash').disabled = activeBatch !== null;
 
-                // Reset index button
                 const indexedCount = stats.status_counts?.indexed || 0;
                 document.getElementById('count-indexed').textContent = `${indexedCount} 个已索引`;
-                document.getElementById('btn-reset-index').disabled = (indexedCount === 0) || activeBatch !== null;
+
+                // Update per-vector-db index counts
+                vectorDBs.forEach(db => {
+                    const el = document.getElementById(`count-index-${db.id}`);
+                    if (el) {
+                        el.textContent = `${indexCount} 个待索引`;
+                    }
+                });
 
                 // Collections
                 const collectionsDiv = document.getElementById('collections-list');
@@ -796,16 +831,21 @@
         }
 
         function updateButtonStates() {
-            const btns = ['btn-parse', 'btn-extract', 'btn-index', 'btn-full', 'btn-reset-errors', 'btn-recalc-hash', 'btn-reset-index'];
-            btns.forEach(id => {
+            const staticBtns = ['btn-parse', 'btn-extract', 'btn-reset-errors', 'btn-recalc-hash', 'btn-reset-index'];
+            const allBtns = [...staticBtns];
+
+            // 添加动态索引按钮
+            vectorDBs.forEach(db => {
+                allBtns.push(`btn-index-${db.id}`);
+            });
+
+            // 只更新活动状态高亮，不禁用按钮
+            allBtns.forEach(id => {
                 const el = document.getElementById(id);
-                if (activeBatch !== null) {
-                    el.disabled = true;
-                    if (id === `btn-${activeBatch}`) {
-                        el.classList.add('batch-btn-active');
-                    } else {
-                        el.classList.remove('batch-btn-active');
-                    }
+                if (!el) return;
+
+                if (activeBatch !== null && (id === `btn-${activeBatch}` || id === activeBatch)) {
+                    el.classList.add('batch-btn-active');
                 } else {
                     el.classList.remove('batch-btn-active');
                 }
@@ -816,8 +856,6 @@
             const endpoints = {
                 'parse': '/assist/api/pipeline/batch/start-parse',
                 'extract': '/assist/api/pipeline/batch/start-extract',
-                'index': '/assist/api/pipeline/batch/start-index',
-                'full': '/assist/api/pipeline/batch/start-full',
             };
 
             try {
@@ -827,6 +865,22 @@
                     return;
                 }
                 activeBatch = type;
+                showToast(result.detail, 'success');
+                updateButtonStates();
+                startBatchPolling();
+            } catch (err) {
+                showToast(err.message, 'error');
+            }
+        }
+
+        async function startBatchIndex(vectorDbId) {
+            try {
+                const result = await api.post(`/assist/api/pipeline/batch/start-index?vector_db_id=${vectorDbId}`);
+                if (result.pending === 0) {
+                    showToast(result.detail, 'info');
+                    return;
+                }
+                activeBatch = `index-${vectorDbId}`;
                 showToast(result.detail, 'success');
                 updateButtonStates();
                 startBatchPolling();
@@ -1159,10 +1213,12 @@
             }
         }
 
-        // Initial load
-        loadStats();
-        loadBatchStatus();
-        loadProcessingTasks();
+        // Initial load - 先加载向量数据库配置，再加载其他数据
+        loadVectorDBs().then(() => {
+            loadStats();
+            loadBatchStatus();
+            loadProcessingTasks();
+        });
     </script>
 </body>
 </html>

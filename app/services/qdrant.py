@@ -66,8 +66,9 @@ class QdrantAdapter(VectorDBAdapter):
             self._client = QdrantClient(url=self.url)
         return self._client
 
-    def get_collection_name(self, user_id: int) -> str:
-        return f"{self.base_collection}_{user_id}"
+    def get_collection_name(self, user_id: int = 0) -> str:
+        # 直接使用配置的集合名，不添加 user_id 后缀
+        return self.base_collection
 
     async def ensure_collection(self, collection_name: str) -> None:
         if collection_name in self._collection_cache:
