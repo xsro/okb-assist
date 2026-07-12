@@ -27,10 +27,33 @@ _task_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 _running_tasks = 0
 _batch_paused = False  # Flag to pause batch processing
 
+# Task tracking - 记录正在运行的任务
+_active_tasks: dict[int, dict] = {}  # doc_id -> {task_type, started_at, status_message}
+
 
 def _get_running_tasks() -> int:
     """Get number of currently running tasks."""
     return _running_tasks
+
+
+def _track_task_start(doc_id: int, task_type: str):
+    """记录任务开始"""
+    _active_tasks[doc_id] = {
+        "task_type": task_type,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "status_message": "正在处理..."
+    }
+
+
+def _track_task_update(doc_id: int, status_message: str):
+    """更新任务状态消息"""
+    if doc_id in _active_tasks:
+        _active_tasks[doc_id]["status_message"] = status_message
+
+
+def _track_task_end(doc_id: int):
+    """记录任务结束"""
+    _active_tasks.pop(doc_id, None)
 
 
 async def _with_semaphore(coro):
@@ -454,51 +477,58 @@ def get_queue_status():
     }
 
 
+@router.get("/tasks/active")
+def get_active_tasks(db: Session = Depends(get_db)):
+    """Get all currently active background tasks."""
+    tasks = []
+    for doc_id, task_info in _active_tasks.items():
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        if doc:
+            tasks.append({
+                "doc_id": doc_id,
+                "doc_title": doc.title or doc.filename or f"文档 {doc_id}",
+                "task_type": task_info["task_type"],
+                "started_at": task_info["started_at"],
+                "status_message": doc.status_message or task_info["status_message"],
+                "status": doc.status.value if isinstance(doc.status, DocStatus) else doc.status,
+            })
+    return {"tasks": tasks, "count": len(tasks)}
+
+
 async def _process_batch():
     """Process all pending documents in batch mode with concurrency."""
     global _batch_paused
 
-    # Track active tasks
-    active_tasks = set()
+    # 一次性查询所有待处理文档
+    db = SessionLocal()
+    try:
+        docs = db.query(Document).filter(
+            Document.status.in_([DocStatus.uploaded, DocStatus.error])
+        ).all()
+        doc_ids = [doc.id for doc in docs]
+    finally:
+        db.close()
 
-    while not _batch_paused:
-        # Clean up completed tasks
-        active_tasks = {t for t in active_tasks if not t.done()}
+    if not doc_ids:
+        _batch_paused = False
+        return
 
-        # Check if we can start more tasks
-        available_slots = MAX_CONCURRENT_TASKS - len(active_tasks)
+    print(f"[Batch full] 开始全流程处理 {len(doc_ids)} 个文档，并发数: {MAX_CONCURRENT_TASKS}")
 
-        if available_slots > 0:
-            db = SessionLocal()
-            try:
-                # Find pending documents
-                docs = db.query(Document).filter(
-                    Document.status.in_([DocStatus.uploaded, DocStatus.error])
-                ).limit(available_slots).all()
+    # 为每个文档创建任务，Semaphore 会自动限制并发
+    async def process_one(doc_id):
+        if _batch_paused:
+            return
+        try:
+            await _run_with_semaphore(doc_id)
+        except Exception as e:
+            print(f"[Batch full] 文档 {doc_id} 处理失败: {e}")
 
-                if not docs and not active_tasks:
-                    # No more documents and no active tasks
-                    break
-
-                for doc in docs:
-                    doc_id = doc.id
-                    # Create task for each document
-                    task = asyncio.create_task(_run_with_semaphore(doc_id))
-                    active_tasks.add(task)
-
-            except Exception as e:
-                print(f"Batch processing error: {e}")
-            finally:
-                db.close()
-
-        # Wait a bit before checking again
-        await asyncio.sleep(2)
-
-    # Wait for all active tasks to complete
-    if active_tasks:
-        await asyncio.gather(*active_tasks, return_exceptions=True)
+    tasks = [process_one(doc_id) for doc_id in doc_ids]
+    await asyncio.gather(*tasks, return_exceptions=True)
 
     _batch_paused = False
+    print(f"[Batch full] 全流程批量处理完成")
 
 
 async def _run_with_semaphore(doc_id: int):
@@ -506,11 +536,13 @@ async def _run_with_semaphore(doc_id: int):
     global _running_tasks
     async with _task_semaphore:
         _running_tasks += 1
+        _track_task_start(doc_id, "full_pipeline")
         try:
             await _do_full_pipeline_impl(doc_id)
         except Exception as e:
             print(f"Pipeline error for doc {doc_id}: {e}")
         finally:
+            _track_task_end(doc_id)
             _running_tasks -= 1
 
 
@@ -561,35 +593,37 @@ async def resume_batch_processing(
 async def _process_stage_batch(stage: str, filter_statuses: list[DocStatus], task_func):
     """Generic stage-specific batch processor with concurrency control."""
     global _batch_paused
-    active_tasks = set()
 
-    while not _batch_paused:
-        active_tasks = {t for t in active_tasks if not t.done()}
-        available_slots = MAX_CONCURRENT_TASKS - len(active_tasks)
+    # 一次性查询所有待处理文档
+    db = SessionLocal()
+    try:
+        docs = db.query(Document).filter(
+            Document.status.in_(filter_statuses)
+        ).all()
+        doc_list = [(doc.id, doc.file_path) for doc in docs]
+    finally:
+        db.close()
 
-        if available_slots > 0:
-            db = SessionLocal()
-            try:
-                docs = db.query(Document).filter(
-                    Document.status.in_(filter_statuses)
-                ).limit(available_slots).all()
+    if not doc_list:
+        _batch_paused = False
+        return
 
-                if not docs and not active_tasks:
-                    break
+    print(f"[Batch {stage}] 开始处理 {len(doc_list)} 个文档，并发数: {MAX_CONCURRENT_TASKS}")
 
-                for doc in docs:
-                    task = asyncio.create_task(task_func(doc.id, doc.file_path if hasattr(doc, 'file_path') else None))
-                    active_tasks.add(task)
-            except Exception as e:
-                print(f"Batch {stage} error: {e}")
-            finally:
-                db.close()
+    # 为每个文档创建任务，Semaphore 会自动限制并发
+    async def process_one(doc_id, file_path):
+        if _batch_paused:
+            return
+        try:
+            await task_func(doc_id, file_path)
+        except Exception as e:
+            print(f"[Batch {stage}] 文档 {doc_id} 处理失败: {e}")
 
-        await asyncio.sleep(2)
+    tasks = [process_one(doc_id, file_path) for doc_id, file_path in doc_list]
+    await asyncio.gather(*tasks, return_exceptions=True)
 
-    if active_tasks:
-        await asyncio.gather(*active_tasks, return_exceptions=True)
     _batch_paused = False
+    print(f"[Batch {stage}] 批量处理完成")
 
 
 async def _run_parse_only(doc_id: int, file_path: str = None):
@@ -597,6 +631,7 @@ async def _run_parse_only(doc_id: int, file_path: str = None):
     global _running_tasks
     async with _task_semaphore:
         _running_tasks += 1
+        _track_task_start(doc_id, "parse")
         try:
             if not file_path:
                 db = SessionLocal()
@@ -608,6 +643,7 @@ async def _run_parse_only(doc_id: int, file_path: str = None):
                     db.close()
             await _do_parse_impl(doc_id, file_path)
         finally:
+            _track_task_end(doc_id)
             _running_tasks -= 1
 
 
@@ -616,9 +652,11 @@ async def _run_extract_only(doc_id: int, _: str = None):
     global _running_tasks
     async with _task_semaphore:
         _running_tasks += 1
+        _track_task_start(doc_id, "extract")
         try:
             await _do_extract_impl(doc_id)
         finally:
+            _track_task_end(doc_id)
             _running_tasks -= 1
 
 
@@ -627,55 +665,57 @@ async def _run_index_only(doc_id: int, vector_db_id: str = "default"):
     global _running_tasks
     async with _task_semaphore:
         _running_tasks += 1
+        _track_task_start(doc_id, "index")
         try:
             await _do_index_impl(doc_id, vector_db_id)
         finally:
+            _track_task_end(doc_id)
             _running_tasks -= 1
 
 
 async def _process_stage_batch_for_db(stage: str, filter_statuses: list[DocStatus], vector_db_id: str):
     """Batch processor for indexing to a specific vector database."""
     global _batch_paused
-    active_tasks = set()
 
-    while not _batch_paused:
-        active_tasks = {t for t in active_tasks if not t.done()}
-        available_slots = MAX_CONCURRENT_TASKS - len(active_tasks)
+    # 一次性查询所有待索引文档
+    db = SessionLocal()
+    try:
+        from app.models import DocumentVectorIndex, IndexStatus
 
-        if available_slots > 0:
-            db = SessionLocal()
-            try:
-                # 查找需要索引到该数据库的文档
-                # 条件：状态为 meta_done 或 indexed，且未索引到该数据库
-                from app.models import DocumentVectorIndex, IndexStatus
+        # 子查询：已索引到该数据库的文档 ID
+        indexed_subq = db.query(DocumentVectorIndex.document_id).filter(
+            DocumentVectorIndex.vector_db_id == vector_db_id,
+            DocumentVectorIndex.status == IndexStatus.indexed,
+        ).subquery()
 
-                # 子查询：已索引到该数据库的文档 ID
-                indexed_subq = db.query(DocumentVectorIndex.document_id).filter(
-                    DocumentVectorIndex.vector_db_id == vector_db_id,
-                    DocumentVectorIndex.status == IndexStatus.indexed,
-                ).subquery()
+        docs = db.query(Document).filter(
+            Document.status.in_(filter_statuses),
+            ~Document.id.in_(indexed_subq),
+        ).all()
+        doc_ids = [doc.id for doc in docs]
+    finally:
+        db.close()
 
-                docs = db.query(Document).filter(
-                    Document.status.in_(filter_statuses),
-                    ~Document.id.in_(indexed_subq),
-                ).limit(available_slots).all()
+    if not doc_ids:
+        _batch_paused = False
+        return
 
-                if not docs and not active_tasks:
-                    break
+    print(f"[Batch {stage}] 开始索引 {len(doc_ids)} 个文档到 {vector_db_id}，并发数: {MAX_CONCURRENT_TASKS}")
 
-                for doc in docs:
-                    task = asyncio.create_task(_run_index_only(doc.id, vector_db_id))
-                    active_tasks.add(task)
-            except Exception as e:
-                print(f"Batch {stage} error: {e}")
-            finally:
-                db.close()
+    # 为每个文档创建任务，Semaphore 会自动限制并发
+    async def process_one(doc_id):
+        if _batch_paused:
+            return
+        try:
+            await _run_index_only(doc_id, vector_db_id)
+        except Exception as e:
+            print(f"[Batch {stage}] 文档 {doc_id} 索引失败: {e}")
 
-        await asyncio.sleep(2)
+    tasks = [process_one(doc_id) for doc_id in doc_ids]
+    await asyncio.gather(*tasks, return_exceptions=True)
 
-    if active_tasks:
-        await asyncio.gather(*active_tasks, return_exceptions=True)
     _batch_paused = False
+    print(f"[Batch {stage}] 批量索引完成")
 
 
 @router.post("/batch/start-parse")

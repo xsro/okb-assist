@@ -464,6 +464,12 @@
                 <div id="processing-tasks" style="color:var(--text-muted)">加载中...</div>
             </div>
 
+            <!-- Active Background Tasks -->
+            <div class="card" style="margin-bottom:1.5rem">
+                <h2 style="margin-bottom:1rem">后台任务 <span id="active-task-count" class="badge" style="font-size:0.75rem;vertical-align:middle">0</span></h2>
+                <div id="active-tasks" style="color:var(--text-muted)">加载中...</div>
+            </div>
+
             <!-- Qdrant Collections -->
             <div class="card">
                 <h2 style="margin-bottom:1rem">Qdrant 集合</h2>
@@ -973,6 +979,7 @@
                 await loadBatchStatus();
                 await loadStats();
                 await loadProcessingTasks();
+                await loadActiveTasks();
 
                 try {
                     const status = await api.get('/assist/api/pipeline/batch/status');
@@ -1003,13 +1010,50 @@
                     <div class="task-item">
                         <div class="task-info">
                             <a href="/assist/detail/${doc.id}" style="font-weight:500">${doc.title || doc.filename || '未命名'}</a>
-                            <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0">ID: ${doc.id}</p>
+                            <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0">ID: ${doc.id} · ${doc.status_message || '处理中...'}</p>
                         </div>
                         <span class="badge badge-${doc.status}">${STATUS_LABELS[doc.status] || doc.status}</span>
                     </div>
                 `).join('');
             } catch (err) {
                 console.error('Processing tasks error:', err);
+            }
+        }
+
+        // ── 后台任务相关函数 ──
+        async function loadActiveTasks() {
+            try {
+                const data = await api.get('/assist/api/pipeline/tasks/active');
+                const container = document.getElementById('active-tasks');
+                const countBadge = document.getElementById('active-task-count');
+
+                countBadge.textContent = data.count;
+
+                if (data.tasks.length === 0) {
+                    container.innerHTML = '<p style="text-align:center;padding:1rem;color:var(--text-muted)">暂无运行中的后台任务</p>';
+                    return;
+                }
+
+                const TASK_TYPE_LABELS = {
+                    'full_pipeline': '全流程处理',
+                    'parse': 'PDF 解析',
+                    'extract': '元数据提取',
+                    'index': '向量索引',
+                };
+
+                container.innerHTML = data.tasks.map(task => `
+                    <div class="task-item">
+                        <div class="task-info">
+                            <a href="/assist/detail/${task.doc_id}" style="font-weight:500">${task.doc_title}</a>
+                            <p style="font-size:0.75rem;color:var(--text-muted);margin:0.25rem 0 0 0">
+                                ID: ${task.doc_id} · ${TASK_TYPE_LABELS[task.task_type] || task.task_type} · ${task.status_message}
+                            </p>
+                        </div>
+                        <span class="badge badge-${task.status}">${STATUS_LABELS[task.status] || task.status}</span>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error('Active tasks error:', err);
             }
         }
 
@@ -1101,7 +1145,7 @@
                 <div class="task-item">
                     <div class="task-info">
                         <div class="task-title">${doc.title || doc.filename || '未命名'}</div>
-                        <div class="task-meta">ID: ${doc.id} · 状态: ${STATUS_LABELS[doc.status] || doc.status}</div>
+                        <div class="task-meta">ID: ${doc.id} · ${doc.status_message || STATUS_LABELS[doc.status] || doc.status}</div>
                         ${formatIndexedDbs(doc.indexed_dbs)}
                     </div>
                     <a href="/assist/doc/${doc.id}" class="btn btn-sm">查看</a>
@@ -1229,6 +1273,7 @@
             loadStats();
             loadBatchStatus();
             loadProcessingTasks();
+            loadActiveTasks();
         });
     </script>
 </body>
