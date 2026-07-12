@@ -340,6 +340,140 @@ def chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> list[str]
     return final_chunks
 
 
+def chunk_text_by_markdown(text: str, chunk_size: int = 1000, min_chunk_size: int = 100) -> list[str]:
+    """根据markdown语义结构切分文本。
+
+    切分策略：
+    1. 按标题（#, ##, ###等）切分，保留标题层级
+    2. 同一章节的内容尽量保持在一起
+    3. 如果章节过长，再按段落细分
+    4. 短章节会与相邻章节合并
+
+    Args:
+        text: markdown文本
+        chunk_size: 目标块大小（字符数）
+        min_chunk_size: 最小块大小，低于此值会与相邻块合并
+    """
+    import re
+
+    if not text or not text.strip():
+        return []
+
+    # 匹配markdown标题的正则表达式
+    header_pattern = re.compile(r'^(#{1,6})\s+(.+)$', re.MULTILINE)
+
+    # 按标题分割文本，保留标题
+    lines = text.split('\n')
+    sections = []
+    current_section = []
+    current_header = ""
+
+    for line in lines:
+        # 检查是否是标题行
+        header_match = header_pattern.match(line)
+        if header_match:
+            # 保存之前的section
+            if current_section:
+                sections.append({
+                    'header': current_header,
+                    'content': '\n'.join(current_section).strip()
+                })
+            # 开始新section
+            current_header = line.strip()
+            current_section = []
+        else:
+            current_section.append(line)
+
+    # 保存最后一个section
+    if current_section:
+        sections.append({
+            'header': current_header,
+            'content': '\n'.join(current_section).strip()
+        })
+
+    # 合并短sections，拆分长sections
+    chunks = []
+    current_chunk_parts = []
+    current_chunk_size = 0
+
+    for section in sections:
+        section_text = section['header'] + '\n' + section['content'] if section['header'] else section['content']
+        section_size = len(section_text)
+
+        # 如果当前section为空，跳过
+        if not section_text.strip():
+            continue
+
+        # 如果加上这个section会超过chunk_size
+        if current_chunk_size + section_size > chunk_size and current_chunk_parts:
+            # 保存当前chunk
+            chunks.append('\n\n'.join(current_chunk_parts))
+            current_chunk_parts = []
+            current_chunk_size = 0
+
+        # 如果单个section就超过chunk_size，需要拆分
+        if section_size > chunk_size:
+            # 先保存之前累积的chunk
+            if current_chunk_parts:
+                chunks.append('\n\n'.join(current_chunk_parts))
+                current_chunk_parts = []
+                current_chunk_size = 0
+
+            # 拆分长section
+            header = section['header']
+            content = section['content']
+            paragraphs = content.split('\n\n')
+            sub_chunk = header + '\n' if header else ''
+
+            for para in paragraphs:
+                para = para.strip()
+                if not para:
+                    continue
+                if len(sub_chunk) + len(para) + 2 <= chunk_size:
+                    sub_chunk += ('\n\n' if sub_chunk and not sub_chunk.endswith('\n') else '') + para
+                else:
+                    if sub_chunk.strip():
+                        chunks.append(sub_chunk.strip())
+                    sub_chunk = (header + '\n\n' if header else '') + para
+
+            if sub_chunk.strip():
+                # 如果剩余部分太短，留给下一个循环合并
+                if len(sub_chunk) < min_chunk_size and chunks:
+                    # 与上一个chunk合并
+                    chunks[-1] = chunks[-1] + '\n\n' + sub_chunk.strip()
+                else:
+                    current_chunk_parts = [sub_chunk.strip()]
+                    current_chunk_size = len(sub_chunk.strip())
+        else:
+            # 正常添加到当前chunk
+            current_chunk_parts.append(section_text)
+            current_chunk_size += section_size
+
+            # 如果当前chunk已经达到合适大小，保存
+            if current_chunk_size >= chunk_size:
+                chunks.append('\n\n'.join(current_chunk_parts))
+                current_chunk_parts = []
+                current_chunk_size = 0
+
+    # 保存最后剩余的chunk
+    if current_chunk_parts:
+        final_text = '\n\n'.join(current_chunk_parts)
+        # 如果太短且有前一个chunk，合并
+        if len(final_text) < min_chunk_size and chunks:
+            chunks[-1] = chunks[-1] + '\n\n' + final_text
+        else:
+            chunks.append(final_text)
+
+    # 后处理：确保每个chunk都有上下文（添加父级标题）
+    if not chunks:
+        return chunks
+
+    # 清理空chunk
+    chunks = [c.strip() for c in chunks if c.strip()]
+
+    return chunks
+
+
 async def get_embeddings_batch(texts: list[str], get_embedding_func) -> list[list[float]]:
     """批量获取 embedding。"""
     try:
@@ -359,6 +493,7 @@ async def index_document(
     metadata: dict,
     get_embedding_func,
     vector_db_id: str = None,
+    use_markdown_chunking: bool = True,
 ) -> str:
     """索引文档到指定的向量数据库。
 
@@ -369,6 +504,7 @@ async def index_document(
         metadata: 元数据
         get_embedding_func: 获取 embedding 的函数
         vector_db_id: 向量数据库 ID，默认使用活跃的向量数据库
+        use_markdown_chunking: 是否使用markdown语义切分（默认True）
     """
     # 获取适配器
     if vector_db_id:
@@ -380,7 +516,12 @@ async def index_document(
     else:
         adapter = _get_default_adapter()
 
-    chunks = chunk_text(markdown_content)
+    # 根据参数选择切分方式
+    if use_markdown_chunking:
+        chunks = chunk_text_by_markdown(markdown_content)
+    else:
+        chunks = chunk_text(markdown_content)
+
     if not chunks:
         return adapter.get_collection_name(user_id)
 
