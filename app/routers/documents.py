@@ -469,6 +469,23 @@ def delete_document(
     return {"detail": "已删除"}
 
 
+@router.head("/{doc_id}/pdf")
+def check_pdf_exists(
+    doc_id: int,
+    db: Session = Depends(get_db),
+):
+    """检查 PDF 文件是否存在（HEAD 请求，不返回文件内容）。"""
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc or not doc.file_path:
+        raise HTTPException(status_code=404, detail="PDF 文件不存在")
+
+    abs_file_path = to_absolute_path(doc.file_path)
+    if not os.path.exists(abs_file_path):
+        raise HTTPException(status_code=404, detail="PDF 文件不存在")
+
+    return Response(status_code=200)
+
+
 @router.get("/{doc_id}/pdf")
 def get_pdf(
     doc_id: int,

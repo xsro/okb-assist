@@ -119,6 +119,22 @@ def check_exists_by_hash(base_url: str, file_hash: str, token: str = None) -> di
     return None
 
 
+def check_pdf_exists(base_url: str, doc_id: int, token: str = None) -> bool:
+    """通过 HEAD 请求检查文档的 PDF 文件是否存在。"""
+    try:
+        headers = {}
+        if token:
+            headers["X-Token"] = token
+        with httpx.Client(timeout=30) as client:
+            resp = client.head(
+                f"{base_url}/assist/api/documents/{doc_id}/pdf",
+                headers=headers,
+            )
+            return resp.status_code == 200
+    except Exception:
+        return False
+
+
 def upload_document(base_url: str, file_path: str, token: str = None) -> dict | None:
     """上传 PDF 文件到服务器。"""
     try:
@@ -328,8 +344,8 @@ def main():
 
             if existing:
                 doc_id = existing["id"]
-                file_path = existing.get("file_path", "")
-                has_pdf = file_path and os.path.exists(file_path)
+                # 通过 HEAD 请求检查服务端 PDF 是否存在
+                has_pdf = check_pdf_exists(args.base_url, doc_id, token)
 
                 if has_pdf:
                     print(f"  跳过: 已存在 (ID: {doc_id})")
