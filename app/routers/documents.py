@@ -493,6 +493,45 @@ def get_pdf(
     )
 
 
+@router.post("/{doc_id}/pdf")
+async def replace_pdf(
+    doc_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: str = Depends(get_current_user),
+):
+    """替换已有文档的 PDF 文件。"""
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="只支持 PDF 文件")
+
+    content = await file.read()
+
+    # 计算新文件哈希
+    import hashlib
+    file_hash = hashlib.sha256(content).hexdigest()
+
+    # 保存文件到 uploads/{id}/{id}.pdf
+    doc_dir = UPLOAD_DIR / str(doc.id)
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    file_path = doc_dir / f"{doc.id}.pdf"
+
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # 更新数据库记录
+    doc.file_path = to_relative_path(str(file_path))
+    doc.file_hash = file_hash
+    doc.status = DocStatus.uploaded
+    db.commit()
+    db.refresh(doc)
+
+    return _doc_to_out(doc, db)
+
+
 @router.get("/{doc_id}/markdown")
 def get_markdown(
     doc_id: int,
