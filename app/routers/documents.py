@@ -293,6 +293,8 @@ def list_documents(
     status_filter: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = "asc",
     db: Session = Depends(get_db),
 ):
     query = db.query(Document)
@@ -312,9 +314,30 @@ def list_documents(
     # Get total count
     total = query.count()
 
+    # Apply sorting
+    _SORTABLE_COLUMNS = {
+        "id": Document.id,
+        "title": Document.title,
+        "authors": Document.authors,
+        "year": Document.year,
+        "doc_type": Document.doc_type,
+        "status": Document.status,
+        "journal": Document.journal,
+        "language": Document.language,
+        "doi": Document.doi,
+        "category": Document.category,
+        "created_at": Document.created_at,
+        "updated_at": Document.updated_at,
+    }
+    sort_col = _SORTABLE_COLUMNS.get(sort_by, Document.created_at)
+    if sort_order == "asc":
+        order_clause = sort_col.asc().nullslast()
+    else:
+        order_clause = sort_col.desc().nullsfirst()
+
     # Apply pagination
     offset = (page - 1) * page_size
-    docs = query.order_by(Document.created_at.desc()).offset(offset).limit(page_size).all()
+    docs = query.order_by(order_clause).offset(offset).limit(page_size).all()
 
     return {
         "items": [_doc_to_out(d, db) for d in docs],

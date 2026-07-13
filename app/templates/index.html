@@ -6,6 +6,7 @@
     <title>文献列表 - OKB-Assist</title>
     <link rel="stylesheet" href="/assist/static/style.css">
     <style>
+        /* Pagination */
         .pagination {
             display: flex;
             justify-content: center;
@@ -53,6 +54,206 @@
             border-radius: 4px;
             font-size: 0.875rem;
         }
+
+        /* Sort */
+        th.sortable {
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+            position: relative;
+            padding-right: 1.5rem !important;
+        }
+        th.sortable:hover {
+            color: var(--primary);
+        }
+        th.sortable .sort-arrow {
+            position: absolute;
+            right: 0.4rem;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 0.7rem;
+            opacity: 0.3;
+        }
+        th.sortable.sort-asc .sort-arrow,
+        th.sortable.sort-desc .sort-arrow {
+            opacity: 1;
+            color: var(--primary);
+        }
+
+        /* Column config dropdown */
+        .col-config-wrapper {
+            position: relative;
+            display: inline-block;
+        }
+        .col-config-dropdown {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 100%;
+            margin-top: 0.5rem;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.75rem;
+            min-width: 220px;
+            max-height: 400px;
+            overflow-y: auto;
+            z-index: 100;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .col-config-dropdown.show {
+            display: block;
+        }
+        .col-config-dropdown label {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.35rem 0.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: background 0.15s;
+        }
+        .col-config-dropdown label:hover {
+            background: var(--bg);
+        }
+        .col-config-dropdown input[type="checkbox"] {
+            accent-color: var(--primary);
+        }
+        .col-config-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .col-config-header span {
+            font-weight: 600;
+            font-size: 0.85rem;
+        }
+        .col-config-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        .col-config-actions button {
+            font-size: 0.75rem;
+            padding: 0.2rem 0.5rem;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            background: var(--bg);
+            cursor: pointer;
+        }
+
+        /* Table enhancements */
+        table {
+            table-layout: fixed;
+            width: 100%;
+        }
+        th, td {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            position: relative;
+        }
+
+        /* Column resize handle */
+        .col-resize-handle {
+            position: absolute;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            width: 5px;
+            cursor: col-resize;
+            z-index: 10;
+            user-select: none;
+        }
+        .col-resize-handle:hover,
+        .col-resize-handle.active {
+            background: var(--primary);
+            opacity: 0.4;
+        }
+        /* Prevent sort click when dragging resize handle */
+        th.sortable {
+            position: relative;
+        }
+
+        td.col-title-cell {
+            font-weight: 500;
+            color: var(--primary);
+            cursor: pointer;
+        }
+        td.col-title-cell:hover {
+            text-decoration: underline;
+        }
+        td.col-abstract-cell {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            line-height: 1.4;
+        }
+        td.col-keywords-cell {
+            font-size: 0.75rem;
+        }
+        td.col-keywords-cell .kw-badge {
+            display: inline-block;
+            padding: 0.1rem 0.4rem;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            margin: 0.1rem 0.15rem;
+            font-size: 0.7rem;
+            max-width: 100px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        td.col-doi-cell {
+            font-size: 0.75rem;
+            font-family: monospace;
+        }
+        td.col-doi-cell a {
+            color: var(--text-muted);
+        }
+        td.col-doi-cell a:hover {
+            color: var(--primary);
+        }
+        td.col-indexed-cell {
+            font-size: 0.75rem;
+        }
+        .idx-badge {
+            display: inline-block;
+            padding: 0.1rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.65rem;
+            font-weight: 600;
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        /* Language flag */
+        .lang-flag {
+            font-size: 0.85rem;
+        }
+
+        /* Toolbar */
+        .toolbar-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            margin-bottom: 1rem;
+        }
+
+        /* Close dropdown on outside click */
+        .col-config-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 99;
+        }
+        .col-config-overlay.show {
+            display: block;
+        }
     </style>
 </head>
 <body>
@@ -64,6 +265,7 @@
     </header>
 
     <main class="container">
+        <!-- Search & Filter -->
         <div class="search-bar">
             <input type="text" id="search-input" class="form-control" placeholder="搜索标题、作者、文件名...">
             <select id="status-filter" class="form-control">
@@ -81,7 +283,8 @@
         </div>
 
         <div class="card">
-            <div class="page-toolbar" style="margin-bottom:1rem">
+            <!-- Toolbar: page size + column config -->
+            <div class="toolbar-row">
                 <div class="page-size-select">
                     <span>每页显示</span>
                     <select id="page-size" onchange="changePageSize()">
@@ -91,25 +294,35 @@
                         <option value="200">200</option>
                     </select>
                     <span>条</span>
+                    <span style="margin-left:1rem" class="pagination-info" id="pagination-info">-</span>
                 </div>
-                <div class="pagination-info" id="pagination-info">-</div>
+                <div style="display:flex;gap:0.5rem;align-items:center">
+                    <div class="col-config-wrapper">
+                        <button class="btn btn-sm" onclick="toggleColConfig()">⚙️ 显示列</button>
+                        <div class="col-config-overlay" id="col-overlay" onclick="toggleColConfig()"></div>
+                        <div class="col-config-dropdown" id="col-dropdown">
+                            <div class="col-config-header">
+                                <span>选择显示列</span>
+                                <div class="col-config-actions">
+                                    <button onclick="colSelectAll()">全选</button>
+                                    <button onclick="colSelectDefault()">默认</button>
+                                    <button onclick="resetColumnWidths()">重置列宽</button>
+                                </div>
+                            </div>
+                            <div id="col-checkboxes"></div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
+            <!-- Table -->
             <div class="table-container">
                 <table>
                     <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>标题</th>
-                            <th>作者</th>
-                            <th>年份</th>
-                            <th>类型</th>
-                            <th>状态</th>
-                            <th>操作</th>
-                        </tr>
+                        <tr id="table-head"></tr>
                     </thead>
                     <tbody id="doc-list">
-                        <tr><td colspan="7" style="text-align:center;color:var(--text-muted)">加载中...</td></tr>
+                        <tr><td colspan="20" style="text-align:center;color:var(--text-muted)">加载中...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -120,16 +333,272 @@
 
     <script src="/assist/static/app.js"></script>
     <script>
+        // ========== Column Definitions ==========
+        const ALL_COLUMNS = [
+            { key: 'id',          label: 'ID',        sortable: true,  default: true,  field: 'id' },
+            { key: 'title',       label: '标题',      sortable: true,  default: true,  field: 'title' },
+            { key: 'authors',     label: '作者',      sortable: true,  default: true,  field: 'authors' },
+            { key: 'year',        label: '年份',      sortable: true,  default: true,  field: 'year' },
+            { key: 'doc_type',    label: '类型',      sortable: true,  default: true,  field: 'doc_type' },
+            { key: 'journal',     label: '期刊/会议', sortable: true,  default: true,  field: 'journal' },
+            { key: 'language',    label: '语言',      sortable: true,  default: false, field: 'language' },
+            { key: 'doi',         label: 'DOI',       sortable: true,  default: false, field: 'doi' },
+            { key: 'keywords',    label: '关键词',    sortable: false, default: false, field: 'keywords' },
+            { key: 'abstract',    label: '摘要',      sortable: false, default: false, field: 'abstract' },
+            { key: 'category',    label: '分类',      sortable: true,  default: false, field: 'category' },
+            { key: 'indexed',     label: '索引状态',  sortable: false, default: false, field: 'indexed_dbs' },
+            { key: 'status',      label: '状态',      sortable: true,  default: true,  field: 'status' },
+            { key: 'created_at',  label: '创建时间',  sortable: true,  default: false, field: 'created_at' },
+            { key: 'updated_at',  label: '更新时间',  sortable: true,  default: false, field: 'updated_at' },
+            { key: 'actions',     label: '操作',      sortable: false, default: true,  fixed: true },
+        ];
+
+        const LANG_FLAGS = {
+            'en': '🇬🇧', 'zh': '🇨🇳', 'ja': '🇯🇵', 'ko': '🇰🇷',
+            'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸', 'pt': '🇧🇷',
+            'ru': '🇷🇺', 'ar': '🇸🇦', 'it': '🇮🇹', 'nl': '🇳🇱',
+            'pl': '🇵🇱', 'th': '🇹🇭', 'vi': '🇻🇳', 'tr': '🇹🇷',
+        };
+        const LANG_NAMES = {
+            'en': 'EN', 'zh': '中文', 'ja': '日', 'ko': '韩',
+            'fr': '法', 'de': '德', 'es': '西', 'pt': '葡',
+            'ru': '俄', 'ar': '阿', 'it': '意', 'nl': '荷',
+            'pl': '波', 'th': '泰', 'vi': '越', 'tr': '土',
+        };
+
+        // ========== State ==========
         let currentPage = 1;
         let pageSize = 50;
         let totalPages = 1;
         let totalDocs = 0;
+        let sort_by = 'created_at';
+        let sort_order = 'desc';
+        let visibleColumns = [];
+        let columnWidths = {};
 
+        // ========== Column Widths ==========
+        const DEFAULT_COL_WIDTHS = {
+            id: 50, title: 250, authors: 140, year: 60, doc_type: 80,
+            journal: 140, language: 70, doi: 120, keywords: 140,
+            abstract: 200, category: 90, indexed: 100, status: 80,
+            created_at: 100, updated_at: 100, actions: 120,
+        };
+
+        function loadColumnWidths() {
+            const saved = localStorage.getItem('okb_column_widths');
+            if (saved) {
+                try { columnWidths = JSON.parse(saved); } catch { columnWidths = {}; }
+            }
+        }
+
+        function saveColumnWidths() {
+            localStorage.setItem('okb_column_widths', JSON.stringify(columnWidths));
+        }
+
+        function getColWidth(key) {
+            return columnWidths[key] || DEFAULT_COL_WIDTHS[key] || 120;
+        }
+
+        // ========== Column Config ==========
+        function loadVisibleColumns() {
+            const saved = localStorage.getItem('okb_visible_columns');
+            if (saved) {
+                try {
+                    visibleColumns = JSON.parse(saved);
+                    // Validate: ensure all keys exist
+                    const validKeys = ALL_COLUMNS.map(c => c.key);
+                    visibleColumns = visibleColumns.filter(k => validKeys.includes(k));
+                } catch {
+                    visibleColumns = getDefaultColumns();
+                }
+            } else {
+                visibleColumns = getDefaultColumns();
+            }
+        }
+
+        function getDefaultColumns() {
+            return ALL_COLUMNS.filter(c => c.default || c.fixed).map(c => c.key);
+        }
+
+        function saveVisibleColumns() {
+            localStorage.setItem('okb_visible_columns', JSON.stringify(visibleColumns));
+        }
+
+        function renderColCheckboxes() {
+            const container = document.getElementById('col-checkboxes');
+            container.innerHTML = ALL_COLUMNS.filter(c => !c.fixed).map(col => `
+                <label>
+                    <input type="checkbox" value="${col.key}" ${visibleColumns.includes(col.key) ? 'checked' : ''}
+                           onchange="toggleColumn('${col.key}', this.checked)">
+                    ${col.label}
+                </label>
+            `).join('');
+        }
+
+        function toggleColumn(key, show) {
+            if (show && !visibleColumns.includes(key)) {
+                visibleColumns.push(key);
+            } else if (!show) {
+                visibleColumns = visibleColumns.filter(k => k !== key);
+            }
+            saveVisibleColumns();
+            renderTableHead();
+            loadDocuments();
+        }
+
+        function colSelectAll() {
+            visibleColumns = ALL_COLUMNS.map(c => c.key);
+            saveVisibleColumns();
+            renderColCheckboxes();
+            renderTableHead();
+            loadDocuments();
+        }
+
+        function colSelectDefault() {
+            visibleColumns = getDefaultColumns();
+            saveVisibleColumns();
+            renderColCheckboxes();
+            renderTableHead();
+            loadDocuments();
+        }
+
+        function toggleColConfig() {
+            const dropdown = document.getElementById('col-dropdown');
+            const overlay = document.getElementById('col-overlay');
+            dropdown.classList.toggle('show');
+            overlay.classList.toggle('show');
+        }
+
+        function resetColumnWidths() {
+            columnWidths = {};
+            localStorage.removeItem('okb_column_widths');
+            renderTableHead();
+            loadDocuments();
+            showToast('列宽已重置', 'info');
+        }
+
+        // ========== Sort ==========
+        function toggleSort(field) {
+            if (sort_by === field) {
+                sort_order = sort_order === 'asc' ? 'desc' : 'asc';
+            } else {
+                sort_by = field;
+                sort_order = 'asc';
+            }
+            // Save sort preference
+            localStorage.setItem('okb_sort_by', sort_by);
+            localStorage.setItem('okb_sort_order', sort_order);
+            currentPage = 1;
+            loadDocuments();
+        }
+
+        function loadSortPreference() {
+            const saved_by = localStorage.getItem('okb_sort_by');
+            const saved_order = localStorage.getItem('okb_sort_order');
+            if (saved_by) sort_by = saved_by;
+            if (saved_order) sort_order = saved_order;
+        }
+
+        // ========== Render Table Head ==========
+        function renderTableHead() {
+            const thead = document.getElementById('table-head');
+            const cols = ALL_COLUMNS.filter(c => visibleColumns.includes(c.key) || c.fixed);
+
+            thead.innerHTML = cols.map(col => {
+                const w = getColWidth(col.key);
+                const resizeHandle = `<div class="col-resize-handle" data-col="${col.key}" onmousedown="startResize(event, '${col.key}')"></div>`;
+                if (!col.sortable) {
+                    return `<th style="width:${w}px">${col.label}${resizeHandle}</th>`;
+                }
+                const isCurrentSort = sort_by === col.field;
+                const arrowClass = isCurrentSort ? (sort_order === 'asc' ? 'sort-asc' : 'sort-desc') : '';
+                const arrow = isCurrentSort ? (sort_order === 'asc' ? '▲' : '▼') : '⇅';
+                return `<th class="sortable ${arrowClass}" style="width:${w}px" onclick="toggleSort('${col.field}')">
+                    ${col.label}<span class="sort-arrow">${arrow}</span>${resizeHandle}
+                </th>`;
+            }).join('');
+
+            // Apply widths to body cells too
+            applyColWidthsToBody(cols);
+        }
+
+        function applyColWidthsToBody(cols) {
+            const rows = document.querySelectorAll('#doc-list tr');
+            rows.forEach(row => {
+                const cells = row.children;
+                for (let i = 0; i < cells.length && i < cols.length; i++) {
+                    cells[i].style.width = getColWidth(cols[i].key) + 'px';
+                }
+            });
+        }
+
+        // ========== Column Resize ==========
+        let resizeState = null;
+
+        function startResize(e, colKey) {
+            e.preventDefault();
+            e.stopPropagation(); // Prevent sort click
+
+            const th = e.target.closest('th');
+            const startX = e.clientX;
+            const startWidth = th.offsetWidth;
+
+            resizeState = { colKey, th, startX, startWidth };
+            e.target.classList.add('active');
+
+            document.addEventListener('mousemove', onResizeMove);
+            document.addEventListener('mouseup', onResizeEnd);
+            // Prevent text selection while dragging
+            document.body.style.userSelect = 'none';
+            document.body.style.cursor = 'col-resize';
+        }
+
+        function onResizeMove(e) {
+            if (!resizeState) return;
+            const diff = e.clientX - resizeState.startX;
+            const newWidth = Math.max(40, resizeState.startWidth + diff);
+            resizeState.th.style.width = newWidth + 'px';
+
+            // Update all cells in this column
+            const cols = ALL_COLUMNS.filter(c => visibleColumns.includes(c.key) || c.fixed);
+            const colIdx = cols.findIndex(c => c.key === resizeState.colKey);
+            if (colIdx >= 0) {
+                const rows = document.querySelectorAll('#doc-list tr');
+                rows.forEach(row => {
+                    if (row.children[colIdx]) {
+                        row.children[colIdx].style.width = newWidth + 'px';
+                    }
+                });
+            }
+        }
+
+        function onResizeEnd(e) {
+            if (!resizeState) return;
+            const diff = e.clientX - resizeState.startX;
+            const newWidth = Math.max(40, resizeState.startWidth + diff);
+
+            // Save the new width
+            columnWidths[resizeState.colKey] = newWidth;
+            saveColumnWidths();
+
+            // Cleanup
+            const handle = resizeState.th.querySelector('.col-resize-handle');
+            if (handle) handle.classList.remove('active');
+
+            resizeState = null;
+            document.removeEventListener('mousemove', onResizeMove);
+            document.removeEventListener('mouseup', onResizeEnd);
+            document.body.style.userSelect = '';
+            document.body.style.cursor = '';
+        }
+
+        // ========== Load & Render ==========
         async function loadDocuments() {
             const q = document.getElementById('search-input').value;
             const status = document.getElementById('status-filter').value;
 
             let url = `/assist/api/documents/?page=${currentPage}&page_size=${pageSize}`;
+            url += `&sort_by=${encodeURIComponent(sort_by)}&sort_order=${encodeURIComponent(sort_order)}`;
             if (q) url += `&q=${encodeURIComponent(q)}`;
             if (status) url += `&status_filter=${encodeURIComponent(status)}`;
 
@@ -149,40 +618,138 @@
 
         function renderDocuments(docs) {
             const tbody = document.getElementById('doc-list');
+            const cols = ALL_COLUMNS.filter(c => visibleColumns.includes(c.key) || c.fixed);
 
             if (docs.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">暂无文献</td></tr>';
+                tbody.innerHTML = `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-muted)">暂无文献</td></tr>`;
                 return;
             }
 
             tbody.innerHTML = docs.map(doc => {
-                const statusHtml = doc.status === 'error' && doc.status_message
-                    ? `<span class="badge badge-error" title="${escapeHtml(doc.status_message)}" style="cursor:help">⚠️ 错误</span>`
-                    : statusBadge(doc.status);
+                const cells = cols.map(col => renderCell(col, doc)).join('');
+                return `<tr>${cells}</tr>`;
+            }).join('');
 
-                return `
-                <tr>
-                    <td style="color:var(--text-muted);font-size:0.75rem">${doc.id}</td>
-                    <td>${doc.title || doc.filename || '-'}</td>
-                    <td>${formatAuthors(doc.authors)}</td>
-                    <td>${doc.year || '-'}</td>
-                    <td>${doc.doc_type || '-'}</td>
-                    <td>${statusHtml}</td>
-                    <td>
+            // Apply column widths to body cells
+            applyColWidthsToBody(cols);
+        }
+
+        function renderCell(col, doc) {
+            switch (col.key) {
+                case 'id':
+                    return `<td style="color:var(--text-muted);font-size:0.75rem">${doc.id}</td>`;
+
+                case 'title':
+                    return `<td class="col-title-cell" onclick="window.location.href='/assist/detail/${doc.id}'" title="${escapeHtml(doc.title || doc.filename || '')}">${escapeHtml(doc.title || doc.filename || '-')}</td>`;
+
+                case 'authors':
+                    return `<td title="${escapeHtml(doc.authors || '')}">${formatAuthors(doc.authors)}</td>`;
+
+                case 'year':
+                    return `<td>${doc.year || '-'}</td>`;
+
+                case 'doc_type':
+                    return `<td>${doc.doc_type || '-'}</td>`;
+
+                case 'journal':
+                    return `<td title="${escapeHtml(doc.journal || '')}">${escapeHtml(doc.journal || '-')}</td>`;
+
+                case 'language':
+                    if (!doc.language) return `<td>-</td>`;
+                    const flag = LANG_FLAGS[doc.language] || '🌐';
+                    const langName = LANG_NAMES[doc.language] || doc.language;
+                    return `<td><span class="lang-flag">${flag}</span> ${langName}</td>`;
+
+                case 'doi':
+                    if (!doc.doi) return `<td>-</td>`;
+                    const doiUrl = doc.doi.startsWith('http') ? doc.doi : `https://doi.org/${doc.doi}`;
+                    return `<td class="col-doi-cell"><a href="${doiUrl}" target="_blank" title="${escapeHtml(doc.doi)}">${escapeHtml(truncate(doc.doi, 20))}</a></td>`;
+
+                case 'keywords':
+                    if (!doc.keywords) return `<td>-</td>`;
+                    try {
+                        const kws = JSON.parse(doc.keywords);
+                        if (Array.isArray(kws)) {
+                            const shown = kws.slice(0, 3).map(k => `<span class="kw-badge" title="${escapeHtml(k)}">${escapeHtml(k)}</span>`).join('');
+                            const more = kws.length > 3 ? `<span style="color:var(--text-muted);font-size:0.7rem">+${kws.length - 3}</span>` : '';
+                            return `<td class="col-keywords-cell">${shown}${more}</td>`;
+                        }
+                    } catch {}
+                    return `<td>${escapeHtml(doc.keywords)}</td>`;
+
+                case 'abstract':
+                    if (!doc.abstract) return `<td>-</td>`;
+                    return `<td class="col-abstract-cell" title="${escapeHtml(doc.abstract)}">${escapeHtml(truncate(doc.abstract, 80))}</td>`;
+
+                case 'category':
+                    return `<td>${escapeHtml(doc.category || '-')}</td>`;
+
+                case 'indexed':
+                    if (!doc.indexed_dbs || !doc.indexed_dbs.length) return `<td style="color:var(--text-muted)">-</td>`;
+                    return `<td class="col-indexed-cell">${doc.indexed_dbs.map(db => `<span class="idx-badge">${escapeHtml(db)}</span>`).join(' ')}</td>`;
+
+                case 'status':
+                    const statusHtml = doc.status === 'error' && doc.status_message
+                        ? `<span class="badge badge-error" title="${escapeHtml(doc.status_message)}" style="cursor:help">⚠️ 错误</span>`
+                        : statusBadge(doc.status);
+                    return `<td>${statusHtml}</td>`;
+
+                case 'created_at':
+                    return `<td style="font-size:0.8rem;color:var(--text-muted)">${formatDate(doc.created_at)}</td>`;
+
+                case 'updated_at':
+                    return `<td style="font-size:0.8rem;color:var(--text-muted)">${formatDate(doc.updated_at)}</td>`;
+
+                case 'actions':
+                    return `<td>
                         <div class="btn-row">
                             <a href="/assist/detail/${doc.id}" class="btn btn-sm btn-primary">查看</a>
                             <a href="/assist/doc/${doc.id}" class="btn btn-sm">管理</a>
                         </div>
-                    </td>
-                </tr>
-            `}).join('');
+                    </td>`;
+
+                default:
+                    return `<td>-</td>`;
+            }
         }
 
+        // ========== Helpers ==========
         function escapeHtml(str) {
             if (!str) return '';
             return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
         }
 
+        function truncate(str, len) {
+            if (!str) return '';
+            return str.length > len ? str.substring(0, len) + '...' : str;
+        }
+
+        function formatAuthors(authors) {
+            if (!authors) return '-';
+            try {
+                const arr = JSON.parse(authors);
+                if (Array.isArray(arr)) {
+                    const text = arr.length > 2 ? arr.slice(0, 2).join(', ') + '...' : arr.join(', ');
+                    return `<span title="${escapeHtml(arr.join(', '))}">${escapeHtml(text)}</span>`;
+                }
+            } catch {}
+            return escapeHtml(authors);
+        }
+
+        function formatDate(iso) {
+            if (!iso) return '-';
+            try {
+                const d = new Date(iso);
+                const y = d.getFullYear();
+                const m = String(d.getMonth() + 1).padStart(2, '0');
+                const day = String(d.getDate()).padStart(2, '0');
+                return `${y}-${m}-${day}`;
+            } catch {
+                return iso.substring(0, 10);
+            }
+        }
+
+        // ========== Pagination ==========
         function renderPagination() {
             const container = document.getElementById('pagination');
             if (totalPages <= 1) {
@@ -191,43 +758,30 @@
             }
 
             let html = '';
-
-            // Previous button
             html += `<button onclick="goToPage(${currentPage - 1})" ${currentPage <= 1 ? 'disabled' : ''}>◀</button>`;
 
-            // Page numbers
             const maxVisible = 7;
             let startPage = Math.max(1, currentPage - Math.floor(maxVisible / 2));
             let endPage = Math.min(totalPages, startPage + maxVisible - 1);
-
             if (endPage - startPage < maxVisible - 1) {
                 startPage = Math.max(1, endPage - maxVisible + 1);
             }
 
-            // First page
             if (startPage > 1) {
                 html += `<button onclick="goToPage(1)">1</button>`;
-                if (startPage > 2) {
-                    html += `<span style="padding:0 0.5rem">...</span>`;
-                }
+                if (startPage > 2) html += `<span style="padding:0 0.5rem">...</span>`;
             }
 
-            // Page buttons
             for (let i = startPage; i <= endPage; i++) {
                 html += `<button onclick="goToPage(${i})" class="${i === currentPage ? 'active' : ''}">${i}</button>`;
             }
 
-            // Last page
             if (endPage < totalPages) {
-                if (endPage < totalPages - 1) {
-                    html += `<span style="padding:0 0.5rem">...</span>`;
-                }
+                if (endPage < totalPages - 1) html += `<span style="padding:0 0.5rem">...</span>`;
                 html += `<button onclick="goToPage(${totalPages})">${totalPages}</button>`;
             }
 
-            // Next button
             html += `<button onclick="goToPage(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled' : ''}>▶</button>`;
-
             container.innerHTML = html;
         }
 
@@ -251,17 +805,7 @@
             loadDocuments();
         }
 
-        function formatAuthors(authors) {
-            if (!authors) return '-';
-            try {
-                const arr = JSON.parse(authors);
-                return Array.isArray(arr) ? arr.join(', ') : authors;
-            } catch {
-                return authors;
-            }
-        }
-
-        // Search with debounce
+        // ========== Search with debounce ==========
         let searchTimer;
         document.getElementById('search-input').addEventListener('input', () => {
             clearTimeout(searchTimer);
@@ -276,7 +820,12 @@
             loadDocuments();
         });
 
-        // Load on page ready
+        // ========== Init ==========
+        loadSortPreference();
+        loadColumnWidths();
+        loadVisibleColumns();
+        renderColCheckboxes();
+        renderTableHead();
         loadDocuments();
     </script>
 </body>

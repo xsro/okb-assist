@@ -30,6 +30,21 @@ _batch_paused = False  # Flag to pause batch processing
 # Task tracking - 记录正在运行的任务
 _active_tasks: dict[int, dict] = {}  # doc_id -> {task_type, started_at, status_message}
 
+# Batch progress tracking - 批量任务整体进度
+_batch_progress: dict = {
+    "active": False,        # 是否有批量任务在运行
+    "stage": "",            # 当前阶段: index / parse / extract
+    "vector_db_id": "",     # 索引目标数据库
+    "total": 0,             # 总文档数
+    "processed": 0,         # 已处理数
+    "current_batch": 0,     # 当前第几批
+    "total_batches": 0,     # 总批数
+    "batch_size": 0,        # 每批大小
+    "pause_seconds": 0,     # 批间暂停秒数
+    "started_at": None,     # 开始时间
+    "errors": 0,            # 失败数
+}
+
 
 def _get_running_tasks() -> int:
     """Get number of currently running tasks."""
@@ -673,11 +688,24 @@ async def _run_index_only(doc_id: int, vector_db_id: str = "default"):
             _running_tasks -= 1
 
 
-async def _process_stage_batch_for_db(stage: str, filter_statuses: list[DocStatus], vector_db_id: str):
-    """Batch processor for indexing to a specific vector database."""
-    global _batch_paused
+async def _process_stage_batch_for_db(
+    stage: str,
+    filter_statuses: list[DocStatus],
+    vector_db_id: str,
+    limit: int = 0,
+    batch_size: int = 0,
+    pause_seconds: int = 0,
+):
+    """Batch processor for indexing to a specific vector database.
 
-    # 一次性查询所有待索引文档
+    Args:
+        limit: 最多处理多少个文档，0 表示不限制
+        batch_size: 每批处理多少个文档，0 表示不分批（全部同时处理）
+        pause_seconds: 每批之间暂停多少秒
+    """
+    global _batch_paused, _batch_progress
+
+    # 查询待索引文档
     db = SessionLocal()
     try:
         from app.models import DocumentVectorIndex, IndexStatus
@@ -688,34 +716,110 @@ async def _process_stage_batch_for_db(stage: str, filter_statuses: list[DocStatu
             DocumentVectorIndex.status == IndexStatus.indexed,
         ).subquery()
 
-        docs = db.query(Document).filter(
+        query = db.query(Document).filter(
             Document.status.in_(filter_statuses),
             ~Document.id.in_(indexed_subq),
-        ).all()
+        )
+
+        # 按 ID 排序，确保顺序稳定
+        query = query.order_by(Document.id)
+
+        if limit > 0:
+            query = query.limit(limit)
+
+        docs = query.all()
         doc_ids = [doc.id for doc in docs]
     finally:
         db.close()
 
     if not doc_ids:
         _batch_paused = False
+        _batch_progress["active"] = False
         return
 
-    print(f"[Batch {stage}] 开始索引 {len(doc_ids)} 个文档到 {vector_db_id}，并发数: {MAX_CONCURRENT_TASKS}")
+    total = len(doc_ids)
+    effective_batch_size = batch_size if batch_size > 0 else total
+    num_batches = (total + effective_batch_size - 1) // effective_batch_size
 
-    # 为每个文档创建任务，Semaphore 会自动限制并发
-    async def process_one(doc_id):
-        if _batch_paused:
-            return
-        try:
-            await _run_index_only(doc_id, vector_db_id)
-        except Exception as e:
-            print(f"[Batch {stage}] 文档 {doc_id} 索引失败: {e}")
+    # 初始化进度
+    _batch_progress.update({
+        "active": True,
+        "stage": stage,
+        "vector_db_id": vector_db_id,
+        "total": total,
+        "processed": 0,
+        "current_batch": 0,
+        "total_batches": num_batches,
+        "batch_size": batch_size,
+        "pause_seconds": pause_seconds,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "errors": 0,
+    })
 
-    tasks = [process_one(doc_id) for doc_id in doc_ids]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    error_count = 0
+
+    if batch_size <= 0 or batch_size >= total:
+        # 不分批，一次性处理
+        print(f"[Batch {stage}] 开始索引 {total} 个文档到 {vector_db_id}，并发数: {MAX_CONCURRENT_TASKS}")
+        _batch_progress["current_batch"] = 1
+        _batch_progress["total_batches"] = 1
+
+        async def process_one(doc_id):
+            nonlocal error_count
+            if _batch_paused:
+                return
+            try:
+                await _run_index_only(doc_id, vector_db_id)
+            except Exception as e:
+                error_count += 1
+                print(f"[Batch {stage}] 文档 {doc_id} 索引失败: {e}")
+
+        tasks = [process_one(doc_id) for doc_id in doc_ids]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        _batch_progress["processed"] = total
+        _batch_progress["errors"] = error_count
+    else:
+        # 分批处理
+        batches = [doc_ids[i:i + batch_size] for i in range(0, total, batch_size)]
+        print(f"[Batch {stage}] 开始分批索引 {total} 个文档到 {vector_db_id}，"
+              f"每批 {batch_size} 个，暂停 {pause_seconds}s，共 {len(batches)} 批")
+
+        processed = 0
+        for batch_idx, batch_ids in enumerate(batches):
+            if _batch_paused:
+                print(f"[Batch {stage}] 已暂停，中止剩余批次")
+                break
+
+            _batch_progress["current_batch"] = batch_idx + 1
+
+            print(f"[Batch {stage}] 处理第 {batch_idx + 1}/{len(batches)} 批，"
+                  f"文档 {batch_ids[0]}-{batch_ids[-1]}")
+
+            async def process_one(doc_id):
+                nonlocal error_count
+                if _batch_paused:
+                    return
+                try:
+                    await _run_index_only(doc_id, vector_db_id)
+                except Exception as e:
+                    error_count += 1
+                    print(f"[Batch {stage}] 文档 {doc_id} 索引失败: {e}")
+
+            tasks = [process_one(doc_id) for doc_id in batch_ids]
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+            processed += len(batch_ids)
+            _batch_progress["processed"] = processed
+            _batch_progress["errors"] = error_count
+
+            # 批间暂停（最后一批不暂停）
+            if pause_seconds > 0 and batch_idx < len(batches) - 1 and not _batch_paused:
+                print(f"[Batch {stage}] 批间暂停 {pause_seconds}s...")
+                await asyncio.sleep(pause_seconds)
 
     _batch_paused = False
-    print(f"[Batch {stage}] 批量索引完成")
+    _batch_progress["active"] = False
+    print(f"[Batch {stage}] 批量索引完成，共处理 {total} 个文档，失败 {error_count} 个")
 
 
 @router.post("/batch/start-parse")
@@ -745,10 +849,20 @@ async def start_batch_extract(background_tasks: BackgroundTasks, db: Session = D
 @router.post("/batch/start-index")
 async def start_batch_index(
     vector_db_id: str = "default",
+    limit: int = 0,
+    batch_size: int = 0,
+    pause_seconds: int = 0,
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
 ):
-    """Start batch indexing for all metadata-extracted documents to specified vector database."""
+    """Start batch indexing for all metadata-extracted documents to specified vector database.
+
+    Args:
+        vector_db_id: 向量数据库 ID
+        limit: 最多索引多少个文档，0 表示不限制
+        batch_size: 每批处理多少个文档，0 表示不分批
+        pause_seconds: 每批之间暂停多少秒
+    """
     global _batch_paused
 
     # 验证向量数据库配置
@@ -757,12 +871,24 @@ async def start_batch_index(
         raise HTTPException(status_code=400, detail=f"向量数据库 {vector_db_id} 配置不存在")
 
     # 查找可索引的文档（meta_done 或已有索引但需要索引到新数据库的）
-    count = db.query(Document).filter(
-        Document.status.in_([DocStatus.meta_done, DocStatus.indexed])
-    ).count()
+    from app.models import DocumentVectorIndex, IndexStatus as IndexStatusEnum
+    indexed_subq = db.query(DocumentVectorIndex.document_id).filter(
+        DocumentVectorIndex.vector_db_id == vector_db_id,
+        DocumentVectorIndex.status == IndexStatusEnum.indexed,
+    ).subquery()
 
-    if count == 0:
+    count_query = db.query(Document).filter(
+        Document.status.in_([DocStatus.meta_done, DocStatus.indexed]),
+        ~Document.id.in_(indexed_subq),
+    )
+
+    total_available = count_query.count()
+
+    if total_available == 0:
         return {"detail": "没有待索引的文档", "pending": 0}
+
+    # 实际处理数量
+    actual_limit = min(limit, total_available) if limit > 0 else total_available
 
     _batch_paused = False
     background_tasks.add_task(
@@ -770,8 +896,23 @@ async def start_batch_index(
         "index",
         [DocStatus.meta_done, DocStatus.indexed],
         vector_db_id,
+        limit,
+        batch_size,
+        pause_seconds,
     )
-    return {"detail": f"批量索引到 {vector_db_id} 已开始，共 {count} 个文档", "pending": count}
+
+    # 构建描述信息
+    detail_parts = [f"批量索引到 {vector_db_id} 已开始，共 {actual_limit} 个文档"]
+    if batch_size > 0 and batch_size < actual_limit:
+        detail_parts.append(f"每批 {batch_size} 个")
+    if pause_seconds > 0:
+        detail_parts.append(f"批间暂停 {pause_seconds}s")
+
+    return {
+        "detail": "，".join(detail_parts),
+        "pending": actual_limit,
+        "total_available": total_available,
+    }
 
 
 @router.post("/batch/start-full")
@@ -834,6 +975,7 @@ def get_batch_status(db: Session = Depends(get_db)):
             "meta_done": db.query(Document).filter(Document.status == DocStatus.meta_done).count(),
             "ready_to_promote": ready_to_promote,
         },
+        "batch_progress": dict(_batch_progress),
     }
 
 

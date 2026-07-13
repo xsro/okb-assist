@@ -386,7 +386,8 @@
             <div class="card" style="margin-bottom:1.5rem">
                 <div class="section-header" style="margin-bottom:1rem">
                     <h2>批量处理</h2>
-                    <div class="action-row" style="align-items:center;gap:1rem">
+                    <div class="action-row" style="align-items:center;gap:0.75rem">
+                        <a href="/assist/duplicates" class="btn btn-sm">🔍 文献查重</a>
                         <span id="batch-status-indicator" class="status-indicator status-idle">空闲</span>
                         <button class="btn btn-warning btn-sm" id="btn-pause" onclick="pauseBatch()" style="display:none">⏸ 暂停</button>
                     </div>
@@ -414,6 +415,7 @@
                         <span class="label">并发任务</span>
                     </div>
                 </div>
+
 
                 <div class="batch-controls" id="batch-controls">
                     <button class="batch-btn batch-btn-parse" id="btn-parse" onclick="startBatch('parse')">
@@ -492,6 +494,28 @@
                         自动刷新
                     </label>
                     <span id="refresh-countdown" style="color:var(--text-muted)">3s</span>
+                </div>
+            </div>
+
+            <!-- 批量任务进度 -->
+            <div id="batch-progress-panel" style="display:none;margin-bottom:1.5rem;padding:1.25rem;background:var(--card);border:1px solid var(--primary);border-radius:8px;box-shadow:0 0 0 3px rgba(37,99,235,0.08)">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
+                    <div style="font-weight:600;font-size:1rem">
+                        <span id="bp-stage"></span>
+                        <span id="bp-target" style="color:var(--text-muted);font-weight:400;font-size:0.85rem;margin-left:0.5rem"></span>
+                    </div>
+                    <span id="bp-elapsed" style="font-size:0.85rem;color:var(--text-muted)"></span>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;font-size:0.9rem">
+                    <span>进度: <strong id="bp-processed">0</strong> / <span id="bp-total">0</span> 个文档</span>
+                    <span id="bp-batch-info" style="color:var(--text-muted)"></span>
+                </div>
+                <div style="background:var(--bg);border-radius:6px;height:12px;overflow:hidden;margin-bottom:0.5rem">
+                    <div id="bp-bar" style="background:linear-gradient(90deg,var(--primary),#60a5fa);height:100%;width:0%;transition:width 0.5s;border-radius:6px"></div>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:0.85rem;color:var(--text-muted)">
+                    <span id="bp-percent">0%</span>
+                    <span id="bp-errors"></span>
                 </div>
             </div>
 
@@ -629,6 +653,11 @@
         let autoRefresh = true;
         let allDocs = [];
         let vectorDBs = [];  // 向量数据库配置列表
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+        }
 
         // Status colors and labels
         const STATUS_COLORS = {
@@ -837,10 +866,69 @@
                     activeBatch = null;
                 }
 
+                // 更新批量进度面板
+                updateBatchProgress(status.batch_progress);
+
                 updateButtonStates();
 
             } catch (err) {
                 console.error('Batch status error:', err);
+            }
+        }
+
+        function updateBatchProgress(bp) {
+            const panel = document.getElementById('batch-progress-panel');
+            if (!bp || !bp.active) {
+                panel.style.display = 'none';
+                return;
+            }
+
+            panel.style.display = 'block';
+
+            // 阶段名称
+            const stageNames = { 'index': '🔍 索引中', 'parse': '📄 解析中', 'extract': '📋 提取中' };
+            document.getElementById('bp-stage').textContent = stageNames[bp.stage] || bp.stage;
+
+            // 目标数据库
+            const targetEl = document.getElementById('bp-target');
+            if (bp.vector_db_id) {
+                targetEl.textContent = `→ ${bp.vector_db_id}`;
+            } else {
+                targetEl.textContent = '';
+            }
+
+            // 进度数字
+            document.getElementById('bp-processed').textContent = bp.processed;
+            document.getElementById('bp-total').textContent = bp.total;
+
+            // 进度条
+            const percent = bp.total > 0 ? Math.round(bp.processed / bp.total * 100) : 0;
+            document.getElementById('bp-bar').style.width = `${percent}%`;
+            document.getElementById('bp-percent').textContent = `${percent}%`;
+
+            // 批次信息
+            const batchInfoEl = document.getElementById('bp-batch-info');
+            if (bp.total_batches > 1) {
+                batchInfoEl.textContent = `第 ${bp.current_batch}/${bp.total_batches} 批`;
+            } else {
+                batchInfoEl.textContent = '';
+            }
+
+            // 耗时
+            if (bp.started_at) {
+                const elapsed = Math.round((Date.now() - new Date(bp.started_at).getTime()) / 1000);
+                const min = Math.floor(elapsed / 60);
+                const sec = elapsed % 60;
+                document.getElementById('bp-elapsed').textContent = `已耗时 ${min > 0 ? min + '分' : ''}${sec}秒`;
+            }
+
+            // 错误数
+            const errorsEl = document.getElementById('bp-errors');
+            if (bp.errors > 0) {
+                errorsEl.textContent = `失败 ${bp.errors} 个`;
+                errorsEl.style.color = 'var(--danger)';
+            } else {
+                errorsEl.textContent = '';
             }
         }
 
@@ -888,8 +976,68 @@
         }
 
         async function startBatchIndex(vectorDbId) {
+            // 弹出配置对话框
+            showBatchIndexDialog(vectorDbId);
+        }
+
+        function showBatchIndexDialog(vectorDbId) {
+            const db = vectorDBs.find(d => d.id === vectorDbId);
+            const dbName = db ? (db.name || db.id) : vectorDbId;
+
+            const dialogHtml = `
+                <div id="batch-index-dialog" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000" onclick="if(event.target===this)closeBatchIndexDialog()">
+                    <div class="dialog-panel" style="max-width:420px;width:90%;padding:1.5rem">
+                        <h3 style="margin-bottom:1rem">🔍 批量索引到 ${escapeHtml(dbName)}</h3>
+
+                        <div class="form-group">
+                            <label>索引前多少个文档</label>
+                            <input type="number" id="batch-index-limit" class="form-control" value="0" min="0" placeholder="0 = 全部">
+                            <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem">0 表示索引全部待处理文档</p>
+                        </div>
+
+                        <div class="form-group">
+                            <label>每批处理数量</label>
+                            <input type="number" id="batch-index-batch-size" class="form-control" value="0" min="0" placeholder="0 = 不分批">
+                            <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem">0 表示不分批，全部同时处理</p>
+                        </div>
+
+                        <div class="form-group">
+                            <label>批间暂停（秒）</label>
+                            <input type="number" id="batch-index-pause" class="form-control" value="0" min="0" placeholder="0 = 不暂停">
+                            <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem">每批完成后等待多少秒再处理下一批</p>
+                        </div>
+
+                        <div class="action-row" style="justify-content:flex-end;margin-top:1.5rem">
+                            <button class="btn" onclick="closeBatchIndexDialog()">取消</button>
+                            <button class="btn btn-primary" onclick="confirmBatchIndex('${escapeHtml(vectorDbId)}')">开始索引</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            const div = document.createElement('div');
+            div.innerHTML = dialogHtml;
+            document.body.appendChild(div);
+        }
+
+        function closeBatchIndexDialog() {
+            const dialog = document.getElementById('batch-index-dialog');
+            if (dialog) dialog.parentElement.remove();
+        }
+
+        async function confirmBatchIndex(vectorDbId) {
+            const limit = parseInt(document.getElementById('batch-index-limit').value) || 0;
+            const batchSize = parseInt(document.getElementById('batch-index-batch-size').value) || 0;
+            const pauseSeconds = parseInt(document.getElementById('batch-index-pause').value) || 0;
+
+            closeBatchIndexDialog();
+
             try {
-                const result = await api.post(`/assist/api/pipeline/batch/start-index?vector_db_id=${vectorDbId}`);
+                let url = `/assist/api/pipeline/batch/start-index?vector_db_id=${encodeURIComponent(vectorDbId)}`;
+                if (limit > 0) url += `&limit=${limit}`;
+                if (batchSize > 0) url += `&batch_size=${batchSize}`;
+                if (pauseSeconds > 0) url += `&pause_seconds=${pauseSeconds}`;
+
+                const result = await api.post(url);
                 if (result.pending === 0) {
                     showToast(result.detail, 'info');
                     return;
@@ -1089,6 +1237,12 @@
         // ── 监控相关函数 ──
         async function loadMonitorData() {
             try {
+                // Load batch progress
+                try {
+                    const batchStatus = await api.get('/assist/api/pipeline/batch/status');
+                    updateBatchProgress(batchStatus.batch_progress);
+                } catch (e) {}
+
                 // Load queue status
                 const queue = await api.get('/assist/api/pipeline/queue/status');
                 document.getElementById('running-tasks').textContent = `${queue.running_tasks}/${queue.max_concurrent_tasks}`;
