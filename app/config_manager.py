@@ -46,6 +46,8 @@ DEFAULT_SYSTEM = {
     "max_concurrent_tasks": 3,
     "database_url": "sqlite:///./okb_assist.db",
     "uploads_folder": "uploads",
+    "public_url": "http://localhost:5001",
+    "subnet_url": "http://192.168.1.100:5001",
 }
 
 # 进程内缓存

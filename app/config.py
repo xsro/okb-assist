@@ -90,6 +90,14 @@ class Settings:
     def uploads_folder(self) -> str:
         return get_system_config().get("uploads_folder", "uploads")
 
+    @property
+    def public_url(self) -> str:
+        return get_system_config().get("public_url", "http://localhost:5001")
+
+    @property
+    def subnet_url(self) -> str:
+        return get_system_config().get("subnet_url", "http://192.168.1.100:5001")
+
 
 _settings_instance = Settings()
 

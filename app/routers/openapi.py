@@ -111,8 +111,8 @@ class ErrorResponse(BaseModel):
 
 def _get_base_url() -> str:
     """获取基础URL（用于构建链接）"""
-    # 在实际部署时，应该从配置或请求中获取
-    return "http://localhost:8000"
+    from app.config import get_settings
+    return get_settings().public_url
 
 
 def _parse_authors(authors_str: str) -> str:
@@ -162,11 +162,9 @@ def _format_document(doc: Document) -> DocumentInfo:
 
 def _get_document_links(doc_id: int) -> DocumentLinks:
     """获取文献链接（只返回路径部分）"""
-    base_url="http://192.168.1.100:5001"
+    base_url = _get_base_url()
     return DocumentLinks(
-        detail_page=f"{base_url}/assist/detail/{doc_id}",
-        pdf_download=f"{base_url}/assist/api/documents/{doc_id}/pdf",
-        markdown_content=f"{base_url}/assist/api/documents/{doc_id}/markdown",
+        detail_page=f"{base_url}/redirect/{doc_id}",
     )
 
 

@@ -216,6 +216,18 @@ def root():
     return RedirectResponse(url="/assist/")
 
 
+@app.get("/redirect/{doc_id}")
+def redirect_by_network(request: Request, doc_id: int):
+    """根据客户端IP自动跳转到对应地址的详情页"""
+    _settings = get_settings()
+    client_ip = request.client.host if request.client else ""
+    if client_ip.startswith("192.168.1."):
+        base = _settings.subnet_url
+    else:
+        base = _settings.public_url
+    return RedirectResponse(url=f"{base}/assist/detail/{doc_id}")
+
+
 @app.get("/assist/login")
 def login_page(request: Request):
     return templates.TemplateResponse(name="login.html", request=request)
