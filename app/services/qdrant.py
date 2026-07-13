@@ -548,10 +548,24 @@ async def search_similar(
     query: str,
     get_embedding_func,
     limit: int = 10,
+    vector_db_id: str = None,
 ) -> list[dict]:
-    """兼容旧代码：语义搜索。"""
-    adapter = _get_default_adapter()
-    embedding = await get_embedding_func(query)
+    """语义搜索。指定 vector_db_id 可搜索特定向量数据库。"""
+    if vector_db_id:
+        from app.config_manager import get_vector_db_by_id
+        db_config = get_vector_db_by_id(vector_db_id)
+        if not db_config:
+            raise ValueError(f"向量数据库 {vector_db_id} 配置不存在")
+        adapter = QdrantAdapter(db_config)
+    else:
+        adapter = _get_default_adapter()
+
+    # 尝试传 vector_db_id 给 embedding 函数（支持按数据库使用不同模型）
+    try:
+        embedding = await get_embedding_func(query, vector_db_id=vector_db_id)
+    except TypeError:
+        embedding = await get_embedding_func(query)
+
     if not embedding:
         return []
     return await adapter.search_similar(user_id, embedding, limit)

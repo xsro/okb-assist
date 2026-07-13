@@ -186,10 +186,64 @@ def find_similar_titles(
     }
 
 
+@router.get("/vector-dbs")
+def list_vector_dbs():
+    """列出所有配置的向量数据库（用于搜索时选择）。"""
+    from app.config_manager import load_config
+    cfg = load_config()
+    dbs = []
+    for db in cfg.get("vector_dbs", []):
+        dbs.append({
+            "id": db.get("id"),
+            "name": db.get("name", db.get("id")),
+            "type": db.get("type"),
+            "enabled": db.get("enabled", False),
+            "collection": db.get("collection", ""),
+        })
+    return {"vector_dbs": dbs}
+
+
+@router.get("/grep-search")
+async def grep_search(
+    q: str = "",
+    limit: int = 10,
+    context: int = 2,
+    db: Session = Depends(get_db),
+):
+    """基于系统 grep 的轻量全文搜索（无需向量数据库）。"""
+    if not q.strip():
+        return {"results": [], "query": q}
+
+    from app.services.grep_search import grep_search as do_grep
+
+    results = await do_grep(query=q, context_lines=context, limit=limit)
+
+    # 补充文档元数据
+    enriched = []
+    for hit in results:
+        doc_id = hit.get("document_id")
+        doc_info = {}
+        if doc_id:
+            doc = db.query(Document).filter(Document.id == doc_id).first()
+            if doc:
+                doc_info = {
+                    "title": doc.title,
+                    "filename": doc.filename,
+                    "status": doc.status.value if isinstance(doc.status, DocStatus) else doc.status,
+                    "authors": doc.authors,
+                    "year": doc.year,
+                    "journal": doc.journal,
+                }
+        enriched.append({**hit, **doc_info})
+
+    return {"results": enriched, "query": q}
+
+
 @router.get("/search")
 async def semantic_search(
     q: str = "",
     limit: int = 5,
+    vector_db_id: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """Semantic search across indexed documents using vector similarity."""
@@ -199,12 +253,16 @@ async def semantic_search(
     from app.services.qdrant import search_similar
     from app.services.ollama import get_embedding
 
-    results = await search_similar(
-        user_id=QDRANT_USER_ID,
-        query=q,
-        get_embedding_func=get_embedding,
-        limit=limit,
-    )
+    try:
+        results = await search_similar(
+            user_id=QDRANT_USER_ID,
+            query=q,
+            get_embedding_func=get_embedding,
+            limit=limit,
+            vector_db_id=vector_db_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # Enrich results with document info from DB
     enriched = []

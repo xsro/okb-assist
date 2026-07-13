@@ -314,6 +314,9 @@
                         <div class="tool-nav-item active" data-tool="search" onclick="switchTool('search')">
                             🔍 语义搜索
                         </div>
+                        <div class="tool-nav-item" data-tool="grep" onclick="switchTool('grep')">
+                            📝 全文搜索
+                        </div>
                         <div class="tool-nav-item" data-tool="browse" onclick="switchTool('browse')">
                             📚 文档浏览
                         </div>
@@ -350,6 +353,9 @@
                             <input type="text" id="searchQuery" class="form-control"
                                    placeholder="输入搜索内容，如：机器学习优化算法..."
                                    onkeydown="if(event.key==='Enter') doSearch()">
+                            <select id="searchVectorDb" class="form-control" style="width: 160px;">
+                                <option value="">默认数据库</option>
+                            </select>
                             <select id="searchLimit" class="form-control" style="width: 80px;">
                                 <option value="5">5条</option>
                                 <option value="10">10条</option>
@@ -361,6 +367,39 @@
                             <div class="empty-state">
                                 <div class="icon">🔍</div>
                                 <p>输入关键词开始搜索</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Grep Search Panel -->
+                <div class="tool-panel" id="panel-grep">
+                    <div class="card">
+                        <h2 style="margin-bottom: 1rem;">📝 全文搜索 (grep)</h2>
+                        <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem;">
+                            使用系统 grep 搜索文档内容，无需向量数据库，速度快、资源占用低。支持正则表达式。
+                        </p>
+                        <div class="search-input-group">
+                            <input type="text" id="grepQuery" class="form-control"
+                                   placeholder="输入关键词，如：neural network、优化算法..."
+                                   onkeydown="if(event.key==='Enter') doGrepSearch()">
+                            <select id="grepLimit" class="form-control" style="width: 80px;">
+                                <option value="5">5条</option>
+                                <option value="10" selected>10条</option>
+                                <option value="20">20条</option>
+                            </select>
+                            <select id="grepContext" class="form-control" style="width: 100px;">
+                                <option value="1">1行上下文</option>
+                                <option value="2" selected>2行上下文</option>
+                                <option value="3">3行上下文</option>
+                                <option value="5">5行上下文</option>
+                            </select>
+                            <button class="btn btn-primary" onclick="doGrepSearch()">搜索</button>
+                        </div>
+                        <div id="grepResults">
+                            <div class="empty-state">
+                                <div class="icon">📝</div>
+                                <p>输入关键词开始全文搜索</p>
                             </div>
                         </div>
                     </div>
@@ -449,13 +488,16 @@
         async function doSearch() {
             const query = document.getElementById('searchQuery').value.trim();
             const limit = parseInt(document.getElementById('searchLimit').value);
+            const vectorDbId = document.getElementById('searchVectorDb').value;
             if (!query) return;
 
             const container = document.getElementById('searchResults');
             container.innerHTML = '<div class="loading">搜索中</div>';
 
             try {
-                const data = await api.get(`/assist/api/documents/search?q=${encodeURIComponent(query)}&limit=${limit}`);
+                let url = `/assist/api/documents/search?q=${encodeURIComponent(query)}&limit=${limit}`;
+                if (vectorDbId) url += `&vector_db_id=${encodeURIComponent(vectorDbId)}`;
+                const data = await api.get(url);
                 if (!data.results || data.results.length === 0) {
                     container.innerHTML = `
                         <div class="empty-state">
@@ -486,6 +528,59 @@
             } catch (e) {
                 container.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">搜索失败: ${e.message}</p></div>`;
             }
+        }
+
+        // ─── Grep Search ───────────────────────────────────────────────────
+        async function doGrepSearch() {
+            const query = document.getElementById('grepQuery').value.trim();
+            const limit = parseInt(document.getElementById('grepLimit').value);
+            const context = parseInt(document.getElementById('grepContext').value);
+            if (!query) return;
+
+            const container = document.getElementById('grepResults');
+            container.innerHTML = '<div class="loading">搜索中</div>';
+
+            try {
+                const data = await api.get(`/assist/api/documents/grep-search?q=${encodeURIComponent(query)}&limit=${limit}&context=${context}`);
+                if (!data.results || data.results.length === 0) {
+                    container.innerHTML = `
+                        <div class="empty-state">
+                            <div class="icon">😔</div>
+                            <p>未找到与 "${query}" 相关的结果</p>
+                        </div>`;
+                    return;
+                }
+
+                container.innerHTML = data.results.map(r => {
+                    // 高亮匹配的关键词
+                    const escaped = escapeHtml(r.content || '');
+                    const highlighted = escaped.replace(
+                        new RegExp(escapeRegex(query), 'gi'),
+                        match => `<mark style="background:var(--primary);color:white;padding:0 2px;border-radius:2px">${match}</mark>`
+                    );
+                    return `
+                    <div class="search-result-card">
+                        <div class="search-result-title">${r.title || r.filename || `文档 #${r.document_id}`}</div>
+                        <div class="search-result-meta">
+                            ID: ${r.document_id}
+                            ${r.authors ? ' · ' + r.authors : ''}
+                            ${r.year ? ' · ' + r.year : ''}
+                            ${r.journal ? ' · ' + r.journal : ''}
+                        </div>
+                        <div class="search-result-text" style="white-space:pre-wrap;font-family:monospace;font-size:0.8rem">${highlighted}</div>
+                        <div class="search-result-actions">
+                            <a href="/assist/detail/${r.document_id}" class="btn btn-sm btn-primary">详情</a>
+                            <a href="/assist/markdown/${r.document_id}" class="btn btn-sm btn-success">阅读</a>
+                        </div>
+                    </div>
+                `}).join('');
+            } catch (e) {
+                container.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">搜索失败: ${e.message}</p></div>`;
+            }
+        }
+
+        function escapeRegex(str) {
+            return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         }
 
         // ─── Browse ──────────────────────────────────────────────────────────
@@ -653,7 +748,26 @@
         // Auto-load browse on first visit
         document.addEventListener('DOMContentLoaded', () => {
             doBrowse();
+            loadVectorDbs();
         });
+
+        async function loadVectorDbs() {
+            try {
+                const data = await api.get('/assist/api/documents/vector-dbs');
+                const select = document.getElementById('searchVectorDb');
+                (data.vector_dbs || []).forEach(db => {
+                    if (db.enabled) {
+                        const opt = document.createElement('option');
+                        opt.value = db.id;
+                        opt.textContent = db.name || db.id;
+                        select.appendChild(opt);
+                    }
+                });
+            } catch (e) {
+                // 静默失败，下拉框保持默认
+                console.warn('加载向量数据库列表失败:', e);
+            }
+        }
     </script>
 </body>
 </html>

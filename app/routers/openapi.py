@@ -162,7 +162,7 @@ def _format_document(doc: Document) -> DocumentInfo:
 
 def _get_document_links(doc_id: int) -> DocumentLinks:
     """获取文献链接（只返回路径部分）"""
-    base_url="http://192.168.1.183:5001"
+    base_url="http://192.168.1.100:5001"
     return DocumentLinks(
         detail_page=f"{base_url}/assist/detail/{doc_id}",
         pdf_download=f"{base_url}/assist/api/documents/{doc_id}/pdf",
@@ -175,6 +175,57 @@ def _get_document_links(doc_id: int) -> DocumentLinks:
 # -------------------------------
 
 @router.get(
+    "/grep-search",
+    response_model=SearchResponse,
+    summary="全文搜索知识库（轻量）",
+    description="使用系统 grep 在知识库中进行全文搜索。无需向量数据库和 embedding 模型，适用于嵌入式设备。返回匹配的文本片段及文献信息。",
+)
+async def grep_search_knowledge_base(
+    q: str = Query(..., description="搜索关键词（支持正则表达式）", min_length=1),
+    limit: int = Query(10, description="返回结果数量", ge=1, le=50),
+    context: int = Query(2, description="匹配行前后的上下文行数", ge=0, le=10),
+    db: Session = Depends(get_db),
+):
+    """全文搜索知识库（基于 grep，轻量版）"""
+    from app.services.grep_search import grep_search as do_grep
+
+    try:
+        results = await do_grep(query=q, context_lines=context, limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+
+    # 补充文档元数据
+    enriched = []
+    for hit in results:
+        doc_id = hit.get("document_id")
+        doc_info = {}
+        if doc_id:
+            doc = db.query(Document).filter(Document.id == doc_id).first()
+            if doc:
+                doc_info = {
+                    "title": doc.title or "",
+                    "authors": _parse_authors(doc.authors),
+                    "year": doc.year,
+                    "journal": doc.journal or "",
+                }
+        enriched.append(SearchResult(
+            document_id=doc_id or 0,
+            title=doc_info.get("title", ""),
+            authors=doc_info.get("authors", ""),
+            year=doc_info.get("year"),
+            journal=doc_info.get("journal", ""),
+            content=hit.get("content", ""),
+            score=0.0,  # grep 没有相似度分数
+        ))
+
+    return SearchResponse(
+        query=q,
+        results=enriched,
+        total=len(enriched),
+    )
+
+
+@router.get(
     "/search",
     response_model=SearchResponse,
     summary="语义搜索知识库",
@@ -183,6 +234,7 @@ def _get_document_links(doc_id: int) -> DocumentLinks:
 async def search_knowledge_base(
     q: str = Query(..., description="搜索查询内容", min_length=1),
     limit: int = Query(5, description="返回结果数量", ge=1, le=20),
+    vector_db_id: Optional[str] = Query(None, description="向量数据库 ID，不填则使用默认"),
     db: Session = Depends(get_db),
 ):
     """语义搜索知识库"""
@@ -198,7 +250,10 @@ async def search_knowledge_base(
             query=q,
             get_embedding_func=get_embedding,
             limit=limit,
+            vector_db_id=vector_db_id,
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
 
