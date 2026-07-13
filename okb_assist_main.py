@@ -220,13 +220,15 @@ def root():
 
 @app.get("/redirect/{doc_id}")
 def redirect_by_network(request: Request, doc_id: int):
-    """根据客户端IP自动跳转到对应地址的详情页"""
+    """根据请求Host自动跳转到对应地址的详情页"""
+    from urllib.parse import urlparse
     _settings = get_settings()
-    client_ip = request.client.host if request.client else ""
-    if client_ip.startswith("192.168.1.") or client_ip in ("127.0.0.1", "::1"):
-        base = _settings.subnet_url
-    else:
+    host = request.headers.get("host", "")
+    public_host = urlparse(_settings.public_url).netloc
+    if host == public_host:
         base = _settings.public_url
+    else:
+        base = _settings.subnet_url
     return RedirectResponse(url=f"{base}/assist/detail/{doc_id}")
 
 
