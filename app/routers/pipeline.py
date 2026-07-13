@@ -805,6 +805,12 @@ def get_batch_status(db: Session = Depends(get_db)):
 
     total_count = db.query(Document).count()
 
+    # 统计超时失败的任务数（status_message 包含 "timed out"）
+    timeout_error_count = db.query(Document).filter(
+        Document.status == DocStatus.error,
+        Document.status_message.contains("timed out")
+    ).count()
+
     return {
         "paused": _batch_paused,
         "pending": pending_count,
@@ -816,6 +822,7 @@ def get_batch_status(db: Session = Depends(get_db)):
         "stage_counts": {
             "uploaded": db.query(Document).filter(Document.status == DocStatus.uploaded).count(),
             "error": db.query(Document).filter(Document.status == DocStatus.error).count(),
+            "timeout_error": timeout_error_count,
             "markdown_done": db.query(Document).filter(Document.status == DocStatus.markdown_done).count(),
             "meta_done": db.query(Document).filter(Document.status == DocStatus.meta_done).count(),
         },
@@ -857,6 +864,47 @@ def batch_reset_errors(target_status: str = None, db: Session = Depends(get_db))
 
     return {
         "detail": f"已重置 {reset_count} 个错误状态的文档",
+        "reset_count": reset_count,
+    }
+
+
+@router.post("/batch/reset-timeout-errors")
+def batch_reset_timeout_errors(target_status: str = None, db: Session = Depends(get_db)):
+    """批量将超时失败的文档重置为失败前的状态。
+
+    仅重置 status_message 包含 "timed out" 的错误文档。
+    默认重置逻辑：
+    - 有 markdown_path 的文档 -> markdown_done
+    - 没有 markdown_path 的文档 -> uploaded
+    """
+    # 查询超时失败的文档
+    timeout_docs = db.query(Document).filter(
+        Document.status == DocStatus.error,
+        Document.status_message.contains("timed out")
+    ).all()
+
+    if not timeout_docs:
+        return {"detail": "没有超时失败的文档", "reset_count": 0}
+
+    reset_count = 0
+    for doc in timeout_docs:
+        if target_status and target_status in ['uploaded', 'markdown_done', 'meta_done']:
+            doc.status = DocStatus(target_status)
+        else:
+            if doc.markdown_path:
+                doc.status = DocStatus.markdown_done
+            else:
+                doc.status = DocStatus.uploaded
+
+        doc.status_message = None
+        doc.progress = 0
+        doc.mineru_task_id = None
+        reset_count += 1
+
+    db.commit()
+
+    return {
+        "detail": f"已重置 {reset_count} 个超时失败的文档",
         "reset_count": reset_count,
     }
 

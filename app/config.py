@@ -23,6 +23,11 @@ class Settings:
     def mineru_tasks(self) -> int:
         return get_config()["mineru"].get("max_tasks", 3)
 
+    @property
+    def mineru_task_timeout(self) -> int:
+        """MinerU 任务轮询超时时间（秒）。"""
+        return get_config()["mineru"].get("task_timeout", 300)
+
     # ── Ollama ──
     @property
     def ollama_url(self) -> str:

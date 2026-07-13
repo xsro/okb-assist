@@ -209,6 +209,11 @@
                     <label>最大并发任务</label>
                     <input type="number" id="mineru-max-tasks" min="1" max="20" value="3">
                 </div>
+                <div class="form-group">
+                    <label>任务超时（秒）</label>
+                    <input type="number" id="mineru-task-timeout" min="60" max="3600" value="300" step="30">
+                    <small style="color:var(--text-muted);font-size:0.75rem">PDF 解析任务的等待超时时间，默认 300 秒（5 分钟）</small>
+                </div>
             </div>
             <div style="margin-top:0.75rem">
                 <button class="btn btn-secondary btn-sm" onclick="testService('mineru')">🔗 测试连接</button>
@@ -371,6 +376,7 @@
             document.getElementById('mineru-url').value = cfg.mineru?.url || '';
             document.getElementById('mineru-key').value = cfg.mineru?.key || '';
             document.getElementById('mineru-max-tasks').value = cfg.mineru?.max_tasks ?? 3;
+            document.getElementById('mineru-task-timeout').value = cfg.mineru?.task_timeout ?? 300;
 
             // Ollama
             document.getElementById('ollama-url').value = cfg.ollama?.url || '';
@@ -674,6 +680,7 @@
                     url: document.getElementById('mineru-url').value.trim(),
                     key: document.getElementById('mineru-key').value.trim(),
                     max_tasks: parseInt(document.getElementById('mineru-max-tasks').value) || 3,
+                    task_timeout: parseInt(document.getElementById('mineru-task-timeout').value) || 300,
                 },
                 ollama: {
                     url: document.getElementById('ollama-url').value.trim(),

@@ -428,7 +428,7 @@
                     </button>
                     <button class="batch-btn batch-btn-reset" id="btn-reset-errors" onclick="resetAllErrors()">
                         <span class="icon">🔄</span>
-                        <span>重置所有失败任务</span>
+                        <span>重置所有超时失败任务</span>
                         <span class="count" id="count-errors">-</span>
                     </button>
                     <button class="batch-btn batch-btn-hash" id="btn-recalc-hash" onclick="recalculateHashes()">
@@ -770,8 +770,8 @@
                 document.getElementById('count-parse').textContent = `${parseCount} 个待解析`;
                 document.getElementById('count-extract').textContent = `${extractCount} 个待提取`;
 
-                const errorCount = sc.error || 0;
-                document.getElementById('count-errors').textContent = `${errorCount} 个失败`;
+                const errorCount = sc.timeout_error || 0;
+                document.getElementById('count-errors').textContent = `${errorCount} 个超时失败`;
 
                 document.getElementById('count-hash').textContent = `${stats.documents} 个文档`;
 
@@ -913,12 +913,12 @@
                 return;
             }
 
-            if (!confirm(`确定要重置所有 ${errorCount} 个失败任务的状态吗？`)) {
+            if (!confirm(`确定要重置所有 ${errorCount} 个超时失败任务的状态吗？`)) {
                 return;
             }
 
             try {
-                const result = await api.post('/assist/api/pipeline/batch/reset-errors');
+                const result = await api.post('/assist/api/pipeline/batch/reset-timeout-errors');
                 showToast(result.detail, 'success');
                 await loadStats();
                 await loadBatchStatus();

@@ -18,6 +18,7 @@ DEFAULT_CONFIG = {
         "url": "http://127.0.0.1:8002",
         "key": "key",
         "max_tasks": 3,
+        "task_timeout": 300,
     },
     "ollama": {
         "url": "http://127.0.0.1:11434",

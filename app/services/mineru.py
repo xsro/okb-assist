@@ -158,12 +158,14 @@ async def submit_parse_task(file_path: str) -> str:
     return task_id
 
 
-async def poll_task(task_id: str, max_wait: int = 300, poll_interval: int = 2) -> dict:
+async def poll_task(task_id: str, max_wait: int = None, poll_interval: int = 2) -> dict:
     """
     Poll a MinerU task until completion, failure, or timeout.
     Returns the final status result dict.
     Raises Exception on failure or timeout.
     """
+    if max_wait is None:
+        max_wait = settings.mineru_task_timeout
     for _ in range(max_wait // poll_interval):
         async with _get_client() as client:
             status_result = await get_router_task_status_tasks_task_id_get.asyncio(

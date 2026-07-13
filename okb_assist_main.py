@@ -280,4 +280,4 @@ def config_page(request: Request, user: str = Depends(get_current_user)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("okb_assist_main:app", host="0.0.0.0", port=5001, reload=True)
+    uvicorn.run("okb_assist_main:app", host="0.0.0.0", port=5001, reload=False)
