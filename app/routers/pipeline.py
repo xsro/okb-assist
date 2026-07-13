@@ -811,6 +811,13 @@ def get_batch_status(db: Session = Depends(get_db)):
         Document.status_message.contains("timed out")
     ).count()
 
+    # 统计已解析且已有标题和作者的文档数（可直接标记为已提取）
+    ready_to_promote = db.query(Document).filter(
+        Document.status == DocStatus.markdown_done,
+        Document.title.isnot(None), Document.title != "",
+        Document.authors.isnot(None), Document.authors != "",
+    ).count()
+
     return {
         "paused": _batch_paused,
         "pending": pending_count,
@@ -825,6 +832,7 @@ def get_batch_status(db: Session = Depends(get_db)):
             "timeout_error": timeout_error_count,
             "markdown_done": db.query(Document).filter(Document.status == DocStatus.markdown_done).count(),
             "meta_done": db.query(Document).filter(Document.status == DocStatus.meta_done).count(),
+            "ready_to_promote": ready_to_promote,
         },
     }
 
@@ -906,6 +914,37 @@ def batch_reset_timeout_errors(target_status: str = None, db: Session = Depends(
     return {
         "detail": f"已重置 {reset_count} 个超时失败的文档",
         "reset_count": reset_count,
+    }
+
+
+@router.post("/batch/promote-ready")
+def batch_promote_ready(db: Session = Depends(get_db)):
+    """将已解析且包含标题和作者信息的文档直接标记为已提取。
+
+    跳过 Ollama 元数据提取步骤，适用于已通过其他方式（如 Zotero 导入）
+    填充了元数据的文档。
+    """
+    ready_docs = db.query(Document).filter(
+        Document.status == DocStatus.markdown_done,
+        Document.title.isnot(None), Document.title != "",
+        Document.authors.isnot(None), Document.authors != "",
+    ).all()
+
+    if not ready_docs:
+        return {"detail": "没有符合条件的文档", "promote_count": 0}
+
+    promote_count = 0
+    for doc in ready_docs:
+        doc.status = DocStatus.meta_done
+        doc.status_message = "元数据已存在，跳过提取"
+        doc.progress = 100
+        promote_count += 1
+
+    db.commit()
+
+    return {
+        "detail": f"已将 {promote_count} 个文档标记为已提取",
+        "promote_count": promote_count,
     }
 
 

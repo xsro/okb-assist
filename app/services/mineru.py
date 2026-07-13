@@ -47,6 +47,7 @@ async def check_task_status(task_id: str) -> dict:
 async def get_task_result(task_id: str, output_dir: str, doc_id: int = None) -> str:
     """
     Fetch the result of a completed MinerU task and save to output_dir.
+    Images are packed into images.zip instead of a directory.
     Returns the path to the generated markdown file.
     """
     output_path = Path(output_dir)
@@ -65,18 +66,15 @@ async def get_task_result(task_id: str, output_dir: str, doc_id: int = None) -> 
     # Process ZIP file
     zip_content = response.content
     markdown_content = ""
-    images_dir = output_path / "images"
-    images_dir.mkdir(exist_ok=True)
+    image_entries = []  # (basename, data)
 
     try:
         with zipfile.ZipFile(BytesIO(zip_content), 'r') as zip_ref:
-            # Extract all files
             for file_info in zip_ref.infolist():
                 if file_info.filename.endswith('.md'):
                     # Read markdown content with error handling
                     with zip_ref.open(file_info) as md_file:
                         raw_data = md_file.read()
-                        # Try different encodings
                         for encoding in ['utf-8', 'gbk', 'gb2312', 'latin-1']:
                             try:
                                 markdown_content = raw_data.decode(encoding)
@@ -86,14 +84,11 @@ async def get_task_result(task_id: str, output_dir: str, doc_id: int = None) -> 
                         else:
                             markdown_content = raw_data.decode('utf-8', errors='replace')
                 elif '/' in file_info.filename:
-                    # Extract image files
+                    # Collect image files
                     filename = os.path.basename(file_info.filename)
                     if filename and any(filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg']):
                         with zip_ref.open(file_info) as img_file:
-                            img_data = img_file.read()
-                            img_path = images_dir / filename
-                            with open(img_path, 'wb') as f:
-                                f.write(img_data)
+                            image_entries.append((filename, img_file.read()))
     except zipfile.BadZipFile:
         # If not a ZIP, try to use as JSON response
         try:
@@ -109,6 +104,19 @@ async def get_task_result(task_id: str, output_dir: str, doc_id: int = None) -> 
 
     if not markdown_content:
         raise Exception(f"No markdown content found in MinerU result [task_id={task_id}]")
+
+    # Save images to images.zip
+    images_zip_path = output_path / "images.zip"
+    if image_entries:
+        with zipfile.ZipFile(images_zip_path, 'w', zipfile.ZIP_STORED) as zf:
+            for filename, data in image_entries:
+                zf.writestr(filename, data)
+
+    # Remove legacy images/ directory if it exists
+    legacy_images_dir = output_path / "images"
+    if legacy_images_dir.exists():
+        import shutil
+        shutil.rmtree(legacy_images_dir)
 
     # Save markdown as {id}.md
     md_filename = f"{doc_id}.md" if doc_id else "output.md"

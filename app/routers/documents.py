@@ -1,6 +1,7 @@
 import json
 import os
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -510,6 +511,58 @@ def get_pdf(
     )
 
 
+# 图片 MIME 类型映射
+_IMAGE_MIME = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+}
+
+
+@router.get("/{doc_id}/image/{filename}")
+def get_image_from_zip(
+    doc_id: int,
+    filename: str,
+    db: Session = Depends(get_db),
+):
+    """从 images.zip 中读取图片并返回。"""
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="文档不存在")
+
+    doc_dir = os.path.join(settings.uploads_folder, str(doc_id))
+    zip_path = os.path.join(doc_dir, "images.zip")
+
+    if not os.path.exists(zip_path):
+        raise HTTPException(status_code=404, detail="图片包不存在")
+
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            # 在 zip 中查找匹配的文件（basename 匹配）
+            target = None
+            for name in zf.namelist():
+                if os.path.basename(name) == filename:
+                    target = name
+                    break
+            if not target:
+                raise HTTPException(status_code=404, detail="图片不存在")
+
+            img_data = zf.read(target)
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=500, detail="图片包损坏")
+
+    ext = os.path.splitext(filename)[1].lower()
+    mime = _IMAGE_MIME.get(ext, "application/octet-stream")
+
+    return Response(
+        content=img_data,
+        media_type=mime,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @router.post("/{doc_id}/pdf")
 async def replace_pdf(
     doc_id: int,
@@ -569,19 +622,16 @@ def get_markdown(
     with open(abs_markdown_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Rewrite image paths to absolute URLs
+    # Rewrite image paths to use zip-based image API
     import re
-    # Get the directory containing the markdown file (doc_dir)
-    doc_dir = os.path.dirname(abs_markdown_path)
-    # Get the relative path from uploads/
-    rel_path = os.path.relpath(doc_dir, settings.uploads_folder)
 
-    # Replace relative image paths: images/xxx.png -> /assist/uploads/{rel_path}/images/xxx.png
+    # Replace relative image paths: images/xxx.png -> /assist/api/documents/{id}/image/xxx.png
     def rewrite_image(match):
         img_path = match.group(1)
         if not img_path.startswith(('http://', 'https://', '/assist/')):
-            # Relative path, rewrite to absolute
-            return f'](/assist/uploads/{rel_path}/{img_path})'
+            # 提取文件名（去掉 images/ 前缀）
+            filename = os.path.basename(img_path)
+            return f'](/assist/api/documents/{doc_id}/image/{filename})'
         return match.group(0)
 
     content = re.sub(r'\]\(([^)]+)\)', rewrite_image, content)
