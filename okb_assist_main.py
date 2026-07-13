@@ -39,6 +39,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
     }
     PUBLIC_PREFIXES = (
         "/assist/static/",
+        "/assist/detail/",
+        "/redirect/",
     )
     API_PREFIXES = (
         "/assist/api/",
@@ -221,7 +223,7 @@ def redirect_by_network(request: Request, doc_id: int):
     """根据客户端IP自动跳转到对应地址的详情页"""
     _settings = get_settings()
     client_ip = request.client.host if request.client else ""
-    if client_ip.startswith("192.168.1."):
+    if client_ip.startswith("192.168.1.") or client_ip in ("127.0.0.1", "::1"):
         base = _settings.subnet_url
     else:
         base = _settings.public_url

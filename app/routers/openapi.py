@@ -70,10 +70,10 @@ class DocumentListResponse(BaseModel):
 
 
 class DocumentLinks(BaseModel):
-    """文献链接（路径格式，不含域名和端口）"""
-    detail_page: str = Field(..., description="详情页面路径，如 /assist/detail/710")
-    pdf_download: str = Field(..., description="PDF下载路径，如 /assist/api/documents/710/pdf")
-    markdown_content: str = Field("", description="Markdown内容路径，如 /assist/api/documents/710/markdown")
+    """文献链接"""
+    detail_page: str = Field(..., description="详情页面路径")
+    pdf_download: str = Field("", description="PDF下载路径")
+    markdown_content: str = Field("", description="Markdown内容路径")
 
 
 class DocumentDetailResponse(BaseModel):
@@ -160,12 +160,15 @@ def _format_document(doc: Document) -> DocumentInfo:
     )
 
 
-def _get_document_links(doc_id: int) -> DocumentLinks:
-    """获取文献链接（只返回路径部分）"""
+def _get_document_links(doc_id: int, include_pdf: bool = False, include_markdown: bool = False) -> DocumentLinks:
+    """获取文献链接"""
     base_url = _get_base_url()
-    return DocumentLinks(
-        detail_page=f"{base_url}/redirect/{doc_id}",
-    )
+    links = DocumentLinks(detail_page=f"{base_url}/redirect/{doc_id}")
+    if include_pdf:
+        links.pdf_download = f"{base_url}/assist/api/documents/{doc_id}/pdf"
+    if include_markdown:
+        links.markdown_content = f"{base_url}/assist/api/documents/{doc_id}/markdown"
+    return links
 
 
 # -------------------------------
@@ -331,6 +334,8 @@ async def list_documents(
 )
 async def get_document_detail(
     doc_id: int,
+    include_pdf: bool = Query(False, description="是否包含PDF下载链接"),
+    include_markdown: bool = Query(False, description="是否包含Markdown内容链接"),
     db: Session = Depends(get_db),
 ):
     """获取文献详情"""
@@ -357,7 +362,7 @@ async def get_document_detail(
         keywords_en=_parse_keywords(doc.keywords_en),
         category=doc.category or "",
         status=doc.status.value if isinstance(doc.status, DocStatus) else doc.status,
-        links=_get_document_links(doc_id),
+        links=_get_document_links(doc_id, include_pdf, include_markdown),
     )
 
 
@@ -369,6 +374,8 @@ async def get_document_detail(
 )
 async def get_document_links(
     doc_id: int,
+    include_pdf: bool = Query(False, description="是否包含PDF下载链接"),
+    include_markdown: bool = Query(False, description="是否包含Markdown内容链接"),
     db: Session = Depends(get_db),
 ):
     """获取文献链接"""
@@ -376,7 +383,7 @@ async def get_document_links(
     if not doc:
         raise HTTPException(status_code=404, detail=f"未找到ID为 {doc_id} 的文献")
 
-    return _get_document_links(doc_id)
+    return _get_document_links(doc_id, include_pdf, include_markdown)
 
 
 @router.get(
