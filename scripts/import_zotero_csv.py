@@ -14,7 +14,7 @@ Zotero CSV 导入脚本
 示例:
     python scripts/import_zotero_csv.py ~/zotero_export.csv
     python scripts/import_zotero_csv.py ~/zotero_export.csv --match-mode hash
-    python3 scripts/import_zotero_csv.py data\我的文库.csv --base-url http://192.168.1.185:5001 --token change-me
+    python3 scripts/import_zotero_csv.py data\我的文库.csv --base-url http://192.168.1.100:5001 --token change-me
 """
 
 import argparse
