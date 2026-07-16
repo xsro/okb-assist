@@ -202,6 +202,19 @@ def list_vector_dbs():
     return {"vector_dbs": dbs}
 
 
+@router.get("/doc-types")
+def list_doc_types(db: Session = Depends(get_db)):
+    """返回所有已使用的文献类型（去重、排序）。"""
+    rows = (
+        db.query(Document.doc_type)
+        .filter(Document.doc_type.isnot(None), Document.doc_type != "")
+        .distinct()
+        .all()
+    )
+    types = sorted([r[0] for r in rows])
+    return {"doc_types": types}
+
+
 @router.get("/grep-search")
 async def grep_search(
     q: str = "",
@@ -290,6 +303,7 @@ async def semantic_search(
 def list_documents(
     q: Optional[str] = None,
     status_filter: Optional[str] = None,
+    doc_type_filter: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
     sort_by: Optional[str] = None,
@@ -309,6 +323,11 @@ def list_documents(
         # Support multiple status filters separated by comma
         statuses = status_filter.split(",")
         query = query.filter(Document.status.in_(statuses))
+
+    if doc_type_filter:
+        # Support multiple doc types separated by comma
+        doc_types = doc_type_filter.split(",")
+        query = query.filter(Document.doc_type.in_(doc_types))
 
     # Get total count
     total = query.count()

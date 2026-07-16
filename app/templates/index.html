@@ -279,6 +279,9 @@
                 <option value="indexed">已索引</option>
                 <option value="error">错误</option>
             </select>
+            <select id="doctype-filter" class="form-control">
+                <option value="">全部类型</option>
+            </select>
             <a href="/assist/upload" class="btn btn-primary">上传 PDF</a>
         </div>
 
@@ -596,11 +599,13 @@
         async function loadDocuments() {
             const q = document.getElementById('search-input').value;
             const status = document.getElementById('status-filter').value;
+            const docType = document.getElementById('doctype-filter').value;
 
             let url = `/assist/api/documents/?page=${currentPage}&page_size=${pageSize}`;
             url += `&sort_by=${encodeURIComponent(sort_by)}&sort_order=${encodeURIComponent(sort_order)}`;
             if (q) url += `&q=${encodeURIComponent(q)}`;
             if (status) url += `&status_filter=${encodeURIComponent(status)}`;
+            if (docType) url += `&doc_type_filter=${encodeURIComponent(docType)}`;
 
             try {
                 const data = await api.get(url);
@@ -820,12 +825,34 @@
             loadDocuments();
         });
 
+        document.getElementById('doctype-filter').addEventListener('change', () => {
+            currentPage = 1;
+            loadDocuments();
+        });
+
+        // ========== Load Doc Types ==========
+        async function loadDocTypes() {
+            try {
+                const data = await api.get('/assist/api/documents/doc-types');
+                const select = document.getElementById('doctype-filter');
+                (data.doc_types || []).forEach(t => {
+                    const opt = document.createElement('option');
+                    opt.value = t;
+                    opt.textContent = t || '(空)';
+                    select.appendChild(opt);
+                });
+            } catch (e) {
+                console.warn('加载文献类型列表失败:', e);
+            }
+        }
+
         // ========== Init ==========
         loadSortPreference();
         loadColumnWidths();
         loadVisibleColumns();
         renderColCheckboxes();
         renderTableHead();
+        loadDocTypes();
         loadDocuments();
     </script>
 </body>
