@@ -62,6 +62,10 @@
                 </div>
                 <div class="action-row">
                     <a id="btn-view" href="#" class="btn">📄 查看详情</a>
+                    <label class="btn btn-warning" style="cursor:pointer;margin:0">
+                        📄 <span id="btn-pdf-label">替换 PDF</span>
+                        <input type="file" id="pdfFileInput" accept=".pdf" style="display:none" onchange="uploadPdf(this)">
+                    </label>
                     <button class="btn btn-danger" onclick="deleteDoc()">🗑️ 删除文献</button>
                 </div>
             </div>
@@ -190,6 +194,9 @@
             document.getElementById('doc-authors').textContent = formatAuthors(doc.authors);
             document.getElementById('doc-id').textContent = `ID: ${doc.id}`;
             document.getElementById('btn-view').href = `/assist/detail/${doc.id}`;
+
+            // PDF button label
+            document.getElementById('btn-pdf-label').textContent = doc.file_path ? '替换 PDF' : '上传 PDF';
 
             // Markdown view button
             const btnViewMd = document.getElementById('btn-view-md');
@@ -414,6 +421,31 @@
                 showToast('文献已删除', 'success');
                 window.location.href = '/assist/';
             } catch (err) { showToast(err.message, 'error'); }
+        }
+
+        async function uploadPdf(input) {
+            const file = input.files[0];
+            if (!file) return;
+            if (!file.name.toLowerCase().endsWith('.pdf')) {
+                showToast('只支持 PDF 文件', 'error');
+                input.value = '';
+                return;
+            }
+
+            const label = document.getElementById('btn-pdf-label');
+            const originalText = label.textContent;
+            label.textContent = '上传中...';
+
+            try {
+                await api.upload(`/assist/api/documents/${docId}/pdf`, file);
+                showToast('PDF 已替换成功', 'success');
+                await loadDocument();
+            } catch (err) {
+                showToast(err.message || '上传失败', 'error');
+            } finally {
+                input.value = '';
+                label.textContent = doc.file_path ? '替换 PDF' : '上传 PDF';
+            }
         }
 
         // Polling
