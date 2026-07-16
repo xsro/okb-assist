@@ -14,6 +14,7 @@ import json
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -24,7 +25,10 @@ from app.utils import to_absolute_path
 
 settings = get_settings()
 
-mcp = FastMCP("OKB-Assist")
+mcp = FastMCP(
+    "OKB-Assist",
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
 
 
 def _get_db():
@@ -69,6 +73,53 @@ def _format_doc(doc: Document) -> dict:
 
 
 # ─── Tools ───────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def grep_search(query: str, limit: int = 10, context: int = 2) -> str:
+    """
+    全文搜索文献内容（基于 grep，轻量快速）。无需向量数据库，支持正则表达式。
+
+    Args:
+        query: 搜索关键词（支持正则表达式）
+        limit: 返回结果数量，默认10
+        context: 匹配行前后的上下文行数，默认2
+    """
+    if not query.strip():
+        return json.dumps({"error": "查询不能为空"}, ensure_ascii=False)
+
+    from app.services.grep_search import grep_search as do_grep
+
+    results = await do_grep(query=query, context_lines=context, limit=limit)
+
+    db = _get_db()
+    try:
+        enriched = []
+        for hit in results:
+            doc_id = hit.get("document_id")
+            doc_info = {}
+            if doc_id:
+                doc = db.query(Document).filter(Document.id == doc_id).first()
+                if doc:
+                    doc_info = {
+                        "title": doc.title or "",
+                        "authors": doc.authors or "",
+                        "year": doc.year,
+                        "journal": doc.journal or "",
+                    }
+            enriched.append({
+                "document_id": doc_id,
+                "content": hit.get("content", ""),
+                **doc_info,
+            })
+
+        return json.dumps({
+            "query": query,
+            "total": len(enriched),
+            "results": enriched,
+        }, ensure_ascii=False, indent=2)
+    finally:
+        db.close()
 
 
 @mcp.tool()
@@ -184,13 +235,14 @@ def get_document_info(doc_id: int) -> str:
 
 
 @mcp.tool()
-def list_documents(query: str = "", status: str = "", page: int = 1, page_size: int = 20) -> str:
+def list_documents(query: str = "", status: str = "", doc_type: str = "", page: int = 1, page_size: int = 20) -> str:
     """
-    搜索或列出文献。支持按标题/作者搜索和按状态过滤。
+    搜索或列出文献。支持按标题/作者搜索、按状态和文献类型过滤。
 
     Args:
         query: 搜索关键词（可选，匹配标题、作者、文件名）
-        status: 状态过滤（可选：uploaded/parsing/markdown_done/extracting/meta_done/indexing/indexed/error）
+        status: 状态过滤（可选，逗号分隔：uploaded/parsing/markdown_done/extracting/meta_done/indexing/indexed/error）
+        doc_type: 文献类型过滤（可选，逗号分隔，Zotero 类型：journalArticle/book/conferencePaper/thesis/report/preprint/bookSection 等）
         page: 页码
         page_size: 每页数量
     """
@@ -208,6 +260,10 @@ def list_documents(query: str = "", status: str = "", page: int = 1, page_size: 
         if status:
             statuses = [s.strip() for s in status.split(",")]
             q = q.filter(Document.status.in_(statuses))
+
+        if doc_type:
+            types = [t.strip() for t in doc_type.split(",")]
+            q = q.filter(Document.doc_type.in_(types))
 
         total = q.count()
         offset = (page - 1) * page_size
@@ -281,6 +337,61 @@ def get_document_abstract(doc_id: int) -> str:
             result["language"] = doc.language
 
         return json.dumps(result, ensure_ascii=False, indent=2)
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def get_stats() -> str:
+    """
+    获取知识库统计信息，包括文献总数、各状态数量、各类型数量。
+    """
+    db = _get_db()
+    try:
+        total = db.query(Document).count()
+
+        # 按状态统计
+        status_counts = {}
+        for s in DocStatus:
+            count = db.query(Document).filter(Document.status == s).count()
+            if count > 0:
+                status_counts[s.value] = count
+
+        # 按类型统计
+        type_rows = (
+            db.query(Document.doc_type)
+            .filter(Document.doc_type.isnot(None), Document.doc_type != "")
+            .all()
+        )
+        type_counts = {}
+        for (dt,) in type_rows:
+            type_counts[dt] = type_counts.get(dt, 0) + 1
+
+        return json.dumps({
+            "total_documents": total,
+            "status_counts": status_counts,
+            "type_counts": dict(sorted(type_counts.items(), key=lambda x: -x[1])),
+            "indexed_count": status_counts.get("indexed", 0),
+        }, ensure_ascii=False, indent=2)
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def list_doc_types() -> str:
+    """
+    列出知识库中所有已使用的文献类型（Zotero 标准类型）。
+    """
+    db = _get_db()
+    try:
+        rows = (
+            db.query(Document.doc_type)
+            .filter(Document.doc_type.isnot(None), Document.doc_type != "")
+            .distinct()
+            .all()
+        )
+        types = sorted([r[0] for r in rows])
+        return json.dumps({"doc_types": types}, ensure_ascii=False, indent=2)
     finally:
         db.close()
 
