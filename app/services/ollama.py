@@ -37,7 +37,9 @@ Important Rules:
 3. For English documents (language="en"), leave *_en fields empty
 
 Return the following JSON format:
-{{"language": "language_code", "type": "book|article|conference|thesis", "title": "Title (original)", "title_en": "English title (required for non-English)", "year": publication_year (integer), "authors": ["Author1", "Author2"], "authors_en": ["Author1", "Author2"], "abstract": "Abstract (original)", "abstract_en": "English abstract (required for non-English)", "doi": "DOI", "source": "Source", "journal": "Journal/Conference name (original)", "journal_en": "English journal/conference (required for non-English)", "keywords": ["keyword1", "keyword2"], "keywords_en": ["keyword1", "keyword2"], "category": "Category"}}
+{{"language": "language_code", "type": "journalArticle|book|conferencePaper|thesis|report|preprint|bookSection|webpage|document|patent|review|manuscript|presentation", "title": "Title (original)", "title_en": "English title (required for non-English)", "year": publication_year (integer), "authors": ["Author1", "Author2"], "authors_en": ["Author1", "Author2"], "abstract": "Abstract (original)", "abstract_en": "English abstract (required for non-English)", "doi": "DOI", "source": "Source", "journal": "Journal/Conference name (original)", "journal_en": "English journal/conference (required for non-English)", "keywords": ["keyword1", "keyword2"], "keywords_en": ["keyword1", "keyword2"], "category": "Category"}}
+
+Note: type must be one of the Zotero item types listed above. Use "journalArticle" for journal papers (not "article"), "conferencePaper" for conference papers (not "conference").
 
 Document Content:
 {content}

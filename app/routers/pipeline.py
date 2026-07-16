@@ -18,6 +18,27 @@ from app.utils import to_absolute_path
 
 router = APIRouter(prefix="/assist/api/pipeline", tags=["pipeline"])
 
+
+# ── Zotero 标准类型映射 ──
+_TYPE_NORMALIZE = {
+    "article": "journalArticle", "journalarticle": "journalArticle", "journal article": "journalArticle",
+    "conference": "conferencePaper", "conferencepaper": "conferencePaper", "conference paper": "conferencePaper",
+    "inproceedings": "conferencePaper", "conference proceedings": "conferencePaper",
+    "thesis": "thesis", "dissertation": "thesis", "硕士学位论文": "thesis", "博士学位论文": "thesis",
+    "mastersthesis": "thesis", "phdthesis": "thesis",
+    "book": "book", "booksection": "bookSection", "book section": "bookSection",
+    "preprint": "preprint", "report": "report", "webpage": "webpage", "document": "document",
+    "presentation": "presentation", "manuscript": "manuscript", "patent": "patent", "review": "review",
+}
+
+
+def _normalize_doc_type(raw: str) -> str:
+    """将任意 doc_type 标准化为 Zotero 类型名。"""
+    if not raw:
+        return ""
+    raw = raw.strip()
+    return _TYPE_NORMALIZE.get(raw) or _TYPE_NORMALIZE.get(raw.lower()) or "document"
+
 QDRANT_USER_ID = 0  # Default user ID for Qdrant since no auth
 
 # Concurrency limiting
@@ -273,7 +294,7 @@ async def _do_extract_impl(doc_id: int):
             # 检查元数据是否有效
             title = metadata.get("title", "")
             authors = metadata.get("authors", [])
-            doc_type = metadata.get("type", "")
+            doc_type = _normalize_doc_type(metadata.get("type", ""))
 
             if not title and not authors:
                 _update_doc_status(doc_id, DocStatus.error, "元数据提取失败: 未能获取到标题和作者信息")
