@@ -15,6 +15,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.applications import Starlette
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -24,11 +25,39 @@ from app.services.ollama import get_embedding
 from app.utils import to_absolute_path
 
 settings = get_settings()
+MCP_MOUNT_PATH = "/assist/mcp"
 
 mcp = FastMCP(
     "OKB-Assist",
+    instructions=(
+        "OKB-Assist provides MCP tools for a local academic document library. "
+        "Use search_documents for semantic search, grep_search for full-text "
+        "keyword/regex search, list_documents to browse records, read_markdown "
+        "to read parsed document text, and get_document_info/get_stats for "
+        "metadata and library status."
+    ),
+    streamable_http_path="/",
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )
+
+
+def create_mcp_app(mount_path: str = MCP_MOUNT_PATH) -> Starlette:
+    """Create an MCP app that supports Streamable HTTP and legacy SSE."""
+    streamable_http_app = mcp.streamable_http_app()
+    sse_app = mcp.sse_app(mount_path=mount_path)
+
+    return Starlette(
+        debug=mcp.settings.debug,
+        routes=[
+            *streamable_http_app.routes,
+            *sse_app.routes,
+        ],
+        middleware=[
+            *streamable_http_app.user_middleware,
+            *sse_app.user_middleware,
+        ],
+        lifespan=streamable_http_app.router.lifespan_context,
+    )
 
 
 def _get_db():

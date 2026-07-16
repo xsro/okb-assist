@@ -24,6 +24,27 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
 
 ## 连接方式
 
+### Codex：Streamable HTTP 远程连接
+
+Codex 使用 MCP Streamable HTTP 连接 OKB-Assist，服务启动后端点为：
+
+```
+http://<host>:<port>/assist/mcp/
+```
+
+例如本地运行：`http://localhost:5001/assist/mcp/`
+
+在 Codex 的 `config.toml` 中添加：
+
+```toml
+[mcp_servers.okb_assist]
+url = "http://localhost:5001/assist/mcp/"
+startup_timeout_sec = 20
+tool_timeout_sec = 120
+```
+
+---
+
 ### 方式一：SSE 远程连接（推荐）
 
 适用于网络可达的 OKB-Assist 服务。服务启动后，MCP SSE 端点自动挂载在：

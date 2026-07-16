@@ -4,7 +4,7 @@ import os
 os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
 os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
 
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import Request
 from fastapi.responses import RedirectResponse
@@ -26,16 +26,23 @@ async def lifespan(app: FastAPI):
     # 重置中间状态的任务（重启后恢复）
     reset_stuck_tasks()
 
-    # Mount MCP SSE endpoint
+    mcp_session_manager = None
+
+    # Mount MCP endpoints: Streamable HTTP at /assist/mcp and SSE at /assist/mcp/sse
     try:
-        from app.mcp_server import mcp
-        mcp_app = mcp.sse_app()
+        from app.mcp_server import create_mcp_app, mcp
+        mcp_app = create_mcp_app()
         app.mount("/assist/mcp", mcp_app)
+        mcp_session_manager = mcp.session_manager
     except ImportError:
         print("Warning: mcp package not installed, MCP endpoint unavailable")
     except Exception as e:
         print(f"Warning: Failed to mount MCP: {e}")
-    yield
+
+    async with AsyncExitStack() as stack:
+        if mcp_session_manager is not None:
+            await stack.enter_async_context(mcp_session_manager.run())
+        yield
 
 
 def reset_stuck_tasks():
