@@ -10,7 +10,6 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user
 from app.config import get_settings
 from app.database import get_db
 from app.models import Document, DocStatus, DocumentVectorIndex, IndexStatus
@@ -352,7 +351,6 @@ def list_documents(
 async def upload_document(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    user: str = Depends(get_current_user),
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="只支持 PDF 文件")
@@ -649,7 +647,6 @@ async def replace_pdf(
     doc_id: int,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    user: str = Depends(get_current_user),
 ):
     """替换已有文档的 PDF 文件。"""
     doc = db.query(Document).filter(Document.id == doc_id).first()

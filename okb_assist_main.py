@@ -6,72 +6,16 @@ os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
 
 from contextlib import asynccontextmanager
 
-from fastapi import Request, HTTPException, Depends
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi import Request
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.database import init_db
-from app.auth import (
-    get_current_user,
-    get_token_from_request,
-    is_authenticated,
-    is_request_authorized,
-    is_trusted_lan_client,
-    verify_token,
-)
 from app.config import get_settings
 from app.routers import documents, pipeline, admin, openapi, config
-
-
-class AuthMiddleware(BaseHTTPMiddleware):
-    """Apply token auth except for trusted LAN clients and public bootstrap paths."""
-
-    PUBLIC_EXACT_PATHS = {
-        "/",
-        "/favicon.ico",
-        "/assist/login",
-        "/assist/api/auth/token",
-        "/assist/api/auth/check",
-    }
-    PUBLIC_PREFIXES = (
-        "/assist/static/",
-        "/assist/detail/",
-        "/redirect/",
-    )
-    API_PREFIXES = (
-        "/assist/api/",
-        "/assist/openapi/",
-    )
-
-    def _is_public_path(self, path: str) -> bool:
-        if path in self.PUBLIC_EXACT_PATHS:
-            return True
-
-        return any(path.startswith(prefix) for prefix in self.PUBLIC_PREFIXES)
-
-    def _is_api_path(self, path: str) -> bool:
-        return path == "/openapi.json" or any(path.startswith(prefix) for prefix in self.API_PREFIXES)
-
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-
-        if request.method == "OPTIONS" or self._is_public_path(path):
-            return await call_next(request)
-
-        if is_request_authorized(request):
-            return await call_next(request)
-
-        if self._is_api_path(path):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "未授权访问，请提供有效的token"},
-            )
-
-        return RedirectResponse(url="/assist/login", status_code=302)
 
 
 @asynccontextmanager
@@ -146,9 +90,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Auth middleware
-app.add_middleware(AuthMiddleware)
-
 # Mount static files
 app.mount("/assist/static", StaticFiles(directory="static"), name="static")
 
@@ -165,50 +106,6 @@ app.include_router(pipeline.router)
 app.include_router(admin.router)
 app.include_router(openapi.router)
 app.include_router(config.router)
-
-
-# ==================== 认证端点 ====================
-
-@app.post("/assist/api/auth/token")
-async def auth_token(request: Request):
-    """Validate the configured access token."""
-    token = None
-
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
-
-    if isinstance(body, dict):
-        token = body.get("token") or body.get("access_token")
-
-    if not token:
-        try:
-            form = await request.form()
-        except Exception:
-            form = {}
-        token = form.get("token") or form.get("access_token")
-
-    if not token:
-        token = get_token_from_request(request)
-
-    if verify_token(token):
-        return {"access_token": token, "token_type": "bearer"}
-
-    raise HTTPException(status_code=401, detail="无效的 token")
-
-
-@app.get("/assist/api/auth/check")
-async def auth_check(request: Request):
-    """检查当前请求是否允许访问受保护资源。"""
-    trusted_client = is_trusted_lan_client(request)
-    token_authenticated = is_authenticated(request)
-    return {
-        "authenticated": trusted_client or token_authenticated,
-        "token_authenticated": token_authenticated,
-        "trusted_client": trusted_client,
-        "auth_required": not trusted_client,
-    }
 
 
 # ==================== 页面路由 ====================
@@ -230,11 +127,6 @@ def redirect_by_network(request: Request, doc_id: int):
     else:
         base = _settings.subnet_url
     return RedirectResponse(url=f"{base}/assist/detail/{doc_id}")
-
-
-@app.get("/assist/login")
-def login_page(request: Request):
-    return templates.TemplateResponse(name="login.html", request=request)
 
 
 @app.get("/assist/")
@@ -260,37 +152,37 @@ def markdown_page(request: Request, doc_id: int):
 # ==================== 管理页面 ====================
 
 @app.get("/assist/upload")
-def upload_page(request: Request, user: str = Depends(get_current_user)):
+def upload_page(request: Request):
     return templates.TemplateResponse(name="upload.html", request=request)
 
 
 @app.get("/assist/admin")
-def admin_page(request: Request, user: str = Depends(get_current_user)):
+def admin_page(request: Request):
     return templates.TemplateResponse(name="admin.html", request=request)
 
 
 @app.get("/assist/point")
-def point_page(request: Request, user: str = Depends(get_current_user)):
+def point_page(request: Request):
     return templates.TemplateResponse(name="point.html", request=request)
 
 
 @app.get("/assist/tools")
-def tools_page(request: Request, user: str = Depends(get_current_user)):
+def tools_page(request: Request):
     return templates.TemplateResponse(name="tools.html", request=request)
 
 
 @app.get("/assist/duplicates")
-def duplicates_page(request: Request, user: str = Depends(get_current_user)):
+def duplicates_page(request: Request):
     return templates.TemplateResponse(name="duplicates.html", request=request)
 
 
 @app.get("/assist/doc/{doc_id}")
-def doc_manage_page(request: Request, doc_id: int, user: str = Depends(get_current_user)):
+def doc_manage_page(request: Request, doc_id: int):
     return templates.TemplateResponse(name="doc_manage.html", request=request, context={"doc_id": doc_id})
 
 
 @app.get("/assist/config")
-def config_page(request: Request, user: str = Depends(get_current_user)):
+def config_page(request: Request):
     return templates.TemplateResponse(name="config.html", request=request)
 
 

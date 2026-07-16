@@ -260,10 +260,6 @@
             <h3>🔧 系统设置 <span style="font-size:0.75rem;color:var(--text-muted);font-weight:normal">（仅限手动修改 system.json）</span></h3>
             <div class="form-grid">
                 <div class="form-group">
-                    <label>访问 Token</label>
-                    <input type="text" id="upload-token" readonly style="background:var(--bg-muted);cursor:not-allowed">
-                </div>
-                <div class="form-group">
                     <label>最大并发处理数</label>
                     <input type="text" id="max-concurrent" readonly style="background:var(--bg-muted);cursor:not-allowed">
                 </div>
@@ -394,7 +390,6 @@
 
         function fillSystemForm(sysCfg) {
             // 系统配置（只读显示）
-            document.getElementById('upload-token').value = sysCfg.upload_token || '';
             document.getElementById('max-concurrent').value = sysCfg.max_concurrent_tasks ?? 3;
             document.getElementById('database-url').value = sysCfg.database_url || '';
             document.getElementById('uploads-folder').value = sysCfg.uploads_folder || '';
@@ -499,7 +494,7 @@
 
             // 更新来源选项
             const sourceSelect = document.getElementById(`vdb-embed-source-${id}`);
-            const currentSource = sourceSelect.value;
+            const currentSource = data?.embedding?.source || sourceSelect.value;
             sourceSelect.innerHTML = dbConfig.embeddingSources.map(s =>
                 `<option value="${s}" ${s === currentSource ? 'selected' : ''}>${EMBEDDING_MODELS[s]?.label || s}</option>`
             ).join('');

@@ -94,12 +94,22 @@
             font-size: 0.85rem;
             color: var(--text);
             line-height: 1.5;
-            max-height: 100px;
+            max-height: 200px;
             overflow: hidden;
             position: relative;
         }
         .search-result-text.expanded {
             max-height: none;
+        }
+        .search-result-text.collapsed::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 40px;
+            background: linear-gradient(transparent, var(--card));
+            pointer-events: none;
         }
         .search-result-actions {
             margin-top: 0.5rem;
@@ -311,11 +321,11 @@
             <div class="tools-sidebar">
                 <div class="card">
                     <div class="tool-nav">
-                        <div class="tool-nav-item active" data-tool="search" onclick="switchTool('search')">
-                            🔍 语义搜索
-                        </div>
-                        <div class="tool-nav-item" data-tool="grep" onclick="switchTool('grep')">
+                        <div class="tool-nav-item active" data-tool="grep" onclick="switchTool('grep')">
                             📝 全文搜索
+                        </div>
+                        <div class="tool-nav-item" data-tool="search" onclick="switchTool('search')">
+                            🔍 语义搜索
                         </div>
                         <div class="tool-nav-item" data-tool="browse" onclick="switchTool('browse')">
                             📚 文档浏览
@@ -342,38 +352,8 @@
 
             <!-- Main content -->
             <div class="tools-main">
-                <!-- Search Panel -->
-                <div class="tool-panel active" id="panel-search">
-                    <div class="card">
-                        <h2 style="margin-bottom: 1rem;">🔍 语义搜索</h2>
-                        <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem;">
-                            使用向量数据库进行语义相似度搜索，支持中英文查询
-                        </p>
-                        <div class="search-input-group">
-                            <input type="text" id="searchQuery" class="form-control"
-                                   placeholder="输入搜索内容，如：机器学习优化算法..."
-                                   onkeydown="if(event.key==='Enter') doSearch()">
-                            <select id="searchVectorDb" class="form-control" style="width: 160px;">
-                                <option value="">默认数据库</option>
-                            </select>
-                            <select id="searchLimit" class="form-control" style="width: 80px;">
-                                <option value="5">5条</option>
-                                <option value="10">10条</option>
-                                <option value="20">20条</option>
-                            </select>
-                            <button class="btn btn-primary" onclick="doSearch()">搜索</button>
-                        </div>
-                        <div id="searchResults">
-                            <div class="empty-state">
-                                <div class="icon">🔍</div>
-                                <p>输入关键词开始搜索</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
                 <!-- Grep Search Panel -->
-                <div class="tool-panel" id="panel-grep">
+                <div class="tool-panel active" id="panel-grep">
                     <div class="card">
                         <h2 style="margin-bottom: 1rem;">📝 全文搜索 (grep)</h2>
                         <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem;">
@@ -400,6 +380,36 @@
                             <div class="empty-state">
                                 <div class="icon">📝</div>
                                 <p>输入关键词开始全文搜索</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Search Panel -->
+                <div class="tool-panel" id="panel-search">
+                    <div class="card">
+                        <h2 style="margin-bottom: 1rem;">🔍 语义搜索</h2>
+                        <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 1rem;">
+                            使用向量数据库进行语义相似度搜索，支持中英文查询
+                        </p>
+                        <div class="search-input-group">
+                            <input type="text" id="searchQuery" class="form-control"
+                                   placeholder="输入搜索内容，如：机器学习优化算法..."
+                                   onkeydown="if(event.key==='Enter') doSearch()">
+                            <select id="searchVectorDb" class="form-control" style="width: 160px;">
+                                <option value="">默认数据库</option>
+                            </select>
+                            <select id="searchLimit" class="form-control" style="width: 80px;">
+                                <option value="5">5条</option>
+                                <option value="10">10条</option>
+                                <option value="20">20条</option>
+                            </select>
+                            <button class="btn btn-primary" onclick="doSearch()">搜索</button>
+                        </div>
+                        <div id="searchResults">
+                            <div class="empty-state">
+                                <div class="icon">🔍</div>
+                                <p>输入关键词开始搜索</p>
                             </div>
                         </div>
                     </div>
@@ -567,10 +577,11 @@
                             ${r.year ? ' · ' + r.year : ''}
                             ${r.journal ? ' · ' + r.journal : ''}
                         </div>
-                        <div class="search-result-text" style="white-space:pre-wrap;font-family:monospace;font-size:0.8rem">${highlighted}</div>
+                        <div class="search-result-text collapsed" style="white-space:pre-wrap;font-family:monospace;font-size:0.8rem">${highlighted}</div>
                         <div class="search-result-actions">
                             <a href="/assist/detail/${r.document_id}" class="btn btn-sm btn-primary">详情</a>
                             <a href="/assist/markdown/${r.document_id}" class="btn btn-sm btn-success">阅读</a>
+                            <button class="btn btn-sm" onclick="toggleResultText(this)">展开</button>
                         </div>
                     </div>
                 `}).join('');
@@ -581,6 +592,19 @@
 
         function escapeRegex(str) {
             return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }
+
+        function toggleResultText(btn) {
+            const textEl = btn.closest('.search-result-card').querySelector('.search-result-text');
+            if (textEl.classList.contains('expanded')) {
+                textEl.classList.remove('expanded');
+                textEl.classList.add('collapsed');
+                btn.textContent = '展开';
+            } else {
+                textEl.classList.add('expanded');
+                textEl.classList.remove('collapsed');
+                btn.textContent = '收起';
+            }
         }
 
         // ─── Browse ──────────────────────────────────────────────────────────
