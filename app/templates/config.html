@@ -271,6 +271,10 @@
                     <label>上传文件目录</label>
                     <input type="text" id="uploads-folder" readonly style="background:var(--bg-muted);cursor:not-allowed">
                 </div>
+                <div class="form-group">
+                    <label>MCP Token</label>
+                    <input type="text" id="mcp-token" readonly style="background:var(--bg-muted);cursor:not-allowed" placeholder="未设置">
+                </div>
             </div>
             <p style="margin-top:0.75rem;font-size:0.8rem;color:var(--text-muted)">
                 💡 这些配置存储在 <code>system.json</code> 文件中，需要手动编辑文件并重启服务来修改。
@@ -393,6 +397,9 @@
             document.getElementById('max-concurrent').value = sysCfg.max_concurrent_tasks ?? 3;
             document.getElementById('database-url').value = sysCfg.database_url || '';
             document.getElementById('uploads-folder').value = sysCfg.uploads_folder || '';
+            // MCP Token（脱敏显示）
+            const mcpToken = sysCfg.mcp_token || '';
+            document.getElementById('mcp-token').value = mcpToken ? mcpToken.slice(0, 4) + '***' : '未设置';
         }
 
         // ── 向量数据库卡片管理 ──

@@ -79,6 +79,10 @@ class Settings:
         return get_system_config().get("upload_token", "change-me")
 
     @property
+    def mcp_token(self) -> str:
+        return get_system_config().get("mcp_token", "change-me")
+
+    @property
     def max_concurrent_tasks(self) -> int:
         return get_system_config().get("max_concurrent_tasks", 3)
 

@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
 
 DEFAULT_SYSTEM = {
     "upload_token": "change-me",
+    "mcp_token": "change-me",
     "max_concurrent_tasks": 3,
     "database_url": "sqlite:///./okb_assist.db",
     "uploads_folder": "uploads",
@@ -206,5 +207,10 @@ def mask_system_config(config: dict) -> dict:
     if masked.get("upload_token"):
         token = masked["upload_token"]
         masked["upload_token"] = token[:4] + "***" if len(token) > 4 else "***"
+
+    # MCP token
+    if masked.get("mcp_token"):
+        token = masked["mcp_token"]
+        masked["mcp_token"] = token[:4] + "***" if len(token) > 4 else "***"
 
     return masked

@@ -15,6 +15,9 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.server.auth.settings import AuthSettings
+from mcp.server.auth.provider import AccessToken
+from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
 
 from app.config import get_settings
@@ -27,18 +30,49 @@ from app.utils import to_absolute_path
 settings = get_settings()
 MCP_MOUNT_PATH = "/assist/mcp"
 
-mcp = FastMCP(
-    "OKB-Assist",
-    instructions=(
+
+# ── Bearer Token 认证 ──────────────────────────────────────────────────────
+
+class StaticTokenVerifier:
+    """使用 system.json 中 mcp_token 验证 Bearer Token。"""
+
+    def __init__(self, token: str):
+        self.token = token
+
+    async def verify_token(self, raw_token: str) -> AccessToken | None:
+        if raw_token == self.token:
+            return AccessToken(
+                token=raw_token,
+                client_id="okb-client",
+                scopes=["read", "write"],
+            )
+        return None
+
+
+_token = settings.mcp_token
+_auth_enabled = bool(_token) and _token != "change-me"
+
+_mcp_kwargs: dict = {
+    "instructions": (
         "OKB-Assist provides MCP tools for a local academic document library. "
         "Use search_documents for semantic search, grep_search for full-text "
         "keyword/regex search, list_documents to browse records, read_markdown "
         "to read parsed document text, and get_document_info/get_stats for "
         "metadata and library status."
     ),
-    streamable_http_path="/",
-    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
-)
+    "streamable_http_path": "/",
+    "transport_security": TransportSecuritySettings(enable_dns_rebinding_protection=False),
+}
+
+if _auth_enabled:
+    _base_url = settings.public_url.rstrip("/")
+    _mcp_kwargs["auth"] = AuthSettings(
+        issuer_url=AnyHttpUrl(_base_url),
+        resource_server_url=AnyHttpUrl(f"{_base_url}/assist/mcp"),
+    )
+    _mcp_kwargs["token_verifier"] = StaticTokenVerifier(_token)
+
+mcp = FastMCP("OKB-Assist", **_mcp_kwargs)
 
 
 def create_mcp_app(mount_path: str = MCP_MOUNT_PATH) -> Starlette:
