@@ -363,11 +363,6 @@
                             <input type="text" id="grepQuery" class="form-control"
                                    placeholder="输入关键词，如：neural network、优化算法..."
                                    onkeydown="if(event.key==='Enter') doGrepSearch()">
-                            <select id="grepLimit" class="form-control" style="width: 80px;">
-                                <option value="5">5条</option>
-                                <option value="10" selected>10条</option>
-                                <option value="20">20条</option>
-                            </select>
                             <select id="grepContext" class="form-control" style="width: 100px;">
                                 <option value="1">1行上下文</option>
                                 <option value="2" selected>2行上下文</option>
@@ -375,6 +370,21 @@
                                 <option value="5">5行上下文</option>
                             </select>
                             <button class="btn btn-primary" onclick="doGrepSearch()">搜索</button>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:1rem;font-size:0.85rem;">
+                            <span style="color:var(--text-muted);">最大返回结果数：</span>
+                            <select id="grepLimitPreset" class="form-control" style="width:80px;padding:0.35rem 0.5rem;font-size:0.8rem;"
+                                    onchange="onGrepLimitPresetChange(this)">
+                                <option value="10">10</option>
+                                <option value="20">20</option>
+                                <option value="50">50</option>
+                                <option value="100" selected>100</option>
+                                <option value="200">200</option>
+                                <option value="custom">自定义</option>
+                            </select>
+                            <input type="number" id="grepLimitCustom" class="form-control" style="width:80px;padding:0.35rem 0.5rem;font-size:0.8rem;display:none;"
+                                   min="1" max="1000" placeholder="数量"
+                                   onkeydown="if(event.key==='Enter') doGrepSearch()">
                         </div>
                         <div id="grepResults">
                             <div class="empty-state">
@@ -540,10 +550,30 @@
             }
         }
 
+        // ─── Grep Limit Preset ─────────────────────────────────────────────
+        function onGrepLimitPresetChange(select) {
+            const customInput = document.getElementById('grepLimitCustom');
+            if (select.value === 'custom') {
+                customInput.style.display = '';
+                customInput.focus();
+            } else {
+                customInput.style.display = 'none';
+            }
+        }
+
+        function getGrepLimit() {
+            const preset = document.getElementById('grepLimitPreset').value;
+            if (preset === 'custom') {
+                const val = parseInt(document.getElementById('grepLimitCustom').value);
+                return isNaN(val) || val < 1 ? 100 : Math.min(val, 1000);
+            }
+            return parseInt(preset);
+        }
+
         // ─── Grep Search ───────────────────────────────────────────────────
         async function doGrepSearch() {
             const query = document.getElementById('grepQuery').value.trim();
-            const limit = parseInt(document.getElementById('grepLimit').value);
+            const limit = getGrepLimit();
             const context = parseInt(document.getElementById('grepContext').value);
             if (!query) return;
 
@@ -561,7 +591,12 @@
                     return;
                 }
 
-                container.innerHTML = data.results.map(r => {
+                const resultCount = data.results.length;
+                const countHtml = `<div style="padding:0.5rem 0.75rem;margin-bottom:0.75rem;font-size:0.85rem;color:var(--text-muted);border-bottom:1px solid var(--border);">
+                    共找到 <strong style="color:var(--primary);">${resultCount}</strong> 条结果${resultCount >= limit ? `（已达上限 ${limit} 条，可增大返回数量）` : ''}
+                </div>`;
+
+                container.innerHTML = countHtml + data.results.map(r => {
                     // 高亮匹配的关键词
                     const escaped = escapeHtml(r.content || '');
                     const highlighted = escaped.replace(
