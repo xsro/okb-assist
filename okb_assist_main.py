@@ -12,10 +12,79 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 from app.database import init_db
 from app.config import get_settings
 from app.routers import documents, pipeline, admin, openapi, config
+
+
+# ── Token 认证中间件 ──────────────────────────────────────────────────────
+
+class TokenMiddleware(BaseHTTPMiddleware):
+    """API 端点 Token 认证（MCP、页面、静态文件不校验）。"""
+
+    # 不需要校验 token 的路径前缀
+    SKIP_PREFIXES = (
+        "/assist/mcp",      # MCP 有自己的 Bearer Token 认证
+        "/assist/static",   # 静态文件
+        "/assist/uploads",  # 上传文件
+        "/redirect",        # 重定向
+    )
+
+    # 不需要校验 token 的页面路由（HTML 模板）
+    PAGE_PATHS = (
+        "/assist/",
+        "/assist/detail/",
+        "/assist/markdown/",
+        "/assist/monitor",
+        "/assist/upload",
+        "/assist/admin",
+        "/assist/point",
+        "/assist/tools",
+        "/assist/duplicates",
+        "/assist/doc/",
+        "/assist/config",
+        "/assist/login",
+        "/",
+    )
+
+    async def dispatch(self, request, call_next):
+        path = request.url.path
+
+        # 跳过不需要校验的路径
+        for prefix in self.SKIP_PREFIXES:
+            if path.startswith(prefix):
+                return await call_next(request)
+
+        # 跳过页面路由
+        for page in self.PAGE_PATHS:
+            if path == page or path.startswith(page):
+                return await call_next(request)
+
+        # 只校验 API 路由
+        if not path.startswith("/assist/api/"):
+            return await call_next(request)
+
+        # 获取 token（Header 或 Query）
+        settings = get_settings()
+        expected = settings.token
+
+        # token 为 change-me 时跳过校验
+        if not expected or expected == "change-me":
+            return await call_next(request)
+
+        # 从 Header 或 Query 获取 token
+        provided = request.headers.get("X-Token") or request.query_params.get("token")
+
+        if not provided or provided != expected:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "未授权：请提供有效的 Token"},
+            )
+
+        return await call_next(request)
 
 
 @asynccontextmanager
@@ -96,6 +165,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Token 认证中间件
+app.add_middleware(TokenMiddleware)
 
 # Mount static files
 app.mount("/assist/static", StaticFiles(directory="static"), name="static")

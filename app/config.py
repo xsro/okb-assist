@@ -75,8 +75,8 @@ class Settings:
 
     # ── 系统配置（从 system.json 读取） ──
     @property
-    def upload_token(self) -> str:
-        return get_system_config().get("upload_token", "change-me")
+    def token(self) -> str:
+        return get_system_config().get("token", "change-me")
 
     @property
     def mcp_token(self) -> str:
