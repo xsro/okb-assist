@@ -75,10 +75,10 @@ if _auth_enabled:
 mcp = FastMCP("OKB-Assist", **_mcp_kwargs)
 
 
-def create_mcp_app(mount_path: str = MCP_MOUNT_PATH) -> Starlette:
+def create_mcp_app() -> Starlette:
     """Create an MCP app that supports Streamable HTTP and legacy SSE."""
     streamable_http_app = mcp.streamable_http_app()
-    sse_app = mcp.sse_app(mount_path=mount_path)
+    sse_app = mcp.sse_app(mount_path="")
 
     return Starlette(
         debug=mcp.settings.debug,
