@@ -188,7 +188,7 @@ async def serve_file_alias(filename: str):
         abs_path = to_absolute_path(doc.file_path)
         if not os.path.isfile(abs_path):
             return JSONResponse(status_code=404, content={"detail": "文件不存在"})
-        return FileResponse(abs_path, media_type="application/pdf", filename=filename)
+        return FileResponse(abs_path, media_type="application/pdf")
     finally:
         db.close()
 
