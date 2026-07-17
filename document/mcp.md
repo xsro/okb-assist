@@ -6,12 +6,15 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
 
 | 工具名称 | 功能 | 参数 |
 |---------|------|------|
+| `grep_search` | 全文搜索（基于 grep，轻量快速） | `query: str`, `limit: int = 10`, `context: int = 2` |
 | `search_documents` | 语义搜索文献内容 | `query: str`, `limit: int = 5` |
-| `read_markdown` | 读取文献 Markdown 内容 | `doc_id: int`, `page: int = 1`, `page_size: int = 5000` |
+| `read_markdown` | 读取文献 Markdown 内容（分页） | `doc_id: int`, `page: int = 1`, `page_size: int = 5000` |
 | `get_document_info` | 获取文献详细信息 | `doc_id: int` |
-| `list_documents` | 搜索/列出文献 | `query: str`, `status: str`, `page: int`, `page_size: int` |
+| `list_documents` | 搜索/列出文献 | `query: str`, `status: str`, `doc_type: str`, `page: int`, `page_size: int` |
 | `get_pdf_url` | 获取 PDF 链接 | `doc_id: int` |
 | `get_document_abstract` | 获取文献摘要 | `doc_id: int` |
+| `get_stats` | 获取知识库统计信息 | 无 |
+| `list_doc_types` | 列出所有已使用的文献类型 | 无 |
 
 ## 可用资源
 
@@ -22,31 +25,23 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
 
 ---
 
-## 连接方式
+## 认证配置
 
-### Codex：Streamable HTTP 远程连接
+MCP 服务使用 Bearer Token 认证。Token 在 `system.json` 的 `mcp_token` 字段中配置：
 
-Codex 使用 MCP Streamable HTTP 连接 OKB-Assist，服务启动后端点为：
-
-```
-http://<host>:<port>/assist/mcp/
-```
-
-例如本地运行：`http://192.168.1.100:5001/assist/mcp/`
-
-在 Codex 的 `config.toml` 中添加：
-
-```toml
-[mcp_servers.okb_assist]
-url = "http://192.168.1.100:5001/assist/mcp/"
-startup_timeout_sec = 20
-tool_timeout_sec = 120
-http_headers = {
-    Authorization = "Bearer token"
+```json
+{
+  "mcp_token": "your-secret-token"
 }
 ```
 
+- Token 为 `change-me` 时**禁用认证**（开发模式）
+- Token 为其他值时，客户端必须在请求中携带 `Authorization: Bearer <token>`
+- `system.json` 中的 `token` 字段用于 API 认证，与 `mcp_token` 独立
+
 ---
+
+## 连接方式
 
 ### 方式一：SSE 远程连接（推荐）
 
@@ -66,7 +61,10 @@ http://<host>:<port>/assist/mcp/sse
 {
   "mcpServers": {
     "okb-assist": {
-      "url": "http://192.168.1.100:5001/assist/mcp/sse"
+      "url": "http://192.168.1.100:5001/assist/mcp/sse",
+      "headers": {
+        "Authorization": "Bearer we-network-control"
+      }
     }
   }
 }
@@ -80,7 +78,10 @@ http://<host>:<port>/assist/mcp/sse
 {
   "mcpServers": {
     "okb-assist": {
-      "url": "http://192.168.1.100:5001/assist/mcp/sse"
+      "url": "http://192.168.1.100:5001/assist/mcp/sse",
+      "headers": {
+        "Authorization": "Bearer we-network-control"
+      }
     }
   }
 }
@@ -88,13 +89,7 @@ http://<host>:<port>/assist/mcp/sse
 
 #### Claude Code 配置
 
-在 Claude Code 中运行：
-
-```bash
-claude mcp add okb-assist --transport sse http://192.168.1.100:5001/assist/mcp/sse --header "Authorization: Bearer your-token"
-```
-
-或手动编辑 `.claude.json`：
+编辑 `~/.claude/settings.json`：
 
 ```json
 {
@@ -107,6 +102,26 @@ claude mcp add okb-assist --transport sse http://192.168.1.100:5001/assist/mcp/s
       }
     }
   }
+}
+```
+
+或使用命令行：
+
+```bash
+claude mcp add okb-assist --transport sse http://192.168.1.100:5001/assist/mcp/sse --header "Authorization: Bearer we-network-control"
+```
+
+#### Codex 配置（Streamable HTTP）
+
+在 Codex 的 `config.toml` 中添加：
+
+```toml
+[mcp_servers.okb_assist]
+url = "http://192.168.1.100:5001/assist/mcp/"
+startup_timeout_sec = 20
+tool_timeout_sec = 120
+http_headers = {
+    Authorization = "Bearer we-network-control"
 }
 ```
 
@@ -166,8 +181,12 @@ curl http://192.168.1.100:5001/assist/api/admin/services/status
 ### 2. 测试 MCP 端点
 
 ```bash
-# 测试 SSE 端点是否可访问
-curl -N http://192.168.1.100:5001/assist/mcp/sse
+# 无 token 测试（应返回401）
+curl -s http://192.168.1.100:5001/assist/mcp/sse
+
+# 带 token 测试（应返回 SSE 事件流）
+curl -s -N http://192.168.1.100:5001/assist/mcp/sse \
+  -H "Authorization: Bearer we-network-control"
 ```
 
 ### 3. 使用 MCP Inspector 测试
@@ -182,11 +201,14 @@ npx @modelcontextprotocol/inspector uv run python -m app.mcp_server
 
 连接成功后，可以在 AI 助手中直接使用自然语言调用工具：
 
-- **搜索文献**: "帮我搜索关于机器学习优化的文献"
+- **全文搜索**: "帮我用 grep 搜索包含 transformer 的文献"
+- **语义搜索**: "帮我搜索关于机器学习优化的文献"
 - **阅读文献**: "读取文档 42 的 Markdown 内容"
 - **查看信息**: "文档 42 的详细信息是什么？"
 - **获取摘要**: "给我看看文档 42 的摘要"
-- **列出文献**: "列出所有已索引的文献"
+- **列出文献**: "列出所有已索引的 journalArticle 类型文献"
+- **统计信息**: "知识库有多少篇文献？各类型分别多少？"
+- **文献类型**: "知识库中有哪些文献类型？"
 
 ---
 
@@ -199,6 +221,7 @@ http://192.168.1.100:5001/assist/tools
 ```
 
 功能包括：
+- **全文搜索**: 基于 grep 的关键词/正则搜索，支持自定义返回数量
 - **语义搜索**: 输入查询，显示带相似度分数的搜索结果
 - **文档浏览**: 分页列表，支持搜索和状态过滤
 - **Markdown 阅读**: 选择文档后渲染 Markdown 内容
@@ -208,17 +231,24 @@ http://192.168.1.100:5001/assist/tools
 
 ## 故障排除
 
-### MCP 端点无法访问
+### MCP 端点返回401
 
-- 确认 OKB-Assist 服务已启动且端口正确
-- 检查 `mcp` 包是否安装：`uv pip list | grep mcp`
+- 检查 `system.json` 中的 `mcp_token` 配置
+- 确认客户端请求中携带了正确的 `Authorization: Bearer <token>` header
+- Token 为 `change-me` 时认证会被禁用
 
 ### 工具调用返回空结果
 
 - 确认文档已通过完整 pipeline 处理（状态为 `indexed`）
 - 向量搜索需要文档先被索引到 Qdrant
+- 全文搜索（grep）不需要索引，可直接使用
 
 ### stdio 模式启动失败
 
 - 确认在 OKB-Assist 项目根目录下运行
 - 检查 Python 环境：`uv run python -c "import mcp; print('OK')"`
+
+### SSE 消息端点404
+
+- 确认使用最新版本的 MCP 配置（`mount_path=""` 已修复路径重复问题）
+- 重启服务后重试
