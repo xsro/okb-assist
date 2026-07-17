@@ -272,13 +272,19 @@
             document.getElementById('pdf-path').innerHTML = `📄 PDF: <code>${pdfPath}</code>`;
             document.getElementById('md-path').innerHTML = `📝 MD: <code>${mdPath}</code>`;
 
-            // PDF buttons
+            // PDF buttons (通过别名获取不可猜测的 URL)
             const btnPdf = document.getElementById('btn-pdf');
             const btnDownload = document.getElementById('btn-download');
-            btnPdf.href = `/assist/api/documents/${docId}/pdf`;
-            btnPdf.style.display = 'inline-flex';
-            btnDownload.href = `/assist/api/documents/${docId}/pdf`;
-            btnDownload.style.display = 'inline-flex';
+            if (doc.file_path) {
+                api.get(`/assist/api/documents/${docId}/file-alias`)
+                    .then(data => {
+                        btnPdf.href = data.url;
+                        btnPdf.style.display = 'inline-flex';
+                        btnDownload.href = data.url;
+                        btnDownload.style.display = 'inline-flex';
+                    })
+                    .catch(() => {});
+            }
 
             // Markdown button
             const btnMarkdown = document.getElementById('btn-markdown');

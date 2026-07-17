@@ -30,6 +30,7 @@ class TokenMiddleware(BaseHTTPMiddleware):
         "/assist/mcp",      # MCP 有自己的 Bearer Token 认证
         "/assist/static",   # 静态文件
         "/assist/uploads",  # 上传文件
+        "/assist/file",     # 文件别名（不可猜测的 PDF 路径）
         "/redirect",        # 重定向
     )
 
@@ -163,6 +164,33 @@ app.include_router(pipeline.router)
 app.include_router(admin.router)
 app.include_router(openapi.router)
 app.include_router(config.router)
+
+
+# ── 文件别名路由（无需 token，路径不可猜测） ─────────────────────────────
+@app.get("/assist/file/{filename}")
+async def serve_file_alias(filename: str):
+    """通过别名访问 PDF 文件（无需 token，URL 不可猜测）。"""
+    from app.routers.documents import get_doc_by_alias
+    from app.utils import to_absolute_path
+    from fastapi.responses import FileResponse
+
+    doc_id = get_doc_by_alias(filename)
+    if doc_id is None:
+        return JSONResponse(status_code=404, content={"detail": "文件不存在或链接已过期"})
+
+    from app.database import SessionLocal
+    from app.models import Document
+    db = SessionLocal()
+    try:
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        if not doc or not doc.file_path:
+            return JSONResponse(status_code=404, content={"detail": "文件不存在"})
+        abs_path = to_absolute_path(doc.file_path)
+        if not os.path.isfile(abs_path):
+            return JSONResponse(status_code=404, content={"detail": "文件不存在"})
+        return FileResponse(abs_path, media_type="application/pdf", filename=filename)
+    finally:
+        db.close()
 
 
 # ==================== 页面路由 ====================

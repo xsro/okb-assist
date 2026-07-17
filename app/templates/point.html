@@ -247,8 +247,9 @@
                 btnMd.href = `/assist/markdown/${documentId}`;
                 btnMd.style.display = 'inline-flex';
 
-                btnPdf.href = `/assist/api/documents/${documentId}/pdf`;
-                btnPdf.style.display = 'inline-flex';
+                api.get(`/assist/api/documents/${documentId}/file-alias`)
+                    .then(data => { btnPdf.href = data.url; btnPdf.style.display = 'inline-flex'; })
+                    .catch(() => { btnPdf.style.display = 'none'; });
             }
 
             // Render vector info

@@ -543,10 +543,17 @@
                         <div class="search-result-actions">
                             <a href="/assist/detail/${r.document_id}" class="btn btn-sm btn-primary">详情</a>
                             <a href="/assist/markdown/${r.document_id}" class="btn btn-sm btn-success">阅读</a>
-                            ${r.pdf_url ? `<a href="${r.pdf_url}" target="_blank" class="btn btn-sm btn-warning">PDF</a>` : ''}
+                            ${r.pdf_url ? `<a href="#" data-doc-id="${r.document_id}" class="btn btn-sm btn-warning pdf-link">PDF</a>` : ''}
                         </div>
                     </div>
                 `).join('');
+                // 异步获取 PDF 别名链接
+                container.querySelectorAll('.pdf-link').forEach(link => {
+                    const docId = link.dataset.docId;
+                    api.get(`/assist/api/documents/${docId}/file-alias`)
+                        .then(d => { link.href = d.url; })
+                        .catch(() => { link.style.display = 'none'; });
+                });
             } catch (e) {
                 container.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">搜索失败: ${e.message}</p></div>`;
             }
@@ -787,9 +794,18 @@
                     <div class="action-row" style="margin-top: 1.5rem;">
                         <a href="/assist/detail/${doc.id}" class="btn btn-primary">详情页</a>
                         <a href="/assist/markdown/${doc.id}" class="btn btn-success">阅读 Markdown</a>
-                        <a href="/assist/api/documents/${doc.id}/pdf" target="_blank" class="btn btn-warning">打开 PDF</a>
+                        <a href="#" id="pdf-alias-link" target="_blank" class="btn btn-warning" style="display:none">打开 PDF</a>
                     </div>
                 `;
+                // 异步获取 PDF 别名链接
+                if (doc.file_path) {
+                    api.get(`/assist/api/documents/${doc.id}/file-alias`)
+                        .then(d => {
+                            const el = document.getElementById('pdf-alias-link');
+                            if (el) { el.href = d.url; el.style.display = ''; }
+                        })
+                        .catch(() => {});
+                }
             } catch (e) {
                 container.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">加载失败: ${e.message}</p></div>`;
             }

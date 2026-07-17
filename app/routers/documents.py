@@ -1,9 +1,13 @@
 import json
 import os
+import random
+import re
+import string
 import uuid
 import zipfile
 from pathlib import Path
 from typing import Optional
+from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import Response
@@ -22,6 +26,28 @@ UPLOAD_DIR = Path(settings.uploads_folder)
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 QDRANT_USER_ID = 0  # Default user ID for Qdrant since no auth
+
+# ── 文件别名系统（生成不可猜测的 PDF 访问路径） ─────────────────────────────
+_file_aliases: dict[str, int] = {}   # alias -> doc_id
+_alias_lock = Lock()
+
+
+def _make_alias(year: int | None, title: str | None) -> str:
+    """生成 {year}_{shorttitle}_{random6}.pdf 格式的别名。"""
+    y = str(year) if year else "unknown"
+    # 标题取前 30 字符，只保留字母数字和连字符
+    if title:
+        t = re.sub(r"[^a-zA-Z0-9一-鿿]+", "_", title)[:30].strip("_")
+    else:
+        t = "untitled"
+    rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"{y}_{t}_{rand}.pdf"
+
+
+def get_doc_by_alias(alias: str) -> int | None:
+    """通过别名查找 doc_id，供外部路由使用。"""
+    with _alias_lock:
+        return _file_aliases.get(alias)
 
 
 def _next_available_id(db: Session) -> int | None:
@@ -802,3 +828,25 @@ def update_markdown(
     with open(abs_markdown_path, "w", encoding="utf-8") as f:
         f.write(data.content)
     return {"detail": "Markdown 已更新"}
+
+
+@router.get("/{doc_id}/file-alias")
+def generate_file_alias(
+    doc_id: int,
+    db: Session = Depends(get_db),
+):
+    """为 PDF 生成一个不可猜测的临时访问路径。"""
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="文献不存在")
+    if not doc.file_path:
+        raise HTTPException(status_code=404, detail="PDF 文件不存在")
+
+    # 检查是否已有别名，没有则创建（原子操作）
+    with _alias_lock:
+        for alias, did in _file_aliases.items():
+            if did == doc_id:
+                return {"url": f"/assist/file/{alias}"}
+        alias = _make_alias(doc.year, doc.title)
+        _file_aliases[alias] = doc_id
+    return {"url": f"/assist/file/{alias}"}
