@@ -32,15 +32,18 @@ Codex 使用 MCP Streamable HTTP 连接 OKB-Assist，服务启动后端点为：
 http://<host>:<port>/assist/mcp/
 ```
 
-例如本地运行：`http://localhost:5001/assist/mcp/`
+例如本地运行：`http://192.168.1.100:5001/assist/mcp/`
 
 在 Codex 的 `config.toml` 中添加：
 
 ```toml
 [mcp_servers.okb_assist]
-url = "http://localhost:5001/assist/mcp/"
+url = "http://192.168.1.100:5001/assist/mcp/"
 startup_timeout_sec = 20
 tool_timeout_sec = 120
+http_headers = {
+    Authorization = "Bearer token"
+}
 ```
 
 ---
@@ -53,7 +56,7 @@ tool_timeout_sec = 120
 http://<host>:<port>/assist/mcp/sse
 ```
 
-例如本地运行：`http://localhost:5001/assist/mcp/sse`
+例如本地运行：`http://192.168.1.100:5001/assist/mcp/sse`
 
 #### Claude Desktop 配置
 
@@ -63,7 +66,7 @@ http://<host>:<port>/assist/mcp/sse
 {
   "mcpServers": {
     "okb-assist": {
-      "url": "http://localhost:5001/assist/mcp/sse"
+      "url": "http://192.168.1.100:5001/assist/mcp/sse"
     }
   }
 }
@@ -77,7 +80,7 @@ http://<host>:<port>/assist/mcp/sse
 {
   "mcpServers": {
     "okb-assist": {
-      "url": "http://localhost:5001/assist/mcp/sse"
+      "url": "http://192.168.1.100:5001/assist/mcp/sse"
     }
   }
 }
@@ -88,7 +91,7 @@ http://<host>:<port>/assist/mcp/sse
 在 Claude Code 中运行：
 
 ```bash
-claude mcp add okb-assist --transport sse http://localhost:5001/assist/mcp/sse
+claude mcp add okb-assist --transport sse http://192.168.1.100:5001/assist/mcp/sse --header "Authorization: Bearer your-token"
 ```
 
 或手动编辑 `.claude.json`：
@@ -98,7 +101,10 @@ claude mcp add okb-assist --transport sse http://localhost:5001/assist/mcp/sse
   "mcpServers": {
     "okb-assist": {
       "type": "sse",
-      "url": "http://localhost:5001/assist/mcp/sse"
+      "url": "http://192.168.1.100:5001/assist/mcp/sse",
+      "headers": {
+        "Authorization": "Bearer we-network-control"
+      }
     }
   }
 }
@@ -154,14 +160,14 @@ claude mcp add okb-assist -- uv run python -m app.mcp_server
 
 ```bash
 # 检查服务是否启动
-curl http://localhost:5001/assist/api/admin/services/status
+curl http://192.168.1.100:5001/assist/api/admin/services/status
 ```
 
 ### 2. 测试 MCP 端点
 
 ```bash
 # 测试 SSE 端点是否可访问
-curl -N http://localhost:5001/assist/mcp/sse
+curl -N http://192.168.1.100:5001/assist/mcp/sse
 ```
 
 ### 3. 使用 MCP Inspector 测试
@@ -189,7 +195,7 @@ npx @modelcontextprotocol/inspector uv run python -m app.mcp_server
 除了 MCP 协议，OKB-Assist 还提供了一个 Web 工具面板，可在浏览器中直接使用：
 
 ```
-http://localhost:5001/assist/tools
+http://192.168.1.100:5001/assist/tools
 ```
 
 功能包括：

@@ -33,23 +33,6 @@ class TokenMiddleware(BaseHTTPMiddleware):
         "/redirect",        # 重定向
     )
 
-    # 不需要校验 token 的页面路由（HTML 模板）
-    PAGE_PATHS = (
-        "/assist/",
-        "/assist/detail/",
-        "/assist/markdown/",
-        "/assist/monitor",
-        "/assist/upload",
-        "/assist/admin",
-        "/assist/point",
-        "/assist/tools",
-        "/assist/duplicates",
-        "/assist/doc/",
-        "/assist/config",
-        "/assist/login",
-        "/",
-    )
-
     async def dispatch(self, request, call_next):
         path = request.url.path
 
@@ -58,12 +41,7 @@ class TokenMiddleware(BaseHTTPMiddleware):
             if path.startswith(prefix):
                 return await call_next(request)
 
-        # 跳过页面路由
-        for page in self.PAGE_PATHS:
-            if path == page or path.startswith(page):
-                return await call_next(request)
-
-        # 只校验 API 路由
+        # 只校验 API 路由，其余全部放行
         if not path.startswith("/assist/api/"):
             return await call_next(request)
 
