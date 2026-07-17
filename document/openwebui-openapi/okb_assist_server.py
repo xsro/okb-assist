@@ -94,13 +94,6 @@ class DocumentListResponse(BaseModel):
     total: int = Field(0, description="总数")
 
 
-class DocumentLinks(BaseModel):
-    """文献链接"""
-    detail_page: str = Field(..., description="详情页面链接")
-    pdf_download: str = Field(..., description="PDF下载链接")
-    markdown_content: str = Field("", description="Markdown内容链接")
-
-
 class DocumentDetailResponse(BaseModel):
     """文献详情响应"""
     id: int = Field(..., description="文献ID")
@@ -119,7 +112,9 @@ class DocumentDetailResponse(BaseModel):
     keywords: str = Field("", description="关键词")
     keywords_en: str = Field("", description="英文关键词")
     status: str = Field("", description="文档状态")
-    links: DocumentLinks = Field(..., description="相关链接")
+    detail_page: str = Field("", description="详情页面路径")
+    pdf_download: str = Field("", description="PDF下载路径")
+    markdown_content: str = Field("", description="Markdown内容路径")
 
 
 # -------------------------------
@@ -315,43 +310,9 @@ async def get_document_detail(doc_id: int):
         keywords=_parse_keywords(doc.get("keywords", "")),
         keywords_en=_parse_keywords(doc.get("keywords_en", "")),
         status=doc.get("status", ""),
-        links=DocumentLinks(
-            detail_page=f"{base_url}/assist/detail/{doc_id}",
-            pdf_download=f"{base_url}/assist/api/documents/{doc_id}/pdf",
-            markdown_content=f"{base_url}/assist/api/documents/{doc_id}/markdown",
-        ),
-    )
-
-
-@app.get(
-    "/documents/{doc_id}/links",
-    response_model=DocumentLinks,
-    summary="获取文献链接",
-    description="获取指定文献的所有相关链接，包括详情页面、PDF下载和Markdown内容链接。",
-)
-async def get_document_links(doc_id: int):
-    """获取文献链接"""
-    # 验证文献是否存在
-    try:
-        response = requests.get(
-            f"{_get_base_url()}/assist/api/documents/{doc_id}",
-            headers=_get_headers(),
-            timeout=30,
-        )
-        response.raise_for_status()
-    except requests.exceptions.ConnectionError:
-        raise HTTPException(status_code=502, detail="无法连接到 OKB-Assist 服务")
-    except requests.exceptions.RequestException as e:
-        if "404" in str(e):
-            raise HTTPException(status_code=404, detail=f"未找到ID为 {doc_id} 的文献")
-        raise HTTPException(status_code=500, detail=f"请求失败: {str(e)}")
-
-    base_url = _get_base_url()
-
-    return DocumentLinks(
-        detail_page=f"{base_url}/assist/detail/{doc_id}",
-        pdf_download=f"{base_url}/assist/api/documents/{doc_id}/pdf",
-        markdown_content=f"{base_url}/assist/api/documents/{doc_id}/markdown",
+        detail_page=f"{base_url}/redirect/{doc_id}",
+        pdf_download=f"{base_url}/assist/api/documents/{doc_id}/pdf" if doc.get("file_path") else "",
+        markdown_content=f"{base_url}/assist/api/documents/{doc_id}/markdown" if doc.get("markdown_path") else "",
     )
 
 

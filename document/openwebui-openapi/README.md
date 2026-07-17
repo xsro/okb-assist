@@ -51,10 +51,11 @@ http://your-server:8000/openapi.json
 | 端点 | 功能 | 参数 |
 |------|------|------|
 | `GET /assist/openapi/search` | 语义搜索知识库 | `q` (查询), `limit` (数量) |
-| `GET /assist/openapi/documents` | 列出文献列表 | `status`, `page`, `page_size` |
-| `GET /assist/openapi/documents/{id}` | 获取文献详情 | `doc_id` |
-| `GET /assist/openapi/documents/{id}/links` | 获取文献链接 | `doc_id` |
+| `GET /assist/openapi/grep-search` | 全文搜索（grep） | `q` (查询), `limit`, `context` |
+| `GET /assist/openapi/documents` | 列出文献列表 | `status`, `doc_type`, `page`, `page_size` |
+| `GET /assist/openapi/documents/{id}` | 获取文献详情（含链接） | `doc_id` |
 | `GET /assist/openapi/stats` | 获取统计信息 | 无 |
+| `GET /assist/openapi/doc-types` | 获取文献类型列表 | 无 |
 
 ## 使用示例
 
@@ -133,22 +134,25 @@ GET /assist/openapi/search?q={query}&limit={limit}
 GET /assist/openapi/documents?status=indexed&page=1&page_size=10
 ```
 
-### 获取详情
+### 获取详情（含链接）
 
 ```
 GET /assist/openapi/documents/{doc_id}
 ```
 
-### 获取链接
-
-```
-GET /assist/openapi/documents/{doc_id}/links
-```
-
 **示例响应：**
 ```json
 {
-  "detail_page": "http://localhost:8000/assist/detail/710",
+  "id": 710,
+  "title": "Fuzzy Adaptive Disturbance-Observer-Based Robust Tracking Control...",
+  "authors": "ZhongYi Chu, Jing Cui, FuChun Sun",
+  "year": 2014,
+  "doc_type": "journalArticle",
+  "journal": "IEEE Systems Journal",
+  "doi": "10.1109/JSYST.2014.2345678",
+  "abstract": "...",
+  "status": "indexed",
+  "detail_page": "http://localhost:8000/redirect/710",
   "pdf_download": "http://localhost:8000/assist/api/documents/710/pdf",
   "markdown_content": "http://localhost:8000/assist/api/documents/710/markdown"
 }
