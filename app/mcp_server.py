@@ -139,7 +139,7 @@ def _format_doc(doc: Document) -> dict:
 
 
 @mcp.tool()
-async def grep_search(query: str, limit: int = 10, context: int = 2) -> str:
+async def grep_search(query: str, limit: int = 10, context: int = 2, doc_ids: str = "") -> str:
     """
     全文搜索文献内容（基于 grep，轻量快速）。无需向量数据库，支持正则表达式。
 
@@ -147,13 +147,22 @@ async def grep_search(query: str, limit: int = 10, context: int = 2) -> str:
         query: 搜索关键词（支持正则表达式）
         limit: 返回结果数量，默认10
         context: 匹配行前后的上下文行数，默认2
+        doc_ids: 逗号分隔的文档 ID 列表，限定搜索范围（如 "1,2,3"），留空搜索全部
     """
     if not query.strip():
         return json.dumps({"error": "查询不能为空"}, ensure_ascii=False)
 
     from app.services.grep_search import grep_search as do_grep
 
-    results = await do_grep(query=query, context_lines=context, limit=limit)
+    # 解析 doc_ids
+    id_list = None
+    if doc_ids and doc_ids.strip():
+        try:
+            id_list = [int(x.strip()) for x in doc_ids.split(",") if x.strip()]
+        except ValueError:
+            return json.dumps({"error": "doc_ids 格式无效，需为逗号分隔的数字"}, ensure_ascii=False)
+
+    results = await do_grep(query=query, context_lines=context, limit=limit, doc_ids=id_list)
 
     db = _get_db()
     try:

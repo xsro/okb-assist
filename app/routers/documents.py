@@ -246,15 +246,31 @@ async def grep_search(
     q: str = "",
     limit: int = 10,
     context: int = 2,
+    doc_ids: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    """基于系统 grep 的轻量全文搜索（无需向量数据库）。"""
+    """基于系统 grep 的轻量全文搜索（无需向量数据库）。
+
+    Args:
+        q: 搜索关键词（支持正则）
+        limit: 返回结果数量
+        context: 匹配行前后的上下文行数
+        doc_ids: 逗号分隔的文档 ID 列表，限定搜索范围（如 "1,2,3"）
+    """
     if not q.strip():
         return {"results": [], "query": q}
 
     from app.services.grep_search import grep_search as do_grep
 
-    results = await do_grep(query=q, context_lines=context, limit=limit)
+    # 解析 doc_ids
+    id_list = None
+    if doc_ids:
+        try:
+            id_list = [int(x.strip()) for x in doc_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="doc_ids 格式无效，需为逗号分隔的数字")
+
+    results = await do_grep(query=q, context_lines=context, limit=limit, doc_ids=id_list)
 
     # 补充文档元数据
     enriched = []
@@ -730,9 +746,10 @@ def get_markdown(
     doc_id: int,
     page: int = 1,
     page_size: int = 5000,
+    full: bool = False,
     db: Session = Depends(get_db),
 ):
-    """Get markdown content with pagination. page_size is in characters."""
+    """Get markdown content. Use full=true to get entire content without pagination."""
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
@@ -758,6 +775,14 @@ def get_markdown(
         return match.group(0)
 
     content = re.sub(r'\]\(([^)]+)\)', rewrite_image, content)
+
+    if full:
+        return {
+            "content": content,
+            "page": 1,
+            "total_pages": 1,
+            "total_length": len(content),
+        }
 
     # Split into pages by double newline to preserve paragraph structure
     pages = _split_into_pages(content, page_size)

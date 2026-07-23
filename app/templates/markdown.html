@@ -157,6 +157,7 @@
     <div class="toolbar">
         <div class="toolbar-left">
             <a href="/assist/detail/{{ doc_id }}" class="btn btn-sm">← 返回详情</a>
+            <a href="/assist/markdown/{{ doc_id }}/edit" class="btn btn-sm btn-primary">✏️ 编辑</a>
             <div class="math-toggle">
                 <label for="math-engine">公式渲染:</label>
                 <select id="math-engine" onchange="changeMathEngine()">
@@ -182,9 +183,10 @@
 
     <div id="markdown-raw" class="markdown-body" style="display:none;white-space:pre-wrap;font-family:monospace;font-size:0.875rem"></div>
 
+    <script src="/assist/static/app.js"></script>
     <script>
         const docId = {{ doc_id }};
-        const PAGE_SIZE = 15000;  // 3x original size
+        const PAGE_SIZE = 25000;  // 5x default (5000)
         let currentPage = 1;
         let totalPages = 1;
         let showingRaw = false;
@@ -196,9 +198,7 @@
 
         async function loadMarkdown(page) {
             try {
-                const res = await fetch(`/assist/api/documents/${docId}/markdown?page=${page}&page_size=${PAGE_SIZE}`);
-                if (!res.ok) throw new Error('加载失败');
-                const data = await res.json();
+                const data = await api.get(`/assist/api/documents/${docId}/markdown?page=${page}&page_size=${PAGE_SIZE}`);
 
                 currentPage = data.page;
                 totalPages = data.total_pages;

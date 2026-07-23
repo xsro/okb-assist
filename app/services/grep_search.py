@@ -16,13 +16,15 @@ async def grep_search(
     query: str,
     context_lines: int = 2,
     limit: int = 10,
+    doc_ids: list[int] | None = None,
 ) -> list[dict]:
-    """使用系统 grep 搜索所有文档的 markdown 内容。
+    """使用系统 grep 搜索文档的 markdown 内容。
 
     Args:
         query: 搜索关键词（支持正则）
         context_lines: 匹配行前后的上下文行数
         limit: 最大返回结果数
+        doc_ids: 限定搜索的文档 ID 列表，None 表示搜索全部
 
     Returns:
         [{document_id, content, file_path}, ...]
@@ -33,6 +35,18 @@ async def grep_search(
     if not uploads_dir.exists():
         return []
 
+    # 构建搜索路径
+    if doc_ids:
+        search_paths = []
+        for did in doc_ids:
+            doc_dir = uploads_dir / str(did)
+            if doc_dir.exists():
+                search_paths.append(str(doc_dir))
+        if not search_paths:
+            return []
+    else:
+        search_paths = [str(uploads_dir)]
+
     # 构建 grep 命令
     cmd = [
         "grep",
@@ -41,7 +55,7 @@ async def grep_search(
         f"-C{context_lines}",  # 上下文行数
         "--include=*.md",   # 只搜索 markdown 文件
         query,
-        str(uploads_dir),
+        *search_paths,
     ]
 
     try:

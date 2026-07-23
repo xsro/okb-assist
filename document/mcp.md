@@ -6,7 +6,7 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
 
 | 工具名称 | 功能 | 参数 |
 |---------|------|------|
-| `grep_search` | 全文搜索（基于 grep，轻量快速） | `query: str`, `limit: int = 10`, `context: int = 2` |
+| `grep_search` | 全文搜索（基于 grep，轻量快速） | `query: str`, `limit: int = 10`, `context: int = 2`, `doc_ids: str` |
 | `search_documents` | 语义搜索文献内容 | `query: str`, `limit: int = 5` |
 | `read_markdown` | 读取文献 Markdown 内容（分页） | `doc_id: int`, `page: int = 1`, `page_size: int = 5000` |
 | `get_document_info` | 获取文献详细信息 | `doc_id: int` |
@@ -202,6 +202,7 @@ npx @modelcontextprotocol/inspector uv run python -m app.mcp_server
 连接成功后，可以在 AI 助手中直接使用自然语言调用工具：
 
 - **全文搜索**: "帮我用 grep 搜索包含 transformer 的文献"
+- **指定范围搜索**: "在文档 42 和 99 中搜索 transformer"
 - **语义搜索**: "帮我搜索关于机器学习优化的文献"
 - **阅读文献**: "读取文档 42 的 Markdown 内容"
 - **查看信息**: "文档 42 的详细信息是什么？"

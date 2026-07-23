@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>编辑 Markdown - OKB-Assist</title>
+    <link rel="stylesheet" href="/assist/static/style.css">
+    <!-- Marked.js for preview -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- KaTeX -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+    <!-- MathJax -->
+    <script>
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']],
+            },
+            svg: { fontCache: 'global' }
+        };
+    </script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <!-- Ace Editor -->
+    <script src="https://cdn.jsdelivr.net/npm/ace-builds@1.36.5/src-min-noconflict/ace.js"></script>
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        .editor-toolbar {
+            position: sticky;
+            top: 0;
+            background: var(--card);
+            border-bottom: 1px solid var(--border);
+            padding: 0.5rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 100;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            height: 44px;
+        }
+        .toolbar-left {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .toolbar-right {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .save-status {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+        .save-status.saving { color: var(--warning); }
+        .save-status.saved { color: var(--success); }
+        .save-status.error { color: var(--danger); }
+
+        .editor-container {
+            display: flex;
+            height: calc(100vh - 44px);
+        }
+        .editor-pane {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        .editor-pane-header {
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+            padding: 0.35rem 0.75rem;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+        #editor {
+            flex: 1;
+            width: 100%;
+        }
+        .preview-pane {
+            flex: 1;
+            min-width: 0;
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+        }
+        .preview-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1.5rem;
+            line-height: 1.8;
+        }
+        .preview-content h1, .preview-content h2, .preview-content h3 {
+            margin-top: 1.5rem;
+            margin-bottom: 0.5rem;
+            padding-bottom: 0.3rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .preview-content h1 { font-size: 1.6rem; }
+        .preview-content h2 { font-size: 1.4rem; }
+        .preview-content h3 { font-size: 1.2rem; border-bottom: none; }
+        .preview-content p { margin-bottom: 1rem; }
+        .preview-content pre {
+            background: var(--bg);
+            padding: 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+        }
+        .preview-content code {
+            background: var(--bg);
+            padding: 0.15rem 0.35rem;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+        .preview-content pre code { background: none; padding: 0; }
+        .preview-content table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        .preview-content th, .preview-content td {
+            border: 1px solid var(--border);
+            padding: 0.5rem;
+            text-align: left;
+        }
+        .preview-content th { background: var(--bg); }
+        .preview-content img { max-width: 100%; }
+        .preview-content blockquote {
+            border-left: 4px solid var(--primary);
+            padding-left: 1rem;
+            margin: 1rem 0;
+            color: var(--text-muted);
+        }
+
+        /* Resizable splitter */
+        .splitter {
+            width: 5px;
+            cursor: col-resize;
+            background: var(--border);
+            flex-shrink: 0;
+            transition: background 0.15s;
+        }
+        .splitter:hover, .splitter.active {
+            background: var(--primary);
+        }
+
+        /* Preview-only / editor-only modes */
+        .editor-container.preview-only .editor-pane { display: none; }
+        .editor-container.preview-only .splitter { display: none; }
+        .editor-container.preview-only .preview-pane { border-left: none; }
+        .editor-container.editor-only .preview-pane { display: none; }
+        .editor-container.editor-only .splitter { display: none; }
+
+        .btn-active {
+            background: var(--primary);
+            color: white;
+        }
+
+        /* Word count */
+        .word-count {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        @media (max-width: 768px) {
+            .editor-container {
+                flex-direction: column;
+            }
+            .splitter {
+                width: 100%;
+                height: 5px;
+                cursor: row-resize;
+            }
+            .preview-pane {
+                border-left: none;
+                border-top: 1px solid var(--border);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="editor-toolbar">
+        <div class="toolbar-left">
+            <a href="/assist/markdown/{{ doc_id }}" class="btn btn-sm">← 返回查看</a>
+            <a href="/assist/detail/{{ doc_id }}" class="btn btn-sm">详情</a>
+            <select id="math-engine" onchange="changeMathEngine()" style="padding:0.25rem 0.4rem;border:1px solid var(--border);border-radius:4px;font-size:0.8rem">
+                <option value="none">公式: 关闭</option>
+                <option value="katex">公式: KaTeX</option>
+                <option value="mathjax">公式: MathJax</option>
+            </select>
+            <span class="save-status" id="save-status"></span>
+        </div>
+        <div class="toolbar-right">
+            <span class="word-count" id="word-count"></span>
+            <button class="btn btn-sm" id="btn-view-editor" onclick="setViewMode('editor')" title="仅编辑器">📝</button>
+            <button class="btn btn-sm btn-active" id="btn-view-split" onclick="setViewMode('split')" title="分栏">⬜</button>
+            <button class="btn btn-sm" id="btn-view-preview" onclick="setViewMode('preview')" title="仅预览">👁</button>
+            <button class="btn btn-sm btn-primary" onclick="save()" title="Ctrl+S">💾 保存</button>
+        </div>
+    </div>
+
+    <div class="editor-container" id="editor-container">
+        <div class="editor-pane">
+            <div class="editor-pane-header">
+                <span>Markdown 编辑</span>
+                <span id="cursor-pos" style="font-weight:400">行 1, 列 1</span>
+            </div>
+            <div id="editor"></div>
+        </div>
+        <div class="splitter" id="splitter"></div>
+        <div class="preview-pane">
+            <div class="editor-pane-header">
+                <span>预览</span>
+            </div>
+            <div class="preview-content" id="preview"></div>
+        </div>
+    </div>
+
+    <script src="/assist/static/app.js"></script>
+    <script>
+        const docId = {{ doc_id }};
+        let saveTimer = null;
+        let lastSavedContent = '';
+        let viewMode = localStorage.getItem('md_edit_view') || 'split';
+        let currentMathEngine = localStorage.getItem('mathEngine') || 'none';
+
+        // Initialize math engine selector
+        document.getElementById('math-engine').value = currentMathEngine;
+
+        // Initialize Ace Editor
+        const editor = ace.edit('editor');
+        editor.setTheme('ace/theme/github');
+        editor.session.setMode('ace/mode/markdown');
+        editor.setOptions({
+            fontSize: '14px',
+            showPrintMargin: false,
+            wrap: true,
+            tabSize: 4,
+            useSoftTabs: true,
+            enableBasicAutocompletion: false,
+            highlightActiveLine: true,
+            showGutter: true,
+        });
+        editor.renderer.setScrollMargin(10, 10);
+
+        // Cursor position display
+        editor.selection.on('changeCursor', () => {
+            const pos = editor.getCursorPosition();
+            document.getElementById('cursor-pos').textContent = `行 ${pos.row + 1}, 列 ${pos.column + 1}`;
+        });
+
+        // Word count update
+        editor.session.on('change', () => {
+            updateWordCount();
+        });
+
+        function updateWordCount() {
+            const text = editor.getValue();
+            const chars = text.length;
+            const lines = text.split('\n').length;
+            document.getElementById('word-count').textContent = `${lines} 行 · ${chars} 字符`;
+        }
+
+        // Load full content
+        async function loadContent() {
+            try {
+                const data = await api.get(`/assist/api/documents/${docId}/markdown?full=true`);
+                const content = data.content || '';
+                editor.setValue(content, -1);
+                lastSavedContent = content;
+                updateWordCount();
+                updatePreview();
+                setViewMode(viewMode);
+            } catch (err) {
+                showToast('加载失败: ' + err.message, 'error');
+            }
+        }
+
+        // Preview rendering - only render visible portion for performance
+        let previewTimer = null;
+        const BUFFER_LINES = 30; // extra lines above/below visible area
+
+        editor.session.on('change', () => {
+            if (previewTimer) clearTimeout(previewTimer);
+            previewTimer = setTimeout(updatePreview, 300);
+        });
+
+        // Also update on scroll (debounced)
+        editor.session.on('changeScrollTop', () => {
+            if (previewTimer) clearTimeout(previewTimer);
+            previewTimer = setTimeout(updatePreview, 150);
+        });
+
+        function updatePreview() {
+            const preview = document.getElementById('preview');
+            const allLines = editor.getValue().split('\n');
+            const totalLines = allLines.length;
+
+            // For small documents, render everything
+            if (totalLines <= 200) {
+                preview.innerHTML = marked.parse(allLines.join('\n'));
+                renderMath(preview);
+                return;
+            }
+
+            // Get visible row range from Ace editor
+            const firstVisible = editor.renderer.getFirstFullyVisibleRow();
+            const lastVisible = editor.renderer.getLastFullyVisibleRow();
+
+            // Expand range with buffer
+            let startRow = Math.max(0, firstVisible - BUFFER_LINES);
+            let endRow = Math.min(totalLines - 1, lastVisible + BUFFER_LINES);
+
+            // Snap to safe markdown boundaries (blank lines or headings)
+            // This prevents breaking lists, code blocks, etc.
+            startRow = findSafeBoundaryAbove(allLines, startRow);
+            endRow = findSafeBoundaryBelow(allLines, endRow);
+
+            const chunk = allLines.slice(startRow, endRow + 1).join('\n');
+
+            // Add context hint if truncated
+            let html = '';
+            if (startRow > 0) {
+                html += '<div style="color:var(--text-muted);font-size:0.8rem;font-style:italic;padding:0.5rem 0;border-bottom:1px dashed var(--border);margin-bottom:1rem">↑ 省略前 ' + startRow + ' 行</div>';
+            }
+            html += marked.parse(chunk);
+            if (endRow < totalLines - 1) {
+                html += '<div style="color:var(--text-muted);font-size:0.8rem;font-style:italic;padding:0.5rem 0;border-top:1px dashed var(--border);margin-top:1rem">↓ 省略后 ' + (totalLines - 1 - endRow) + ' 行</div>';
+            }
+
+            preview.innerHTML = html;
+
+            // Sync preview scroll position proportionally
+            if (totalLines > 0) {
+                const scrollRatio = firstVisible / totalLines;
+                preview.scrollTop = scrollRatio * preview.scrollHeight;
+            }
+
+            renderMath(preview);
+        }
+
+        function findSafeBoundaryAbove(lines, row) {
+            // Look up for a blank line or heading (safe split point)
+            for (let i = row; i >= Math.max(0, row - BUFFER_LINES); i--) {
+                if (lines[i].trim() === '' || lines[i].match(/^#{1,6}\s/)) {
+                    return i + 1; // start after the blank/heading
+                }
+            }
+            return row; // fallback
+        }
+
+        function findSafeBoundaryBelow(lines, row) {
+            // Look down for a blank line or heading (safe split point)
+            for (let i = row; i <= Math.min(lines.length - 1, row + BUFFER_LINES); i++) {
+                if (lines[i].trim() === '' || lines[i].match(/^#{1,6}\s/)) {
+                    return i; // include the blank/heading
+                }
+            }
+            return row; // fallback
+        }
+
+        function renderMath(container) {
+            if (currentMathEngine === 'katex') {
+                renderMathInElement(container, {
+                    delimiters: [
+                        {left: '$$', right: '$$', display: true},
+                        {left: '$', right: '$', display: false},
+                        {left: '\\[', right: '\\]', display: true},
+                        {left: '\\(', right: '\\)', display: false},
+                    ],
+                    throwOnError: false,
+                    trust: true,
+                });
+            } else if (currentMathEngine === 'mathjax') {
+                if (window.MathJax && window.MathJax.typesetPromise) {
+                    MathJax.typesetPromise([container]).catch(err => console.warn('MathJax error:', err));
+                }
+            }
+        }
+
+        function changeMathEngine() {
+            currentMathEngine = document.getElementById('math-engine').value;
+            localStorage.setItem('mathEngine', currentMathEngine);
+            updatePreview();
+        }
+
+        // Save
+        async function save() {
+            const content = editor.getValue();
+            if (content === lastSavedContent) {
+                showToast('内容未变化', 'info');
+                return;
+            }
+
+            const status = document.getElementById('save-status');
+            status.textContent = '保存中...';
+            status.className = 'save-status saving';
+
+            try {
+                await api.put(`/assist/api/documents/${docId}/markdown`, { content });
+                lastSavedContent = content;
+                status.textContent = '已保存';
+                status.className = 'save-status saved';
+                setTimeout(() => { status.textContent = ''; }, 2000);
+            } catch (err) {
+                status.textContent = '保存失败';
+                status.className = 'save-status error';
+                showToast('保存失败: ' + err.message, 'error');
+            }
+        }
+
+        // Ctrl+S to save
+        document.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                e.preventDefault();
+                save();
+            }
+        });
+
+        // View mode
+        function setViewMode(mode) {
+            viewMode = mode;
+            localStorage.setItem('md_edit_view', mode);
+            const container = document.getElementById('editor-container');
+            container.classList.remove('editor-only', 'preview-only');
+
+            document.getElementById('btn-view-editor').classList.remove('btn-active');
+            document.getElementById('btn-view-split').classList.remove('btn-active');
+            document.getElementById('btn-view-preview').classList.remove('btn-active');
+
+            if (mode === 'editor') {
+                container.classList.add('editor-only');
+                document.getElementById('btn-view-editor').classList.add('btn-active');
+            } else if (mode === 'preview') {
+                container.classList.add('preview-only');
+                document.getElementById('btn-view-preview').classList.add('btn-active');
+            } else {
+                document.getElementById('btn-view-split').classList.add('btn-active');
+            }
+
+            editor.resize();
+            updatePreview();
+        }
+
+        // Splitter drag
+        const splitter = document.getElementById('splitter');
+        let isDragging = false;
+
+        splitter.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            splitter.classList.add('active');
+            document.body.style.userSelect = 'none';
+            document.body.style.cursor = 'col-resize';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const container = document.getElementById('editor-container');
+            const rect = container.getBoundingClientRect();
+            const percent = ((e.clientX - rect.left) / rect.width) * 100;
+            const clamped = Math.max(20, Math.min(80, percent));
+
+            const editorPane = container.querySelector('.editor-pane');
+            const previewPane = container.querySelector('.preview-pane');
+            editorPane.style.flex = 'none';
+            editorPane.style.width = clamped + '%';
+            previewPane.style.flex = 'none';
+            previewPane.style.width = (100 - clamped) + '%';
+            editor.resize();
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isDragging) {
+                isDragging = false;
+                splitter.classList.remove('active');
+                document.body.style.userSelect = '';
+                document.body.style.cursor = '';
+            }
+        });
+
+        // Init
+        loadContent();
+    </script>
+</body>
+</html>

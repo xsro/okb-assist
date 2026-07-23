@@ -42,6 +42,10 @@ class TokenMiddleware(BaseHTTPMiddleware):
             if path.startswith(prefix):
                 return await call_next(request)
 
+        # 图片资源跳过认证（文件名是 SHA256 哈希，不可猜测）
+        if "/image/" in path and path.startswith("/assist/api/documents/"):
+            return await call_next(request)
+
         # 只校验 API 路由，其余全部放行
         if not path.startswith("/assist/api/"):
             return await call_next(request)
@@ -232,6 +236,11 @@ def monitor_page(request: Request):
 @app.get("/assist/markdown/{doc_id}")
 def markdown_page(request: Request, doc_id: int):
     return templates.TemplateResponse(name="markdown.html", request=request, context={"doc_id": doc_id})
+
+
+@app.get("/assist/markdown/{doc_id}/edit")
+def markdown_edit_page(request: Request, doc_id: int):
+    return templates.TemplateResponse(name="markdown_edit.html", request=request, context={"doc_id": doc_id})
 
 
 # ==================== 管理页面 ====================
