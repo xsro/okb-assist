@@ -195,6 +195,69 @@ async def grep_search(query: str, limit: int = 10, context: int = 2, doc_ids: st
 
 
 @mcp.tool()
+async def search_info(query: str, limit: int = 10) -> str:
+    """
+    搜索文献元数据信息（标题、作者、期刊、关键词、摘要、DOI 等）。
+    返回匹配文献的完整信息，适合按作者、标题、期刊等条件查找文献。
+
+    Args:
+        query: 搜索关键词（模糊匹配标题、作者、期刊、关键词、摘要、DOI 等字段）
+        limit: 返回结果数量，默认10
+    """
+    if not query.strip():
+        return json.dumps({"error": "查询不能为空"}, ensure_ascii=False)
+
+    db = _get_db()
+    try:
+        like = f"%{query}%"
+        q = db.query(Document).filter(
+            (Document.title.ilike(like)) |
+            (Document.title_en.ilike(like)) |
+            (Document.authors.ilike(like)) |
+            (Document.authors_en.ilike(like)) |
+            (Document.journal.ilike(like)) |
+            (Document.journal_en.ilike(like)) |
+            (Document.keywords.ilike(like)) |
+            (Document.keywords_en.ilike(like)) |
+            (Document.abstract.ilike(like)) |
+            (Document.abstract_en.ilike(like)) |
+            (Document.doi.ilike(like)) |
+            (Document.category.ilike(like)) |
+            (Document.source.ilike(like))
+        )
+
+        docs = q.order_by(Document.updated_at.desc()).limit(limit).all()
+
+        results = []
+        for doc in docs:
+            results.append({
+                "id": doc.id,
+                "title": doc.title or "",
+                "title_en": doc.title_en or "",
+                "authors": doc.authors or "",
+                "authors_en": doc.authors_en or "",
+                "year": doc.year,
+                "doi": doc.doi or "",
+                "journal": doc.journal or "",
+                "journal_en": doc.journal_en or "",
+                "keywords": doc.keywords or "",
+                "abstract": (doc.abstract or "")[:300],
+                "doc_type": doc.doc_type or "",
+                "language": doc.language or "",
+                "category": doc.category or "",
+                "status": doc.status.value if hasattr(doc.status, 'value') else doc.status,
+            })
+
+        return json.dumps({
+            "query": query,
+            "total": len(results),
+            "results": results,
+        }, ensure_ascii=False, indent=2)
+    finally:
+        db.close()
+
+
+@mcp.tool()
 async def search_documents(query: str, limit: int = 5) -> str:
     """
     语义搜索文献内容。使用向量数据库进行相似度搜索，返回最相关的文档片段。

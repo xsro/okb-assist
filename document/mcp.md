@@ -7,6 +7,7 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
 | 工具名称 | 功能 | 参数 |
 |---------|------|------|
 | `grep_search` | 全文搜索（基于 grep，轻量快速） | `query: str`, `limit: int = 10`, `context: int = 2`, `doc_ids: str` |
+| `search_info` | 搜索文献元数据（标题、作者、期刊等） | `query: str`, `limit: int = 10` |
 | `search_documents` | 语义搜索文献内容 | `query: str`, `limit: int = 5` |
 | `read_markdown` | 读取文献 Markdown 内容（分页） | `doc_id: int`, `page: int = 1`, `page_size: int = 5000` |
 | `get_document_info` | 获取文献详细信息 | `doc_id: int` |
@@ -203,6 +204,9 @@ npx @modelcontextprotocol/inspector uv run python -m app.mcp_server
 
 - **全文搜索**: "帮我用 grep 搜索包含 transformer 的文献"
 - **指定范围搜索**: "在文档 42 和 99 中搜索 transformer"
+- **按作者搜索**: "搜索作者是 Hinton 的文献"
+- **按标题搜索**: "有没有标题包含 Attention 的论文"
+- **按期刊搜索**: "列出发表在 Nature 上的文献"
 - **语义搜索**: "帮我搜索关于机器学习优化的文献"
 - **阅读文献**: "读取文档 42 的 Markdown 内容"
 - **查看信息**: "文档 42 的详细信息是什么？"

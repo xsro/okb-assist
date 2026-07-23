@@ -293,6 +293,45 @@ async def grep_search(
     return {"results": enriched, "query": q}
 
 
+@router.get("/search-info")
+async def search_info(
+    q: str = "",
+    limit: int = 10,
+    db: Session = Depends(get_db),
+):
+    """搜索文献元数据（标题、作者、期刊、关键词、摘要、DOI 等）。
+
+    返回匹配的文献完整信息。
+    """
+    if not q.strip():
+        return {"results": [], "query": q}
+
+    like = f"%{q}%"
+    query = db.query(Document).filter(
+        (Document.title.ilike(like)) |
+        (Document.title_en.ilike(like)) |
+        (Document.authors.ilike(like)) |
+        (Document.authors_en.ilike(like)) |
+        (Document.journal.ilike(like)) |
+        (Document.journal_en.ilike(like)) |
+        (Document.keywords.ilike(like)) |
+        (Document.keywords_en.ilike(like)) |
+        (Document.abstract.ilike(like)) |
+        (Document.abstract_en.ilike(like)) |
+        (Document.doi.ilike(like)) |
+        (Document.category.ilike(like)) |
+        (Document.source.ilike(like))
+    )
+
+    docs = query.order_by(Document.updated_at.desc()).limit(limit).all()
+
+    results = []
+    for doc in docs:
+        results.append(_doc_to_out(doc, db))
+
+    return {"results": results, "query": q, "total": len(results)}
+
+
 @router.get("/search")
 async def semantic_search(
     q: str = "",

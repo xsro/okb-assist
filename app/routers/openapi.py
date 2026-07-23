@@ -170,13 +170,21 @@ async def grep_search_knowledge_base(
     q: str = Query(..., description="搜索关键词（支持正则表达式）", min_length=1),
     limit: int = Query(10, description="返回结果数量", ge=1, le=50),
     context: int = Query(2, description="匹配行前后的上下文行数", ge=0, le=10),
+    doc_ids: Optional[str] = Query(None, description="逗号分隔的文档 ID 列表，限定搜索范围（如 '1,2,3'）"),
     db: Session = Depends(get_db),
 ):
-    """全文搜索知识库（基于 grep，轻量版）"""
+    """全文搜索知识库（基于 grep，轻量版）。支持通过 doc_ids 限定搜索范围。"""
     from app.services.grep_search import grep_search as do_grep
 
+    id_list = None
+    if doc_ids:
+        try:
+            id_list = [int(x.strip()) for x in doc_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="doc_ids 格式无效，需为逗号分隔的数字")
+
     try:
-        results = await do_grep(query=q, context_lines=context, limit=limit)
+        results = await do_grep(query=q, context_lines=context, limit=limit, doc_ids=id_list)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
 
@@ -374,4 +382,169 @@ async def get_stats(
         "total_documents": total,
         "status_counts": status_counts,
         "indexed_count": status_counts.get("indexed", 0),
+    }
+
+
+@router.get(
+    "/search-info",
+    summary="搜索文献元数据",
+    description="按标题、作者、期刊、关键词、摘要、DOI 等字段模糊搜索，返回匹配文献的完整信息。",
+)
+async def search_document_info(
+    q: str = Query(..., description="搜索关键词", min_length=1),
+    limit: int = Query(10, description="返回结果数量", ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    """搜索文献元数据（标题、作者、期刊等）"""
+    like = f"%{q}%"
+    query = db.query(Document).filter(
+        (Document.title.ilike(like)) |
+        (Document.title_en.ilike(like)) |
+        (Document.authors.ilike(like)) |
+        (Document.authors_en.ilike(like)) |
+        (Document.journal.ilike(like)) |
+        (Document.journal_en.ilike(like)) |
+        (Document.keywords.ilike(like)) |
+        (Document.keywords_en.ilike(like)) |
+        (Document.abstract.ilike(like)) |
+        (Document.abstract_en.ilike(like)) |
+        (Document.doi.ilike(like)) |
+        (Document.category.ilike(like)) |
+        (Document.source.ilike(like))
+    )
+
+    docs = query.order_by(Document.updated_at.desc()).limit(limit).all()
+
+    return {
+        "query": q,
+        "total": len(docs),
+        "results": [_format_document(doc) for doc in docs],
+    }
+
+
+@router.get(
+    "/documents/{doc_id}/markdown",
+    summary="读取文献 Markdown 内容",
+    description="分页读取文献的 Markdown 内容。使用 full=true 可获取全文。",
+)
+async def read_markdown(
+    doc_id: int,
+    page: int = Query(1, description="页码", ge=1),
+    page_size: int = Query(5000, description="每页字符数", ge=100, le=100000),
+    full: bool = Query(False, description="true 时返回全文，忽略分页参数"),
+    db: Session = Depends(get_db),
+):
+    """读取文献 Markdown 内容"""
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"未找到 ID 为 {doc_id} 的文献")
+    if not doc.markdown_path:
+        raise HTTPException(status_code=404, detail="该文献尚未生成 Markdown")
+
+    import os
+    from app.utils import to_absolute_path
+
+    abs_path = to_absolute_path(doc.markdown_path)
+    if not os.path.exists(abs_path):
+        raise HTTPException(status_code=404, detail="Markdown 文件不存在")
+
+    with open(abs_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    if full:
+        return {
+            "doc_id": doc_id,
+            "content": content,
+            "total_length": len(content),
+            "page": 1,
+            "total_pages": 1,
+        }
+
+    # 分页
+    from app.routers.documents import _split_into_pages
+    pages = _split_into_pages(content, page_size)
+    total_pages = len(pages)
+
+    if page < 1 or page > total_pages:
+        page = 1
+
+    return {
+        "doc_id": doc_id,
+        "content": pages[page - 1] if pages else "",
+        "total_length": len(content),
+        "page": page,
+        "total_pages": total_pages,
+    }
+
+
+@router.get(
+    "/documents/{doc_id}/abstract",
+    summary="获取文献摘要",
+    description="获取指定文献的摘要信息，包含原文摘要和英文摘要（如有）。",
+)
+async def get_abstract(
+    doc_id: int,
+    db: Session = Depends(get_db),
+):
+    """获取文献摘要"""
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"未找到 ID 为 {doc_id} 的文献")
+
+    return {
+        "doc_id": doc_id,
+        "title": doc.title or "",
+        "abstract": doc.abstract or "",
+        "abstract_en": doc.abstract_en or "",
+    }
+
+
+@router.get(
+    "/documents/{doc_id}/pdf-url",
+    summary="获取 PDF 链接",
+    description="获取指定文献的 PDF 下载链接。",
+)
+async def get_pdf_url(
+    doc_id: int,
+    db: Session = Depends(get_db),
+):
+    """获取 PDF 链接"""
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"未找到 ID 为 {doc_id} 的文献")
+
+    base_url = _get_base_url()
+    return {
+        "doc_id": doc_id,
+        "title": doc.title or "",
+        "pdf_url": f"{base_url}/assist/api/documents/{doc_id}/pdf" if doc.file_path else "",
+        "detail_page": f"{base_url}/redirect/{doc_id}",
+    }
+
+
+@router.get(
+    "/doc-types",
+    summary="列出文献类型",
+    description="列出知识库中所有已使用的文献类型及其数量。",
+)
+async def list_doc_types(
+    db: Session = Depends(get_db),
+):
+    """列出所有文献类型"""
+    from sqlalchemy import func
+
+    results = (
+        db.query(Document.doc_type, func.count(Document.id))
+        .filter(Document.doc_type.isnot(None), Document.doc_type != "")
+        .group_by(Document.doc_type)
+        .order_by(func.count(Document.id).desc())
+        .all()
+    )
+
+    return {
+        "types": [
+            {"doc_type": doc_type, "count": count}
+            for doc_type, count in results
+        ],
+        "total_types": len(results),
     }
