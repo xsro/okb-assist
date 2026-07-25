@@ -56,15 +56,25 @@ class QdrantAdapter(VectorDBAdapter):
 
     def __init__(self, db_config: dict):
         self.url = db_config.get("url", "http://127.0.0.1:6333")
+        self.search_url = db_config.get("search_url")  # 搜索专用 URL，可选
         self.base_collection = db_config.get("collection", "documents")
         self.vector_size = get_vector_size(db_config)
         self._client: Optional[QdrantClient] = None
+        self._search_client: Optional[QdrantClient] = None
         self._collection_cache: set[str] = set()
 
     def _get_client(self) -> QdrantClient:
         if self._client is None:
             self._client = QdrantClient(url=self.url)
         return self._client
+
+    def _get_search_client(self) -> QdrantClient:
+        """获取搜索专用客户端，未配置 search_url 则使用主客户端。"""
+        if not self.search_url:
+            return self._get_client()
+        if self._search_client is None:
+            self._search_client = QdrantClient(url=self.search_url)
+        return self._search_client
 
     def get_collection_name(self, user_id: int = 0) -> str:
         # 直接使用配置的集合名，不添加 user_id 后缀
@@ -142,7 +152,7 @@ class QdrantAdapter(VectorDBAdapter):
         limit: int = 10,
     ) -> list[dict]:
         collection_name = self.get_collection_name(user_id)
-        client = self._get_client()
+        client = self._get_search_client()
 
         if collection_name not in self._collection_cache:
             collections = client.get_collections().collections

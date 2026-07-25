@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 
 export OLLAMA_BASE_URL=http://192.168.1.185:11434
