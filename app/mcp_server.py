@@ -258,13 +258,14 @@ async def search_info(query: str, limit: int = 10) -> str:
 
 
 @mcp.tool()
-async def search_documents(query: str, limit: int = 5) -> str:
+async def search_documents(query: str, limit: int = 5, vector_db_id: str = "") -> str:
     """
     语义搜索文献内容。使用向量数据库进行相似度搜索，返回最相关的文档片段。
 
     Args:
         query: 搜索查询（支持中文和英文）
         limit: 返回结果数量，默认5
+        vector_db_id: 向量数据库 ID（如 "small"），留空使用默认数据库
     """
     if not query.strip():
         return json.dumps({"error": "查询不能为空"}, ensure_ascii=False)
@@ -274,6 +275,7 @@ async def search_documents(query: str, limit: int = 5) -> str:
         query=query,
         get_embedding_func=get_embedding,
         limit=limit,
+        vector_db_id=vector_db_id or None,
     )
 
     if not results:

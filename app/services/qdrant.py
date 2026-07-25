@@ -474,14 +474,19 @@ def chunk_text_by_markdown(text: str, chunk_size: int = 1000, min_chunk_size: in
     return chunks
 
 
-async def get_embeddings_batch(texts: list[str], get_embedding_func) -> list[list[float]]:
+async def get_embeddings_batch(texts: list[str], get_embedding_func, vector_db_id: str = None) -> list[list[float]]:
     """批量获取 embedding。"""
     try:
+        return await get_embedding_func(texts, vector_db_id=vector_db_id)
+    except TypeError:
         return await get_embedding_func(texts)
     except Exception:
         results = []
         for text in texts:
-            emb = await get_embedding_func(text)
+            try:
+                emb = await get_embedding_func(text, vector_db_id=vector_db_id)
+            except TypeError:
+                emb = await get_embedding_func(text)
             results.append(emb)
         return results
 
@@ -525,7 +530,7 @@ async def index_document(
     if not chunks:
         return adapter.get_collection_name(user_id)
 
-    embeddings = await get_embeddings_batch(chunks, get_embedding_func)
+    embeddings = await get_embeddings_batch(chunks, get_embedding_func, vector_db_id=vector_db_id)
     return await adapter.index_document(doc_id, user_id, chunks, embeddings, metadata)
 
 
