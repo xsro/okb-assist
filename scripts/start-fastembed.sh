@@ -10,7 +10,7 @@ cd "$PROJECT_DIR"
 # 默认模型（可通过 --model 参数覆盖）
 DEFAULT_MODEL="sentence-transformers/all-MiniLM-L6-v2"
 
-# 从 config.json 读取第一个 builtin 类型的 embedding 模型
+# 从 config.json 读取第一个 fastembed 类型的 embedding 模型
 if [ -f config.json ] && command -v python3 &>/dev/null; then
     MODEL_FROM_CONFIG=$(python3 -c "
 import json
@@ -18,7 +18,7 @@ with open('config.json') as f:
     cfg = json.load(f)
 for vdb in cfg.get('vector_dbs', []):
     emb = vdb.get('embedding', {})
-    if emb.get('source') == 'builtin' and emb.get('model'):
+    if emb.get('source') == 'fastembed' and emb.get('model'):
         print(emb['model'])
         break
 " 2>/dev/null)

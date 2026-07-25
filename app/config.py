@@ -49,7 +49,7 @@ class Settings:
     # ── Embedding 配置（从活跃向量数据库配置中获取） ──
     @property
     def embedding_source(self) -> str:
-        """获取 embedding 来源: 'ollama' 或 'builtin'。"""
+        """获取 embedding 来源: 'ollama' 或 'fastembed'。"""
         db = get_active_vector_db()
         if db and "embedding" in db:
             return db["embedding"].get("source", "ollama")

@@ -201,34 +201,34 @@ async def get_embedding(text: str | list[str], vector_db_id: str = None) -> list
     is_batch = isinstance(text, list)
 
     # 获取 embedding 配置
+    source = settings.embedding_source
+    model = settings.embedding_model
+    embed_url = None
+
     if vector_db_id:
         from app.config_manager import get_vector_db_by_id
         vdb_config = get_vector_db_by_id(vector_db_id)
         if vdb_config and 'embedding' in vdb_config:
             emb_config = vdb_config['embedding']
-            source = emb_config.get('source', 'ollama')
-            model = emb_config.get('model', 'nomic-embed-text')
-        else:
-            source = settings.embedding_source
-            model = settings.embedding_model
+            source = emb_config.get('source', source)
+            model = emb_config.get('model', model)
+            embed_url = emb_config.get('url')
+
+    if source == "fastembed":
+        return await _get_embedding_fastembed(text, is_batch, model, embed_url)
     else:
-        source = settings.embedding_source
-        model = settings.embedding_model
-
-    if source == "builtin":
-        return await _get_embedding_builtin(text, is_batch, model)
-    else:
-        return await _get_embedding_ollama(text, is_batch, model)
+        return await _get_embedding_ollama(text, is_batch, model, embed_url)
 
 
-async def _get_embedding_ollama(text: str | list[str], is_batch: bool, model_name: str = None) -> list[float] | list[list[float]]:
+async def _get_embedding_ollama(text: str | list[str], is_batch: bool, model_name: str = None, embed_url: str = None) -> list[float] | list[list[float]]:
     """Get embedding from Ollama API."""
     input_data = text if is_batch else [text]
     model = model_name or settings.embedding_model
+    url = embed_url or settings.ollama_url
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
-            f"{settings.ollama_url}/api/embed",
+            f"{url}/api/embed",
             json={
                 "model": model,
                 "input": input_data,
@@ -244,22 +244,23 @@ async def _get_embedding_ollama(text: str | list[str], is_batch: bool, model_nam
     return embeddings[0] if embeddings else []
 
 
-async def _get_embedding_builtin(text: str | list[str], is_batch: bool, model_name: str = None) -> list[float] | list[list[float]]:
+async def _get_embedding_fastembed(text: str | list[str], is_batch: bool, model_name: str = None, embed_url: str = None) -> list[float] | list[list[float]]:
     """Get embedding from FastEmbed HTTP service."""
     input_data = text if is_batch else [text]
     model = model_name or settings.embedding_model
+    url = embed_url or settings.fastembed_url
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
-                f"{settings.fastembed_url}/embed",
+                f"{url}/embed",
                 json={"texts": input_data, "model": model},
             )
             response.raise_for_status()
             result = response.json()
     except httpx.ConnectError as e:
         raise Exception(
-            f"无法连接 FastEmbed 服务 ({settings.fastembed_url})，"
+            f"无法连接 FastEmbed 服务 ({url})，"
             f"请确认服务已启动: bash scripts/start-fastembed.sh\n{e}"
         )
     except httpx.TimeoutException as e:
