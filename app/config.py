@@ -41,6 +41,11 @@ class Settings:
     def ollama_model(self) -> str:
         return get_config()["ollama"]["model"]
 
+    # ── FastEmbed ──
+    @property
+    def fastembed_url(self) -> str:
+        return get_config().get("fastembed", {}).get("url", "http://127.0.0.1:8003")
+
     # ── Embedding 配置（从活跃向量数据库配置中获取） ──
     @property
     def embedding_source(self) -> str:

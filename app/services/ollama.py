@@ -245,31 +245,33 @@ async def _get_embedding_ollama(text: str | list[str], is_batch: bool, model_nam
 
 
 async def _get_embedding_builtin(text: str | list[str], is_batch: bool, model_name: str = None) -> list[float] | list[list[float]]:
-    """Get embedding using FastEmbed library (local embedding)."""
-    import os
-
-    # 设置 HuggingFace 镜像（如果需要）
-    if not os.environ.get('HF_ENDPOINT'):
-        os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-    if not os.environ.get('HF_HUB_DISABLE_XET'):
-        os.environ['HF_HUB_DISABLE_XET'] = '1'
+    """Get embedding from FastEmbed HTTP service."""
+    input_data = text if is_batch else [text]
+    model = model_name or settings.embedding_model
 
     try:
-        from fastembed import TextEmbedding
-    except ImportError:
-        raise ImportError("fastembed 库未安装，请运行: pip install fastembed")
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                f"{settings.fastembed_url}/embed",
+                json={"texts": input_data, "model": model},
+            )
+            response.raise_for_status()
+            result = response.json()
+    except httpx.ConnectError as e:
+        raise Exception(
+            f"无法连接 FastEmbed 服务 ({settings.fastembed_url})，"
+            f"请确认服务已启动: bash scripts/start-fastembed.sh\n{e}"
+        )
+    except httpx.TimeoutException as e:
+        raise Exception(f"FastEmbed 请求超时: {e}")
+    except httpx.HTTPStatusError as e:
+        raise Exception(f"FastEmbed 返回错误 {e.response.status_code}: {e.response.text[:200]}")
 
-    # 使用 fastembed 进行本地 embedding
-    model = TextEmbedding(model_name=model_name or settings.embedding_model)
+    embeddings = result.get("embeddings", [])
 
     if is_batch:
-        # Batch embedding
-        embeddings = list(model.embed(text))
-        return [emb.tolist() for emb in embeddings]
-    else:
-        # Single embedding
-        embeddings = list(model.embed([text]))
-        return embeddings[0].tolist() if embeddings else []
+        return embeddings
+    return embeddings[0] if embeddings else []
 
 
 def add_yaml_frontmatter(markdown_content: str, metadata: dict) -> str:

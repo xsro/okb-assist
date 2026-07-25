@@ -52,6 +52,7 @@ async def get_services_status():
     result = {
         "mineru": {"status": "unknown", "url": cfg["mineru"]["url"]},
         "ollama": {"status": "unknown", "url": cfg["ollama"]["url"]},
+        "fastembed": {"status": "unknown", "url": cfg.get("fastembed", {}).get("url", "http://127.0.0.1:8003")},
     }
 
     # Check MinerU
@@ -91,6 +92,23 @@ async def get_services_status():
     except Exception as e:
         result["ollama"]["status"] = "disconnected"
         result["ollama"]["error"] = str(e)
+
+    # Check FastEmbed
+    try:
+        fastembed_url = cfg.get("fastembed", {}).get("url", "http://127.0.0.1:8003")
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{fastembed_url}/health")
+            if response.status_code == 200:
+                health = response.json()
+                result["fastembed"]["status"] = "connected"
+                result["fastembed"]["default_model"] = health.get("default_model", "")
+                result["fastembed"]["loaded_models"] = health.get("loaded_models", [])
+            else:
+                result["fastembed"]["status"] = "error"
+                result["fastembed"]["error"] = f"HTTP {response.status_code}"
+    except Exception as e:
+        result["fastembed"]["status"] = "disconnected"
+        result["fastembed"]["error"] = str(e)
 
     # Check all configured vector databases
     result["vector_dbs"] = []
