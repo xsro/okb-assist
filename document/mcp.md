@@ -1,6 +1,6 @@
 # OKB-Assist MCP 工具配置指南
 
-OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) 服务器，允许 AI 助手（如 Claude Desktop、Cursor 等）直接调用文献管理工具。
+OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) 服务器，允许 AI 助手（如 Codebuddy、 Claude Desktop、Cursor 等）直接调用文献管理工具。
 
 ## 可用工具
 
@@ -63,6 +63,26 @@ http://<host>:<port>/assist/mcp/stream
 
 例如本地运行：`http://192.168.1.100:5001/assist/mcp/stream`
 
+
+#### Tencent Codebuddy 配置
+
+在`~/.codebuddy/.mcp.json`中配置：
+
+```json
+{
+    "mcpServers": {
+        "okb-assist": {
+            "type":"http",
+            "url": "http://192.168.1.100:5001/assist/mcp/stream",
+            "headers": {
+                "Authorization": "Bearer <token>"
+            },
+            "description": "控制理论文献知识库"
+        }
+    }
+}
+```
+
 #### Claude Desktop 配置
 
 编辑配置文件 `~/.claude/claude_desktop_config.json`：
@@ -74,7 +94,7 @@ http://<host>:<port>/assist/mcp/stream
       "type": "http",
       "url": "http://192.168.1.100:5001/assist/mcp/stream",
       "headers": {
-        "Authorization": "Bearer we-network-control"
+        "Authorization": "Bearer <token>"
       }
     }
   }
@@ -91,7 +111,7 @@ http://<host>:<port>/assist/mcp/stream
     "okb-assist": {
       "url": "http://192.168.1.100:5001/assist/mcp/stream",
       "headers": {
-        "Authorization": "Bearer we-network-control"
+        "Authorization": "Bearer <token>"
       }
     }
   }
@@ -101,7 +121,7 @@ http://<host>:<port>/assist/mcp/stream
 #### Claude Code 配置
 
 ```bash
-claude mcp add okb-assist --transport http http://192.168.1.100:5001/assist/mcp/stream --header "Authorization: Bearer we-network-control"
+claude mcp add okb-assist --transport http http://192.168.1.100:5001/assist/mcp/stream --header "Authorization: Bearer <token>"
 ```
 
 #### Codex 配置（Streamable HTTP）
@@ -114,7 +134,7 @@ url = "http://192.168.1.100:5001/assist/mcp/stream"
 startup_timeout_sec = 20
 tool_timeout_sec = 120
 http_headers = {
-    Authorization = "Bearer we-network-control"
+    Authorization = "Bearer <token>"
 }
 ```
 
@@ -140,7 +160,7 @@ http://<host>:<port>/assist/mcp/sse
     "okb-assist": {
       "url": "http://192.168.1.100:5001/assist/mcp/sse",
       "headers": {
-        "Authorization": "Bearer we-network-control"
+        "Authorization": "Bearer <token>"
       }
     }
   }
@@ -157,7 +177,7 @@ http://<host>:<port>/assist/mcp/sse
     "okb-assist": {
       "url": "http://192.168.1.100:5001/assist/mcp/sse",
       "headers": {
-        "Authorization": "Bearer we-network-control"
+        "Authorization": "Bearer <token>"
       }
     }
   }
@@ -175,7 +195,7 @@ http://<host>:<port>/assist/mcp/sse
       "type": "sse",
       "url": "http://192.168.1.100:5001/assist/mcp/sse",
       "headers": {
-        "Authorization": "Bearer we-network-control"
+        "Authorization": "Bearer <token>"
       }
     }
   }
@@ -185,7 +205,7 @@ http://<host>:<port>/assist/mcp/sse
 或使用命令行：
 
 ```bash
-claude mcp add okb-assist --transport sse http://192.168.1.100:5001/assist/mcp/sse --header "Authorization: Bearer we-network-control"
+claude mcp add okb-assist --transport sse http://192.168.1.100:5001/assist/mcp/sse --header "Authorization: Bearer <token>"
 ```
 
 ---
@@ -246,11 +266,11 @@ curl http://192.168.1.100:5001/assist/api/admin/services/status
 ```bash
 # Streamable HTTP 端点（精确路径，带 token 应返回 406，无 token 应返回 401）
 curl -s -o /dev/null -w "%{http_code}\n" http://192.168.1.100:5001/assist/mcp/stream \
-  -H "Authorization: Bearer we-network-control"
+  -H "Authorization: Bearer <token>"
 
 # SSE 端点（无 token 应返回401；带 token 返回 SSE 事件流）
 curl -s -N http://192.168.1.100:5001/assist/mcp/sse \
-  -H "Authorization: Bearer we-network-control"
+  -H "Authorization: Bearer <token>"
 ```
 
 > 注意：Streamable HTTP 端点为精确路径 `/assist/mcp/stream`，末尾不要加斜杠；SSE 端点为 `/assist/mcp/sse`。
