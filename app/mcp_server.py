@@ -80,6 +80,11 @@ def create_mcp_app() -> Starlette:
     streamable_http_app = mcp.streamable_http_app()
     sse_app = mcp.sse_app(mount_path="")
 
+    # NOTE: do NOT set a lifespan here. The StreamableHTTP session manager is
+    # started exactly once by the parent app's lifespan
+    # (okb_assist_main.py -> mcp_session_manager.run()). Setting it here too
+    # would call session_manager.run() a second time, which raises RuntimeError
+    # ("can only be called once per instance").
     return Starlette(
         debug=mcp.settings.debug,
         routes=[
@@ -90,7 +95,6 @@ def create_mcp_app() -> Starlette:
             *streamable_http_app.user_middleware,
             *sse_app.user_middleware,
         ],
-        lifespan=streamable_http_app.router.lifespan_context,
     )
 
 
