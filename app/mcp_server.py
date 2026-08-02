@@ -6,11 +6,13 @@ for use by AI assistants like Claude Desktop, Cursor, etc.
 
 Usage:
   stdio mode:  python -m app.mcp_server
-  SSE mode:    mounted at /assist/mcp in main.py
+  SSE mode:    mounted at /assist/mcp in main.py  → /assist/mcp/sse
+  HTTP mode:   served at /assist/mcp/stream in main.py (exact Route)
 """
 
 import os
 import json
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
@@ -19,6 +21,8 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.auth.provider import AccessToken
 from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
+from starlette.routing import Mount, Route
+from starlette.responses import Response
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -60,7 +64,13 @@ _mcp_kwargs: dict = {
         "to read parsed document text, and get_document_info/get_stats for "
         "metadata and library status."
     ),
-    "streamable_http_path": "/",
+    # The Streamable HTTP endpoint is mounted at the EXACT path
+    # /assist/mcp/stream (no trailing slash) in okb_assist_main.py via an exact
+    # Route. We set streamable_http_path to that same full path so the internal
+    # route matches the scope path the parent app hands over (a Route does not
+    # strip the mount prefix the way Mount would). This lets MCP clients connect
+    # to /assist/mcp/stream directly without a 307 redirect.
+    "streamable_http_path": "/assist/mcp/stream",
     "transport_security": TransportSecuritySettings(enable_dns_rebinding_protection=False),
 }
 
@@ -75,27 +85,52 @@ if _auth_enabled:
 mcp = FastMCP("OKB-Assist", **_mcp_kwargs)
 
 
-def create_mcp_app() -> Starlette:
-    """Create an MCP app that supports Streamable HTTP and legacy SSE."""
-    streamable_http_app = mcp.streamable_http_app()
-    sse_app = mcp.sse_app(mount_path="")
+def create_streamable_app() -> Starlette:
+    """Standalone Streamable HTTP app, served at the exact path /assist/mcp/stream.
 
-    # NOTE: do NOT set a lifespan here. The StreamableHTTP session manager is
-    # started exactly once by the parent app's lifespan
-    # (okb_assist_main.py -> mcp_session_manager.run()). Setting it here too
-    # would call session_manager.run() a second time, which raises RuntimeError
-    # ("can only be called once per instance").
-    return Starlette(
-        debug=mcp.settings.debug,
-        routes=[
-            *streamable_http_app.routes,
-            *sse_app.routes,
-        ],
-        middleware=[
-            *streamable_http_app.user_middleware,
-            *sse_app.user_middleware,
-        ],
-    )
+    In okb_assist_main.py this sub-app is registered with
+    `app.add_route("/assist/mcp/stream", create_streamable_app(), ...)` — an
+    EXACT Route, not a Mount. A Mount would require a trailing slash
+    (/assist/mcp/stream/) and, worse, the legacy SSE Mount at /assist/mcp would
+    capture /assist/mcp/stream before the Streamable endpoint could. Registering
+    it as an exact Route lets MCP clients connect to /assist/mcp/stream directly
+    without a 307 redirect (which a POST `initialize` cannot follow).
+
+    This sub-app already carries its own auth middleware stack
+    (AuthenticationMiddleware + AuthContextMiddleware), so Bearer-token
+    validation works without touching the parent app's middleware.
+
+    The session manager's lifespan is removed here on purpose: it is started
+    exactly once by the parent app's lifespan (okb_assist_main.py ->
+    mcp_session_manager.run()). Leaving it on this sub-app would call
+    session_manager.run() a second time, which raises RuntimeError
+    ("can only be called once per instance").
+    """
+    app = mcp.streamable_http_app()
+
+    @asynccontextmanager
+    async def _noop(_app):
+        yield
+
+    app.router.lifespan_context = _noop
+    return app
+
+
+def create_sse_app() -> Starlette:
+    """Standalone legacy SSE app, mounted at /assist/mcp.
+
+    This yields the SAME URLs as before the split:
+      - GET  /assist/mcp/sse          (SSE stream)
+      - POST /assist/mcp/messages/    (client message POST; the exact URL is
+                                      sent to the client via the `endpoint`
+                                      SSE event, so clients derive it
+                                      automatically and need no config change)
+
+    Keeping the two transports in separate mounts (instead of merging their
+    routes into one Starlette) prevents a client that talks to both endpoints
+    from assuming the Streamable HTTP and SSE sessions are shared.
+    """
+    return mcp.sse_app(mount_path="")
 
 
 def _get_db():

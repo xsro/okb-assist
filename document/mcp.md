@@ -44,9 +44,85 @@ MCP 服务使用 Bearer Token 认证。Token 在 `system.json` 的 `mcp_token` �
 
 ## 连接方式
 
-### 方式一：SSE 远程连接（推荐）
+OKB-Assist 同时提供两种 MCP 传输端点，二者**会话相互独立**（连接其中一个不会影响另一个，客户端不应假设两者会话共享）：
 
-适用于网络可达的 OKB-Assist 服务。服务启动后，MCP SSE 端点自动挂载在：
+| 传输 | 端点 URL | 说明 |
+|------|----------|------|
+| **Streamable HTTP（推荐）** | `http://<host>:<port>/assist/mcp/stream` | 当前标准传输；精确路径，末尾无斜杠 |
+| **SSE（legacy 兼容）** | `http://<host>:<port>/assist/mcp/sse` | 旧版传输，仅供需要 SSE 的客户端使用 |
+
+> 两种传输都使用同一个 `mcp_token` 进行 Bearer 认证，工具与资源完全一致。
+
+### 方式一：Streamable HTTP 远程连接（推荐）
+
+适用于网络可达的 OKB-Assist 服务，端点为：
+
+```
+http://<host>:<port>/assist/mcp/stream
+```
+
+例如本地运行：`http://192.168.1.100:5001/assist/mcp/stream`
+
+#### Claude Desktop 配置
+
+编辑配置文件 `~/.claude/claude_desktop_config.json`：
+
+```json
+{
+  "mcpServers": {
+    "okb-assist": {
+      "type": "http",
+      "url": "http://192.168.1.100:5001/assist/mcp/stream",
+      "headers": {
+        "Authorization": "Bearer we-network-control"
+      }
+    }
+  }
+}
+```
+
+#### Cursor 配置
+
+在项目根目录创建 `.cursor/mcp.json`：
+
+```json
+{
+  "mcpServers": {
+    "okb-assist": {
+      "url": "http://192.168.1.100:5001/assist/mcp/stream",
+      "headers": {
+        "Authorization": "Bearer we-network-control"
+      }
+    }
+  }
+}
+```
+
+#### Claude Code 配置
+
+```bash
+claude mcp add okb-assist --transport http http://192.168.1.100:5001/assist/mcp/stream --header "Authorization: Bearer we-network-control"
+```
+
+#### Codex 配置（Streamable HTTP）
+
+Streamable HTTP 端点地址为 `/assist/mcp/stream`（注意末尾无斜杠，是精确路径）：
+
+```toml
+[mcp_servers.okb_assist]
+url = "http://192.168.1.100:5001/assist/mcp/stream"
+startup_timeout_sec = 20
+tool_timeout_sec = 120
+http_headers = {
+    Authorization = "Bearer we-network-control"
+}
+```
+
+---
+
+### 方式二：SSE 远程连接（legacy 兼容）
+
+适用于需要 SSE 传输的客户端。服务启动后，MCP SSE 端点自动挂载在：
 
 ```
 http://<host>:<port>/assist/mcp/sse
@@ -112,20 +188,6 @@ http://<host>:<port>/assist/mcp/sse
 claude mcp add okb-assist --transport sse http://192.168.1.100:5001/assist/mcp/sse --header "Authorization: Bearer we-network-control"
 ```
 
-#### Codex 配置（Streamable HTTP）
-
-在 Codex 的 `config.toml` 中添加：
-
-```toml
-[mcp_servers.okb_assist]
-url = "http://192.168.1.100:5001/assist/mcp/"
-startup_timeout_sec = 20
-tool_timeout_sec = 120
-http_headers = {
-    Authorization = "Bearer we-network-control"
-}
-```
-
 ---
 
 ### 方式二：stdio 本地连接
@@ -182,13 +244,16 @@ curl http://192.168.1.100:5001/assist/api/admin/services/status
 ### 2. 测试 MCP 端点
 
 ```bash
-# 无 token 测试（应返回401）
-curl -s http://192.168.1.100:5001/assist/mcp/sse
+# Streamable HTTP 端点（精确路径，带 token 应返回 406，无 token 应返回 401）
+curl -s -o /dev/null -w "%{http_code}\n" http://192.168.1.100:5001/assist/mcp/stream \
+  -H "Authorization: Bearer we-network-control"
 
-# 带 token 测试（应返回 SSE 事件流）
+# SSE 端点（无 token 应返回401；带 token 返回 SSE 事件流）
 curl -s -N http://192.168.1.100:5001/assist/mcp/sse \
   -H "Authorization: Bearer we-network-control"
 ```
+
+> 注意：Streamable HTTP 端点为精确路径 `/assist/mcp/stream`，末尾不要加斜杠；SSE 端点为 `/assist/mcp/sse`。
 
 ### 3. 使用 MCP Inspector 测试
 

@@ -78,19 +78,6 @@ async def lifespan(app: FastAPI):
     # 重置中间状态的任务（重启后恢复）
     reset_stuck_tasks()
 
-    mcp_session_manager = None
-
-    # Mount MCP endpoints: Streamable HTTP at /assist/mcp and SSE at /assist/mcp/sse
-    try:
-        from app.mcp_server import create_mcp_app, mcp
-        mcp_app = create_mcp_app()
-        app.mount("/assist/mcp", mcp_app)
-        mcp_session_manager = mcp.session_manager
-    except ImportError:
-        print("Warning: mcp package not installed, MCP endpoint unavailable")
-    except Exception as e:
-        print(f"Warning: Failed to mount MCP: {e}")
-
     async with AsyncExitStack() as stack:
         if mcp_session_manager is not None:
             await stack.enter_async_context(mcp_session_manager.run())
@@ -168,6 +155,37 @@ app.include_router(pipeline.router)
 app.include_router(admin.router)
 app.include_router(openapi.router)
 app.include_router(config.router)
+
+
+# ── 挂载 MCP 端点（两个完全独立的端点，避免会话混淆） ─────────────────
+#   - Streamable HTTP: 精确 Route /assist/mcp/stream  (推荐的标准传输)
+#   - SSE (legacy)   : Mount /assist/mcp            → /assist/mcp/sse
+#
+# Streamable 必须用精确 Route（而非 Mount）注册，原因：
+#   1. Mount 要求末尾斜杠 (/assist/mcp/stream/)，否则根路径 404；
+#   2. SSE 的 Mount 前缀 /assist/mcp 会先于 Streamable 抢走 /assist/mcp/stream。
+# 用精确 Route 后客户端可直接连 /assist/mcp/stream（POST initialize 无法跟随
+# 307 重定向，所以必须精确匹配）。该子应用自带 AuthenticationMiddleware +
+# AuthContextMiddleware，Bearer Token 校验不依赖父应用中间件。
+# Route 必须在 SSE Mount 之前注册，确保 /assist/mcp/stream 命中精确 Route 而非
+# 被 SSE 的 /assist/mcp 前缀吞掉。
+# 注册必须在模块加载时（app 创建后）完成，否则 Starlette 活动路由表不可靠。
+mcp_session_manager = None
+try:
+    from app.mcp_server import create_sse_app, create_streamable_app, mcp
+    # 先注册 Streamable HTTP 精确 Route（必须在 SSE Mount 之前）
+    app.add_route(
+        "/assist/mcp/stream",
+        create_streamable_app(),
+        methods=["GET", "POST", "DELETE", "OPTIONS", "HEAD"],
+    )
+    # 再注册 SSE Mount
+    app.mount("/assist/mcp", create_sse_app())
+    mcp_session_manager = mcp.session_manager
+except ImportError:
+    print("Warning: mcp package not installed, MCP endpoint unavailable")
+except Exception as e:
+    print(f"Warning: Failed to mount MCP: {e}")
 
 
 # ── 文件别名路由（无需 token，路径不可猜测） ─────────────────────────────
