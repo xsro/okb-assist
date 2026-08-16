@@ -193,7 +193,7 @@ except Exception as e:
 async def serve_file_alias(filename: str):
     """通过别名访问 PDF 文件（无需 token，URL 不可猜测）。"""
     from app.routers.documents import get_doc_by_alias
-    from app.utils import to_absolute_path
+    from app.paths import get_pdf_path
     from fastapi.responses import FileResponse
 
     doc_id = get_doc_by_alias(filename)
@@ -205,10 +205,8 @@ async def serve_file_alias(filename: str):
     db = SessionLocal()
     try:
         doc = db.query(Document).filter(Document.id == doc_id).first()
-        if not doc or not doc.file_path:
-            return JSONResponse(status_code=404, content={"detail": "文件不存在"})
-        abs_path = to_absolute_path(doc.file_path)
-        if not os.path.isfile(abs_path):
+        abs_path = get_pdf_path(doc_id)
+        if not doc or not os.path.isfile(abs_path):
             return JSONResponse(status_code=404, content={"detail": "文件不存在"})
         return FileResponse(abs_path, media_type="application/pdf")
     finally:

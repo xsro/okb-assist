@@ -9,6 +9,7 @@ OpenWebUI 配置:
 """
 
 import json
+import os
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Document, DocStatus
+from app.paths import get_markdown_path, get_pdf_path
 
 # 使用空前缀，让路由直接挂在根路径下
 # 这样 OpenWebUI 可以直接通过 /openapi.json 访问
@@ -356,8 +358,8 @@ async def get_document_detail(
         category=doc.category or "",
         status=doc.status.value if isinstance(doc.status, DocStatus) else doc.status,
         detail_page=f"{base_url}/redirect/{doc_id}",
-        pdf_download=f"{base_url}/assist/api/documents/{doc_id}/pdf" if doc.file_path else "",
-        markdown_content=f"{base_url}/assist/api/documents/{doc_id}/markdown" if doc.markdown_path else "",
+        pdf_download=f"{base_url}/assist/api/documents/{doc_id}/pdf" if os.path.exists(get_pdf_path(doc_id)) else "",
+        markdown_content=f"{base_url}/assist/api/documents/{doc_id}/markdown" if os.path.exists(get_markdown_path(doc_id)) else "",
     )
 
 
@@ -438,15 +440,9 @@ async def read_markdown(
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail=f"未找到 ID 为 {doc_id} 的文献")
-    if not doc.markdown_path:
-        raise HTTPException(status_code=404, detail="该文献尚未生成 Markdown")
-
-    import os
-    from app.utils import to_absolute_path
-
-    abs_path = to_absolute_path(doc.markdown_path)
+    abs_path = get_markdown_path(doc_id)
     if not os.path.exists(abs_path):
-        raise HTTPException(status_code=404, detail="Markdown 文件不存在")
+        raise HTTPException(status_code=404, detail="该文献尚未生成 Markdown")
 
     with open(abs_path, "r", encoding="utf-8") as f:
         content = f.read()
@@ -517,7 +513,7 @@ async def get_pdf_url(
     return {
         "doc_id": doc_id,
         "title": doc.title or "",
-        "pdf_url": f"{base_url}/assist/api/documents/{doc_id}/pdf" if doc.file_path else "",
+        "pdf_url": f"{base_url}/assist/api/documents/{doc_id}/pdf" if os.path.exists(get_pdf_path(doc_id)) else "",
         "detail_page": f"{base_url}/redirect/{doc_id}",
     }
 

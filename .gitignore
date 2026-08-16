@@ -2,7 +2,7 @@ data/storage
 data/storage2
 data/qdrant
 data/.qdrant-initialized
-
+okb_assist.db.bak.*
 .env
 config.json
 system.json

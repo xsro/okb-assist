@@ -15,6 +15,7 @@ from app.services.mineru import parse_pdf, submit_parse_task, poll_task, get_tas
 from app.services.ollama import extract_metadata, get_embedding
 from app.services.qdrant import index_document, delete_document_points
 from app.utils import to_absolute_path
+from app.paths import get_markdown_path, get_pdf_path, get_asset_path
 
 router = APIRouter(prefix="/assist/api/pipeline", tags=["pipeline"])
 
@@ -239,14 +240,24 @@ def _clear_mineru_task_id(doc_id: int):
 
 
 def _save_parse_result(doc_id: int, md_path: str):
-    """Save parse result to database."""
-    from app.utils import to_relative_path
+    """Save parse result: copy markdown and asset zip to system.json-defined locations."""
+    import shutil
     db = SessionLocal()
     try:
         doc = db.query(Document).filter(Document.id == doc_id).first()
         if doc:
-            # 存储相对路径
-            doc.markdown_path = to_relative_path(md_path)
+            # 复制 markdown 到规范路径（由 system.json markdown_path 推导）
+            target_md = get_markdown_path(doc_id)
+            os.makedirs(os.path.dirname(target_md), exist_ok=True)
+            shutil.copy2(md_path, target_md)
+
+            # 复制图片资源 zip 到规范路径（由 system.json markdown_asset_path 推导）
+            images_zip = os.path.join(os.path.dirname(md_path), "images.zip")
+            if os.path.exists(images_zip):
+                target_zip = get_asset_path(doc_id)
+                os.makedirs(os.path.dirname(target_zip), exist_ok=True)
+                shutil.copy2(images_zip, target_zip)
+
             doc.status = DocStatus.markdown_done
             doc.status_message = "PDF 解析完成"
             doc.progress = 100
@@ -270,7 +281,13 @@ async def _do_extract_impl(doc_id: int):
         db = SessionLocal()
         try:
             doc = db.query(Document).filter(Document.id == doc_id).first()
-            if not doc or not doc.markdown_path:
+            if not doc:
+                _update_doc_status(doc_id, DocStatus.error, "文档不存在")
+                return
+
+            # markdown 路径由 system.json 推导
+            abs_markdown_path = get_markdown_path(doc_id)
+            if not os.path.exists(abs_markdown_path):
                 _update_doc_status(doc_id, DocStatus.error, "Markdown 文件不存在")
                 return
 
@@ -282,8 +299,6 @@ async def _do_extract_impl(doc_id: int):
                 db.commit()
                 return
 
-            # 将相对路径转换为绝对路径
-            abs_markdown_path = to_absolute_path(doc.markdown_path)
             with open(abs_markdown_path, "r", encoding="utf-8") as f:
                 markdown_content = f.read()
 
@@ -384,7 +399,15 @@ async def _do_index_impl(doc_id: int, vector_db_id: str = "default"):
         _update_doc_status(doc_id, DocStatus.indexing, f"正在索引到 {vector_db_id}...", 10)
 
         doc = db.query(Document).filter(Document.id == doc_id).first()
-        if not doc or not doc.markdown_path:
+        if not doc:
+            index_record.status = IndexStatus.error
+            index_record.error_message = "文档不存在"
+            db.commit()
+            _update_doc_status(doc_id, DocStatus.error, "文档不存在")
+            return
+
+        abs_markdown_path = get_markdown_path(doc_id)
+        if not os.path.exists(abs_markdown_path):
             index_record.status = IndexStatus.error
             index_record.error_message = "Markdown 文件不存在"
             db.commit()
@@ -400,8 +423,6 @@ async def _do_index_impl(doc_id: int, vector_db_id: str = "default"):
             _update_doc_status(doc_id, DocStatus.error, f"向量数据库 {vector_db_id} 配置不存在")
             return
 
-        # 将相对路径转换为绝对路径
-        abs_markdown_path = to_absolute_path(doc.markdown_path)
         with open(abs_markdown_path, "r", encoding="utf-8") as f:
             markdown_content = f.read()
 
@@ -468,7 +489,7 @@ async def _do_full_pipeline_impl(doc_id: int):
             db.close()
             return
 
-        file_path = doc.file_path
+        file_path = get_pdf_path(doc_id)
         db.close()
 
         # Stage 1: Parse
@@ -636,7 +657,7 @@ async def _process_stage_batch(stage: str, filter_statuses: list[DocStatus], tas
         docs = db.query(Document).filter(
             Document.status.in_(filter_statuses)
         ).all()
-        doc_list = [(doc.id, doc.file_path) for doc in docs]
+        doc_list = [(doc.id, get_pdf_path(doc.id)) for doc in docs]
     finally:
         db.close()
 
@@ -674,7 +695,7 @@ async def _run_parse_only(doc_id: int, file_path: str = None):
                 try:
                     doc = db.query(Document).filter(Document.id == doc_id).first()
                     if doc:
-                        file_path = doc.file_path
+                        file_path = get_pdf_path(doc_id)
                 finally:
                     db.close()
             await _do_parse_impl(doc_id, file_path)
@@ -1020,8 +1041,8 @@ def batch_reset_errors(target_status: str = None, db: Session = Depends(get_db))
         if target_status and target_status in ['uploaded', 'markdown_done', 'meta_done']:
             doc.status = DocStatus(target_status)
         else:
-            # 默认逻辑：根据是否有 markdown 文件决定
-            if doc.markdown_path:
+            # 默认逻辑：根据是否存在 markdown 文件决定
+            if os.path.exists(get_markdown_path(doc.id)):
                 doc.status = DocStatus.markdown_done
             else:
                 doc.status = DocStatus.uploaded
@@ -1062,7 +1083,7 @@ def batch_reset_timeout_errors(target_status: str = None, db: Session = Depends(
         if target_status and target_status in ['uploaded', 'markdown_done', 'meta_done']:
             doc.status = DocStatus(target_status)
         else:
-            if doc.markdown_path:
+            if os.path.exists(get_markdown_path(doc.id)):
                 doc.status = DocStatus.markdown_done
             else:
                 doc.status = DocStatus.uploaded
@@ -1149,7 +1170,6 @@ def reset_document(
 
     # Clear downstream data based on target status
     if doc.status == DocStatus.uploaded:
-        doc.markdown_path = None
         doc.qdrant_collection = None
     elif doc.status == DocStatus.markdown_done:
         doc.qdrant_collection = None
@@ -1183,7 +1203,7 @@ async def parse_document(
     doc.progress = 0
     db.commit()
 
-    background_tasks.add_task(_run_parse, doc_id, doc.file_path)
+    background_tasks.add_task(_run_parse, doc_id, get_pdf_path(doc_id))
 
     return {"detail": "解析任务已提交", "status": "parsing"}
 
@@ -1239,7 +1259,7 @@ async def index_document_to_qdrant(
         raise HTTPException(status_code=400, detail=f"当前状态 {doc.status.value} 不允许索引")
 
     # 检查是否有 markdown 文件
-    if not doc.markdown_path:
+    if not os.path.exists(get_markdown_path(doc_id)):
         raise HTTPException(status_code=400, detail="Markdown 文件不存在，无法索引")
 
     # 验证向量数据库配置是否存在
@@ -1320,11 +1340,9 @@ def get_pipeline_status(
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
 
-    # 检查 markdown 文件是否存在
-    has_markdown = False
-    if doc.markdown_path:
-        abs_markdown_path = to_absolute_path(doc.markdown_path)
-        has_markdown = os.path.exists(abs_markdown_path)
+    # 检查 markdown 文件是否存在（路径由 system.json 推导）
+    abs_markdown_path = get_markdown_path(doc_id)
+    has_markdown = os.path.exists(abs_markdown_path)
 
     # 获取索引状态
     indexes = db.query(DocumentVectorIndex).filter(

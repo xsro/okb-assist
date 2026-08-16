@@ -28,11 +28,9 @@ def get_english_docs_without_mini_index():
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT d.id, d.title, d.markdown_path
+        SELECT d.id, d.title
         FROM documents d
         WHERE d.language = 'en'
-          AND d.markdown_path IS NOT NULL
-          AND d.markdown_path != ''
           AND NOT EXISTS (
               SELECT 1 FROM document_vector_index dvi
               WHERE dvi.document_id = d.id
@@ -47,28 +45,24 @@ def get_english_docs_without_mini_index():
     return rows
 
 
-def get_uploads_folder() -> str:
-    """从system.json获取uploads_folder路径。"""
-    system_json = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "system.json")
-    with open(system_json, "r") as f:
-        config = json.load(f)
-    return config.get("uploads_folder", "uploads")
+def check_markdown_valid(doc_id: int) -> bool:
+    """检查文档 markdown 文件（由 system.json 推导）是否存在且非空。"""
+    try:
+        from app.paths import get_markdown_path
+    except Exception:
+        # 兜底：直接读取 system.json 推导
+        system_json = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "system.json")
+        with open(system_json, "r") as f:
+            template = json.load(f).get("markdown_path", "")
+        abs_path = template.replace("{id}", str(doc_id))
+    else:
+        abs_path = get_markdown_path(doc_id)
 
-
-def check_markdown_valid(markdown_path: str) -> bool:
-    """检查markdown文件是否存在且非空。"""
-    if not markdown_path:
-        return False
-
-    uploads_folder = get_uploads_folder()
-    abs_path = os.path.join(uploads_folder, markdown_path)
-
-    if not os.path.exists(abs_path):
+    if not abs_path or not os.path.exists(abs_path):
         return False
 
     try:
-        size = os.path.getsize(abs_path)
-        return size > 0
+        return os.path.getsize(abs_path) > 0
     except Exception:
         return False
 
@@ -110,9 +104,9 @@ def main():
 
     # 过滤有效文档
     valid_docs = []
-    for doc_id, title, md_path in docs:
-        if check_markdown_valid(md_path):
-            valid_docs.append((doc_id, title, md_path))
+    for doc_id, title in docs:
+        if check_markdown_valid(doc_id):
+            valid_docs.append((doc_id, title))
         else:
             print(f"  跳过 ID {doc_id}: markdown文件不存在或为空")
 
@@ -120,7 +114,7 @@ def main():
 
     if args.dry_run:
         print("\n[DRY RUN] 将要提交索引的文档:")
-        for doc_id, title, md_path in valid_docs:
+        for doc_id, title in valid_docs:
             print(f"  ID {doc_id}: {title[:70]}")
         return
 
@@ -128,7 +122,7 @@ def main():
     success = 0
     failed = 0
 
-    for i, (doc_id, title, md_path) in enumerate(valid_docs, 1):
+    for i, (doc_id, title) in enumerate(valid_docs, 1):
         print(f"[{i}/{len(valid_docs)}] 提交 ID {doc_id}: {title[:50]}...")
         if submit_index(doc_id, args.base_url, args.token):
             print(f"  ✓ 已提交")

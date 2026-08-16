@@ -17,7 +17,8 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models import Document, DocStatus, DocumentVectorIndex, IndexStatus
-from app.utils import calculate_file_hash, to_relative_path, to_absolute_path
+from app.utils import calculate_file_hash, to_absolute_path
+from app.paths import get_markdown_path, get_pdf_path, get_asset_path
 
 router = APIRouter(prefix="/assist/api/documents", tags=["documents"])
 
@@ -138,8 +139,8 @@ def _doc_to_out(doc: Document, db: Session = None) -> dict:
     return DocumentOut(
         id=doc.id,
         filename=doc.filename,
-        file_path=doc.file_path,
-        markdown_path=doc.markdown_path,
+        file_path=get_pdf_path(doc.id),
+        markdown_path=get_markdown_path(doc.id),
         file_hash=doc.file_hash,
         title=doc.title,
         authors=doc.authors,
@@ -464,7 +465,6 @@ async def upload_document(
     # Create DB record, reuse smallest available ID
     doc = Document(
         filename=file.filename,
-        file_path="",
         file_hash=file_hash,
         status=DocStatus.uploaded,
     )
@@ -475,18 +475,12 @@ async def upload_document(
     db.commit()
     db.refresh(doc)
 
-    # Save file as uploads/{id}/{id}.pdf
-    doc_dir = UPLOAD_DIR / str(doc.id)
-    doc_dir.mkdir(parents=True, exist_ok=True)
-    file_path = doc_dir / f"{doc.id}.pdf"
+    # 保存到 system.json 推导出的源 PDF 路径
+    file_path = Path(get_pdf_path(doc.id))
+    file_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(file_path, "wb") as f:
         f.write(content)
-
-    # 存储相对路径
-    doc.file_path = to_relative_path(str(file_path))
-    db.commit()
-    db.refresh(doc)
 
     return _doc_to_out(doc, db)
 
@@ -524,7 +518,7 @@ def register_document_by_path(
                     "error": "duplicate",
                     "message": f"文件已存在 (hash: {file_hash[:16]}...)",
                     "existing_id": duplicate.id,
-                    "existing_path": duplicate.file_path,
+                    "existing_path": get_pdf_path(duplicate.id),
                 }
             )
 
@@ -532,7 +526,6 @@ def register_document_by_path(
     filename = os.path.basename(file_path)
     doc = Document(
         filename=filename,
-        file_path="",
         file_hash=file_hash,
         status=DocStatus.uploaded,
     )
@@ -543,17 +536,11 @@ def register_document_by_path(
     db.commit()
     db.refresh(doc)
 
-    # Copy file to uploads/{id}/{id}.pdf
+    # 复制到 system.json 推导出的源 PDF 路径
     import shutil
-    doc_dir = UPLOAD_DIR / str(doc.id)
-    doc_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = doc_dir / f"{doc.id}.pdf"
+    dest_path = Path(get_pdf_path(doc.id))
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(file_path, dest_path)
-
-    # 存储相对路径
-    doc.file_path = to_relative_path(str(dest_path))
-    db.commit()
-    db.refresh(doc)
 
     return _doc_to_out(doc, db)
 
@@ -656,11 +643,8 @@ def check_pdf_exists(
 ):
     """检查 PDF 文件是否存在（HEAD 请求，不返回文件内容）。"""
     doc = db.query(Document).filter(Document.id == doc_id).first()
-    if not doc or not doc.file_path:
-        raise HTTPException(status_code=404, detail="PDF 文件不存在")
-
-    abs_file_path = to_absolute_path(doc.file_path)
-    if not os.path.exists(abs_file_path):
+    abs_file_path = get_pdf_path(doc_id)
+    if not doc or not os.path.exists(abs_file_path):
         raise HTTPException(status_code=404, detail="PDF 文件不存在")
 
     return Response(status_code=200)
@@ -672,12 +656,8 @@ def get_pdf(
     db: Session = Depends(get_db),
 ):
     doc = db.query(Document).filter(Document.id == doc_id).first()
-    if not doc or not doc.file_path:
-        raise HTTPException(status_code=404, detail="PDF 文件不存在")
-
-    # 将相对路径转换为绝对路径
-    abs_file_path = to_absolute_path(doc.file_path)
-    if not os.path.exists(abs_file_path):
+    abs_file_path = get_pdf_path(doc_id)
+    if not doc or not os.path.exists(abs_file_path):
         raise HTTPException(status_code=404, detail="PDF 文件不存在")
 
     with open(abs_file_path, "rb") as f:
@@ -706,13 +686,13 @@ def get_image_from_zip(
     filename: str,
     db: Session = Depends(get_db),
 ):
-    """从 images.zip 中读取图片并返回。"""
+    """从图片资源 zip（system.json markdown_asset_path）中读取图片并返回。"""
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文档不存在")
 
-    doc_dir = os.path.join(settings.uploads_folder, str(doc_id))
-    zip_path = os.path.join(doc_dir, "images.zip")
+    # 资源 zip 路径由 system.json 推导
+    zip_path = get_asset_path(doc_id)
 
     if not os.path.exists(zip_path):
         raise HTTPException(status_code=404, detail="图片包不存在")
@@ -762,16 +742,14 @@ async def replace_pdf(
     import hashlib
     file_hash = hashlib.sha256(content).hexdigest()
 
-    # 保存文件到 uploads/{id}/{id}.pdf
-    doc_dir = UPLOAD_DIR / str(doc.id)
-    doc_dir.mkdir(parents=True, exist_ok=True)
-    file_path = doc_dir / f"{doc.id}.pdf"
+    # 保存到 system.json 推导出的源 PDF 路径
+    file_path = Path(get_pdf_path(doc.id))
+    file_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(file_path, "wb") as f:
         f.write(content)
 
     # 更新数据库记录
-    doc.file_path = to_relative_path(str(file_path))
     doc.file_hash = file_hash
     doc.status = DocStatus.uploaded
     db.commit()
@@ -793,9 +771,9 @@ def get_markdown(
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
 
-    # 将相对路径转换为绝对路径
-    abs_markdown_path = to_absolute_path(doc.markdown_path) if doc.markdown_path else None
-    if not abs_markdown_path or not os.path.exists(abs_markdown_path):
+    # markdown 路径由 system.json 推导
+    abs_markdown_path = get_markdown_path(doc_id)
+    if not os.path.exists(abs_markdown_path):
         raise HTTPException(status_code=404, detail="Markdown 文件尚未生成")
 
     with open(abs_markdown_path, "r", encoding="utf-8") as f:
@@ -884,11 +862,11 @@ def update_markdown(
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
-    if not doc.markdown_path:
+    if not os.path.exists(get_markdown_path(doc_id)):
         raise HTTPException(status_code=400, detail="Markdown 文件尚未生成")
 
-    # 将相对路径转换为绝对路径
-    abs_markdown_path = to_absolute_path(doc.markdown_path)
+    # markdown 路径由 system.json 推导
+    abs_markdown_path = get_markdown_path(doc_id)
     with open(abs_markdown_path, "w", encoding="utf-8") as f:
         f.write(data.content)
     return {"detail": "Markdown 已更新"}
@@ -903,7 +881,7 @@ def generate_file_alias(
     doc = db.query(Document).filter(Document.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="文献不存在")
-    if not doc.file_path:
+    if not os.path.exists(get_pdf_path(doc_id)):
         raise HTTPException(status_code=404, detail="PDF 文件不存在")
 
     # 检查是否已有别名，没有则创建（原子操作）

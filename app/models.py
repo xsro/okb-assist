@@ -28,7 +28,6 @@ class Document(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     filename = Column(String(255), nullable=False)
-    file_path = Column(String(500), nullable=False)
     file_hash = Column(String(64), nullable=True, index=True)  # SHA256 hash
 
     # Meta fields
@@ -51,8 +50,7 @@ class Document(Base):
     abstract_en = Column(Text, nullable=True)
     journal_en = Column(String(200), nullable=True)
 
-    # Paths
-    markdown_path = Column(String(500), nullable=True)
+    # Paths are derived from system.json templates (see app/paths.py), not stored here.
 
     # MinerU task tracking
     mineru_task_id = Column(String(100), nullable=True)  # MinerU async task ID for resume after timeout

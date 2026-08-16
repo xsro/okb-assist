@@ -25,7 +25,7 @@ from pathlib import Path
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import Document, DocStatus
-from app.utils import to_relative_path, to_absolute_path
+from app.paths import get_pdf_path, get_markdown_path, get_asset_path
 
 settings = get_settings()
 UPLOADS_DIR = Path(settings.uploads_folder)
@@ -54,15 +54,6 @@ def normalize(title: str) -> str:
     t = title.lower().strip()
     t = re.sub(r'[^a-z0-9一-鿿]+', '', t)
     return t
-
-
-def file_exists(path: str | None) -> bool:
-    """检查文件是否存在，支持相对路径。"""
-    if not path:
-        return False
-    # 将相对路径转换为绝对路径
-    abs_path = to_absolute_path(path)
-    return os.path.exists(abs_path)
 
 
 def higher_status(a: DocStatus, b: DocStatus) -> DocStatus:
@@ -125,28 +116,20 @@ def main():
                     keeper.progress = src.progress
                     merged_items.append("status")
 
-                # 合并 PDF 文件
-                src_pdf_rel = f"{src.id}/{src.id}.pdf"
-                src_pdf_abs = str(UPLOADS_DIR / str(src.id) / f"{src.id}.pdf")
-                keeper_pdf_rel = f"{keeper.id}/{keeper.id}.pdf"
-                keeper_pdf_abs = str(UPLOADS_DIR / str(keeper.id) / f"{keeper.id}.pdf")
-                if not file_exists(keeper_pdf_rel) and os.path.exists(src_pdf_abs):
-                    keeper_dir = UPLOADS_DIR / str(keeper.id)
-                    keeper_dir.mkdir(parents=True, exist_ok=True)
+                # 合并 PDF 文件（路径由 system.json 推导）
+                src_pdf_abs = get_pdf_path(src.id)
+                keeper_pdf_abs = get_pdf_path(keeper.id)
+                if not os.path.exists(keeper_pdf_abs) and os.path.exists(src_pdf_abs):
+                    os.makedirs(os.path.dirname(keeper_pdf_abs), exist_ok=True)
                     shutil.copy2(src_pdf_abs, keeper_pdf_abs)
-                    keeper.file_path = keeper_pdf_rel
                     merged_items.append("pdf")
 
-                # 合并 markdown 文件
-                src_md_rel = f"{src.id}/{src.id}.md"
-                src_md_abs = str(UPLOADS_DIR / str(src.id) / f"{src.id}.md")
-                keeper_md_rel = f"{keeper.id}/{keeper.id}.md"
-                keeper_md_abs = str(UPLOADS_DIR / str(keeper.id) / f"{keeper.id}.md")
-                if not file_exists(keeper_md_rel) and os.path.exists(src_md_abs):
-                    keeper_dir = UPLOADS_DIR / str(keeper.id)
-                    keeper_dir.mkdir(parents=True, exist_ok=True)
+                # 合并 markdown 文件（路径由 system.json 推导）
+                src_md_abs = get_markdown_path(src.id)
+                keeper_md_abs = get_markdown_path(keeper.id)
+                if not os.path.exists(keeper_md_abs) and os.path.exists(src_md_abs):
+                    os.makedirs(os.path.dirname(keeper_md_abs), exist_ok=True)
                     shutil.copy2(src_md_abs, keeper_md_abs)
-                    keeper.markdown_path = keeper_md_rel
                     merged_items.append("markdown")
 
                 # 合并 qdrant_collection
@@ -164,10 +147,17 @@ def main():
             if not args.dry_run:
                 # 删除被合并的文档
                 for src in others:
-                    # 删除文件
+                    # 删除解析临时目录
                     src_dir = UPLOADS_DIR / str(src.id)
                     if src_dir.exists():
                         shutil.rmtree(src_dir, ignore_errors=True)
+                    # 删除推导出的规范文件
+                    for p in (get_pdf_path(src.id), get_markdown_path(src.id), get_asset_path(src.id)):
+                        if os.path.exists(p):
+                            try:
+                                os.remove(p)
+                            except OSError:
+                                pass
                     # 删除 Qdrant 点
                     if src.qdrant_collection:
                         try:

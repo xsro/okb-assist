@@ -11,7 +11,8 @@ from app.database import get_db, engine
 from app.models import Document, DocStatus
 from app.services.qdrant import get_qdrant_client, get_point, list_collections, delete_collection
 from app.services.vector_db import get_vector_db
-from app.utils import calculate_file_hash, to_absolute_path
+from app.utils import calculate_file_hash
+from app.paths import get_pdf_path
 
 router = APIRouter(prefix="/assist/api/admin", tags=["admin"])
 
@@ -214,12 +215,8 @@ def recalculate_hashes(db: Session = Depends(get_db)):
     errors = []
 
     for doc in docs:
-        if not doc.file_path:
-            skipped += 1
-            continue
-
-        # 将相对路径转换为绝对路径
-        abs_file_path = to_absolute_path(doc.file_path)
+        # 源 PDF 路径由 system.json 推导
+        abs_file_path = get_pdf_path(doc.id)
         if not os.path.exists(abs_file_path):
             skipped += 1
             continue

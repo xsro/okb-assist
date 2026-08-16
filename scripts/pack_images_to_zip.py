@@ -2,8 +2,8 @@
 """
 将已有文档的 images/ 目录打包为 images.zip
 
-遍历所有文档，将 uploads/{id}/images/ 打包为 uploads/{id}/images.zip，
-验证 zip 完整性后删除 images/ 目录。
+遍历所有文档，将 uploads/{id}/images/ 打包为 system.json 定义的资源 zip
+（markdown_asset_path，如 /.../pdfs/{id}/{id}.zip），验证 zip 完整性后删除 images/ 目录。
 
 使用方法:
     python scripts/pack_images_to_zip.py [选项]
@@ -22,6 +22,11 @@ import zipfile
 from pathlib import Path
 
 import httpx
+
+try:
+    from app.paths import get_asset_path
+except Exception:
+    get_asset_path = None
 
 
 # ──────────────────────────────────────────────
@@ -174,7 +179,11 @@ def main():
         doc_id = doc["id"]
         doc_dir = os.path.join(args.uploads_dir, str(doc_id))
         images_dir = os.path.join(doc_dir, "images")
-        zip_path = os.path.join(doc_dir, "images.zip")
+        # 资源 zip 目标路径由 system.json 推导（markdown_asset_path）
+        if get_asset_path is not None:
+            zip_path = get_asset_path(doc_id)
+        else:
+            zip_path = os.path.join(doc_dir, "images.zip")
 
         print(f"[{i}/{len(all_docs)}] ID={doc_id}", end="")
 
