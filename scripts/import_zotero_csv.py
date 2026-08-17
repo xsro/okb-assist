@@ -175,6 +175,20 @@ def update_document_metadata(base_url: str, doc_id: int, metadata: dict, token: 
     return False
 
 
+def save_document_info(base_url, doc_id, info, token):
+    """POST the full non-empty CSV row to the server, which persists it
+    into markdowns/{doc_id}.json."""
+    headers = {"X-Token": token, "Content-Type": "application/json"}
+    with httpx.Client(timeout=120) as client:
+        resp = client.post(
+            f"{base_url}/assist/api/documents/{doc_id}/info",
+            json={"info": info},
+            headers=headers,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 # ──────────────────────────────────────────────
 # Zotero CSV 字段名映射（兼容不同导出格式）
 # ──────────────────────────────────────────────
@@ -513,6 +527,8 @@ def upload_one(d: dict, args, token: str | None) -> bool:
         doc_id = res["id"]
         if args.update_meta:
             update_document_metadata(args.base_url, doc_id, d["meta"], token)
+            save_document_info(args.base_url, doc_id, d["info"], token)
+            print(f"  已保存信息到 json: id={doc_id}")
         print(f"  已上传: {d['doi']} -> id={doc_id}")
         return True
     except Exception as e:
@@ -563,7 +579,9 @@ def main():
         if not file_path:
             continue  # not locally uploadable
         meta = parse_zotero_row(row)
-        local_docs.append({"doi": doi, "file_path": file_path, "title": meta.get("title"), "meta": meta})
+        info = {k: v for k, v in row.items() if v is not None and str(v).strip() != ""}
+        local_docs.append({"doi": doi, "file_path": file_path, "title": meta.get("title"),
+                           "meta": meta, "info": info})
 
     if not local_docs:
         print("没有本地可上传的文件（或全部缺少 DOI）。")

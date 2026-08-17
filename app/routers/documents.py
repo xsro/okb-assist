@@ -18,7 +18,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.models import Document, DocStatus, DocumentVectorIndex, IndexStatus
 from app.utils import calculate_file_hash, to_absolute_path
-from app.paths import get_markdown_path, get_pdf_path, get_asset_path
+from app.paths import get_markdown_path, get_pdf_path, get_asset_path, get_info_path
 
 router = APIRouter(prefix="/assist/api/documents", tags=["documents"])
 
@@ -635,6 +635,37 @@ def update_document(
     db.commit()
     db.refresh(doc)
     return _doc_to_out(doc, db)
+
+
+class InfoPayload(BaseModel):
+    info: dict = {}
+
+
+@router.post("/{doc_id}/info")
+def save_document_info(doc_id: int, payload: InfoPayload, db: Session = Depends(get_db)):
+    """Persist the supplied metadata into markdowns/{doc_id}.json.
+
+    Merges with any existing JSON (only non-empty provided values overwrite),
+    so it is safe to call repeatedly. Mirrors the Zotero-export JSON layout
+    (original CSV column names as keys)."""
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="文献不存在")
+    info_path = Path(get_info_path(doc_id))
+    info_path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict = {}
+    if info_path.exists():
+        try:
+            with open(info_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            existing = {}
+    for k, v in (payload.info or {}).items():
+        if v is not None and str(v).strip() != "":
+            existing[k] = v
+    with open(info_path, "w", encoding="utf-8") as f:
+        json.dump(existing, f, ensure_ascii=False, indent=2)
+    return {"id": doc_id, "info_path": str(info_path), "keys": len(existing)}
 
 
 @router.delete("/{doc_id}")
