@@ -14,8 +14,8 @@ docker run --gpus all \
   -d \
   -p 30000:30000 -p 7860:7860 -p 8000:8000 -p 8002:8002 \
   --ipc=host \
-  --name mineru \
-  -it mineru:latest2 \
+  --name minerul \
+  -it mineru:latest \
   /bin/bash -c "CUDA_VISIBLE_DEVICES=1,2 mineru-router --host 0.0.0.0 --port 8002 --local-gpus auto"
 ```
 
