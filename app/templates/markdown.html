@@ -118,6 +118,52 @@
             border-radius: 4px;
             font-size: 0.8rem;
         }
+        .img-toggle {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            cursor: pointer;
+            user-select: none;
+            font-size: 0.875rem;
+        }
+        .img-toggle input[type="checkbox"] {
+            width: 36px;
+            height: 20px;
+            appearance: none;
+            background: #cbd5e1;
+            border-radius: 10px;
+            position: relative;
+            cursor: pointer;
+            transition: background 0.2s;
+            flex-shrink: 0;
+        }
+        .img-toggle input[type="checkbox"]::after {
+            content: '';
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: white;
+            top: 2px;
+            left: 2px;
+            transition: transform 0.2s;
+        }
+        .img-toggle input[type="checkbox"]:checked {
+            background: var(--primary);
+        }
+        .img-toggle input[type="checkbox"]:checked::after {
+            transform: translateX(16px);
+        }
+        /* Placeholder shown when images are disabled (no src -> no network load) */
+        .markdown-body img:not([src]) {
+            min-width: 120px;
+            min-height: 60px;
+            background: var(--bg);
+            border: 1px dashed var(--border);
+            border-radius: 4px;
+            display: inline-block;
+            vertical-align: middle;
+        }
 
         @media (max-width: 768px) {
             .toolbar {
@@ -173,6 +219,10 @@
                 <span class="page-info" id="page-info">加载中...</span>
                 <button class="btn btn-sm" id="btn-next" onclick="changePage(1)">下一页 ▶</button>
             </div>
+            <label class="img-toggle">
+                <input type="checkbox" id="img-toggle" onchange="toggleImages()">
+                <span>显示图片</span>
+            </label>
             <button class="btn btn-sm" id="btn-raw" onclick="toggleRaw()">原始文本</button>
         </div>
     </div>
@@ -192,9 +242,26 @@
         let showingRaw = false;
         let rawContent = '';
         let currentMathEngine = localStorage.getItem('mathEngine') || 'none';
+        // Images are disabled by default (no network load until the user opts in)
+        let loadImages = localStorage.getItem('loadImages') === 'true';
 
         // Initialize math engine selector
         document.getElementById('math-engine').value = currentMathEngine;
+        document.getElementById('img-toggle').checked = loadImages;
+
+        // Swap <img src="..."> to <img data-src="..."> so the browser never fetches it
+        function stripImageSources(html) {
+            return html.replace(/<img\b([^>]*?)\bsrc=(["'])(.*?)\2([^>]*)>/gi,
+                (m, pre, q, src, post) => `<img${pre} data-src=${q}${src}${q}${post}>`);
+        }
+
+        function renderMarkdown() {
+            let html = marked.parse(rawContent || '');
+            if (!loadImages) {
+                html = stripImageSources(html);
+            }
+            document.getElementById('markdown-content').innerHTML = html;
+        }
 
         async function loadMarkdown(page) {
             try {
@@ -204,12 +271,9 @@
                 totalPages = data.total_pages;
                 rawContent = data.content;
 
-                // Render markdown
-                const rendered = marked.parse(data.content || '');
-                document.getElementById('markdown-content').innerHTML = rendered;
+                // Render markdown (respecting image toggle) + apply math rendering
+                renderMarkdown();
                 document.getElementById('markdown-raw').textContent = data.content;
-
-                // Apply math rendering
                 renderMath();
 
                 // Update pagination
@@ -219,6 +283,14 @@
             } catch (err) {
                 document.getElementById('markdown-content').innerHTML = `<p style="color:red">加载失败: ${err.message}</p>`;
             }
+        }
+
+        function toggleImages() {
+            loadImages = document.getElementById('img-toggle').checked;
+            localStorage.setItem('loadImages', loadImages);
+            // Re-render current page (parses locally, no extra network request)
+            renderMarkdown();
+            renderMath();
         }
 
         function renderMath() {
