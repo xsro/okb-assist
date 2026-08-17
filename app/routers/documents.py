@@ -545,6 +545,36 @@ def register_document_by_path(
     return _doc_to_out(doc, db)
 
 
+class DiffDoisRequest(BaseModel):
+    dois: list[str] = []
+
+
+@router.post("/diff-dois")
+def diff_dois(data: DiffDoisRequest, db: Session = Depends(get_db)):
+    """Accept a list of DOIs; return which are NOT present on the server
+    (i.e. the documents the client would need to upload)."""
+    submitted: list[str] = []
+    for d in data.dois:
+        if isinstance(d, str):
+            s = d.strip()
+            if s:
+                submitted.append(s)
+    existing: set[str] = set()
+    if submitted:
+        rows = db.query(Document.doi).filter(Document.doi.in_(submitted)).all()
+        for (doi_val,) in rows:
+            if doi_val:
+                existing.add(doi_val.strip())
+    missing = [d for d in submitted if d not in existing]
+    return {
+        "submitted": submitted,
+        "present": sorted(existing),
+        "missing": missing,
+        "present_count": len(existing),
+        "missing_count": len(missing),
+    }
+
+
 @router.get("/by-hash/{file_hash}")
 def get_document_by_hash(
     file_hash: str,

@@ -23,6 +23,7 @@ import csv
 import hashlib
 import json
 import os
+import pathlib
 import re
 import sys
 from pathlib import Path
@@ -47,7 +48,7 @@ def calculate_file_hash(file_path: str) -> str:
 # 文件路径解析
 # ──────────────────────────────────────────────
 
-def parse_file_paths(file_field: str) -> list[str]:
+def parse_file_paths(file_field: str, storage_root: str | None = None) -> list[str]:
     """
     解析 Zotero file 字段，返回存在的文件路径列表。
 
@@ -55,6 +56,10 @@ def parse_file_paths(file_field: str) -> list[str]:
       - /path/to/file.pdf
       - /path/to/a.pdf;/path/to/b.pdf
       - /path/to/file.pdf:application/pdf:1234
+
+    storage_root: 可选，用于把 Windows Zotero 路径映射为本地 storage 文件夹。
+      例如 Windows 路径 C:\\Users\\X\\Zotero\\storage\\HASH\\file.pdf
+      会尝试映射为 {storage_root}/HASH/file.pdf。
     """
     if not file_field:
         return []
@@ -65,9 +70,18 @@ def parse_file_paths(file_field: str) -> list[str]:
         if not part:
             continue
         # 去掉 Zotero 附加的 :type:size 后缀
-        path = part.split(":")[0].strip() if ":" in part else part.strip()
-        if path and os.path.exists(path):
-            paths.append(path)
+        path = part
+        candidates = [path]
+        if storage_root and not os.path.exists(path):
+            # Map Windows Zotero path -> local storage_root (storage_root == the Zotero 'storage' folder)
+            p = pathlib.PureWindowsPath(path)
+            if len(p.parts) > 5:  # C:\Users\X\Zotero\storage\HASH\file.pdf
+                rel = os.path.join(*p.parts[5:])
+                candidates.append(os.path.join(storage_root, rel))
+        for c in candidates:
+            if c and os.path.exists(c) and c.endswith("pdf"):
+                paths.append(c)
+                break
     return paths
 
 
@@ -457,17 +471,63 @@ def read_token(args_token: str | None) -> str | None:
     return None
 
 
+def print_doc_detail(d: dict) -> None:
+    """打印单篇文献的可读详情。"""
+    meta = d.get("meta", {}) or {}
+    print(f"  ── {d.get('title') or '(无标题)'} ──")
+    authors = meta.get("authors")
+    if authors:
+        try:
+            authors = json.loads(authors)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if authors:
+        print(f"  作者: {', '.join(authors) if isinstance(authors, list) else authors}")
+    if meta.get("year"):
+        print(f"  年份: {meta['year']}")
+    if meta.get("journal"):
+        print(f"  期刊/来源: {meta['journal']}")
+    if d.get("doi"):
+        print(f"  DOI: {d['doi']}")
+    if meta.get("language"):
+        print(f"  语言: {meta['language']}")
+    if meta.get("doc_type"):
+        print(f"  文献类型: {meta['doc_type']}")
+    abstract = meta.get("abstract")
+    if abstract:
+        abstract = abstract if len(abstract) <= 300 else abstract[:300] + "..."
+        print(f"  摘要: {abstract}")
+    print(f"  文件: {d.get('file_path')}")
+
+
+def upload_one(d: dict, args, token: str | None) -> bool:
+    """上传单篇文献。返回是否成功。"""
+    if args.dry_run:
+        print(f"  [dry-run] 跳过上传: {d['doi']} ({d['file_path']})")
+        return True
+    try:
+        res = upload_document(args.base_url, d["file_path"], token)
+        if not res:
+            print(f"  上传失败 {d['doi']}: 无返回结果")
+            return False
+        doc_id = res["id"]
+        if args.update_meta:
+            update_document_metadata(args.base_url, doc_id, d["meta"], token)
+        print(f"  已上传: {d['doi']} -> id={doc_id}")
+        return True
+    except Exception as e:
+        print(f"  上传失败 {d['doi']}: {e}")
+        return False
+
+
 def main():
-    parser = argparse.ArgumentParser(description="导入 Zotero CSV 到 OKB-Assist")
+    parser = argparse.ArgumentParser(description="导入 Zotero CSV 到 OKB-Assist（交互式 diff-then-upload）")
     parser.add_argument("csv_file", help="Zotero 导出的 CSV 文件路径")
-    parser.add_argument("--base-url", default="http://localhost:5001", help="OKB-Assist 服务地址")
+    parser.add_argument("--base-url", default="http://192.168.1.122:5001", help="OKB-Assist 服务地址")
     parser.add_argument("--token", default=None, help="访问令牌")
-    parser.add_argument("--match-mode", choices=["doi", "hash"], default="doi",
-                        help="匹配模式: doi (默认，仅 DOI 匹配，无 DOI 则跳过) | hash (仅哈希匹配)")
+    parser.add_argument("--storage-root", default=None,
+                        help="Zotero storage 文件夹的本地路径，用于把 Windows 附件路径映射到本地")
     parser.add_argument("--dry-run", action="store_true", help="试运行，不实际上传")
-    parser.add_argument("--no-skip", action="store_true", help="不跳过已存在的文件，强制重新注册")
-    parser.add_argument("--save-original", action="store_true", default=False,
-                        help="额外保存原始 CSV 行数据到 source 字段（默认关闭，避免覆盖结构化信息）")
     parser.add_argument("--update-meta", action="store_true", default=True,
                         help="上传后自动更新元数据（默认开启）")
     parser.add_argument("--no-update-meta", action="store_false", dest="update_meta",
@@ -479,8 +539,7 @@ def main():
 
     print(f"服务地址: {args.base_url}")
     print(f"CSV 文件: {args.csv_file}")
-    print(f"匹配模式: {args.match_mode}")
-    print(f"保存原始: {'是' if args.save_original else '否'}")
+    print(f"Storage root: {args.storage_root or '(未设置)'}")
     print(f"Token: {'*' * 8 if token else '未设置'}")
     print()
 
@@ -488,110 +547,97 @@ def main():
         print(f"错误: CSV 文件不存在: {args.csv_file}")
         sys.exit(1)
 
+    # ── 1. 读取 CSV，构建本地可上传文档列表 ──
     with open(args.csv_file, "r", encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
 
-    print(f"共 {len(rows)} 条记录")
+    local_docs = []
+    for row in rows:
+        nrow = normalize_row(row)
+        doi = (nrow.get("doi") or "").strip()
+        if not doi:
+            continue  # DOI-based flow; skip rows w/o DOI
+        file_field = nrow.get("file", "")
+        paths = parse_file_paths(file_field, storage_root=args.storage_root)
+        file_path = get_newest_file(paths)
+        if not file_path:
+            continue  # not locally uploadable
+        meta = parse_zotero_row(row)
+        local_docs.append({"doi": doi, "file_path": file_path, "title": meta.get("title"), "meta": meta})
+
+    if not local_docs:
+        print("没有本地可上传的文件（或全部缺少 DOI）。")
+        return
+
+    # ── 2. 与服务器做 diff ──
+    dois = [d["doi"] for d in local_docs]
+    try:
+        with httpx.Client(timeout=120) as client:
+            resp = client.post(
+                f"{args.base_url}/assist/api/documents/diff-dois",
+                json={"dois": dois},
+                headers={"X-Token": token, "Content-Type": "application/json"},
+            )
+        if resp.status_code != 200:
+            print(f"错误: diff-dois 请求失败: {resp.status_code} - {resp.text[:200]}")
+            return
+        diff = resp.json()
+    except Exception as e:
+        print(f"错误: 无法连接服务器进行 diff: {e}")
+        return
+
+    missing = set(diff.get("missing", []))
+    to_upload = [d for d in local_docs if d["doi"] in missing]
+
+    total = len(local_docs)
+    present_count = diff.get("present_count", len(local_docs) - len(to_upload))
+    vacant_count = len(to_upload)
+
+    print(f"本地可上传（含 DOI 且有文件）: {total}")
+    print(f"服务器已存在: {present_count}")
+    print(f"服务器空缺（待上传）: {vacant_count}")
     print()
+    for i, d in enumerate(to_upload, 1):
+        print(f"  [{i}] {d['doi']}  {d['title']}")
 
-    stats = {"total": len(rows), "uploaded": 0, "skipped": 0, "failed": 0, "duplicate": 0, "meta_updated": 0}
+    if not to_upload:
+        print("无空缺文献，无需上传。")
+        return
 
-    for i, row in enumerate(rows, 1):
-        print(f"[{i}/{len(rows)}] ", end="")
-
-        normalized = normalize_row(row)
-        title = normalized.get("title", "") or normalized.get("file", "").split("/")[-1] or "未知标题"
-        print(f"{title[:60]}")
-
-        csv_doi = normalized.get("doi", "")
-
-        # ── DOI 模式: 无 DOI 直接跳过 ──
-        if args.match_mode == "doi" and not csv_doi:
-            print(f"  跳过: 无 DOI")
-            stats["skipped"] += 1
-            continue
-
-        # ── 解析文件路径（两种模式都需要，注册时要用）──
-        file_field = normalized.get("file", "")
-        newest_file = get_newest_file(parse_file_paths(file_field))
-        if not newest_file:
-            print(f"  跳过: 无有效文件路径")
-            stats["skipped"] += 1
-            continue
-        print(f"  文件: {newest_file}")
-
-        # ── 匹配已有文档 ──
-        if not args.no_skip:
-            existing = None
-            if args.match_mode == "doi":
-                print(f"  DOI: {csv_doi}")
-                existing = check_exists_by_doi(args.base_url, csv_doi, token)
+    # ── 3. 交互选择 ──
+    choice = input("请选择 [a] 全部上传  [s] 逐个上传  [q] 退出: ").strip().lower()
+    if choice == "q":
+        return
+    if choice == "a":
+        uploaded = 0
+        failed = 0
+        for d in to_upload:
+            if upload_one(d, args, token):
+                uploaded += 1
             else:
-                file_hash = calculate_file_hash(newest_file)
-                print(f"  哈希: {file_hash[:16]}...")
-                existing = check_exists_by_hash(args.base_url, file_hash, token)
-
-            if existing:
-                print(f"  跳过: 已存在 (ID: {existing['id']})")
-                stats["duplicate"] += 1
-                continue
-
-        # ── 解析元数据 ──
-        metadata = parse_zotero_row(row)
-
-        if args.debug and metadata:
-            print(f"  [DEBUG] 元数据字段: {list(metadata.keys())}")
-            for k, v in metadata.items():
-                val_str = str(v)
-                if len(val_str) > 80:
-                    val_str = val_str[:80] + "..."
-                print(f"    {k}: {val_str}")
-
-        if args.save_original:
-            # 将原始数据存为 JSON，追加到 source 字段末尾（不覆盖已有值）
-            original_json = json.dumps(row, ensure_ascii=False)
-            existing_source = metadata.get("source", "")
-            if existing_source:
-                metadata["source"] = f"{existing_source} | CSV:{original_json}"
+                failed += 1
+    elif choice == "s":
+        uploaded = 0
+        failed = 0
+        for d in to_upload:
+            print_doc_detail(d)
+            ans = input("上传这篇？[y/N]: ").strip().lower()
+            if ans == "y":
+                if upload_one(d, args, token):
+                    uploaded += 1
+                else:
+                    failed += 1
             else:
-                metadata["source"] = f"CSV:{original_json}"
+                print("  跳过。")
+    else:
+        print("无效选择，退出。")
+        return
 
-        # ── 试运行 ──
-        if args.dry_run:
-            print(f"  [试运行] 将上传并更新 {len(metadata)} 个字段")
-            stats["uploaded"] += 1
-            continue
-
-        # ── 上传文档 ──
-        result = upload_document(args.base_url, newest_file, token)
-        if not result:
-            stats["failed"] += 1
-            continue
-
-        doc_id = result["id"]
-        print(f"  已上传: ID={doc_id}")
-
-        # ── 更新元数据 ──
-        if args.update_meta and metadata:
-            if update_document_metadata(args.base_url, doc_id, metadata, token):
-                print(f"  已更新 {len(metadata)} 个元数据字段")
-                stats["meta_updated"] += 1
-            else:
-                print(f"  警告: 元数据更新失败")
-
-        stats["uploaded"] += 1
-
-    # ── 统计 ──
-
+    # ── 4. 最终统计 ──
     print()
     print("=" * 50)
-    print("导入完成!")
-    print(f"  总计: {stats['total']}")
-    print(f"  上传: {stats['uploaded']}")
-    print(f"  元数据更新: {stats['meta_updated']}")
-    print(f"  重复: {stats['duplicate']}")
-    print(f"  跳过: {stats['skipped']}")
-    print(f"  失败: {stats['failed']}")
+    print(f"已上传: {uploaded}")
+    print(f"失败: {failed}")
 
 
 if __name__ == "__main__":
