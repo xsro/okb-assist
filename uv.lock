@@ -975,6 +975,7 @@ source = { editable = "." }
 dependencies = [
     { name = "attrs" },
     { name = "fastapi" },
+    { name = "fastembed" },
     { name = "httpx" },
     { name = "jinja2" },
     { name = "mcp" },
@@ -982,7 +983,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "pyyaml" },
-    { name = "qdrant-client", extra = ["fastembed"] },
+    { name = "qdrant-client" },
     { name = "sqlalchemy" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -991,6 +992,7 @@ dependencies = [
 requires-dist = [
     { name = "attrs", specifier = ">=23.0.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
+    { name = "fastembed", specifier = ">=0.8.0" },
     { name = "httpx", specifier = ">=0.27.2" },
     { name = "jinja2", specifier = ">=3.1.4" },
     { name = "mcp", specifier = ">=1.28.1,<2" },
@@ -998,7 +1000,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.1" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "pyyaml", specifier = ">=6.0.2" },
-    { name = "qdrant-client", extras = ["fastembed"], specifier = ">=1.12.1" },
+    { name = "qdrant-client", specifier = ">=1.12.1" },
     { name = "sqlalchemy", specifier = ">=2.0.35" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.6" },
 ]
@@ -1406,11 +1408,6 @@ dependencies = [
 sdist = { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/3a/33/c6e4ec45b4fca5a0b808e8804e60be54a6d7505b68b53c0b1d0d62ba86c1/qdrant_client-1.19.0.tar.gz", hash = "sha256:365395a04b0a26c309b25b7d8b1c99ef2071ec9a2b74bc8a5fd3b7a3642fe963" }
 wheels = [
     { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/fc/3c/480c61cc8d5a3e76bb44e86231f408c93643e5498beadbbeb381ab55d02b/qdrant_client-1.19.0-py3-none-any.whl", hash = "sha256:13602a2b3478a95ecdf42f97b93d7f703b63a3361cd912a04495a33a5ac14121" },
-]
-
-[package.optional-dependencies]
-fastembed = [
-    { name = "fastembed" },
 ]
 
 [[package]]
