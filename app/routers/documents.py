@@ -68,8 +68,6 @@ def _next_available_id(db: Session) -> int | None:
 class DocumentOut(BaseModel):
     id: int
     filename: str
-    file_path: Optional[str] = None
-    markdown_path: Optional[str] = None
     file_hash: Optional[str] = None
     title: Optional[str] = None
     authors: Optional[str] = None
@@ -140,8 +138,6 @@ def _doc_to_out(doc: Document, db: Session = None) -> dict:
     return DocumentOut(
         id=doc.id,
         filename=doc.filename,
-        file_path=get_pdf_path(doc.id),
-        markdown_path=get_markdown_path(doc.id),
         file_hash=doc.file_hash,
         title=doc.title,
         authors=doc.authors,
@@ -472,7 +468,8 @@ async def upload_document(
     content = await file.read()
 
     # 上传后自动从 PDF 提取元数据（含 DOI），仅填充空字段
-    meta = extract_pdf_metadata(content)
+    # 传入 filename 以便在 Info 字典缺失 /Title 时从 XMP/正文推断真实标题
+    meta = extract_pdf_metadata(content, filename=file.filename)
 
     # Calculate hash from the bytes already in memory
     import hashlib
@@ -536,7 +533,8 @@ def register_document_by_path(
 
     # 读取源 PDF 字节，用于自动提取元数据（含 DOI）
     content = Path(file_path).read_bytes()
-    meta = extract_pdf_metadata(content)
+    # 传入 filename 以便在 Info 字典缺失 /Title 时从 XMP/正文推断真实标题
+    meta = extract_pdf_metadata(content, filename=os.path.basename(file_path))
 
     # Calculate file hash
     file_hash = calculate_file_hash(file_path)

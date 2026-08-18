@@ -267,32 +267,24 @@
             document.getElementById('doc-title').textContent = doc.title || doc.filename || '未命名';
             document.getElementById('doc-authors').textContent = formatAuthors(doc.authors);
 
-            // File paths
-            const pdfPath = doc.file_path || '-';
-            const mdPath = doc.markdown_path || '-';
-            document.getElementById('pdf-path').innerHTML = `📄 PDF: <code>${pdfPath}</code>`;
-            document.getElementById('md-path').innerHTML = `📝 MD: <code>${mdPath}</code>`;
+            // File paths (links built from document id)
+            const pdfUrl = `/assist/api/documents/${docId}/pdf`;
+            const mdUrl = `/assist/api/documents/${docId}/markdown`;
+            document.getElementById('pdf-path').innerHTML = `📄 PDF: <a href="${pdfUrl}" target="_blank">${pdfUrl}</a>`;
+            document.getElementById('md-path').innerHTML = `📝 MD: <a href="${mdUrl}" target="_blank">${mdUrl}</a>`;
 
-            // PDF buttons (通过别名获取不可猜测的 URL)
+            // PDF buttons (links built from document id)
             const btnPdf = document.getElementById('btn-pdf');
             const btnDownload = document.getElementById('btn-download');
-            if (doc.file_path) {
-                api.get(`/assist/api/documents/${docId}/file-alias`)
-                    .then(data => {
-                        btnPdf.href = data.url;
-                        btnPdf.style.display = 'inline-flex';
-                        btnDownload.href = data.url;
-                        btnDownload.style.display = 'inline-flex';
-                    })
-                    .catch(() => {});
-            }
+            btnPdf.href = pdfUrl;
+            btnPdf.style.display = 'inline-flex';
+            btnDownload.href = pdfUrl;
+            btnDownload.style.display = 'inline-flex';
 
             // Markdown button
             const btnMarkdown = document.getElementById('btn-markdown');
-            if (doc.markdown_path) {
-                btnMarkdown.href = `/assist/markdown/${docId}`;
-                btnMarkdown.style.display = 'inline-flex';
-            }
+            btnMarkdown.href = `/assist/markdown/${docId}`;
+            btnMarkdown.style.display = 'inline-flex';
 
             // Manage button
             document.getElementById('btn-manage').href = `/assist/doc/${docId}`;
@@ -300,14 +292,14 @@
 
         async function loadMarkdownPreview() {
             const preview = document.getElementById('markdown-preview');
-            if (!doc.markdown_path) {
-                preview.innerHTML = '<p style="color:var(--text-muted)">暂无 Markdown 内容</p>';
-                return;
-            }
 
             try {
                 const data = await api.get(`/assist/api/documents/${docId}/markdown?page=1&page_size=5000`);
                 const content = data.content || '';
+                if (!content.trim()) {
+                    preview.innerHTML = '<p style="color:var(--text-muted)">暂无 Markdown 内容</p>';
+                    return;
+                }
                 // 简单渲染（保留换行）
                 preview.innerHTML = content
                     .replace(/&/g, '&amp;')
