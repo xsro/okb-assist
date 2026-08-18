@@ -1,3 +1,4 @@
+import ipaddress
 import os
 
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -54,6 +55,17 @@ class TokenMiddleware(BaseHTTPMiddleware):
         if not expected or expected == "change-me":
             return await call_next(request)
 
+        # 本地局域网白名单：来自 192.168.1.0/24 的请求免 token 校验。
+        # 注意：若经由反向代理，client IP 可能来自 X-Forwarded-For，存在被伪造的可能；
+        # 对本地辅助工具，放行 LAN 的便利性优先，故不做额外防护。
+        client_ip = self._get_client_ip(request)
+        try:
+            if ipaddress.ip_address(client_ip) in ipaddress.ip_network("192.168.1.0/24"):
+                return await call_next(request)
+        except ValueError:
+            # 无法解析的 IP 直接落入下方 token 校验流程
+            pass
+
         # 从 Header 或 Query 获取 token
         provided = request.headers.get("X-Token") or request.query_params.get("token")
 
@@ -64,6 +76,20 @@ class TokenMiddleware(BaseHTTPMiddleware):
             )
 
         return await call_next(request)
+
+    @staticmethod
+    def _get_client_ip(request):
+        """获取客户端真实 IP。
+
+        优先取 X-Forwarded-For 的第一个地址（经代理时），否则用直连的
+        request.client.host。
+        """
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        if request.client is not None:
+            return request.client.host
+        return ""
 
 
 @asynccontextmanager
