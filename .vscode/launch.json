@@ -4,7 +4,7 @@
             "name": "Python main.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "main.py",
+            "program": "okb_assist_main.py",
             "console": "integratedTerminal",
             // "args": "${command:pickArgs}"
         }
