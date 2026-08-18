@@ -42,3 +42,9 @@ ctrl+p 结合 ctrl+q 不杀死的情况下退出
 mineru-gradio --server-name 0.0.0.0 --api-url http://127.0.0.1:8002 --allow-public-http-client
 mineru-gradio --server-name 0.0.0.0 --enable-api true --allow-public-http-client
 ```
+
+有时需要设置mineru可以自动重启
+
+```
+sudo docker update --restart=unless-stopped minerul
+```
