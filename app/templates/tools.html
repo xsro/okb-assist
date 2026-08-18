@@ -816,11 +816,14 @@
                         <a href="#" id="pdf-alias-link" target="_blank" class="btn btn-warning" style="display:none">打开 PDF</a>
                     </div>
                 `;
-                // PDF 链接（构建自文档 id，始终显示）
-                const pdfEl = document.getElementById('pdf-alias-link');
-                if (pdfEl) {
-                    pdfEl.href = `/assist/api/documents/${doc.id}/pdf`;
-                    pdfEl.style.display = '';
+                // 异步获取 PDF 别名链接
+                if (doc.file_path) {
+                    api.get(`/assist/api/documents/${doc.id}/file-alias`)
+                        .then(d => {
+                            const el = document.getElementById('pdf-alias-link');
+                            if (el) { el.href = d.url; el.style.display = ''; }
+                        })
+                        .catch(() => {});
                 }
             } catch (e) {
                 container.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">加载失败: ${e.message}</p></div>`;

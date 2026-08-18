@@ -117,8 +117,7 @@
             </div>
             <div class="action-row" style="flex-wrap:wrap">
                 <button class="btn btn-primary" id="btn-parse" onclick="runStep('parse')">📄 解析 PDF</button>
-                <button class="btn btn-warning" id="btn-extract" onclick="runStep('extract')">📋 从markdown提取元数据</button>
-                <button class="btn btn-warning" id="btn-extract-pdf" onclick="extractPdfMeta()">📄 从pdf meta提取元数据</button>
+                <button class="btn btn-warning" id="btn-extract" onclick="runStep('extract')">📋 提取元数据</button>
                 <button class="btn btn-info" id="btn-crossref" onclick="fetchCrossref()">🌐 从 Crossref 获取</button>
                 <div id="index-buttons" style="display:contents"></div>
                 <button class="btn" id="btn-reset" onclick="resetDoc()" style="margin-left:auto">🔄 重置状态</button>
@@ -195,25 +194,30 @@
             document.getElementById('btn-view').href = `/assist/detail/${doc.id}`;
 
             // PDF button label
-            document.getElementById('btn-pdf-label').textContent = '上传 PDF';
+            document.getElementById('btn-pdf-label').textContent = doc.file_path ? '替换 PDF' : '上传 PDF';
 
             // Markdown view button
             const btnViewMd = document.getElementById('btn-view-md');
             const btnEditorMd = document.getElementById('btn-editor-md');
-            btnViewMd.href = `/assist/markdown/${docId}`;
-            btnEditorMd.href = `/assist/markdown/${docId}/edit`;
+            if (doc.markdown_path) {
+                btnViewMd.href = `/assist/markdown/${docId}`;
+                btnEditorMd.href = `/assist/markdown/${docId}/edit`;
+            } else {
+                btnViewMd.style.display = 'none';
+                btnEditorMd.style.display = 'none';
+            }
         }
 
         async function loadMarkdownPreview() {
             const preview = document.getElementById('markdown-preview');
+            if (!doc.markdown_path) {
+                preview.innerHTML = '<p>暂无 Markdown 内容</p>';
+                return;
+            }
 
             try {
                 const data = await api.get(`/assist/api/documents/${docId}/markdown?page=1&page_size=2000`);
                 const content = data.content || '';
-                if (!content.trim()) {
-                    preview.innerHTML = '<p>暂无 Markdown 内容</p>';
-                    return;
-                }
                 // Show first ~20 lines
                 const lines = content.split('\n');
                 const previewLines = lines.slice(0, 20).join('\n');
@@ -281,8 +285,8 @@
                     <tr><td style="font-weight:600">状态消息</td><td>${doc.status_message || '-'}</td></tr>
                     <tr><td style="font-weight:600">创建时间</td><td>${doc.created_at || '-'}</td></tr>
                     <tr><td style="font-weight:600">更新时间</td><td>${doc.updated_at || '-'}</td></tr>
-                    <tr><td style="font-weight:600">文件路径</td><td><a href="/assist/api/documents/${docId}/pdf" target="_blank">/assist/api/documents/${docId}/pdf</a></td></tr>
-                    <tr><td style="font-weight:600">Markdown</td><td><a href="/assist/api/documents/${docId}/markdown" target="_blank">/assist/api/documents/${docId}/markdown</a></td></tr>
+                    <tr><td style="font-weight:600">文件路径</td><td><code>${doc.file_path || '-'}</code></td></tr>
+                    <tr><td style="font-weight:600">Markdown</td><td><code>${doc.markdown_path || '-'}</code></td></tr>
                 </table>
             `;
         }
@@ -303,14 +307,6 @@
         async function fetchCrossref() {
             try {
                 const result = await api.post(`/assist/api/pipeline/${docId}/crossref`);
-                showToast(result.detail, 'info');
-                startPolling();
-            } catch (err) { showToast(err.message, 'error'); }
-        }
-
-        async function extractPdfMeta() {
-            try {
-                const result = await api.post(`/assist/api/pipeline/${docId}/extract-pdf-meta`);
                 showToast(result.detail, 'info');
                 startPolling();
             } catch (err) { showToast(err.message, 'error'); }
@@ -422,7 +418,7 @@
                 showToast(err.message || '上传失败', 'error');
             } finally {
                 input.value = '';
-                label.textContent = '上传 PDF';
+                label.textContent = doc.file_path ? '替换 PDF' : '上传 PDF';
             }
         }
 

@@ -341,9 +341,13 @@ class Tools:
         pdf_url = f"{base_url}/assist/api/documents/{doc_id}/pdf"
         output_lines.append(f"📕 PDF 下载：{pdf_url}")
 
-        # Markdown 内容链接（始终显示，即使文件尚未生成）
-        markdown_url = f"{base_url}/assist/api/documents/{doc_id}/markdown"
-        output_lines.append(f"📝 Markdown 内容：{markdown_url}")
+        # Markdown 内容链接
+        markdown_path = doc.get("markdown_path", "")
+        if markdown_path:
+            markdown_url = f"{base_url}/assist/api/documents/{doc_id}/markdown"
+            output_lines.append(f"📝 Markdown 内容：{markdown_url}")
+        else:
+            output_lines.append("📝 Markdown 内容：尚未生成")
 
         output_lines.append("")
         output_lines.append("使用说明：")

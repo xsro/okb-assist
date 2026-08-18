@@ -311,8 +311,8 @@ async def get_document_detail(doc_id: int):
         keywords_en=_parse_keywords(doc.get("keywords_en", "")),
         status=doc.get("status", ""),
         detail_page=f"{base_url}/redirect/{doc_id}",
-        pdf_download=f"{base_url}/assist/api/documents/{doc_id}/pdf",
-        markdown_content=f"{base_url}/assist/api/documents/{doc_id}/markdown",
+        pdf_download=f"{base_url}/assist/api/documents/{doc_id}/pdf" if doc.get("file_path") else "",
+        markdown_content=f"{base_url}/assist/api/documents/{doc_id}/markdown" if doc.get("markdown_path") else "",
     )
 
 
