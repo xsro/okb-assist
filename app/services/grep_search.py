@@ -7,9 +7,6 @@
 
 import asyncio
 import re
-from pathlib import Path
-
-from app.config import get_settings
 
 
 async def grep_search(
@@ -20,6 +17,9 @@ async def grep_search(
 ) -> list[dict]:
     """使用系统 grep 搜索文档的 markdown 内容。
 
+    搜索路径取自 system.json 推导的规范 markdown 路径（get_markdown_path），
+    不再依赖 uploads/<id>/ 暂存目录（解析完成后该目录会被清理，仅保留规范副本）。
+
     Args:
         query: 搜索关键词（支持正则）
         context_lines: 匹配行前后的上下文行数
@@ -29,23 +29,33 @@ async def grep_search(
     Returns:
         [{document_id, content, file_path}, ...]
     """
-    settings = get_settings()
-    uploads_dir = Path(settings.uploads_folder)
+    import os
+    from app.paths import get_markdown_path
 
-    if not uploads_dir.exists():
-        return []
-
-    # 构建搜索路径
+    # 构建搜索路径：优先使用规范 markdown 路径
     if doc_ids:
         search_paths = []
         for did in doc_ids:
-            doc_dir = uploads_dir / str(did)
-            if doc_dir.exists():
-                search_paths.append(str(doc_dir))
+            md = get_markdown_path(did)
+            if md and os.path.exists(md):
+                search_paths.append(md)
         if not search_paths:
             return []
     else:
-        search_paths = [str(uploads_dir)]
+        # 搜索规范 markdown 目录下的全部 *.md 文件
+        sample = get_markdown_path(0)
+        if not sample:
+            return []
+        markdowns_dir = os.path.dirname(sample)
+        if not os.path.isdir(markdowns_dir):
+            return []
+        search_paths = [
+            os.path.join(markdowns_dir, name)
+            for name in os.listdir(markdowns_dir)
+            if name.endswith(".md")
+        ]
+        if not search_paths:
+            return []
 
     # 构建 grep 命令
     cmd = [
@@ -53,7 +63,6 @@ async def grep_search(
         "-rn",              # 递归，显示行号
         "-i",               # 忽略大小写
         f"-C{context_lines}",  # 上下文行数
-        "--include=*.md",   # 只搜索 markdown 文件
         query,
         *search_paths,
     ]
@@ -155,13 +164,21 @@ def _parse_grep_output(output: str, limit: int) -> list[dict]:
 def _extract_doc_id(file_path: str) -> int | None:
     """从文件路径中提取文档 ID。
 
-    路径格式: uploads/{id}/{id}.md
+    支持两种路径格式：
+    - 规范路径: .../markdowns/{id}.md（文件名即文档 ID）
+    - 暂存路径: uploads/{id}/{id}.md
     """
+    # 规范路径：文件名即文档 ID（{id}.md）
+    match = re.search(r"/(\d+)\.md$", file_path)
+    if match:
+        return int(match.group(1))
+
+    # 暂存路径: /{id}/{id}.md（目录名与文件名一致）
     match = re.search(r"/(\d+)/\1\.md$", file_path)
     if match:
         return int(match.group(1))
 
-    # 备用：从路径中提取数字目录名
+    # 备用：/数字目录/任意 .md 文件
     match = re.search(r"/(\d+)/[^/]+\.md$", file_path)
     if match:
         return int(match.group(1))

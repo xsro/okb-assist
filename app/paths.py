@@ -36,3 +36,12 @@ def get_pdf_path(doc_id: int) -> str:
 def get_asset_path(doc_id: int) -> str:
     """文档图片资源 zip 的绝对路径（markdown_asset_path）。"""
     return _resolve(load_system_config().get("markdown_asset_path"), doc_id)
+
+
+def get_crossref_path(doc_id: int) -> str:
+    """文档 Crossref 原始返回 JSON 的绝对路径（crossref_path）。
+
+    模板在 system.json 中以 ``{id}`` 占位符定义，替换后得到
+    ``/.../markdowns/{id}_crossref.json`` 之类的路径。
+    """
+    return _resolve(load_system_config().get("crossref_path"), doc_id)

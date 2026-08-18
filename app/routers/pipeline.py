@@ -14,8 +14,9 @@ from app.models import Document, DocStatus, DocumentVectorIndex, IndexStatus
 from app.services.mineru import parse_pdf, submit_parse_task, poll_task, get_task_result, check_task_status
 from app.services.ollama import extract_metadata, get_embedding
 from app.services.qdrant import index_document, delete_document_points
+from app.services.crossref import lookup_by_doi, lookup_by_title, normalize_doi as cr_normalize_doi
 from app.utils import to_absolute_path
-from app.paths import get_markdown_path, get_pdf_path, get_asset_path
+from app.paths import get_markdown_path, get_pdf_path, get_asset_path, get_crossref_path
 
 router = APIRouter(prefix="/assist/api/pipeline", tags=["pipeline"])
 
@@ -240,7 +241,11 @@ def _clear_mineru_task_id(doc_id: int):
 
 
 def _save_parse_result(doc_id: int, md_path: str):
-    """Save parse result: copy markdown and asset zip to system.json-defined locations."""
+    """保存解析结果：将 markdown 与图片资源 zip 复制到 system.json 定义的规范路径。
+
+    两份复制均成功后，删除 uploads/<id>/ 暂存目录，避免与规范路径形成重复副本。
+    仅当复制成功时才删除，复制失败不会误删尚未复制完成的文件。
+    """
     import shutil
     db = SessionLocal()
     try:
@@ -251,12 +256,22 @@ def _save_parse_result(doc_id: int, md_path: str):
             os.makedirs(os.path.dirname(target_md), exist_ok=True)
             shutil.copy2(md_path, target_md)
 
-            # 复制图片资源 zip 到规范路径（由 system.json markdown_asset_path 推导）
+            # 复制图片资源 zip 到规范路径（由 system.json markdown_asset_path 推导）；
+            # 仅当 zip 存在时才复制（部分文档可能不含图片）
             images_zip = os.path.join(os.path.dirname(md_path), "images.zip")
             if os.path.exists(images_zip):
                 target_zip = get_asset_path(doc_id)
                 os.makedirs(os.path.dirname(target_zip), exist_ok=True)
                 shutil.copy2(images_zip, target_zip)
+
+            # 两份复制均成功（zip 不存在时视为无需复制），才清理 uploads/<id>/ 暂存目录。
+            # 若任一复制失败，shutil.copy2 会抛异常并在上层捕获，不会执行到删除逻辑。
+            md_copied = os.path.exists(target_md)
+            zip_copied = not os.path.exists(images_zip) or os.path.exists(get_asset_path(doc_id))
+            if md_copied and zip_copied:
+                staging_dir = os.path.dirname(md_path)  # uploads/<id>/
+                if os.path.isdir(staging_dir):
+                    shutil.rmtree(staging_dir, ignore_errors=True)
 
             doc.status = DocStatus.markdown_done
             doc.status_message = "PDF 解析完成"
@@ -1230,6 +1245,102 @@ async def extract_document_meta(
     background_tasks.add_task(_run_extract, doc_id)
 
     return {"detail": "元数据提取任务已提交", "status": "extracting"}
+
+
+@router.post("/{doc_id}/crossref")
+async def fetch_crossref_meta(
+    doc_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """从 Crossref 补全元数据（异步，后台任务）。
+
+    仅做元数据补全，不改变文档流水线状态。
+    """
+    doc = db.query(Document).filter(Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="文献不存在")
+
+    background_tasks.add_task(_run_crossref, doc_id)
+
+    return {"detail": "Crossref 获取任务已提交", "status": "crossref"}
+
+
+async def _run_crossref(doc_id: int):
+    """后台任务：从 Crossref 获取并补全元数据（仅填充空字段）。"""
+    import traceback
+
+    db = SessionLocal()
+    try:
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        if not doc:
+            print(f"[CROSSREF] 文档不存在，跳过: doc_id={doc_id}")
+            return
+
+        # 决定查询方式：优先 DOI，其次题名
+        if doc.doi and cr_normalize_doi(doc.doi):
+            result = await lookup_by_doi(doc.doi)
+        elif doc.title:
+            result = await lookup_by_title(doc.title)
+        else:
+            print(f"[CROSSREF] 文档无 DOI 与标题，跳过: doc_id={doc_id}")
+            return
+
+        if not result:
+            print(f"[CROSSREF] 未匹配到 Crossref 记录，跳过: doc_id={doc_id}")
+            return
+
+        # 保存原始 Crossref 返回
+        path = get_crossref_path(doc_id)
+        if path:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(result["raw"], f, ensure_ascii=False, indent=2)
+
+        parsed = result["parsed"]
+
+        # 仅填充空字段（镜像 _do_extract_impl 的 only-empty 逻辑）
+        if not doc.title and parsed.get("title"):
+            doc.title = parsed["title"]
+        if not doc.authors and parsed.get("authors"):
+            doc.authors = json.dumps(parsed["authors"], ensure_ascii=False)
+        if not doc.year and parsed.get("year"):
+            doc.year = parsed["year"]
+        if not doc.doi and parsed.get("doi"):
+            doc.doi = cr_normalize_doi(parsed["doi"])
+        if not doc.source and parsed.get("source"):
+            doc.source = parsed["source"]
+        if not doc.journal and parsed.get("journal"):
+            doc.journal = parsed["journal"]
+        if not doc.keywords and parsed.get("keywords"):
+            doc.keywords = json.dumps(parsed["keywords"], ensure_ascii=False)
+        if not doc.abstract and parsed.get("abstract"):
+            doc.abstract = parsed["abstract"]
+        if not doc.doc_type and parsed.get("doc_type"):
+            doc.doc_type = parsed["doc_type"]
+        if not doc.language and parsed.get("language"):
+            doc.language = parsed["language"]
+        # 双语 *_en 副本
+        if not doc.title_en and parsed.get("title_en"):
+            doc.title_en = parsed["title_en"]
+        if not doc.authors_en and parsed.get("authors_en"):
+            doc.authors_en = json.dumps(parsed["authors_en"], ensure_ascii=False)
+        if not doc.journal_en and parsed.get("journal_en"):
+            doc.journal_en = parsed["journal_en"]
+        if not doc.keywords_en and parsed.get("keywords_en"):
+            doc.keywords_en = json.dumps(parsed["keywords_en"], ensure_ascii=False)
+        if not doc.abstract_en and parsed.get("abstract_en"):
+            doc.abstract_en = parsed["abstract_en"]
+
+        # 注意：不修改 doc.status（这是元数据补全，不是流水线阶段）
+        db.commit()
+        print(f"[CROSSREF] 补全完成: doc_id={doc_id}")
+    except Exception as e:
+        error_msg = f"Crossref 补全失败: {type(e).__name__}: {str(e) or repr(e)}"
+        print(f"[ERROR] Document {doc_id}: {error_msg}")
+        print(traceback.format_exc())
+    finally:
+        db.close()
 
 
 @router.post("/{doc_id}/index")

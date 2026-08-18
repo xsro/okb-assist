@@ -118,6 +118,7 @@
             <div class="action-row" style="flex-wrap:wrap">
                 <button class="btn btn-primary" id="btn-parse" onclick="runStep('parse')">📄 解析 PDF</button>
                 <button class="btn btn-warning" id="btn-extract" onclick="runStep('extract')">📋 提取元数据</button>
+                <button class="btn btn-info" id="btn-crossref" onclick="fetchCrossref()">🌐 从 Crossref 获取</button>
                 <div id="index-buttons" style="display:contents"></div>
                 <button class="btn" id="btn-reset" onclick="resetDoc()" style="margin-left:auto">🔄 重置状态</button>
             </div>
@@ -298,6 +299,14 @@
         async function runStep(step) {
             try {
                 const result = await api.post(`/assist/api/pipeline/${docId}/${step}`);
+                showToast(result.detail, 'info');
+                startPolling();
+            } catch (err) { showToast(err.message, 'error'); }
+        }
+
+        async function fetchCrossref() {
+            try {
+                const result = await api.post(`/assist/api/pipeline/${docId}/crossref`);
                 showToast(result.detail, 'info');
                 startPolling();
             } catch (err) { showToast(err.message, 'error'); }

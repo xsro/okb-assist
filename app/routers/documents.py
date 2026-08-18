@@ -19,6 +19,7 @@ from app.database import get_db
 from app.models import Document, DocStatus, DocumentVectorIndex, IndexStatus
 from app.utils import calculate_file_hash, to_absolute_path
 from app.paths import get_markdown_path, get_pdf_path, get_asset_path, get_info_path
+from app.services.pdf_meta import extract_pdf_metadata, normalize_doi
 
 router = APIRouter(prefix="/assist/api/documents", tags=["documents"])
 
@@ -458,6 +459,9 @@ async def upload_document(
 
     content = await file.read()
 
+    # 上传后自动从 PDF 提取元数据（含 DOI），仅填充空字段
+    meta = extract_pdf_metadata(content)
+
     # Calculate hash from the bytes already in memory
     import hashlib
     file_hash = hashlib.sha256(content).hexdigest()
@@ -468,6 +472,19 @@ async def upload_document(
         file_hash=file_hash,
         status=DocStatus.uploaded,
     )
+    # 仅填充 PDF 中解析到的空字段
+    if meta.get("title") and not doc.title:
+        doc.title = meta["title"]
+    if meta.get("authors") and not doc.authors:
+        doc.authors = json.dumps(meta["authors"], ensure_ascii=False)
+    if meta.get("year") and not doc.year:
+        doc.year = meta["year"]
+    if meta.get("doi") and not doc.doi:
+        doc.doi = normalize_doi(meta["doi"])
+    if meta.get("keywords") and not doc.keywords:
+        doc.keywords = json.dumps(meta["keywords"], ensure_ascii=False)
+    if meta.get("abstract") and not doc.abstract:
+        doc.abstract = meta["abstract"]
     available_id = _next_available_id(db)
     if available_id is not None:
         doc.id = available_id
@@ -505,6 +522,10 @@ def register_document_by_path(
     if not file_path.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="只支持 PDF 文件")
 
+    # 读取源 PDF 字节，用于自动提取元数据（含 DOI）
+    content = Path(file_path).read_bytes()
+    meta = extract_pdf_metadata(content)
+
     # Calculate file hash
     file_hash = calculate_file_hash(file_path)
 
@@ -529,6 +550,19 @@ def register_document_by_path(
         file_hash=file_hash,
         status=DocStatus.uploaded,
     )
+    # 仅填充 PDF 中解析到的空字段
+    if meta.get("title") and not doc.title:
+        doc.title = meta["title"]
+    if meta.get("authors") and not doc.authors:
+        doc.authors = json.dumps(meta["authors"], ensure_ascii=False)
+    if meta.get("year") and not doc.year:
+        doc.year = meta["year"]
+    if meta.get("doi") and not doc.doi:
+        doc.doi = normalize_doi(meta["doi"])
+    if meta.get("keywords") and not doc.keywords:
+        doc.keywords = json.dumps(meta["keywords"], ensure_ascii=False)
+    if meta.get("abstract") and not doc.abstract:
+        doc.abstract = meta["abstract"]
     available_id = _next_available_id(db)
     if available_id is not None:
         doc.id = available_id

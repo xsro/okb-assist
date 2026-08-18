@@ -17,6 +17,7 @@ dependencies = [
     "attrs>=23.0.0",
     "mcp>=1.28.1,<2",
     "fastembed>=0.8.0",
+    "pypdf>=4.0",
 ]
 
 [build-system]
