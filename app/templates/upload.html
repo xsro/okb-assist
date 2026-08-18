@@ -23,11 +23,12 @@
                 <p>拖拽 PDF 文件到此处，或点击选择文件</p>
                 <p style="font-size:0.75rem">仅支持 .pdf 格式</p>
                 <p style="font-size:0.8rem;color:#888">上传后将自动从 PDF 提取元数据（含 DOI）</p>
-                <input type="file" id="file-input" accept=".pdf" style="display:none">
+                <p style="font-size:0.8rem;color:#888">支持批量上传（多选 PDF）；上传后将自动从 Crossref 补全元数据</p>
+                <input type="file" id="file-input" accept=".pdf" multiple style="display:none">
             </div>
 
             <div id="upload-progress" style="display:none;margin-top:1rem">
-                <p>上传中...</p>
+                <p id="upload-progress-text">上传中...</p>
                 <progress value="0" max="100" style="width:100%"></progress>
             </div>
         </div>
@@ -38,6 +39,7 @@
         const uploadArea = document.getElementById('upload-area');
         const fileInput = document.getElementById('file-input');
         const progressDiv = document.getElementById('upload-progress');
+        const progressText = document.getElementById('upload-progress-text');
 
         // Click to select file
         uploadArea.addEventListener('click', () => fileInput.click());
@@ -52,38 +54,68 @@
             uploadArea.classList.remove('dragover');
         });
 
+        // 拖拽上传：支持一次拖入多个 PDF
         uploadArea.addEventListener('drop', (e) => {
             e.preventDefault();
             uploadArea.classList.remove('dragover');
-            const file = e.dataTransfer.files[0];
-            if (file) uploadFile(file);
+            if (e.dataTransfer.files && e.dataTransfer.files.length) {
+                uploadFiles(e.dataTransfer.files);
+            }
         });
 
-        // File selected
+        // 点击选择文件：支持多选
         fileInput.addEventListener('change', () => {
-            if (fileInput.files[0]) uploadFile(fileInput.files[0]);
+            if (fileInput.files && fileInput.files.length) {
+                uploadFiles(fileInput.files);
+            }
+            // 重置，保证同一文件可再次选择
+            fileInput.value = '';
         });
 
-        async function uploadFile(file) {
-            if (!file.name.toLowerCase().endsWith('.pdf')) {
+        // 批量上传多个 PDF，并在每个上传成功后自动触发 Crossref 元数据补全
+        async function uploadFiles(fileList) {
+            // 转为数组并仅保留 PDF 文件（扩展名大小写不敏感）
+            const files = Array.from(fileList).filter(f =>
+                f.name.toLowerCase().endsWith('.pdf'));
+            if (files.length === 0) {
                 showToast('只支持 PDF 文件', 'error');
                 return;
             }
 
+            // 显示上传进度区域，隐藏拖拽区
             progressDiv.style.display = 'block';
             uploadArea.style.display = 'none';
 
-            try {
-                const result = await api.upload('/assist/api/documents/upload', file);
-                showToast('上传成功', 'success');
-                setTimeout(() => {
-                    window.location.href = `/assist/detail/${result.id}`;
-                }, 500);
-            } catch (err) {
-                showToast(err.message, 'error');
-                progressDiv.style.display = 'none';
-                uploadArea.style.display = 'block';
+            const ids = [];
+            let done = 0;
+
+            for (const file of files) {
+                try {
+                    // 逐个上传文件
+                    const result = await api.upload('/assist/api/documents/upload', file);
+                    ids.push(result.id);
+
+                    // 自动从 Crossref 补全元数据（后台任务，失败忽略）
+                    api.post(`/assist/api/pipeline/${result.id}/crossref`).catch(() => {});
+
+                    done++;
+                    // 更新进度文案
+                    progressText.textContent = `已上传 ${done}/${files.length}`;
+                } catch (err) {
+                    // 单个文件失败不阻断其余文件
+                    showToast(`${file.name}: ${err.message}`, 'error');
+                }
             }
+
+            progressText.textContent = `上传完成：${ids.length}/${files.length}`;
+            showToast(`上传完成：${ids.length}/${files.length}`, 'success');
+
+            // 跳转：有多个则去最后一个详情页，否则回上传页
+            setTimeout(() => {
+                window.location.href = ids.length
+                    ? `/assist/detail/${ids[ids.length - 1]}`
+                    : '/assist/upload';
+            }, 800);
         }
     </script>
 </body>
