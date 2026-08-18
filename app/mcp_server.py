@@ -176,7 +176,7 @@ def _format_doc(doc: Document) -> dict:
 
 
 @mcp.tool()
-async def grep_search(query: str, limit: int = 10, context: int = 2, doc_ids: str = "") -> str:
+async def grep_search(query: str, limit: int = 10, context: int = 2, doc_ids: str = "", algorithm: str = "full", regex: bool = True) -> str:
     """
     全文搜索文献内容（基于 grep，轻量快速）。无需向量数据库，支持正则表达式。
 
@@ -184,24 +184,37 @@ async def grep_search(query: str, limit: int = 10, context: int = 2, doc_ids: st
         query: 搜索关键词（支持正则表达式）
         limit: 返回结果数量，默认10
         context: 匹配行前后的上下文行数，默认2
-        doc_ids: 逗号分隔的文档 ID 列表，限定搜索范围（如 "1,2,3"），留空搜索全部
+        doc_ids: 文档 ID 限定范围，支持逗号与区间（如 "1,2,5-100,4"），留空搜索全部
+        algorithm: 搜索算法，"full"=全量扫描(原)，"fast"=元数据预筛候选（需未指定 doc_ids）
+        regex: 是否按正则匹配，True 时为正则（默认），False 时为字面量匹配
     """
     if not query.strip():
         return json.dumps({"error": "查询不能为空"}, ensure_ascii=False)
 
     from app.services.grep_search import grep_search as do_grep
+    from app.services.grep_search import parse_doc_ids
 
-    # 解析 doc_ids
+    # 解析 doc_ids（支持逗号与区间，如 1,2,5-100）
     id_list = None
     if doc_ids and doc_ids.strip():
         try:
-            id_list = [int(x.strip()) for x in doc_ids.split(",") if x.strip()]
+            id_list = parse_doc_ids(doc_ids)
         except ValueError:
-            return json.dumps({"error": "doc_ids 格式无效，需为逗号分隔的数字"}, ensure_ascii=False)
+            return json.dumps({"error": "doc_ids 格式无效，支持逗号与区间，如 1,2,5-100"}, ensure_ascii=False)
 
-    results = await do_grep(query=query, context_lines=context, limit=limit, doc_ids=id_list)
-
+    # 透传 algorithm / regex 参数：默认 full + 正则，与原行为一致
     db = _get_db()
+    results = await do_grep(
+        query=query,
+        context_lines=context,
+        limit=limit,
+        doc_ids=id_list,
+        algorithm=algorithm,
+        regex=regex,
+        db=db,
+    )
+
+    # 复用上方已获取的 db 会话（避免重复创建导致 fast 模式会话泄漏）
     try:
         enriched = []
         for hit in results:

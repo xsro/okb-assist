@@ -172,21 +172,33 @@ async def grep_search_knowledge_base(
     q: str = Query(..., description="搜索关键词（支持正则表达式）", min_length=1),
     limit: int = Query(10, description="返回结果数量", ge=1, le=50),
     context: int = Query(2, description="匹配行前后的上下文行数", ge=0, le=10),
-    doc_ids: Optional[str] = Query(None, description="逗号分隔的文档 ID 列表，限定搜索范围（如 '1,2,3'）"),
+    doc_ids: Optional[str] = Query(None, description="文档 ID 限定范围，支持逗号与区间（如 '1,2,5-100'），留空搜索全部"),
+    algorithm: str = Query("full", description="搜索算法：full=全量扫描(原), fast=元数据预筛候选"),
+    regex: bool = Query(True, description="是否按正则匹配（False 时按字面量匹配）"),
     db: Session = Depends(get_db),
 ):
-    """全文搜索知识库（基于 grep，轻量版）。支持通过 doc_ids 限定搜索范围。"""
+    """全文搜索知识库（基于 grep，轻量版）。支持通过 doc_ids 限定搜索范围。
+    algorithm 可选 full（全量扫描）/ fast（元数据预筛）；regex 控制是否正则匹配。"""
     from app.services.grep_search import grep_search as do_grep
+    from app.services.grep_search import parse_doc_ids
 
-    id_list = None
-    if doc_ids:
-        try:
-            id_list = [int(x.strip()) for x in doc_ids.split(",") if x.strip()]
-        except ValueError:
-            raise HTTPException(status_code=400, detail="doc_ids 格式无效，需为逗号分隔的数字")
+    # 解析 doc_ids（支持逗号与区间，如 1,2,5-100）
+    try:
+        id_list = parse_doc_ids(doc_ids)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="doc_ids 格式无效，支持逗号与区间，如 1,2,5-100")
 
     try:
-        results = await do_grep(query=q, context_lines=context, limit=limit, doc_ids=id_list)
+        # 透传 algorithm / regex 参数：默认 full + 正则，与原行为一致
+        results = await do_grep(
+            query=q,
+            context_lines=context,
+            limit=limit,
+            doc_ids=id_list,
+            algorithm=algorithm,
+            regex=regex,
+            db=db,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
 

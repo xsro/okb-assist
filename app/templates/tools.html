@@ -371,6 +371,13 @@
                                 <option value="3">3行上下文</option>
                                 <option value="5">5行上下文</option>
                             </select>
+                            <select id="grep-algorithm" class="form-control" style="width: 150px;">
+                                <option value="full">全量扫描(原)</option>
+                                <option value="fast">快速(元数据预筛)</option>
+                            </select>
+                            <label style="display:flex;align-items:center;gap:0.25rem;white-space:nowrap;">
+                                <input type="checkbox" id="grep-regex" checked> 正则
+                            </label>
                             <button class="btn btn-primary" onclick="doGrepSearch()">搜索</button>
                         </div>
                         <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:1rem;font-size:0.85rem;">
@@ -387,6 +394,13 @@
                             <input type="number" id="grepLimitCustom" class="form-control" style="width:80px;padding:0.35rem 0.5rem;font-size:0.8rem;display:none;"
                                    min="1" max="1000" placeholder="数量"
                                    onkeydown="if(event.key==='Enter') doGrepSearch()">
+                        </div>
+                        <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:1rem;font-size:0.85rem;">
+                            <span style="color:var(--text-muted);white-space:nowrap;">限定范围：</span>
+                            <input type="text" id="grepDocIds" class="form-control" style="width:260px;padding:0.35rem 0.5rem;font-size:0.8rem;"
+                                   placeholder="限定范围，如 1,2,5-100,4（留空搜全库）"
+                                   onkeydown="if(event.key==='Enter') doGrepSearch()">
+                            <span style="color:var(--text-muted);">支持逗号与区间，区间含端点</span>
                         </div>
                         <div id="grepResults">
                             <div class="empty-state">
@@ -584,13 +598,18 @@
             const query = document.getElementById('grepQuery').value.trim();
             const limit = getGrepLimit();
             const context = parseInt(document.getElementById('grepContext').value);
+            // 读取算法与正则模式（默认 full + 正则，与 API 默认值一致）
+            const algorithm = document.getElementById('grep-algorithm').value;
+            const regex = document.getElementById('grep-regex').checked;
+            // 限定搜索范围（支持逗号与区间，如 1,2,5-100）；留空则搜全库
+            const docIds = document.getElementById('grepDocIds').value.trim();
             if (!query) return;
 
             const container = document.getElementById('grepResults');
             container.innerHTML = '<div class="loading">搜索中</div>';
 
             try {
-                const data = await api.get(`/assist/api/documents/grep-search?q=${encodeURIComponent(query)}&limit=${limit}&context=${context}`);
+                const data = await api.get(`/assist/api/documents/grep-search?q=${encodeURIComponent(query)}&limit=${limit}&context=${context}&algorithm=${algorithm}&regex=${regex}` + (docIds ? `&doc_ids=${encodeURIComponent(docIds)}` : ""));
                 if (!data.results || data.results.length === 0) {
                     container.innerHTML = `
                         <div class="empty-state">

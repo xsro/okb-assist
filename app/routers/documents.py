@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 from threading import Lock
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -249,6 +249,8 @@ async def grep_search(
     limit: int = 10,
     context: int = 2,
     doc_ids: Optional[str] = None,
+    algorithm: str = Query("full", description="搜索算法：full=全量扫描(原), fast=元数据预筛候选"),
+    regex: bool = Query(True, description="是否按正则匹配（False 时按字面量匹配）"),
     db: Session = Depends(get_db),
 ):
     """基于系统 grep 的轻量全文搜索（无需向量数据库）。
@@ -258,21 +260,31 @@ async def grep_search(
         limit: 返回结果数量
         context: 匹配行前后的上下文行数
         doc_ids: 逗号分隔的文档 ID 列表，限定搜索范围（如 "1,2,3"）
+        algorithm: 搜索算法，full 或 fast
+        regex: 是否按正则匹配
     """
     if not q.strip():
         return {"results": [], "query": q}
 
     from app.services.grep_search import grep_search as do_grep
+    from app.services.grep_search import parse_doc_ids
 
-    # 解析 doc_ids
-    id_list = None
-    if doc_ids:
-        try:
-            id_list = [int(x.strip()) for x in doc_ids.split(",") if x.strip()]
-        except ValueError:
-            raise HTTPException(status_code=400, detail="doc_ids 格式无效，需为逗号分隔的数字")
+    # 解析 doc_ids（支持逗号与区间，如 1,2,5-100）
+    try:
+        id_list = parse_doc_ids(doc_ids)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="doc_ids 格式无效，支持逗号与区间，如 1,2,5-100")
 
-    results = await do_grep(query=q, context_lines=context, limit=limit, doc_ids=id_list)
+    # 透传 algorithm / regex 参数：默认 full + 正则，与原行为一致
+    results = await do_grep(
+        query=q,
+        context_lines=context,
+        limit=limit,
+        doc_ids=id_list,
+        algorithm=algorithm,
+        regex=regex,
+        db=db,
+    )
 
     # 补充文档元数据
     enriched = []
