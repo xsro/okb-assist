@@ -12,6 +12,7 @@ Usage:
 
 import os
 import json
+import ipaddress
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -51,6 +52,51 @@ class StaticTokenVerifier:
                 scopes=["read", "write"],
             )
         return None
+
+
+# ── 局域网白名单：192.168.1.0/24 免 Token 访问 ────────────────────────────────
+# FastMCP 在构建 Streamable HTTP / SSE app 时，固定用模块级符号
+# `mcp.server.fastmcp.server.BearerAuthBackend` 来验证 Bearer Token。
+# 我们在其 `authenticate`（即 Token 校验发生的位置）最前面加一段子网判断：
+# 来自 192.168.1.0/24 的请求直接视为已认证，跳过 Token 校验；其它 IP 仍走原逻辑。
+# 通过替换该模块级符号，让 FastMCP 构建 app 时自动使用带白名单的后端。
+
+from mcp.server.auth.middleware.bearer_auth import (
+    BearerAuthBackend,
+    AuthenticatedUser,
+)
+from starlette.authentication import AuthCredentials
+
+_LAN_NETWORK = ipaddress.ip_network("192.168.1.0/24")
+
+
+def _ip_in_lan(client_ip: str | None) -> bool:
+    """判断客户端 IP 是否落在 192.168.1.0/24；非法 IP 回退到 Token 校验。"""
+    if not client_ip:
+        return False
+    try:
+        return ipaddress.ip_address(client_ip) in _LAN_NETWORK
+    except ValueError:
+        return False
+
+
+class LanBypassBearerAuthBackend(BearerAuthBackend):
+    """在验证 Bearer Token 前放行 192.168.1.0/24 内网请求。"""
+
+    async def authenticate(self, conn):
+        client_ip = conn.client.host if conn.client else None
+        if _ip_in_lan(client_ip):
+            # 视为已认证：复用已配置的 token 生成一张合法 AccessToken，
+            # 使后续鉴权路径与“携带有效 Token”完全一致。
+            access_token = await self.token_verifier.verify_token(self.token_verifier.token)
+            return AuthCredentials(access_token.scopes), AuthenticatedUser(access_token)
+        return await super().authenticate(conn)
+
+
+# 让 FastMCP 构建 app 时使用带白名单的后端（仅影响本进程内的 FastMCP 实例）。
+import mcp.server.fastmcp.server as _fastmcp_server
+
+_fastmcp_server.BearerAuthBackend = LanBypassBearerAuthBackend
 
 
 _token = settings.mcp_token
