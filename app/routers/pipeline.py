@@ -1,6 +1,7 @@
 import json
 import os
 import asyncio
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -15,6 +16,7 @@ from app.services.mineru import parse_pdf, submit_parse_task, poll_task, get_tas
 from app.services.ollama import extract_metadata, get_embedding
 from app.services.qdrant import index_document, delete_document_points
 from app.services.crossref import lookup_by_doi, lookup_by_title, normalize_doi as cr_normalize_doi
+from app.services.pdf_meta import extract_pdf_metadata, normalize_doi
 from app.utils import to_absolute_path
 from app.paths import get_markdown_path, get_pdf_path, get_asset_path, get_crossref_path
 
@@ -1337,6 +1339,72 @@ async def _run_crossref(doc_id: int):
         print(f"[CROSSREF] 补全完成: doc_id={doc_id}")
     except Exception as e:
         error_msg = f"Crossref 补全失败: {type(e).__name__}: {str(e) or repr(e)}"
+        print(f"[ERROR] Document {doc_id}: {error_msg}")
+        print(traceback.format_exc())
+    finally:
+        db.close()
+
+
+@router.post("/{doc_id}/extract-pdf-meta")
+async def extract_pdf_meta(
+    doc_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """从 PDF 内嵌元数据中直接补全元数据（异步，后台任务）。
+
+    仅做元数据补全，不改变文档流水线状态（与 Crossref 按钮同性质）。
+    """
+    doc = db.get(Document, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="文献不存在")
+
+    background_tasks.add_task(_run_extract_pdf_meta, doc_id)
+
+    return {"detail": "从 PDF 元数据提取任务已提交", "status": "extract_pdf_meta"}
+
+
+async def _run_extract_pdf_meta(doc_id: int):
+    """后台任务：读取 PDF 内嵌元数据并仅填充文档的空字段。"""
+    import traceback
+
+    db = SessionLocal()
+    try:
+        doc = db.get(Document, doc_id)
+        if not doc:
+            print(f"[PDF-META] 文档不存在，跳过: doc_id={doc_id}")
+            return
+
+        # 读取 PDF 文件
+        pdf_path = get_pdf_path(doc_id)
+        if not pdf_path or not Path(pdf_path).exists():
+            print(f"[PDF-META] 未找到 PDF 文件，跳过: doc_id={doc_id}, path={pdf_path}")
+            return
+        content = Path(pdf_path).read_bytes()
+
+        # 从 PDF 内嵌元数据提取
+        # 传入 doc.filename 以便在 Info 字典缺失 /Title 时从 XMP/正文推断真实标题
+        meta = extract_pdf_metadata(content, filename=doc.filename)
+
+        # 仅填充空字段（镜像上传时 documents.py 的 only-empty 逻辑）
+        if meta.get("title") and not doc.title:
+            doc.title = meta["title"]
+        if meta.get("authors") and not doc.authors:
+            doc.authors = json.dumps(meta["authors"], ensure_ascii=False)
+        if meta.get("year") and not doc.year:
+            doc.year = meta["year"]
+        if meta.get("doi") and not doc.doi:
+            doc.doi = normalize_doi(meta["doi"])
+        if meta.get("keywords") and not doc.keywords:
+            doc.keywords = json.dumps(meta["keywords"], ensure_ascii=False)
+        if meta.get("abstract") and not doc.abstract:
+            doc.abstract = meta["abstract"]
+
+        # 注意：不修改 doc.status（这是手动元数据补全，不影响流水线状态）
+        db.commit()
+        print(f"[PDF-META] 从 PDF 元数据补全完成: doc_id={doc_id}")
+    except Exception as e:
+        error_msg = f"从 PDF 元数据提取失败: {type(e).__name__}: {str(e) or repr(e)}"
         print(f"[ERROR] Document {doc_id}: {error_msg}")
         print(traceback.format_exc())
     finally:
