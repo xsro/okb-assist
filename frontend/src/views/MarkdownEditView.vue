@@ -42,7 +42,7 @@ async function load() {
   const id = parseInt(route.params.id as string)
   if (!requireToken()) return
   try {
-    const res = await getMarkdown(id)
+    const res = await getMarkdown(id, { full: true })
     content.value = res.content
   } catch {
     showError('加载失败')

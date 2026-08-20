@@ -895,7 +895,7 @@ async def replace_pdf(
 def get_markdown(
     doc_id: int,
     page: int = 1,
-    page_size: int = 5000,
+    page_size: int = 100000,
     full: bool = False,
     db: Session = Depends(get_db),
 ):

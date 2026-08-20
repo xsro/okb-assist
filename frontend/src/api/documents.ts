@@ -132,12 +132,21 @@ export function replacePdf(id: number, file: File) {
 }
 
 /** 获取 Markdown 内容 */
-export function getMarkdown(id: number, page = 1) {
+export function getMarkdown(
+  id: number,
+  options: { page?: number; page_size?: number; full?: boolean } = {}
+) {
+  const { page = 1, page_size = 100000, full = false } = options
   return apiGet<{
     content: string
     total_pages: number
-    current_page: number
-  }>(`/assist/api/documents/${id}/markdown/`, { page })
+    page: number
+    total_length: number
+  }>(`/assist/api/documents/${id}/markdown/`, {
+    page,
+    page_size,
+    full: full ? 1 : 0
+  })
 }
 
 /** 保存 Markdown */
