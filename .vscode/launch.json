@@ -1,12 +1,12 @@
 {
     "configurations": [
         {
-            "name": "Python main.py",
+            "name": "Python okb_assist_main.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "okb_assist_main.py",
-            "console": "integratedTerminal",
-            // "args": "${command:pickArgs}"
+            "program": "backend/okb_assist_main.py",
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal"
         }
     ]
 }

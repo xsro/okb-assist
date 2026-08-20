@@ -222,7 +222,7 @@ claude mcp add okb-assist --transport sse http://192.168.1.100:5001/assist/mcp/s
     "okb-assist": {
       "command": "uv",
       "args": ["run", "python", "-m", "app.mcp_server"],
-      "cwd": "/path/to/okb-assist"
+      "cwd": "/path/to/okb-assist/backend"
     }
   }
 }
@@ -231,7 +231,7 @@ claude mcp add okb-assist --transport sse http://192.168.1.100:5001/assist/mcp/s
 #### Claude Code 配置
 
 ```bash
-claude mcp add okb-assist -- uv run python -m app.mcp_server
+claude mcp add okb-assist -- sh -c "cd /path/to/okb-assist/backend && uv run python -m app.mcp_server"
 ```
 
 #### Cursor 配置
@@ -242,7 +242,7 @@ claude mcp add okb-assist -- uv run python -m app.mcp_server
     "okb-assist": {
       "command": "uv",
       "args": ["run", "python", "-m", "app.mcp_server"],
-      "cwd": "/path/to/okb-assist"
+      "cwd": "/path/to/okb-assist/backend"
     }
   }
 }
@@ -278,6 +278,7 @@ curl -s -N http://192.168.1.100:5001/assist/mcp/sse \
 ### 3. 使用 MCP Inspector 测试
 
 ```bash
+cd /path/to/okb-assist/backend
 npx @modelcontextprotocol/inspector uv run python -m app.mcp_server
 ```
 
@@ -335,7 +336,7 @@ http://192.168.1.100:5001/assist/tools
 
 ### stdio 模式启动失败
 
-- 确认在 OKB-Assist 项目根目录下运行
+- 确认在 `backend/` 目录下运行
 - 检查 Python 环境：`uv run python -c "import mcp; print('OK')"`
 
 ### SSE 消息端点404

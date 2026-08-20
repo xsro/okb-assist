@@ -17,3 +17,5 @@ qdrant_data/
 
 data/*.csv
 *.log
+
+frontend

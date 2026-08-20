@@ -18,7 +18,8 @@ from app.routers import documents, pipeline, admin, openapi, config
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FRONTEND_DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
+# 后端位于 backend/ 子目录，前端构建产物在项目根目录的 frontend/dist/
+FRONTEND_DIST_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend", "dist"))
 FRONTEND_INDEX_PATH = os.path.join(FRONTEND_DIST_DIR, "index.html")
 
 
