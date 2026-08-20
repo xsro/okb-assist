@@ -55,7 +55,7 @@ const activeClient = ref('codebuddy')
 
 const configPath = computed(() => {
   const paths: Record<string, string> = {
-    codebuddy: '~/.codebuddy/mcp.json（具体路径以 CodeBuddy 设置为准）',
+    codebuddy: '~/.codebuddy/.mcp.json（具体路径以 CodeBuddy 设置为准，https://www.codebuddy.ai/docs/zh/cli/mcp#%E9%85%8D%E7%BD%AE%E6%96%87%E4%BB%B6）',
     claude: 'macOS: ~/Library/Application Support/Claude/claude_desktop_config.json；Linux: ~/.config/claude-desktop/config.json',
     codex: '~/.codex/config.toml（或 ~/.config/codex/config.toml）'
   }
@@ -90,7 +90,10 @@ const clientConfig = computed(() => {
     codex: `# Add to your Codex config.toml:
 [mcp_servers.okb-assist]
 url = "${mcpUrl.value}"
-token = "${mcpToken.value}"`
+http_headers = {
+    Authorization = "Bearer ${mcpToken.value}"
+}
+`
   }
   return configs[activeClient.value] || ''
 })
