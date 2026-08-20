@@ -190,6 +190,7 @@ function renderNav() {
         <a href="/assist/">文献列表</a>
         <a href="/assist/upload">上传</a>
         <a href="/assist/tools">工具</a>
+        <a href="/assist/mcp-setup">MCP 配置</a>
         <a href="/assist/admin">管理</a>
         <a href="/assist/config">配置</a>
     `;

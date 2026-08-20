@@ -1,4 +1,5 @@
 import ipaddress
+import json
 import os
 
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -306,6 +307,191 @@ def tools_page(request: Request):
 @app.get("/assist/duplicates")
 def duplicates_page(request: Request):
     return templates.TemplateResponse(name="duplicates.html", request=request)
+
+
+# ==================== MCP 配置页面 ====================
+
+def _build_mcp_setup_configs(request: Request) -> dict:
+    """根据当前请求的实际访问地址与 mcp_token，生成各客户端的 MCP 配置片段。"""
+    settings = get_settings()
+    base_url = str(request.base_url).rstrip("/")
+    stream_url = f"{base_url}/assist/mcp/stream"
+    sse_url = f"{base_url}/assist/mcp/sse"
+
+    token = (settings.mcp_token or "").strip()
+    auth_disabled = (not token) or token == "change-me"
+    header_obj = {"Authorization": f"Bearer {token}"} if not auth_disabled else None
+    header_cli = f' --header "Authorization: Bearer {token}"' if not auth_disabled else ""
+    project_cwd = os.getcwd()
+
+    def http_json(url: str, with_type: bool = True, with_desc: bool = False) -> str:
+        """生成 type=http 的 JSON 配置。"""
+        obj: dict = {"mcpServers": {"okb-assist": {}}}
+        server = obj["mcpServers"]["okb-assist"]
+        if with_type:
+            server["type"] = "http"
+        server["url"] = url
+        if header_obj:
+            server["headers"] = header_obj
+        if with_desc:
+            server["description"] = "控制理论文献知识库"
+        return json.dumps(obj, indent=2, ensure_ascii=False)
+
+    def sse_json(url: str) -> str:
+        obj: dict = {"mcpServers": {"okb-assist": {"type": "sse", "url": url}}}
+        if header_obj:
+            obj["mcpServers"]["okb-assist"]["headers"] = header_obj
+        return json.dumps(obj, indent=2, ensure_ascii=False)
+
+    def cursor_json(url: str) -> str:
+        obj: dict = {"mcpServers": {"okb-assist": {"url": url}}}
+        if header_obj:
+            obj["mcpServers"]["okb-assist"]["headers"] = header_obj
+        return json.dumps(obj, indent=2, ensure_ascii=False)
+
+    def codex_toml(url: str) -> str:
+        lines = [
+            "[mcp_servers.okb_assist]",
+            f'url = "{url}"',
+            "startup_timeout_sec = 20",
+            "tool_timeout_sec = 120",
+        ]
+        if header_obj:
+            lines.append(f'http_headers = {{ Authorization = "Bearer {token}" }}')
+        return "\n".join(lines)
+
+    def claude_code_cli(url: str, transport: str) -> str:
+        return f"claude mcp add okb-assist --transport {transport} {url}{header_cli}"
+
+    def stdio_json() -> str:
+        obj: dict = {
+            "mcpServers": {
+                "okb-assist": {
+                    "command": "uv",
+                    "args": ["run", "python", "-m", "app.mcp_server"],
+                    "cwd": project_cwd,
+                }
+            }
+        }
+        return json.dumps(obj, indent=2, ensure_ascii=False)
+
+    clients = [
+        {
+            "id": "codebuddy",
+            "name": "Tencent CodeBuddy",
+            "variants": [
+                {
+                    "label": "Streamable HTTP（推荐）",
+                    "file_hint": "配置文件：~/.codebuddy/.mcp.json",
+                    "lang": "json",
+                    "code": http_json(stream_url, with_type=True, with_desc=True),
+                },
+                {
+                    "label": "SSE（旧版兼容）",
+                    "file_hint": "配置文件：~/.codebuddy/.mcp.json",
+                    "lang": "json",
+                    "code": http_json(sse_url, with_type=True),
+                },
+            ],
+        },
+        {
+            "id": "claude_desktop",
+            "name": "Claude Desktop",
+            "variants": [
+                {
+                    "label": "Streamable HTTP（推荐）",
+                    "file_hint": "配置文件：~/.claude/claude_desktop_config.json",
+                    "lang": "json",
+                    "code": http_json(stream_url, with_type=True),
+                },
+                {
+                    "label": "SSE（旧版兼容）",
+                    "file_hint": "配置文件：~/.claude/claude_desktop_config.json",
+                    "lang": "json",
+                    "code": sse_json(sse_url),
+                },
+                {
+                    "label": "stdio（本地）",
+                    "file_hint": "配置文件：~/.claude/claude_desktop_config.json",
+                    "lang": "json",
+                    "code": stdio_json(),
+                },
+            ],
+        },
+        {
+            "id": "claude_code",
+            "name": "Claude Code",
+            "variants": [
+                {
+                    "label": "Streamable HTTP（推荐）",
+                    "file_hint": "命令行执行",
+                    "lang": "bash",
+                    "code": claude_code_cli(stream_url, "http"),
+                },
+                {
+                    "label": "SSE（旧版兼容）",
+                    "file_hint": "命令行执行",
+                    "lang": "bash",
+                    "code": claude_code_cli(sse_url, "sse"),
+                },
+            ],
+        },
+        {
+            "id": "cursor",
+            "name": "Cursor",
+            "variants": [
+                {
+                    "label": "Streamable HTTP（推荐）",
+                    "file_hint": "配置文件：项目根目录 .cursor/mcp.json",
+                    "lang": "json",
+                    "code": cursor_json(stream_url),
+                },
+                {
+                    "label": "SSE（旧版兼容）",
+                    "file_hint": "配置文件：项目根目录 .cursor/mcp.json",
+                    "lang": "json",
+                    "code": cursor_json(sse_url),
+                },
+                {
+                    "label": "stdio（本地）",
+                    "file_hint": "配置文件：项目根目录 .cursor/mcp.json",
+                    "lang": "json",
+                    "code": stdio_json(),
+                },
+            ],
+        },
+        {
+            "id": "codex",
+            "name": "OpenAI Codex",
+            "variants": [
+                {
+                    "label": "Streamable HTTP（推荐）",
+                    "file_hint": "配置文件：~/.codex/config.toml（或项目 .codex/config.toml）",
+                    "lang": "toml",
+                    "code": codex_toml(stream_url),
+                },
+            ],
+        },
+    ]
+
+    return {
+        "stream_url": stream_url,
+        "sse_url": sse_url,
+        "auth_disabled": auth_disabled,
+        "token_masked": ("change-me" if auth_disabled else f"{token[:4]}••••••••") if token else "",
+        "clients": clients,
+    }
+
+
+@app.get("/assist/mcp-setup")
+def mcp_setup_page(request: Request):
+    """MCP 客户端（CodeBuddy / Claude / Codex 等）配置说明页，提供可复制的配置片段。"""
+    configs = _build_mcp_setup_configs(request)
+    return templates.TemplateResponse(
+        name="mcp_setup.html",
+        request=request,
+        context=configs,
+    )
 
 
 @app.get("/assist/doc/{doc_id}")

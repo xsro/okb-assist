@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP 客户端配置 - OKB-Assist</title>
+    <link rel="stylesheet" href="/assist/static/style.css">
+    <style>
+        .info-banner {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--primary);
+            border-radius: 8px;
+            padding: 1rem 1.25rem;
+            margin-bottom: 1.5rem;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+        .info-banner code {
+            background: var(--card);
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            word-break: break-all;
+        }
+        .warn-banner {
+            border-left-color: var(--warning, #f59e0b);
+            background: #fffbeb;
+        }
+        .endpoint-row {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            margin: 0.4rem 0;
+        }
+        .endpoint-row .label {
+            font-weight: 600;
+            min-width: 130px;
+            color: var(--text-muted);
+        }
+        .config-card {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            overflow: hidden;
+        }
+        .config-card-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.6rem 0.9rem;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+            flex-wrap: wrap;
+        }
+        .config-card-head .variant-label {
+            font-weight: 600;
+        }
+        .config-card-head .file-hint {
+            display: block;
+            font-size: 0.78rem;
+            color: var(--text-muted);
+            margin-top: 0.15rem;
+        }
+        .code-block {
+            margin: 0;
+            padding: 1rem;
+            background: #1e293b;
+            color: #e2e8f0;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.82rem;
+            line-height: 1.5;
+            overflow-x: auto;
+            white-space: pre;
+        }
+        .code-block code {
+            font-family: inherit;
+        }
+        .section-title {
+            font-size: 1.05rem;
+            font-weight: 600;
+            margin: 1.5rem 0 0.75rem;
+        }
+        .section-title:first-of-type {
+            margin-top: 0;
+        }
+        .hint-text {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            margin-bottom: 0.75rem;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>📚 OKB-Assist</h1>
+            <nav id="nav"></nav>
+        </div>
+    </header>
+
+    <main class="container">
+        <h2>MCP 客户端配置</h2>
+        <p class="hint-text">
+            将下面的配置片段复制到你常用的 AI 编程助手的 MCP 配置文件中即可连接本知识库。
+            配置已根据你的访问地址和 Token 自动生成。
+        </p>
+
+        <div class="info-banner">
+            <div class="endpoint-row">
+                <span class="label">Streamable HTTP：</span>
+                <code>{{ stream_url }}</code>
+            </div>
+            <div class="endpoint-row">
+                <span class="label">SSE（旧版）：</span>
+                <code>{{ sse_url }}</code>
+            </div>
+            <div class="endpoint-row">
+                <span class="label">认证状态：</span>
+                {% if auth_disabled %}
+                    <code>已禁用（mcp_token 为 change-me）</code>
+                {% else %}
+                    <code>Bearer Token：{{ token_masked }}</code>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if auth_disabled %}
+        <div class="info-banner warn-banner">
+            ⚠️ 当前 <code>mcp_token</code> 为 <code>change-me</code>，MCP 认证已禁用。
+            生产环境请在 <code>system.json</code> 中设置一个强 Token（修改后需重启进程），
+            客户端配置中的 <code>Authorization</code> 头届时才会生效。
+        </div>
+        {% endif %}
+
+        <!-- 客户端切换 Tabs -->
+        <div class="tabs" id="client-tabs">
+            {% for client in clients %}
+            <div class="tab {% if loop.first %}active{% endif %}" onclick="switchClient('{{ client.id }}')">{{ client.name }}</div>
+            {% endfor %}
+        </div>
+
+        {% for client in clients %}
+        <div id="client-{{ client.id }}" class="tab-content {% if loop.first %}active{% endif %}">
+            <div class="section-title">连接方式</div>
+            {% for variant in client.variants %}
+            <div class="config-card">
+                <div class="config-card-head">
+                    <div>
+                        <span class="variant-label">{{ variant.label }}</span>
+                        <span class="file-hint">{{ variant.file_hint }}</span>
+                    </div>
+                    <button class="btn btn-sm btn-secondary" onclick="copyConfig(this)">📋 复制</button>
+                </div>
+                <pre class="code-block"><code>{{ variant.code }}</code></pre>
+            </div>
+            {% endfor %}
+        </div>
+        {% endfor %}
+
+        <div class="info-banner" style="margin-top:1.5rem">
+            <strong>说明</strong>
+            <ul style="margin:0.5rem 0 0 1.1rem;line-height:1.7">
+                <li>Streamable HTTP 与 SSE 端点会话相互独立，二者工具与资源完全一致。</li>
+                <li>stdio 方式适用于 AI 工具与 OKB-Assist 运行在同一台机器，<code>cwd</code> 已自动填写为当前项目路径。</li>
+                <li>完整工具列表与故障排查见 <code>document/mcp.md</code>。</li>
+            </ul>
+        </div>
+    </main>
+
+    <script src="/assist/static/app.js"></script>
+    <script>
+        function switchClient(id) {
+            document.querySelectorAll('#client-tabs .tab').forEach(t => t.classList.remove('active'));
+            event.currentTarget.classList.add('active');
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            const target = document.getElementById('client-' + id);
+            if (target) target.classList.add('active');
+        }
+
+        async function copyConfig(btn) {
+            const card = btn.closest('.config-card');
+            const codeEl = card.querySelector('code');
+            if (!codeEl) return;
+            const text = codeEl.textContent;
+            try {
+                await navigator.clipboard.writeText(text);
+                showToast('配置已复制到剪贴板', 'success');
+            } catch (e) {
+                // 回退方案：选中文本
+                const range = document.createRange();
+                range.selectNodeContents(codeEl);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                showToast('已选中配置，请按 Ctrl/Cmd+C 复制', 'info');
+            }
+        }
+    </script>
+</body>
+</html>
