@@ -52,7 +52,9 @@
 
     <!-- 操作按钮 -->
     <div class="detail-actions-bottom">
-      <a :href="getPdfUrl(doc.id)" target="_blank" class="btn btn-outline">查看 PDF</a>
+      <button class="btn btn-outline" :disabled="openingPdf" @click="openPdf">
+        {{ openingPdf ? '准备中...' : '查看 PDF' }}
+      </button>
       <router-link :to="{ name: 'markdown', params: { id: doc.id } }" class="btn btn-outline">全屏阅读</router-link>
     </div>
   </div>
@@ -63,7 +65,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { getDocument, getMarkdown, getPdfUrl } from '@/api/documents'
+import { getDocument, getMarkdown, getFileAlias } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import StatusBadge from '@/components/StatusBadge.vue'
@@ -78,12 +80,26 @@ const doc = ref<Document | null>(null)
 const markdownContent = ref('')
 const currentPage = ref(1)
 const totalPages = ref(1)
+const openingPdf = ref(false)
 
 function formatSize(bytes: number | null): string {
   if (!bytes) return '-'
   if (bytes < 1024) return bytes + ' B'
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+async function openPdf() {
+  if (!doc.value) return
+  openingPdf.value = true
+  try {
+    const { url } = await getFileAlias(doc.value.id)
+    window.open(url, '_blank')
+  } catch {
+    showError('无法打开 PDF')
+  } finally {
+    openingPdf.value = false
+  }
 }
 
 async function load() {

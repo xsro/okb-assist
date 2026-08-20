@@ -119,6 +119,18 @@ export function getPdfUrl(id: number): string {
   return `/assist/api/documents/${id}/pdf/`
 }
 
+/** 获取免 token 的 PDF 别名 URL */
+export function getFileAlias(id: number) {
+  return apiGet<{ url: string }>(`/assist/api/documents/${id}/file-alias/`)
+}
+
+/** 替换文档 PDF */
+export function replacePdf(id: number, file: File) {
+  const fd = new FormData()
+  fd.append('file', file)
+  return apiUpload<Document>(`/assist/api/documents/${id}/pdf/`, fd)
+}
+
 /** 获取 Markdown 内容 */
 export function getMarkdown(id: number, page = 1) {
   return apiGet<{

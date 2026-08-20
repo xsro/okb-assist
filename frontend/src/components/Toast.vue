@@ -6,7 +6,8 @@
       class="toast"
       :class="t.type"
     >
-      {{ t.message }}
+      <button class="toast-close" @click.stop="remove(t.id)">×</button>
+      <span class="toast-message">{{ t.message }}</span>
     </div>
   </div>
 </template>
@@ -14,5 +15,5 @@
 <script setup lang="ts">
 import { useToastStore } from '@/stores/toast'
 
-const { toasts } = useToastStore()
+const { toasts, remove } = useToastStore()
 </script>

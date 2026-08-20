@@ -10,15 +10,48 @@
     <!-- 文献操作 -->
     <div class="section">
       <h3>文献操作</h3>
-      <div class="action-buttons">
-        <button class="btn" @click="runStage('parse')">解析</button>
-        <button class="btn" @click="runStage('index')">索引</button>
-  
-        元数据提取：
-        <button class="btn btn-outline" @click="enrichPdfMeta">从 PDF 元数据</button>
-        <button class="btn btn-outline" @click="enrichCrossref">从 Crossref </button>
-        <button class="btn" @click="runStage('extract')">从解析的 markdown 文件</button>
-        <button class="btn btn-danger" @click="reset">重置</button>
+
+      <!-- 流水线 -->
+      <div class="action-group">
+        <span class="action-label">流水线</span>
+        <div class="action-buttons">
+          <button class="btn" @click="runStage('parse')">解析</button>
+          <button class="btn" @click="runStage('extract')">提取</button>
+          <button class="btn" @click="runStage('index')">索引</button>
+          <button class="btn btn-primary" @click="runStage('process')">全流程</button>
+        </div>
+      </div>
+
+      <!-- 元数据补全 -->
+      <div class="action-group">
+        <span class="action-label">元数据补全</span>
+        <div class="action-buttons">
+          <button class="btn btn-outline" @click="enrichPdfMeta">PDF 元数据</button>
+          <button class="btn btn-outline" @click="enrichCrossref">Crossref</button>
+        </div>
+      </div>
+
+      <!-- 文件管理 -->
+      <div class="action-group">
+        <span class="action-label">文件管理</span>
+        <div class="action-buttons">
+          <button class="btn btn-outline" @click="selectReplacePdf">替换 PDF</button>
+          <input
+            ref="replacePdfInput"
+            type="file"
+            accept=".pdf,application/pdf"
+            style="display: none"
+            @change="onReplacePdfSelected"
+          />
+        </div>
+      </div>
+
+      <!-- 危险操作 -->
+      <div class="action-group action-group-danger">
+        <span class="action-label">危险操作</span>
+        <div class="action-buttons">
+          <button class="btn btn-danger" @click="reset">重置</button>
+        </div>
       </div>
     </div>
 
@@ -70,7 +103,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { getDocument, updateDocument } from '@/api/documents'
+import { getDocument, updateDocument, replacePdf } from '@/api/documents'
 import {
   parseDocument,
   extractDocument,
@@ -90,6 +123,7 @@ const { requireToken } = useRequireToken()
 
 const doc = ref<Document | null>(null)
 const form = ref<Partial<Document>>({})
+const replacePdfInput = ref<HTMLInputElement>()
 
 async function load() {
   const id = parseInt(route.params.id as string)
@@ -143,6 +177,31 @@ async function saveMetadata() {
   }
 }
 
+function selectReplacePdf() {
+  replacePdfInput.value?.click()
+}
+
+async function onReplacePdfSelected(e: Event) {
+  const id = parseInt(route.params.id as string)
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.pdf')) {
+    showError('请选择 PDF 文件')
+    input.value = ''
+    return
+  }
+  try {
+    doc.value = await replacePdf(id, file)
+    showSuccess('PDF 已替换')
+    load()
+  } catch {
+    showError('PDF 替换失败')
+  } finally {
+    input.value = ''
+  }
+}
+
 async function enrichCrossref() {
   const id = parseInt(route.params.id as string)
   try {
@@ -170,16 +229,56 @@ onMounted(load)
 </script>
 
 <style scoped>
+.action-group {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.action-group:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.action-label {
+  width: 90px;
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
 .action-buttons {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  flex: 1;
 }
+
+.action-group-danger .action-label {
+  color: var(--danger);
+}
+
 .form-row {
   display: flex;
   gap: 12px;
 }
+
 .form-row .form-group {
   flex: 1;
+}
+
+@media (max-width: 640px) {
+  .action-group {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .action-label {
+    width: auto;
+  }
 }
 </style>

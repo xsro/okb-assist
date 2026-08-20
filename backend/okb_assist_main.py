@@ -309,7 +309,7 @@ async def serve_spa(full_path: str = "", request: Request = None):
 
     if os.path.exists(FRONTEND_INDEX_PATH):
         return FileResponse(FRONTEND_INDEX_PATH)
-    return {"detail": "前端未构建，请运行 cd frontend && npm run build"}
+    return {"detail": f"前端未构建，请运行 cd {os.path.dirname(FRONTEND_DIST_DIR)} && pnpm run build"}
 
 
 if __name__ == "__main__":

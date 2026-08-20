@@ -4,8 +4,8 @@
             "name": "Python okb_assist_main.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "backend/okb_assist_main.py",
-            "cwd": "${workspaceFolder}/backend",
+            "program": "okb_assist_main.py",
+            "cwd": "${workspaceFolder}/",
             "console": "integratedTerminal"
         }
     ]
