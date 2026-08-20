@@ -53,7 +53,7 @@ DEFAULT_SYSTEM = {
     "markdown_asset_path":"uploads/{id}/{id}.zip",
     "pdf_path":"uploads/{id}/{id}.pdf",
     "public_url": "http://localhost:5001",
-    "subnet_url": "http://192.168.1.100:5001",
+    "subnet_url": "http://192.168.1.122:5001",
 }
 
 # 进程内缓存
