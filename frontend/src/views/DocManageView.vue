@@ -12,11 +12,12 @@
       <h3>文献操作</h3>
       <div class="action-buttons">
         <button class="btn" @click="runStage('parse')">解析</button>
-        <button class="btn" @click="runStage('extract')">提取</button>
         <button class="btn" @click="runStage('index')">索引</button>
-        <button class="btn" @click="runStage('process')">全流程</button>
-        <button class="btn btn-outline" @click="enrichCrossref">Crossref 补充</button>
-        <button class="btn btn-outline" @click="enrichPdfMeta">PDF 元数据提取</button>
+  
+        元数据提取：
+        <button class="btn btn-outline" @click="enrichPdfMeta">从 PDF 元数据</button>
+        <button class="btn btn-outline" @click="enrichCrossref">从 Crossref </button>
+        <button class="btn" @click="runStage('extract')">从解析的 markdown 文件</button>
         <button class="btn btn-danger" @click="reset">重置</button>
       </div>
     </div>
