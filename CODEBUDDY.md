@@ -6,8 +6,8 @@
 
 OKB-Assist 是一个**本地学术文献库管理系统**（论文与专著）。流程：上传/登记 PDF → MinerU 解析为 Markdown → Ollama 抽取元数据 → 向量库（默认 Qdrant）语义建索引 → 通过 Web UI 或 MCP 服务检索。
 
-- 语言：Python >=3.12
-- 主框架：FastAPI + Uvicorn（ASGI），Jinja2 服务端渲染页面
+- 语言：Python >=3.12，前端 TypeScript + Vue 3
+- 主框架：FastAPI + Uvicorn（ASGI，纯 JSON API 后端）+ Vue 3 SPA 前端（Vite 构建）
 - 数据：SQLAlchemy 2.0 + SQLite（`okb_assist.db`）
 - 向量库：Qdrant（默认），适配器层同时支持 Milvus / Chroma
 - 外部服务：MinerU（解析）、Ollama（LLM/嵌入）、Qdrant（向量）、Fastembed（嵌入服务）、OpenWebUI（可选前端）
@@ -34,13 +34,13 @@ uv run scripts/<name>.py ...             # 运行维护脚本（见 scripts/）
 | `app/routers/` | 路由组：`documents.py`(955 行)、`pipeline.py`(1369 行)、`admin.py`、`config.py`、`openapi.py` |
 | `app/services/` | 后端适配器：`qdrant.py`、`ollama.py`、`mineru.py`、`milvus.py`、`chroma.py`、`grep_search.py`、`vector_db.py`（抽象接口） |
 | `app/mineru_fast_api/` | MinerU 解析服务的**自动生成 OpenAPI 客户端**（勿手改） |
-| `app/templates/` | Jinja2 页面模板 |
 | `app/models.py`、`app/database.py` | 数据模型与 SQLite 连接（`init_db()` 启动时建表） |
 | `app/config_manager.py`、`app/config.py` | 配置加载（JSON 文件，带缓存） |
 | `app/paths.py` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
 | `app/mcp_server.py` | MCP 服务（`FastMCP("OKB-Assist")`，10 个工具） |
 | `scripts/` | 维护/迁移脚本 + shell 启动器 |
-| `static/` | 前端资源 `app.js`、`style.css` |
+| `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 构建，输出到 `frontend/dist/`） |
+| `frontend/dist/` | 前端构建产物（`index.html`、`assets/`），由 FastAPI serving |
 | `config.json` | 服务配置（MinerU/Ollama/向量库），**git 忽略，可由 UI 编辑** |
 | `system.json` | 系统配置（token、DB URL、上传路径、路径模板），**git 忽略，需手动改** |
 | `data/`、`uploads/` | 运行时数据（均 git 忽略） |
@@ -57,7 +57,7 @@ uv run scripts/<name>.py ...             # 运行维护脚本（见 scripts/）
 
 ## 架构与请求流
 
-1. **Web/API 层**：`okb_assist_main.py` + `app/routers/*`。`TokenMiddleware` 仅对 `/assist/api/*` 校验 `X-Token`/query `token`，放行 `/assist/mcp`、`/assist/static`、`/assist/uploads`、`/assist/file`、`/redirect`、图片 URL。CORS 全开。
+1. **Web/API 层**：`okb_assist_main.py` + `app/routers/*`。`TokenMiddleware` 仅对 `/assist/api/*` 校验 `X-Token`/query `token`，放行 `/assist/mcp`、`/assist/static`、`/assist/uploads`、`/assist/file`、`/redirect`、图片 URL。CORS 限定前端来源（开发 `localhost:5173`，生产同源）。
 2. **数据模型**：`Document`（主记录 + 状态）、`DocumentVectorIndex`（每个向量库的索引状态，唯一键 `(document_id, vector_db_id)`）。状态机用 `DocStatus` / `IndexStatus` 枚举（`app/models.py`）。
 3. **摄取流水线**（`app/routers/pipeline.py`，核心状态机）：
    - parse（MinerU）→ `parsing` → `markdown_done`
@@ -71,10 +71,23 @@ uv run scripts/<name>.py ...             # 运行维护脚本（见 scripts/）
 
 ## 路由前缀
 
-- 页面：`/assist/`、`/assist/detail/{id}`、`/assist/markdown/{id}`、`/assist/upload`、`/assist/admin`、`/assist/config`、`/assist/monitor`、`/assist/duplicates` 等
+- 前端 SPA：`/assist/*` → fallback 到 `frontend/dist/index.html`（由 Vue Router 处理客户端路由）
 - API：`/assist/api/documents`、`/assist/api/pipeline`、`/assist/api/admin`、`/assist/api/config`、`/assist/openapi`
 - 文件别名（免 token）：`/assist/file/{filename}`
 - MCP：`/assist/mcp/stream`（Streamable HTTP）、`/assist/mcp`（SSE）
+- 上传文件：`/assist/uploads/`（由后端直接 serving）
+
+## 前端开发
+
+```bash
+cd frontend
+npm install          # 安装前端依赖
+npm run dev          # 启动开发服务器（端口 5173，代理 /assist 到后端 5001）
+npm run build        # 构建到 frontend/dist/
+npm run type-check   # TypeScript 类型检查
+```
+
+开发时前端独立端口运行，通过 Vite proxy 访问后端 API。生产环境构建后由 FastAPI 直接 serving 静态文件。
 
 ## 编码约定
 
@@ -95,10 +108,14 @@ uv run scripts/<name>.py ...             # 运行维护脚本（见 scripts/）
 6. **硬编码的局域网 IP**（`192.168.1.x`）出现在 `config.json`、`system.json`、脚本中，是部署相关配置，视为环境配置而非代码。
 7. **`uploads/` 按文档数字 ID 建子目录**（git 忽略），`_next_available_id` 与别名逻辑依赖此布局，勿改。
 8. **SQLite 单写者**：`database.py` 设 `check_same_thread=False`，并发写入可行但仍是瓶颈，勿引入大量并发写。
+9. **SPA Fallback 路由**（`okb_assist_main.py`）：`@app.get("/assist/{full_path:.*}")` 必须放在所有路由之后，它会拦截所有 `/assist/*` 请求并返回 `frontend/dist/index.html`。但必须跳过 `api/`、`mcp/`、`uploads/`、`file/` 前缀，否则会吞掉 API 和 MCP 端点。
+10. **前端构建产物在 `frontend/dist/`**：`npm run build` 输出到 `frontend/dist/`，构建后 `frontend/dist/index.html` 是 SPA 入口。后端无需额外配置即可 serving。
+11. **CORS 已限定**：开发环境只允许 `localhost:5173`，生产环境只允许同源 `localhost:5001`。如需其他前端域名，修改 `okb_assist_main.py` 中的 `allow_origins` 列表。
 
 ## 入口与关键文件速查
 
 - 入口/配置：`okb_assist_main.py`、`app/config_manager.py`、`app/config.py`、`config.json`、`system.json`
 - 架构核心：`app/routers/pipeline.py`、`app/routers/documents.py`、`app/models.py`、`app/services/vector_db.py`、`app/mcp_server.py`
+- 前端：`frontend/`（Vue 3 + TypeScript + Vite）
 - MCP 工具参考（务必链接）：`document/mcp.md`
 - 启动说明：`README.md`

@@ -7,7 +7,6 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from fastapi import Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -18,6 +17,23 @@ from app.config import get_settings
 from app.routers import documents, pipeline, admin, openapi, config
 
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FRONTEND_DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
+FRONTEND_INDEX_PATH = os.path.join(FRONTEND_DIST_DIR, "index.html")
+
+
+def resolve_frontend_file(path: str):
+    """Resolve a requested frontend file inside frontend/dist."""
+    normalized_path = os.path.normpath(path.lstrip("/"))
+    candidate = os.path.abspath(os.path.join(FRONTEND_DIST_DIR, normalized_path))
+
+    if os.path.commonpath([FRONTEND_DIST_DIR, candidate]) != FRONTEND_DIST_DIR:
+        return None
+    if os.path.isfile(candidate):
+        return candidate
+    return None
+
+
 # ── Token 认证中间件 ──────────────────────────────────────────────────────
 
 class TokenMiddleware(BaseHTTPMiddleware):
@@ -26,7 +42,7 @@ class TokenMiddleware(BaseHTTPMiddleware):
     # 不需要校验 token 的路径前缀
     SKIP_PREFIXES = (
         "/assist/mcp",      # MCP 有自己的 Bearer Token 认证
-        "/assist/static",   # 静态文件
+        "/assist/assets",   # 前端静态资源
         "/assist/uploads",  # 上传文件
         "/assist/file",     # 文件别名（不可猜测的 PDF 路径）
         "/redirect",        # 重定向
@@ -150,27 +166,24 @@ def reset_stuck_tasks():
 
 app = FastAPI(title="OKB-Assist", description="论文与专著数据管理系统", lifespan=lifespan)
 
-# CORS middleware
+# CORS middleware — 限定前端来源
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",   # 前端开发服务器
+        "http://localhost:5001",   # 生产：同源（FastAPI serving 静态文件）
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Token", "Authorization"],
 )
 
 # Token 认证中间件
 app.add_middleware(TokenMiddleware)
 
-# Mount static files
-app.mount("/assist/static", StaticFiles(directory="static"), name="static")
-
 _settings = get_settings()
 os.makedirs(_settings.uploads_folder, exist_ok=True)
 app.mount("/assist/uploads", StaticFiles(directory=_settings.uploads_folder), name="uploads")
-
-# Templates
-templates = Jinja2Templates(directory="app/templates")
 
 # Include routers
 app.include_router(documents.router)
@@ -236,11 +249,11 @@ async def serve_file_alias(filename: str):
         db.close()
 
 
-# ==================== 页面路由 ====================
+# ==================== 根路由与重定向 ====================
 
 @app.get("/")
 def root():
-    return RedirectResponse(url="/assist/")
+    return RedirectResponse(url="/assist")
 
 
 @app.get("/redirect/{doc_id}")
@@ -257,251 +270,45 @@ def redirect_by_network(request: Request, doc_id: int):
     return RedirectResponse(url=f"{base}/assist/detail/{doc_id}")
 
 
-@app.get("/assist/")
-def index(request: Request):
-    return templates.TemplateResponse(name="index.html", request=request)
+# ==================== SPA Fallback ====================
+# 所有 /assist/ 下的非 API / 非 MCP / 非上传 / 非文件别名请求：
+#   1. 如果命中 frontend/dist 中的真实文件，直接返回该文件；
+#   2. 否则返回前端 index.html，由 Vue Router 处理客户端路由。
 
+@app.get("/assist", include_in_schema=False)
+@app.get("/assist/{full_path:path}", include_in_schema=False)
+async def serve_spa(full_path: str = "", request: Request = None):
+    """Serve the built frontend under /assist/."""
+    from fastapi import HTTPException
+    from fastapi.responses import FileResponse, RedirectResponse
 
-@app.get("/assist/detail/{doc_id}")
-def detail_page(request: Request, doc_id: int):
-    return templates.TemplateResponse(name="detail.html", request=request, context={"doc_id": doc_id})
-
-
-@app.get("/assist/monitor")
-def monitor_page(request: Request):
-    return templates.TemplateResponse(name="monitor.html", request=request)
-
-
-@app.get("/assist/markdown/{doc_id}")
-def markdown_page(request: Request, doc_id: int):
-    return templates.TemplateResponse(name="markdown.html", request=request, context={"doc_id": doc_id})
-
-
-@app.get("/assist/markdown/{doc_id}/edit")
-def markdown_edit_page(request: Request, doc_id: int):
-    return templates.TemplateResponse(name="markdown_edit.html", request=request, context={"doc_id": doc_id})
-
-
-# ==================== 管理页面 ====================
-
-@app.get("/assist/upload")
-def upload_page(request: Request):
-    return templates.TemplateResponse(name="upload.html", request=request)
-
-
-@app.get("/assist/admin")
-def admin_page(request: Request):
-    return templates.TemplateResponse(name="admin.html", request=request)
-
-
-@app.get("/assist/point")
-def point_page(request: Request):
-    return templates.TemplateResponse(name="point.html", request=request)
-
-
-@app.get("/assist/tools")
-def tools_page(request: Request):
-    return templates.TemplateResponse(name="tools.html", request=request)
-
-
-@app.get("/assist/duplicates")
-def duplicates_page(request: Request):
-    return templates.TemplateResponse(name="duplicates.html", request=request)
-
-
-# ==================== MCP 配置页面 ====================
-
-def _build_mcp_setup_configs(request: Request) -> dict:
-    """根据当前请求的实际访问地址与 mcp_token，生成各客户端的 MCP 配置片段。"""
-    settings = get_settings()
-    base_url = str(request.base_url).rstrip("/")
-    stream_url = f"{base_url}/assist/mcp/stream"
-    sse_url = f"{base_url}/assist/mcp/sse"
-
-    token = (settings.mcp_token or "").strip()
-    auth_disabled = (not token) or token == "change-me"
-    header_obj = {"Authorization": f"Bearer {token}"} if not auth_disabled else None
-    header_cli = f' --header "Authorization: Bearer {token}"' if not auth_disabled else ""
-    project_cwd = os.getcwd()
-
-    def http_json(url: str, with_type: bool = True, with_desc: bool = False) -> str:
-        """生成 type=http 的 JSON 配置。"""
-        obj: dict = {"mcpServers": {"okb-assist": {}}}
-        server = obj["mcpServers"]["okb-assist"]
-        if with_type:
-            server["type"] = "http"
-        server["url"] = url
-        if header_obj:
-            server["headers"] = header_obj
-        if with_desc:
-            server["description"] = "控制理论文献知识库"
-        return json.dumps(obj, indent=2, ensure_ascii=False)
-
-    def sse_json(url: str) -> str:
-        obj: dict = {"mcpServers": {"okb-assist": {"type": "sse", "url": url}}}
-        if header_obj:
-            obj["mcpServers"]["okb-assist"]["headers"] = header_obj
-        return json.dumps(obj, indent=2, ensure_ascii=False)
-
-    def cursor_json(url: str) -> str:
-        obj: dict = {"mcpServers": {"okb-assist": {"url": url}}}
-        if header_obj:
-            obj["mcpServers"]["okb-assist"]["headers"] = header_obj
-        return json.dumps(obj, indent=2, ensure_ascii=False)
-
-    def codex_toml(url: str) -> str:
-        lines = [
-            "[mcp_servers.okb_assist]",
-            f'url = "{url}"',
-            "startup_timeout_sec = 20",
-            "tool_timeout_sec = 120",
-        ]
-        if header_obj:
-            lines.append(f'http_headers = {{ Authorization = "Bearer {token}" }}')
-        return "\n".join(lines)
-
-    def claude_code_cli(url: str, transport: str) -> str:
-        return f"claude mcp add okb-assist --transport {transport} {url}{header_cli}"
-
-    def stdio_json() -> str:
-        obj: dict = {
-            "mcpServers": {
-                "okb-assist": {
-                    "command": "uv",
-                    "args": ["run", "python", "-m", "app.mcp_server"],
-                    "cwd": project_cwd,
-                }
-            }
-        }
-        return json.dumps(obj, indent=2, ensure_ascii=False)
-
-    clients = [
-        {
-            "id": "codebuddy",
-            "name": "Tencent CodeBuddy",
-            "variants": [
-                {
-                    "label": "Streamable HTTP（推荐）",
-                    "file_hint": "配置文件：~/.codebuddy/.mcp.json",
-                    "lang": "json",
-                    "code": http_json(stream_url, with_type=True, with_desc=True),
-                },
-                {
-                    "label": "SSE（旧版兼容）",
-                    "file_hint": "配置文件：~/.codebuddy/.mcp.json",
-                    "lang": "json",
-                    "code": http_json(sse_url, with_type=True),
-                },
-            ],
-        },
-        {
-            "id": "claude_desktop",
-            "name": "Claude Desktop",
-            "variants": [
-                {
-                    "label": "Streamable HTTP（推荐）",
-                    "file_hint": "配置文件：~/.claude/claude_desktop_config.json",
-                    "lang": "json",
-                    "code": http_json(stream_url, with_type=True),
-                },
-                {
-                    "label": "SSE（旧版兼容）",
-                    "file_hint": "配置文件：~/.claude/claude_desktop_config.json",
-                    "lang": "json",
-                    "code": sse_json(sse_url),
-                },
-                {
-                    "label": "stdio（本地）",
-                    "file_hint": "配置文件：~/.claude/claude_desktop_config.json",
-                    "lang": "json",
-                    "code": stdio_json(),
-                },
-            ],
-        },
-        {
-            "id": "claude_code",
-            "name": "Claude Code",
-            "variants": [
-                {
-                    "label": "Streamable HTTP（推荐）",
-                    "file_hint": "命令行执行",
-                    "lang": "bash",
-                    "code": claude_code_cli(stream_url, "http"),
-                },
-                {
-                    "label": "SSE（旧版兼容）",
-                    "file_hint": "命令行执行",
-                    "lang": "bash",
-                    "code": claude_code_cli(sse_url, "sse"),
-                },
-            ],
-        },
-        {
-            "id": "cursor",
-            "name": "Cursor",
-            "variants": [
-                {
-                    "label": "Streamable HTTP（推荐）",
-                    "file_hint": "配置文件：项目根目录 .cursor/mcp.json",
-                    "lang": "json",
-                    "code": cursor_json(stream_url),
-                },
-                {
-                    "label": "SSE（旧版兼容）",
-                    "file_hint": "配置文件：项目根目录 .cursor/mcp.json",
-                    "lang": "json",
-                    "code": cursor_json(sse_url),
-                },
-                {
-                    "label": "stdio（本地）",
-                    "file_hint": "配置文件：项目根目录 .cursor/mcp.json",
-                    "lang": "json",
-                    "code": stdio_json(),
-                },
-            ],
-        },
-        {
-            "id": "codex",
-            "name": "OpenAI Codex",
-            "variants": [
-                {
-                    "label": "Streamable HTTP（推荐）",
-                    "file_hint": "配置文件：~/.codex/config.toml（或项目 .codex/config.toml）",
-                    "lang": "toml",
-                    "code": codex_toml(stream_url),
-                },
-            ],
-        },
-    ]
-
-    return {
-        "stream_url": stream_url,
-        "sse_url": sse_url,
-        "auth_disabled": auth_disabled,
-        "token_masked": ("change-me" if auth_disabled else f"{token[:4]}••••••••") if token else "",
-        "clients": clients,
-    }
-
-
-@app.get("/assist/mcp-setup")
-def mcp_setup_page(request: Request):
-    """MCP 客户端（CodeBuddy / Claude / Codex 等）配置说明页，提供可复制的配置片段。"""
-    configs = _build_mcp_setup_configs(request)
-    return templates.TemplateResponse(
-        name="mcp_setup.html",
-        request=request,
-        context=configs,
+    # 这些前缀由其他路由处理，不应 fallback；
+    # 如果请求路径缺少末尾斜杠（如 /assist/api/documents），
+    # 重定向到带斜杠的地址，让 APIRouter 的 redirect_slashes 生效。
+    skip_prefixes = (
+        "api/",
+        "mcp/",
+        "uploads/",
+        "file/",
     )
+    for prefix in skip_prefixes:
+        if full_path.startswith(prefix):
+            if request is not None and not full_path.endswith("/"):
+                target = f"/assist/{full_path}/"
+                query = str(request.url.query)
+                if query:
+                    target += "?" + query
+                return RedirectResponse(url=target)
+            raise HTTPException(status_code=404, detail="Not Found")
 
+    if full_path:
+        frontend_file = resolve_frontend_file(full_path)
+        if frontend_file is not None:
+            return FileResponse(frontend_file)
 
-@app.get("/assist/doc/{doc_id}")
-def doc_manage_page(request: Request, doc_id: int):
-    return templates.TemplateResponse(name="doc_manage.html", request=request, context={"doc_id": doc_id})
-
-
-@app.get("/assist/config")
-def config_page(request: Request):
-    return templates.TemplateResponse(name="config.html", request=request)
+    if os.path.exists(FRONTEND_INDEX_PATH):
+        return FileResponse(FRONTEND_INDEX_PATH)
+    return {"detail": "前端未构建，请运行 cd frontend && npm run build"}
 
 
 if __name__ == "__main__":
