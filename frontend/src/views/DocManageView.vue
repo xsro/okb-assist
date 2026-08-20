@@ -7,31 +7,16 @@
       </router-link>
     </div>
 
-    <!-- 流水线控制 -->
+    <!-- 文献操作 -->
     <div class="section">
-      <h3>处理流水线</h3>
-      <div class="pipeline-steps">
-        <div class="step" :class="{ active: doc.status === 'parsing', done: isDone('markdown_done') }">
-          <span class="step-num">1</span>
-          <span class="step-label">解析</span>
-        </div>
-        <div class="step-arrow">→</div>
-        <div class="step" :class="{ active: doc.status === 'extracting', done: isDone('meta_done') }">
-          <span class="step-num">2</span>
-          <span class="step-label">提取</span>
-        </div>
-        <div class="step-arrow">→</div>
-        <div class="step" :class="{ active: doc.status === 'indexing', done: isDone('indexed') }">
-          <span class="step-num">3</span>
-          <span class="step-label">索引</span>
-        </div>
-      </div>
-
+      <h3>文献操作</h3>
       <div class="action-buttons">
         <button class="btn" @click="runStage('parse')">解析</button>
         <button class="btn" @click="runStage('extract')">提取</button>
         <button class="btn" @click="runStage('index')">索引</button>
         <button class="btn" @click="runStage('process')">全流程</button>
+        <button class="btn btn-outline" @click="enrichCrossref">Crossref 补充</button>
+        <button class="btn btn-outline" @click="enrichPdfMeta">PDF 元数据提取</button>
         <button class="btn btn-danger" @click="reset">重置</button>
       </div>
     </div>
@@ -76,14 +61,6 @@
       <button class="btn" @click="saveMetadata">保存</button>
     </div>
 
-    <!-- 外部操作 -->
-    <div class="section">
-      <h3>外部操作</h3>
-      <div class="action-buttons">
-        <button class="btn btn-outline" @click="enrichCrossref">Crossref 补充</button>
-        <button class="btn btn-outline" @click="enrichPdfMeta">PDF 元数据提取</button>
-      </div>
-    </div>
   </div>
 
   <div v-else class="loading">加载中...</div>
@@ -98,7 +75,9 @@ import {
   extractDocument,
   indexDocument,
   processDocument,
-  resetDocument
+  resetDocument,
+  crossrefDocument,
+  extractPdfMeta
 } from '@/api/pipeline'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
@@ -110,14 +89,6 @@ const { requireToken } = useRequireToken()
 
 const doc = ref<Document | null>(null)
 const form = ref<Partial<Document>>({})
-
-function isDone(status: string): boolean {
-  const order = ['uploaded', 'parsing', 'markdown_done', 'extracting', 'meta_done', 'indexing', 'indexed']
-  if (!doc.value) return false
-  const currentIdx = order.indexOf(doc.value.status)
-  const targetIdx = order.indexOf(status)
-  return currentIdx >= targetIdx
-}
 
 async function load() {
   const id = parseInt(route.params.id as string)
@@ -172,11 +143,25 @@ async function saveMetadata() {
 }
 
 async function enrichCrossref() {
-  showInfo('Crossref 补充功能开发中')
+  const id = parseInt(route.params.id as string)
+  try {
+    await crossrefDocument(id)
+    showSuccess('Crossref 补充任务已提交')
+    setTimeout(load, 2000)
+  } catch {
+    showError('Crossref 补充失败')
+  }
 }
 
 async function enrichPdfMeta() {
-  showInfo('PDF 元数据提取功能开发中')
+  const id = parseInt(route.params.id as string)
+  try {
+    await extractPdfMeta(id)
+    showSuccess('PDF 元数据提取任务已提交')
+    setTimeout(load, 2000)
+  } catch {
+    showError('PDF 元数据提取失败')
+  }
 }
 
 watch(() => route.params.id, load)
@@ -184,40 +169,6 @@ onMounted(load)
 </script>
 
 <style scoped>
-.pipeline-steps {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-.step {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 8px 16px;
-  border-radius: 8px;
-  background: #f5f5f5;
-  min-width: 80px;
-}
-.step.active {
-  background: #e3f2fd;
-  border: 2px solid var(--primary);
-}
-.step.done {
-  background: #e8f5e9;
-}
-.step-num {
-  font-size: 18px;
-  font-weight: 700;
-}
-.step-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.step-arrow {
-  font-size: 20px;
-  color: var(--text-secondary);
-}
 .action-buttons {
   display: flex;
   gap: 8px;

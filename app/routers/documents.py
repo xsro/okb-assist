@@ -12,6 +12,7 @@ from threading import Lock
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
+import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -167,7 +168,7 @@ def _doc_to_out(doc: Document, db: Session = None) -> dict:
     ).model_dump()
 
 
-@router.get("/similar-titles")
+@router.get("/similar-titles/")
 def find_similar_titles(
     min_group_size: int = 2,
     db: Session = Depends(get_db),
@@ -213,7 +214,7 @@ def find_similar_titles(
     }
 
 
-@router.get("/vector-dbs")
+@router.get("/vector-dbs/")
 def list_vector_dbs():
     """列出所有配置的向量数据库（用于搜索时选择）。"""
     from app.config_manager import load_config
@@ -230,7 +231,7 @@ def list_vector_dbs():
     return {"vector_dbs": dbs}
 
 
-@router.get("/doc-types")
+@router.get("/doc-types/")
 def list_doc_types(db: Session = Depends(get_db)):
     """返回所有已使用的文献类型（去重、排序）。"""
     rows = (
@@ -243,7 +244,7 @@ def list_doc_types(db: Session = Depends(get_db)):
     return {"doc_types": types}
 
 
-@router.get("/grep-search")
+@router.get("/grep-search/")
 async def grep_search(
     q: str = "",
     limit: int = 10,
@@ -307,7 +308,7 @@ async def grep_search(
     return {"results": enriched, "query": q}
 
 
-@router.get("/search-info")
+@router.get("/search-info/")
 async def search_info(
     q: str = "",
     limit: int = 10,
@@ -346,7 +347,7 @@ async def search_info(
     return {"results": results, "query": q, "total": len(results)}
 
 
-@router.get("/search")
+@router.get("/search/")
 async def semantic_search(
     q: str = "",
     limit: int = 5,
@@ -399,6 +400,7 @@ def list_documents(
     q: Optional[str] = None,
     status_filter: Optional[str] = None,
     doc_type_filter: Optional[str] = None,
+    search_fields: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
     sort_by: Optional[str] = None,
@@ -408,11 +410,35 @@ def list_documents(
     query = db.query(Document)
 
     if q:
-        query = query.filter(
-            (Document.title.ilike(f"%{q}%")) |
-            (Document.authors.ilike(f"%{q}%")) |
-            (Document.filename.ilike(f"%{q}%"))
-        )
+        # 可搜索字段映射；search_fields 为空时兼容旧行为
+        _SEARCHABLE_COLUMNS = {
+            "title": Document.title,
+            "authors": Document.authors,
+            "keywords": Document.keywords,
+            "abstract": Document.abstract,
+            "journal": Document.journal,
+            "doi": Document.doi,
+            "source": Document.source,
+            "filename": Document.filename,
+            "category": Document.category,
+            "doc_type": Document.doc_type,
+            "language": Document.language,
+            "title_en": Document.title_en,
+            "authors_en": Document.authors_en,
+            "keywords_en": Document.keywords_en,
+            "abstract_en": Document.abstract_en,
+            "journal_en": Document.journal_en,
+        }
+        if search_fields:
+            fields = [f.strip() for f in search_fields.split(",") if f.strip()]
+            columns = [_SEARCHABLE_COLUMNS.get(f) for f in fields]
+        else:
+            columns = [Document.title, Document.authors, Document.filename]
+        columns = [c for c in columns if c is not None]
+        if columns:
+            query = query.filter(
+                sa.or_(*(c.ilike(f"%{q}%") for c in columns))
+            )
 
     if status_filter:
         # Support multiple status filters separated by comma
@@ -461,7 +487,7 @@ def list_documents(
     }
 
 
-@router.post("/upload")
+@router.post("/upload/")
 async def upload_document(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -519,7 +545,7 @@ class RegisterByPath(BaseModel):
     force: bool = False  # Force registration even if hash exists
 
 
-@router.post("/register")
+@router.post("/register/")
 def register_document_by_path(
     data: RegisterByPath,
     db: Session = Depends(get_db),
@@ -595,7 +621,7 @@ class DiffDoisRequest(BaseModel):
     dois: list[str] = []
 
 
-@router.post("/diff-dois")
+@router.post("/diff-dois/")
 def diff_dois(data: DiffDoisRequest, db: Session = Depends(get_db)):
     """Accept a list of DOIs; return which are NOT present on the server
     (i.e. the documents the client would need to upload)."""
@@ -621,7 +647,7 @@ def diff_dois(data: DiffDoisRequest, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/by-hash/{file_hash}")
+@router.get("/by-hash/{file_hash}/")
 def get_document_by_hash(
     file_hash: str,
     db: Session = Depends(get_db),
@@ -637,7 +663,7 @@ def get_document_by_hash(
     return _doc_to_out(doc, db)
 
 
-@router.get("/by-doi/{doi:path}")
+@router.get("/by-doi/{doi:path}/")
 def get_document_by_doi(
     doi: str,
     db: Session = Depends(get_db),
@@ -653,7 +679,7 @@ def get_document_by_doi(
     return _doc_to_out(doc, db)
 
 
-@router.get("/{doc_id}")
+@router.get("/{doc_id:int}/")
 def get_document(
     doc_id: int,
     db: Session = Depends(get_db),
@@ -664,7 +690,7 @@ def get_document(
     return _doc_to_out(doc, db)
 
 
-@router.put("/{doc_id}")
+@router.put("/{doc_id:int}/")
 def update_document(
     doc_id: int,
     data: DocumentUpdate,
@@ -687,7 +713,7 @@ class InfoPayload(BaseModel):
     info: dict = {}
 
 
-@router.post("/{doc_id}/info")
+@router.post("/{doc_id:int}/info")
 def save_document_info(doc_id: int, payload: InfoPayload, db: Session = Depends(get_db)):
     """Persist the supplied metadata into markdowns/{doc_id}.json.
 
@@ -714,7 +740,7 @@ def save_document_info(doc_id: int, payload: InfoPayload, db: Session = Depends(
     return {"id": doc_id, "info_path": str(info_path), "keys": len(existing)}
 
 
-@router.delete("/{doc_id}")
+@router.delete("/{doc_id:int}/")
 def delete_document(
     doc_id: int,
     db: Session = Depends(get_db),
@@ -757,7 +783,7 @@ def check_pdf_exists(
     return Response(status_code=200)
 
 
-@router.get("/{doc_id}/pdf")
+@router.get("/{doc_id:int}/pdf/")
 def get_pdf(
     doc_id: int,
     db: Session = Depends(get_db),
@@ -787,7 +813,7 @@ _IMAGE_MIME = {
 }
 
 
-@router.get("/{doc_id}/image/{filename}")
+@router.get("/{doc_id:int}/image/{filename}/")
 def get_image_from_zip(
     doc_id: int,
     filename: str,
@@ -829,7 +855,7 @@ def get_image_from_zip(
     )
 
 
-@router.post("/{doc_id}/pdf")
+@router.post("/{doc_id:int}/pdf/")
 async def replace_pdf(
     doc_id: int,
     file: UploadFile = File(...),
@@ -865,7 +891,7 @@ async def replace_pdf(
     return _doc_to_out(doc, db)
 
 
-@router.get("/{doc_id}/markdown")
+@router.get("/{doc_id:int}/markdown/")
 def get_markdown(
     doc_id: int,
     page: int = 1,
@@ -960,7 +986,7 @@ def _split_into_pages(content: str, max_chars: int = 5000) -> list[str]:
     return pages
 
 
-@router.put("/{doc_id}/markdown")
+@router.put("/{doc_id:int}/markdown/")
 def update_markdown(
     doc_id: int,
     data: MarkdownUpdate,
@@ -979,7 +1005,7 @@ def update_markdown(
     return {"detail": "Markdown 已更新"}
 
 
-@router.get("/{doc_id}/file-alias")
+@router.get("/{doc_id:int}/file-alias/")
 def generate_file_alias(
     doc_id: int,
     db: Session = Depends(get_db),

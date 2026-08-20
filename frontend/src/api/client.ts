@@ -58,8 +58,12 @@ export async function apiGet<T>(path: string, params?: Record<string, unknown>):
   return res.data
 }
 
-export async function apiPost<T>(path: string, data?: unknown): Promise<T> {
-  const res = await client.post<T>(path, data)
+export async function apiPost<T>(
+  path: string,
+  data?: unknown,
+  config?: AxiosRequestConfig
+): Promise<T> {
+  const res = await client.post<T>(path, data, config)
   return res.data
 }
 

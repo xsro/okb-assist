@@ -541,7 +541,7 @@ async def _do_full_pipeline_impl(doc_id: int):
         _update_doc_status(doc_id, DocStatus.error, f"处理失败: {str(e)}")
 
 
-@router.get("/queue/status")
+@router.get("/queue/status/")
 def get_queue_status():
     """Get current task queue status."""
     return {
@@ -551,7 +551,7 @@ def get_queue_status():
     }
 
 
-@router.get("/tasks/active")
+@router.get("/tasks/active/")
 def get_active_tasks(db: Session = Depends(get_db)):
     """Get all currently active background tasks."""
     tasks = []
@@ -620,7 +620,7 @@ async def _run_with_semaphore(doc_id: int):
             _running_tasks -= 1
 
 
-@router.post("/batch/start")
+@router.post("/batch/start/")
 async def start_batch_processing(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -645,7 +645,7 @@ async def start_batch_processing(
     }
 
 
-@router.post("/batch/pause")
+@router.post("/batch/pause/")
 def pause_batch_processing():
     """Pause batch processing after current tasks complete."""
     global _batch_paused
@@ -653,7 +653,7 @@ def pause_batch_processing():
     return {"detail": "批量处理将在当前任务完成后暂停"}
 
 
-@router.post("/batch/resume")
+@router.post("/batch/resume/")
 async def resume_batch_processing(
     background_tasks: BackgroundTasks,
 ):
@@ -881,7 +881,7 @@ async def _process_stage_batch_for_db(
     print(f"[Batch {stage}] 批量索引完成，共处理 {total} 个文档，失败 {error_count} 个")
 
 
-@router.post("/batch/start-parse")
+@router.post("/batch/start-parse/")
 async def start_batch_parse(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Start batch parsing for all uploaded documents."""
     global _batch_paused
@@ -893,7 +893,7 @@ async def start_batch_parse(background_tasks: BackgroundTasks, db: Session = Dep
     return {"detail": f"批量解析已开始，共 {count} 个文档", "pending": count}
 
 
-@router.post("/batch/start-extract")
+@router.post("/batch/start-extract/")
 async def start_batch_extract(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Start batch metadata extraction for all parsed documents."""
     global _batch_paused
@@ -905,7 +905,7 @@ async def start_batch_extract(background_tasks: BackgroundTasks, db: Session = D
     return {"detail": f"批量提取已开始，共 {count} 个文档", "pending": count}
 
 
-@router.post("/batch/start-index")
+@router.post("/batch/start-index/")
 async def start_batch_index(
     vector_db_id: str = "default",
     limit: int = 0,
@@ -974,7 +974,7 @@ async def start_batch_index(
     }
 
 
-@router.post("/batch/start-full")
+@router.post("/batch/start-full/")
 async def start_batch_full(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Start full pipeline batch for all pending documents."""
     global _batch_paused
@@ -988,7 +988,7 @@ async def start_batch_full(background_tasks: BackgroundTasks, db: Session = Depe
     return {"detail": f"全流程批量处理已开始，共 {count} 个文档", "pending": count}
 
 
-@router.get("/batch/status")
+@router.get("/batch/status/")
 def get_batch_status(db: Session = Depends(get_db)):
     """Get batch processing status."""
     pending_count = db.query(Document).filter(
@@ -1038,7 +1038,7 @@ def get_batch_status(db: Session = Depends(get_db)):
     }
 
 
-@router.post("/batch/reset-errors")
+@router.post("/batch/reset-errors/")
 def batch_reset_errors(target_status: str = None, db: Session = Depends(get_db)):
     """批量将所有错误状态的文档重置为失败前的状态。
 
@@ -1077,7 +1077,7 @@ def batch_reset_errors(target_status: str = None, db: Session = Depends(get_db))
     }
 
 
-@router.post("/batch/reset-timeout-errors")
+@router.post("/batch/reset-timeout-errors/")
 def batch_reset_timeout_errors(target_status: str = None, db: Session = Depends(get_db)):
     """批量将超时失败的文档重置为失败前的状态。
 
@@ -1118,7 +1118,7 @@ def batch_reset_timeout_errors(target_status: str = None, db: Session = Depends(
     }
 
 
-@router.post("/batch/promote-ready")
+@router.post("/batch/promote-ready/")
 def batch_promote_ready(db: Session = Depends(get_db)):
     """将已解析且包含标题和作者信息的文档直接标记为已提取。
 
@@ -1149,7 +1149,7 @@ def batch_promote_ready(db: Session = Depends(get_db)):
     }
 
 
-@router.post("/{doc_id}/reset")
+@router.post("/{doc_id:int}/reset/")
 def reset_document(
     doc_id: int,
     target_status: str = None,
@@ -1200,7 +1200,7 @@ def reset_document(
     }
 
 
-@router.post("/{doc_id}/parse")
+@router.post("/{doc_id:int}/parse/")
 async def parse_document(
     doc_id: int,
     background_tasks: BackgroundTasks,
@@ -1225,7 +1225,7 @@ async def parse_document(
     return {"detail": "解析任务已提交", "status": "parsing"}
 
 
-@router.post("/{doc_id}/extract")
+@router.post("/{doc_id:int}/extract/")
 async def extract_document_meta(
     doc_id: int,
     background_tasks: BackgroundTasks,
@@ -1249,7 +1249,7 @@ async def extract_document_meta(
     return {"detail": "元数据提取任务已提交", "status": "extracting"}
 
 
-@router.post("/{doc_id}/crossref")
+@router.post("/{doc_id:int}/crossref/")
 async def fetch_crossref_meta(
     doc_id: int,
     background_tasks: BackgroundTasks,
@@ -1345,7 +1345,7 @@ async def _run_crossref(doc_id: int):
         db.close()
 
 
-@router.post("/{doc_id}/extract-pdf-meta")
+@router.post("/{doc_id:int}/extract-pdf-meta/")
 async def extract_pdf_meta(
     doc_id: int,
     background_tasks: BackgroundTasks,
@@ -1411,7 +1411,7 @@ async def _run_extract_pdf_meta(doc_id: int):
         db.close()
 
 
-@router.post("/{doc_id}/index")
+@router.post("/{doc_id:int}/index/")
 async def index_document_to_qdrant(
     doc_id: int,
     vector_db_id: str = "default",
@@ -1456,7 +1456,7 @@ async def index_document_to_qdrant(
     return {"detail": f"索引任务已提交到 {vector_db_id}", "status": "indexing"}
 
 
-@router.get("/{doc_id}/indexes")
+@router.get("/{doc_id:int}/indexes/")
 async def get_document_indexes(
     doc_id: int,
     db: Session = Depends(get_db),
@@ -1485,7 +1485,7 @@ async def get_document_indexes(
     }
 
 
-@router.post("/{doc_id}/process")
+@router.post("/{doc_id:int}/process/")
 async def process_full_pipeline(
     doc_id: int,
     background_tasks: BackgroundTasks,
@@ -1509,7 +1509,7 @@ async def process_full_pipeline(
     return {"detail": "全流程处理任务已提交", "status": "processing"}
 
 
-@router.get("/{doc_id}/status")
+@router.get("/{doc_id:int}/status/")
 def get_pipeline_status(
     doc_id: int,
     db: Session = Depends(get_db),

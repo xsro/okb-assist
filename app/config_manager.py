@@ -47,6 +47,11 @@ DEFAULT_SYSTEM = {
     "max_concurrent_tasks": 3,
     "database_url": "sqlite:///./okb_assist.db",
     "uploads_folder": "uploads",
+    "markdown_path":"uploads/{id}/{id}.md",
+    "info_path":"uploads/{id}/{id}.json",
+    "crossref_path":"uploads/{id}/{id}_crossref.json",
+    "markdown_asset_path":"uploads/{id}/{id}.zip",
+    "pdf_path":"uploads/{id}/{id}.pdf",
     "public_url": "http://localhost:5001",
     "subnet_url": "http://192.168.1.100:5001",
 }

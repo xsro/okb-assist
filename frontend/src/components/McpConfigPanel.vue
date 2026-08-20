@@ -17,6 +17,10 @@
       </button>
     </div>
 
+    <p class="config-path">
+      配置文件位置：<code>{{ configPath }}</code>
+    </p>
+
     <div class="config-output">
       <pre><code>{{ clientConfig }}</code></pre>
       <button class="btn btn-sm" @click="copy">复制</button>
@@ -48,6 +52,15 @@ const clients = [
   { key: 'codex', label: 'Codex' }
 ]
 const activeClient = ref('codebuddy')
+
+const configPath = computed(() => {
+  const paths: Record<string, string> = {
+    codebuddy: '~/.codebuddy/mcp.json（具体路径以 CodeBuddy 设置为准）',
+    claude: 'macOS: ~/Library/Application Support/Claude/claude_desktop_config.json；Linux: ~/.config/claude-desktop/config.json',
+    codex: '~/.codex/config.toml（或 ~/.config/codex/config.toml）'
+  }
+  return paths[activeClient.value] || ''
+})
 
 const clientConfig = computed(() => {
   const configs: Record<string, string> = {
@@ -122,6 +135,15 @@ onMounted(load)
 .tab.active {
   color: var(--primary);
   border-bottom-color: var(--primary);
+}
+.config-path {
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.config-path code {
+  color: var(--primary);
+  word-break: break-all;
 }
 .config-output {
   display: flex;
