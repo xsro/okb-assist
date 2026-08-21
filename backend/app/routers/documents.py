@@ -813,7 +813,7 @@ _IMAGE_MIME = {
 }
 
 
-@router.get("/{doc_id:int}/image/{filename}/")
+@router.get("/{doc_id:int}/image/{filename}")
 def get_image_from_zip(
     doc_id: int,
     filename: str,

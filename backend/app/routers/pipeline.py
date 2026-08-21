@@ -136,7 +136,7 @@ async def _do_parse_impl(doc_id: int, file_path: str):
         # 将相对路径转换为绝对路径
         abs_file_path = to_absolute_path(file_path)
 
-        # Save generated files in uploads/{doc_id}/
+        # Save generated files in {uploads_folder}/{doc_id}/
         output_dir = os.path.join(settings.uploads_folder, str(doc_id))
         os.makedirs(output_dir, exist_ok=True)
 
@@ -245,7 +245,7 @@ def _clear_mineru_task_id(doc_id: int):
 def _save_parse_result(doc_id: int, md_path: str):
     """保存解析结果：将 markdown 与图片资源 zip 复制到 system.json 定义的规范路径。
 
-    两份复制均成功后，删除 uploads/<id>/ 暂存目录，避免与规范路径形成重复副本。
+    两份复制均成功后，删除 {uploads_folder}/<id>/ 暂存目录，避免与规范路径形成重复副本。
     仅当复制成功时才删除，复制失败不会误删尚未复制完成的文件。
     """
     import shutil
@@ -266,12 +266,12 @@ def _save_parse_result(doc_id: int, md_path: str):
                 os.makedirs(os.path.dirname(target_zip), exist_ok=True)
                 shutil.copy2(images_zip, target_zip)
 
-            # 两份复制均成功（zip 不存在时视为无需复制），才清理 uploads/<id>/ 暂存目录。
+            # 两份复制均成功（zip 不存在时视为无需复制），才清理 {uploads_folder}/<id>/ 暂存目录。
             # 若任一复制失败，shutil.copy2 会抛异常并在上层捕获，不会执行到删除逻辑。
             md_copied = os.path.exists(target_md)
             zip_copied = not os.path.exists(images_zip) or os.path.exists(get_asset_path(doc_id))
             if md_copied and zip_copied:
-                staging_dir = os.path.dirname(md_path)  # uploads/<id>/
+                staging_dir = os.path.dirname(md_path)  # {uploads_folder}/<id>/
                 if os.path.isdir(staging_dir):
                     shutil.rmtree(staging_dir, ignore_errors=True)
 

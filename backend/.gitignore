@@ -1,7 +1,5 @@
-data/storage
-data/storage2
-data/qdrant
-data/.qdrant-initialized
+data
+
 okb_assist.db.bak.*
 .env
 config.json
@@ -15,7 +13,7 @@ qdrant_data/
 .swp
 .webui_secret_key
 
-data/*.csv
+
 *.log
 
 frontend

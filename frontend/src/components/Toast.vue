@@ -6,7 +6,14 @@
       class="toast"
       :class="t.type"
     >
-      <button class="toast-close" @click.stop="remove(t.id)">×</button>
+      <button
+        class="toast-close"
+        type="button"
+        aria-label="关闭"
+        @click="remove(t.id)"
+      >
+        <span aria-hidden="true">×</span>
+      </button>
       <span class="toast-message">{{ t.message }}</span>
     </div>
   </div>

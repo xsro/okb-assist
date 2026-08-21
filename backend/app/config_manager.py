@@ -46,7 +46,7 @@ DEFAULT_SYSTEM = {
     "mcp_token": "change-me",
     "max_concurrent_tasks": 3,
     "database_url": "sqlite:///./okb_assist.db",
-    "uploads_folder": "uploads",
+    "uploads_folder": "data/_uploads",
     "markdown_path":"uploads/{id}/{id}.md",
     "info_path":"uploads/{id}/{id}.json",
     "crossref_path":"uploads/{id}/{id}_crossref.json",
