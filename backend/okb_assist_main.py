@@ -7,10 +7,11 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from fastapi import Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.staticfiles import NotModifiedResponse
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, FileResponse
 
 from app.database import init_db
 from app.config import get_settings
@@ -33,6 +34,44 @@ def resolve_frontend_file(path: str):
     if os.path.isfile(candidate):
         return candidate
     return None
+
+
+# ── 缓存策略 ──────────────────────────────────────────────────────────────
+
+# 带内容 hash 的静态资源（Vite 构建产物文件名包含 hash），可安全长期缓存
+LONG_CACHE_EXTENSIONS = {
+    ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+    ".woff", ".woff2", ".ttf", ".eot", ".map", ".webp", ".avif",
+}
+
+# 中等缓存时长：1 天（适用于无 hash 的普通资源）
+MIDDLE_CACHE_MAX_AGE = 86400
+
+# 长期缓存时长：1 年（适用于带 hash 的资源）
+LONG_CACHE_MAX_AGE = 31536000
+
+
+def _get_cache_control(filepath: str) -> str:
+    """根据文件扩展名返回合适的 Cache-Control 头值。
+
+    策略：
+    - index.html / 路由回退页面：不缓存，确保用户始终获取最新版本
+    - 带 hash 的静态资源（JS/CSS/图片/字体）：public, max-age=1年, immutable
+    - 其他文件：public, max-age=1天
+    """
+    basename = os.path.basename(filepath)
+    ext = os.path.splitext(basename)[1].lower()
+
+    # index.html 或无后缀的路由回退页面：不缓存
+    if basename == "index.html" or not ext:
+        return "no-cache, must-revalidate"
+
+    # 带 hash 的静态资源：长期缓存
+    if ext in LONG_CACHE_EXTENSIONS:
+        return f"public, max-age={LONG_CACHE_MAX_AGE}, immutable"
+
+    # 其他：中期缓存
+    return f"public, max-age={MIDDLE_CACHE_MAX_AGE}"
 
 
 # ── Token 认证中间件 ──────────────────────────────────────────────────────
@@ -182,9 +221,26 @@ app.add_middleware(
 # Token 认证中间件
 app.add_middleware(TokenMiddleware)
 
+class CachedStaticFiles(StaticFiles):
+    """带缓存头的 StaticFiles，为上传文件添加合理的 Cache-Control。"""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        from starlette.datastructures import Headers
+        response = FileResponse(
+            full_path,
+            status_code=status_code,
+            stat_result=stat_result,
+            headers={"Cache-Control": _get_cache_control(str(full_path))},
+        )
+        request_headers = Headers(scope=scope)
+        if self.is_not_modified(response.headers, request_headers):
+            return NotModifiedResponse(response.headers)
+        return response
+
+
 _settings = get_settings()
 os.makedirs(_settings.uploads_folder, exist_ok=True)
-app.mount("/assist/uploads", StaticFiles(directory=_settings.uploads_folder), name="uploads")
+app.mount("/assist/uploads", CachedStaticFiles(directory=_settings.uploads_folder), name="uploads")
 
 # Include routers
 app.include_router(documents.router)
@@ -245,7 +301,11 @@ async def serve_file_alias(filename: str):
         abs_path = get_pdf_path(doc_id)
         if not doc or not os.path.isfile(abs_path):
             return JSONResponse(status_code=404, content={"detail": "文件不存在"})
-        return FileResponse(abs_path, media_type="application/pdf")
+        return FileResponse(
+            abs_path,
+            media_type="application/pdf",
+            headers={"Cache-Control": f"public, max-age={MIDDLE_CACHE_MAX_AGE}"},
+        )
     finally:
         db.close()
 
@@ -305,10 +365,12 @@ async def serve_spa(full_path: str = "", request: Request = None):
     if full_path:
         frontend_file = resolve_frontend_file(full_path)
         if frontend_file is not None:
-            return FileResponse(frontend_file)
+            cache_control = _get_cache_control(frontend_file)
+            return FileResponse(frontend_file, headers={"Cache-Control": cache_control})
 
     if os.path.exists(FRONTEND_INDEX_PATH):
-        return FileResponse(FRONTEND_INDEX_PATH)
+        cache_control = _get_cache_control(FRONTEND_INDEX_PATH)
+        return FileResponse(FRONTEND_INDEX_PATH, headers={"Cache-Control": cache_control})
     return {"detail": f"前端未构建，请运行 cd {os.path.dirname(FRONTEND_DIST_DIR)} && pnpm run build"}
 
 
