@@ -55,8 +55,10 @@ class QdrantAdapter(VectorDBAdapter):
     """Qdrant 向量数据库适配器。"""
 
     def __init__(self, db_config: dict):
-        self.url = db_config.get("url", "http://127.0.0.1:6333")
+        self.url = db_config.get("url", "http://127.0.0.1:6333").rstrip("/")
         self.search_url = db_config.get("search_url")  # 搜索专用 URL，可选
+        if self.search_url:
+            self.search_url = self.search_url.rstrip("/")
         self.base_collection = db_config.get("collection", "documents")
         self.vector_size = get_vector_size(db_config)
         self._client: Optional[QdrantClient] = None

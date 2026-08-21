@@ -116,6 +116,7 @@ async def _test_mineru(url: str, key: str) -> dict:
 
 async def _test_ollama(url: str, model: str) -> dict:
     """测试 Ollama 连接。"""
+    url = url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{url}/api/tags")
@@ -137,6 +138,7 @@ async def _test_ollama(url: str, model: str) -> dict:
 
 async def _test_qdrant(url: str) -> dict:
     """测试 Qdrant 连接。"""
+    url = url.rstrip("/")
     try:
         from qdrant_client import QdrantClient
         client = QdrantClient(url=url)

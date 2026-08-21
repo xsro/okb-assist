@@ -22,7 +22,7 @@ class ChromaAdapter(VectorDBAdapter):
                 import chromadb
                 # ChromaDB 支持 HTTP 和持久化两种模式
                 if self.url.startswith("http"):
-                    self._client = chromadb.HttpClient(host=self.url)
+                    self._client = chromadb.HttpClient(host=self.url.rstrip("/"))
                 else:
                     self._client = chromadb.PersistentClient(path=self.url)
             except ImportError:

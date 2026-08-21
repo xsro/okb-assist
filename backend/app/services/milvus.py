@@ -24,7 +24,7 @@ class MilvusAdapter(VectorDBAdapter):
             try:
                 from pymilvus import connections, Collection
                 # 解析 host:port
-                host_port = self.url.replace("http://", "").replace("https://", "")
+                host_port = self.url.replace("http://", "").replace("https://", "").rstrip("/")
                 parts = host_port.split(":")
                 host = parts[0]
                 port = int(parts[1]) if len(parts) > 1 else 19530

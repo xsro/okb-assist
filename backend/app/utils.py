@@ -2,7 +2,6 @@ import hashlib
 import os
 from pathlib import Path
 
-
 def get_uploads_folder() -> str:
     """获取 uploads_folder 的绝对路径。"""
     from app.config import get_settings
@@ -13,11 +12,11 @@ def get_uploads_folder() -> str:
 def to_relative_path(absolute_path: str) -> str:
     """将绝对路径转换为相对于 uploads_folder 的路径。
 
-    例如: /home/user/uploads/1/1.pdf -> 1/1.pdf
+    例如: /home/user/uploads/1/1.pdf -> uploads/1/1.pdf
     """
-    uploads_folder = get_uploads_folder()
+    cwd_folder = os.path.abspath(os.getcwd())
     try:
-        return os.path.relpath(absolute_path, uploads_folder)
+        return os.path.relpath(absolute_path, cwd_folder)
     except ValueError:
         # Windows 上跨盘符时会报错，返回原路径
         return absolute_path
@@ -26,10 +25,10 @@ def to_relative_path(absolute_path: str) -> str:
 def to_absolute_path(relative_path: str) -> str:
     """将相对于 uploads_folder 的路径转换为绝对路径。
 
-    例如: 1/1.pdf -> /home/user/uploads/1/1.pdf
+    例如: uploads/1/1.pdf -> /home/user/uploads/1/1.pdf
     """
-    uploads_folder = get_uploads_folder()
-    return os.path.join(uploads_folder, relative_path)
+    cwd_folder = os.path.abspath(os.getcwd())
+    return os.path.join(cwd_folder, relative_path)
 
 
 def calculate_file_hash(file_path: str) -> str:

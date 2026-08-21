@@ -53,11 +53,13 @@ async def get_services_status():
     cfg = get_config()
     mineru_url = settings.mineru_url  # 已自动去除尾部斜杠
     mineru_key = settings.mineru_key
+    ollama_url = settings.ollama_url
+    fastembed_url = settings.fastembed_url
 
     result = {
         "mineru": {"status": "unknown", "url": mineru_url},
-        "ollama": {"status": "unknown", "url": cfg["ollama"]["url"]},
-        "fastembed": {"status": "unknown", "url": cfg.get("fastembed", {}).get("url", "http://127.0.0.1:8003")},
+        "ollama": {"status": "unknown", "url": ollama_url},
+        "fastembed": {"status": "unknown", "url": fastembed_url},
     }
 
     # Check MinerU
@@ -86,7 +88,7 @@ async def get_services_status():
     # Check Ollama
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{cfg['ollama']['url']}/api/tags")
+            response = await client.get(f"{ollama_url}/api/tags")
             if response.status_code == 200:
                 models = response.json().get("models", [])
                 result["ollama"]["status"] = "connected"
@@ -100,7 +102,6 @@ async def get_services_status():
 
     # Check FastEmbed
     try:
-        fastembed_url = cfg.get("fastembed", {}).get("url", "http://127.0.0.1:8003")
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{fastembed_url}/health")
             if response.status_code == 200:

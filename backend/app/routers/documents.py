@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models import Document, DocStatus, DocumentVectorIndex, IndexStatus
-from app.utils import calculate_file_hash, to_absolute_path
+from app.utils import calculate_file_hash, get_uploads_folder, to_absolute_path
 from app.paths import get_markdown_path, get_pdf_path, get_asset_path, get_info_path
 from app.services.pdf_meta import extract_pdf_metadata, normalize_doi
 
@@ -752,7 +752,7 @@ def delete_document(
     # Delete generated files in uploads/{doc_id}/
     import shutil
     # 使用绝对路径删除文件
-    doc_upload_dir = to_absolute_path(str(doc_id))
+    doc_upload_dir = os.path.join(get_uploads_folder(),str(doc_id))
     if os.path.exists(doc_upload_dir):
         shutil.rmtree(doc_upload_dir, ignore_errors=True)
 

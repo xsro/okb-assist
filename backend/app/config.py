@@ -31,7 +31,7 @@ class Settings:
     # ── Ollama ──
     @property
     def ollama_url(self) -> str:
-        return get_config()["ollama"]["url"]
+        return get_config()["ollama"]["url"].rstrip("/")
 
     @property
     def ollama_key(self) -> str:
@@ -44,7 +44,7 @@ class Settings:
     # ── FastEmbed ──
     @property
     def fastembed_url(self) -> str:
-        return get_config().get("fastembed", {}).get("url", "http://127.0.0.1:8003")
+        return get_config().get("fastembed", {}).get("url", "http://127.0.0.1:8003").rstrip("/")
 
     # ── Embedding 配置（从活跃向量数据库配置中获取） ──
     @property
@@ -68,7 +68,7 @@ class Settings:
     def qdrant_url(self) -> str:
         db = get_active_vector_db()
         if db and db["type"] == "qdrant":
-            return db.get("url", "http://127.0.0.1:6333")
+            return db.get("url", "http://127.0.0.1:6333").rstrip("/")
         return "http://127.0.0.1:6333"
 
     @property
