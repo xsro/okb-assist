@@ -31,10 +31,14 @@
             {{ opt.label }}
           </option>
         </select>
+        <label class="image-toggle">
+          <input v-model="loadImages" type="checkbox" />
+          <span>加载图片</span>
+        </label>
       </div>
     </div>
     <div class="markdown-content">
-      <MarkdownViewer :content="content" :math-mode="mathMode" />
+      <MarkdownViewer :content="content" :math-mode="mathMode" :load-images="loadImages" />
     </div>
   </div>
 </template>
@@ -59,6 +63,7 @@ const totalLength = ref(0)
 const viewAll = ref(false)
 const pageSize = ref(100000)
 const mathMode = ref<'none' | 'katex' | 'mathjax'>('katex')
+const loadImages = ref(false)
 
 const pageSizeOptions = [
   { value: 10000, label: '1万字符/页' },
@@ -170,6 +175,20 @@ onMounted(load)
   font-size: 13px;
   background: #fff;
   color: var(--text-primary);
+}
+
+.image-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.image-toggle input {
+  cursor: pointer;
 }
 
 .markdown-content {
