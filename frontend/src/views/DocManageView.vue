@@ -16,7 +16,6 @@
         <span class="action-label">流水线</span>
         <div class="action-buttons">
           <button class="btn" @click="runStage('parse')">解析</button>
-          <button class="btn" @click="runStage('extract')">提取</button>
           <div class="index-control">
             <select v-model="selectedIndexDb" class="select">
               <option value="">选择索引库</option>
@@ -64,6 +63,7 @@
       <div class="action-group">
         <span class="action-label">元数据补全</span>
         <div class="action-buttons">
+          <button class="btn" @click="runStage('extract')">从 Markdown 文件</button>
           <button class="btn btn-outline" @click="enrichPdfMeta">PDF 元数据</button>
           <button class="btn btn-outline" @click="enrichCrossref">Crossref</button>
         </div>

@@ -4,7 +4,7 @@
 
 <script setup lang="ts">
 import { computed, watch } from 'vue'
-import { marked, type RendererObject } from 'marked'
+import { marked, Renderer } from 'marked'
 import DOMPurify from 'dompurify'
 import { renderMath, loadMathJax, type MathMode } from '@/utils/mathRenderer'
 
@@ -22,17 +22,16 @@ const rendered = computed(() => {
   const withMath = renderMath(props.content, mode)
 
   // 2. 自定义图片渲染器：关闭时不加载图片，用占位符显示
-  const RendererCtor = (marked as any).Renderer as new () => RendererObject
-  const defaultRenderer = new RendererCtor()
-  const renderer: RendererObject = {
-    image(href: string, title: string | null, text: string) {
+  const renderer=new Renderer();
+  const old_image_renderer=renderer.image;
+  renderer.image=e=>{
       if (loadImages) {
-        return defaultRenderer.image!(href, title, text)
+        return  old_image_renderer(e)
       }
+      const {title, text}=e;
       const label = text || title || '图片'
       return `<span class="image-placeholder">[${label}]</span>`
     }
-  }
 
   // 3. marked 解析 markdown
   const raw = marked.parse(withMath, {
