@@ -3,7 +3,9 @@ import type {
   PipelineStatus,
   ActiveTask,
   BatchInfo,
-  DocumentStatusInfo
+  DocumentStatusInfo,
+  DocumentIndexInfo,
+  BatchProgress
 } from '@/types/pipeline'
 
 // ── 流水线状态 ──────────────────────────────────────────
@@ -22,13 +24,6 @@ export function getActiveTasks() {
 
 // ── 单文档操作 ──────────────────────────────────────────
 
-/** 启动单文档处理 */
-export function processDocument(id: number) {
-  return apiPost<{ detail: string; status: string }>(
-    `/assist/api/pipeline/${id}/process/`
-  )
-}
-
 /** 解析文档 */
 export function parseDocument(id: number) {
   return apiPost<{ detail: string; status: string }>(
@@ -44,9 +39,18 @@ export function extractDocument(id: number) {
 }
 
 /** 建立索引 */
-export function indexDocument(id: number) {
+export function indexDocument(id: number, vectorDbId?: string) {
   return apiPost<{ detail: string; status: string }>(
-    `/assist/api/pipeline/${id}/index/`
+    `/assist/api/pipeline/${id}/index/`,
+    undefined,
+    { params: vectorDbId ? { vector_db_id: vectorDbId } : undefined }
+  )
+}
+
+/** 获取文档在各数据库的索引状态 */
+export function getDocumentIndexes(id: number) {
+  return apiGet<{ document_id: number; indexes: DocumentIndexInfo[] }>(
+    `/assist/api/pipeline/${id}/indexes/`
   )
 }
 
@@ -123,8 +127,6 @@ export function promoteReadyBatches() {
 }
 
 /** 获取批次状态 */
-export function getBatchStatus(batchId: string) {
-  return apiGet<BatchInfo>('/assist/api/pipeline/batch/status/', {
-    batch_id: batchId
-  })
+export function getBatchStatus() {
+  return apiGet<BatchProgress>('/assist/api/pipeline/batch/status/')
 }

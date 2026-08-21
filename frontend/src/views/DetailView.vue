@@ -25,7 +25,19 @@
         <tr><th>文件哈希</th><td>{{ doc.file_hash || '-' }}</td></tr>
         <tr><th>文件大小</th><td>{{ formatSize(doc.file_size) }}</td></tr>
         <tr><th>状态</th><td><StatusBadge :status="doc.status" /></td></tr>
-        <tr><th>索引状态</th><td><StatusBadge :status="doc.index_status" /></td></tr>
+        <tr>
+          <th>已索引库</th>
+          <td>
+            <span v-if="!doc.indexed_dbs || doc.indexed_dbs.length === 0">-</span>
+            <span v-else class="index-dbs">
+              <span
+                v-for="dbId in doc.indexed_dbs"
+                :key="dbId"
+                class="index-db-tag"
+              >{{ dbId }}</span>
+            </span>
+          </td>
+        </tr>
         <tr><th>创建时间</th><td>{{ doc.created_at }}</td></tr>
         <tr><th>更新时间</th><td>{{ doc.updated_at }}</td></tr>
       </table>
@@ -178,6 +190,20 @@ onMounted(load)
   display: flex;
   gap: 8px;
   align-items: center;
+}
+.index-dbs {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.index-db-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 .loading {
   text-align: center;

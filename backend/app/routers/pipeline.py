@@ -492,55 +492,6 @@ async def _do_index_impl(doc_id: int, vector_db_id: str = "default"):
         db.close()
 
 
-async def _run_full_pipeline(doc_id: int):
-    """Background task for full pipeline."""
-    await _with_semaphore(_do_full_pipeline_impl(doc_id))
-
-
-async def _do_full_pipeline_impl(doc_id: int):
-    """Full pipeline implementation."""
-    try:
-        db = SessionLocal()
-        doc = db.query(Document).filter(Document.id == doc_id).first()
-        if not doc:
-            db.close()
-            return
-
-        file_path = get_pdf_path(doc_id)
-        db.close()
-
-        # Stage 1: Parse
-        _update_doc_status(doc_id, DocStatus.parsing, "阶段 1/3: 正在解析 PDF...", 0)
-        await _do_parse_impl(doc_id, file_path)
-
-        # Check if parse succeeded
-        db = SessionLocal()
-        doc = db.query(Document).filter(Document.id == doc_id).first()
-        if not doc or doc.status != DocStatus.markdown_done:
-            db.close()
-            return
-        db.close()
-
-        # Stage 2: Extract
-        _update_doc_status(doc_id, DocStatus.extracting, "阶段 2/3: 正在提取元数据...", 33)
-        await _do_extract_impl(doc_id)
-
-        # Check if extract succeeded
-        db = SessionLocal()
-        doc = db.query(Document).filter(Document.id == doc_id).first()
-        if not doc or doc.status != DocStatus.meta_done:
-            db.close()
-            return
-        db.close()
-
-        # Stage 3: Index
-        _update_doc_status(doc_id, DocStatus.indexing, "阶段 3/3: 正在索引到 Qdrant...", 66)
-        await _do_index_impl(doc_id)
-
-    except Exception as e:
-        _update_doc_status(doc_id, DocStatus.error, f"处理失败: {str(e)}")
-
-
 @router.get("/queue/status/")
 def get_queue_status():
     """Get current task queue status."""
@@ -569,63 +520,12 @@ def get_active_tasks(db: Session = Depends(get_db)):
     return {"tasks": tasks, "count": len(tasks)}
 
 
-async def _process_batch():
-    """Process all pending documents in batch mode with concurrency."""
-    global _batch_paused
-
-    # 一次性查询所有待处理文档
-    db = SessionLocal()
-    try:
-        docs = db.query(Document).filter(
-            Document.status.in_([DocStatus.uploaded, DocStatus.error])
-        ).all()
-        doc_ids = [doc.id for doc in docs]
-    finally:
-        db.close()
-
-    if not doc_ids:
-        _batch_paused = False
-        return
-
-    print(f"[Batch full] 开始全流程处理 {len(doc_ids)} 个文档，并发数: {MAX_CONCURRENT_TASKS}")
-
-    # 为每个文档创建任务，Semaphore 会自动限制并发
-    async def process_one(doc_id):
-        if _batch_paused:
-            return
-        try:
-            await _run_with_semaphore(doc_id)
-        except Exception as e:
-            print(f"[Batch full] 文档 {doc_id} 处理失败: {e}")
-
-    tasks = [process_one(doc_id) for doc_id in doc_ids]
-    await asyncio.gather(*tasks, return_exceptions=True)
-
-    _batch_paused = False
-    print(f"[Batch full] 全流程批量处理完成")
-
-
-async def _run_with_semaphore(doc_id: int):
-    """Run a single document pipeline with semaphore limiting."""
-    global _running_tasks
-    async with _task_semaphore:
-        _running_tasks += 1
-        _track_task_start(doc_id, "full_pipeline")
-        try:
-            await _do_full_pipeline_impl(doc_id)
-        except Exception as e:
-            print(f"Pipeline error for doc {doc_id}: {e}")
-        finally:
-            _track_task_end(doc_id)
-            _running_tasks -= 1
-
-
 @router.post("/batch/start/")
 async def start_batch_processing(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """Start batch processing all pending documents."""
+    """Start batch parsing for all pending documents."""
     global _batch_paused
 
     # Count pending documents
@@ -634,13 +534,15 @@ async def start_batch_processing(
     ).count()
 
     if pending_count == 0:
-        return {"detail": "没有待处理的文档", "pending": 0}
+        return {"detail": "没有待解析的文档", "pending": 0}
 
     _batch_paused = False
-    background_tasks.add_task(_process_batch)
+    background_tasks.add_task(
+        _process_stage_batch, "parse", [DocStatus.uploaded, DocStatus.error], _run_parse_only
+    )
 
     return {
-        "detail": f"批量处理已开始，共 {pending_count} 个文档待处理",
+        "detail": f"批量解析已开始，共 {pending_count} 个文档待处理",
         "pending": pending_count,
     }
 
@@ -657,11 +559,13 @@ def pause_batch_processing():
 async def resume_batch_processing(
     background_tasks: BackgroundTasks,
 ):
-    """Resume batch processing."""
+    """Resume batch parsing."""
     global _batch_paused
     _batch_paused = False
-    background_tasks.add_task(_process_batch)
-    return {"detail": "批量处理已恢复"}
+    background_tasks.add_task(
+        _process_stage_batch, "parse", [DocStatus.uploaded, DocStatus.error], _run_parse_only
+    )
+    return {"detail": "批量解析已恢复"}
 
 
 async def _process_stage_batch(stage: str, filter_statuses: list[DocStatus], task_func):
@@ -972,20 +876,6 @@ async def start_batch_index(
         "pending": actual_limit,
         "total_available": total_available,
     }
-
-
-@router.post("/batch/start-full/")
-async def start_batch_full(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    """Start full pipeline batch for all pending documents."""
-    global _batch_paused
-    count = db.query(Document).filter(
-        Document.status.in_([DocStatus.uploaded, DocStatus.error])
-    ).count()
-    if count == 0:
-        return {"detail": "没有待处理的文档", "pending": 0}
-    _batch_paused = False
-    background_tasks.add_task(_process_batch)
-    return {"detail": f"全流程批量处理已开始，共 {count} 个文档", "pending": count}
 
 
 @router.get("/batch/status/")
@@ -1483,30 +1373,6 @@ async def get_document_indexes(
             for idx in indexes
         ]
     }
-
-
-@router.post("/{doc_id:int}/process/")
-async def process_full_pipeline(
-    doc_id: int,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-):
-    """Run all three stages in sequence (async)."""
-    doc = db.query(Document).filter(Document.id == doc_id).first()
-    if not doc:
-        raise HTTPException(status_code=404, detail="文献不存在")
-
-    if doc.status not in [DocStatus.uploaded, DocStatus.error]:
-        raise HTTPException(status_code=400, detail=f"当前状态 {doc.status.value} 不允许处理")
-
-    doc.status = DocStatus.parsing
-    doc.status_message = "全流程处理已提交..."
-    doc.progress = 0
-    db.commit()
-
-    background_tasks.add_task(_run_full_pipeline, doc_id)
-
-    return {"detail": "全流程处理任务已提交", "status": "processing"}
 
 
 @router.get("/{doc_id:int}/status/")

@@ -75,8 +75,12 @@
           <td>{{ doc.doc_type || '-' }}</td>
           <td>
             <StatusBadge :status="doc.status" />
-            <span v-if="doc.index_status" class="ml-8">
-              <StatusBadge :status="doc.index_status" />
+            <span v-if="doc.indexed_dbs && doc.indexed_dbs.length" class="index-dbs">
+              <span
+                v-for="dbId in doc.indexed_dbs"
+                :key="dbId"
+                class="index-db-tag"
+              >{{ dbId }}</span>
             </span>
           </td>
           <td>
@@ -225,6 +229,22 @@ onUnmounted(() => {
 
 <style scoped>
 .ml-8 { margin-left: 8px; }
+.index-dbs {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 8px;
+  flex-wrap: wrap;
+  vertical-align: middle;
+}
+.index-db-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
 .empty,
 .loading-hint {
   text-align: center;

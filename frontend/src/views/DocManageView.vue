@@ -17,8 +17,46 @@
         <div class="action-buttons">
           <button class="btn" @click="runStage('parse')">解析</button>
           <button class="btn" @click="runStage('extract')">提取</button>
-          <button class="btn" @click="runStage('index')">索引</button>
-          <button class="btn btn-primary" @click="runStage('process')">全流程</button>
+          <div class="index-control">
+            <select v-model="selectedIndexDb" class="select">
+              <option value="">选择索引库</option>
+              <option
+                v-for="db in enabledVectorDbs"
+                :key="db.id"
+                :value="db.id"
+              >
+                {{ db.name || db.id }}
+              </option>
+            </select>
+            <button
+              class="btn"
+              :disabled="!selectedIndexDb"
+              @click="runIndex"
+            >
+              索引
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 已索引数据库 -->
+      <div class="action-group">
+        <span class="action-label">已索引库</span>
+        <div class="action-buttons">
+          <div v-if="docIndexes.length === 0" class="empty-hint">
+            尚未索引到任何数据库
+          </div>
+          <div v-else class="index-list">
+            <span
+              v-for="idx in docIndexes"
+              :key="idx.vector_db_id"
+              class="index-tag"
+              :class="`status-${idx.status}`"
+            >
+              {{ idx.vector_db_id }}
+              <small>({{ idx.status }})</small>
+            </span>
+          </div>
         </div>
       </div>
 
@@ -101,14 +139,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, watch, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { getDocument, updateDocument, replacePdf } from '@/api/documents'
+import { getServiceConfig } from '@/api/config'
 import {
   parseDocument,
   extractDocument,
   indexDocument,
-  processDocument,
+  getDocumentIndexes,
   resetDocument,
   crossrefDocument,
   extractPdfMeta
@@ -116,14 +155,42 @@ import {
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import type { Document } from '@/types/document'
+import type { VectorDbConfig } from '@/types/config'
+import type { DocumentIndexInfo } from '@/types/pipeline'
 
 const route = useRoute()
-const { showSuccess, showError, showInfo } = useToast()
+const { showSuccess, showError } = useToast()
 const { requireToken } = useRequireToken()
 
 const doc = ref<Document | null>(null)
 const form = ref<Partial<Document>>({})
 const replacePdfInput = ref<HTMLInputElement>()
+const vectorDbs = ref<VectorDbConfig[]>([])
+const selectedIndexDb = ref('')
+const docIndexes = ref<DocumentIndexInfo[]>([])
+
+const enabledVectorDbs = computed(() =>
+  vectorDbs.value.filter((db) => db.enabled !== false)
+)
+
+async function loadVectorDbs() {
+  try {
+    const config = await getServiceConfig()
+    vectorDbs.value = config.vector_dbs || []
+  } catch {
+    vectorDbs.value = []
+  }
+}
+
+async function loadIndexes() {
+  const id = parseInt(route.params.id as string)
+  try {
+    const res = await getDocumentIndexes(id)
+    docIndexes.value = res.indexes
+  } catch {
+    docIndexes.value = []
+  }
+}
 
 async function load() {
   const id = parseInt(route.params.id as string)
@@ -131,6 +198,7 @@ async function load() {
   try {
     doc.value = await getDocument(id)
     form.value = { ...doc.value }
+    await loadIndexes()
   } catch {
     showError('加载失败')
   }
@@ -139,19 +207,29 @@ async function load() {
 async function runStage(stage: string) {
   const id = parseInt(route.params.id as string)
   try {
-    if (stage === 'process') {
-      await processDocument(id)
-    } else if (stage === 'parse') {
+    if (stage === 'parse') {
       await parseDocument(id)
     } else if (stage === 'extract') {
       await extractDocument(id)
-    } else if (stage === 'index') {
-      await indexDocument(id)
     }
     showSuccess('已启动任务')
     setTimeout(load, 2000)
   } catch {
     showError('操作失败')
+  }
+}
+
+async function runIndex() {
+  const id = parseInt(route.params.id as string)
+  const dbId = selectedIndexDb.value
+  if (!dbId) return
+  try {
+    await indexDocument(id, dbId)
+    showSuccess(`已提交索引到 ${dbId}`)
+    selectedIndexDb.value = ''
+    setTimeout(load, 2000)
+  } catch {
+    showError('索引提交失败')
   }
 }
 
@@ -225,7 +303,10 @@ async function enrichPdfMeta() {
 }
 
 watch(() => route.params.id, load)
-onMounted(load)
+onMounted(() => {
+  loadVectorDbs()
+  load()
+})
 </script>
 
 <style scoped>
@@ -255,6 +336,64 @@ onMounted(load)
   gap: 8px;
   flex-wrap: wrap;
   flex: 1;
+  align-items: center;
+}
+
+.index-control {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.select {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.index-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.index-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.index-tag small {
+  color: var(--text-secondary);
+}
+
+.index-tag.status-indexed {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.index-tag.status-indexing {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
+.index-tag.status-error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.empty-hint {
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 
 .action-group-danger .action-label {
@@ -279,6 +418,14 @@ onMounted(load)
 
   .action-label {
     width: auto;
+  }
+
+  .index-control {
+    width: 100%;
+  }
+
+  .select {
+    flex: 1;
   }
 }
 </style>

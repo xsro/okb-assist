@@ -23,10 +23,33 @@ export interface BatchInfo {
   status: 'running' | 'paused' | 'completed' | 'error'
 }
 
+export interface DocumentIndexInfo {
+  vector_db_id: string
+  collection_name: string
+  status: string
+  error_message: string | null
+  updated_at: string | null
+}
+
+export interface BatchProgress {
+  active: boolean
+  stage: string
+  vector_db_id: string
+  total: number
+  processed: number
+  current_batch: number
+  total_batches: number
+  batch_size: number
+  pause_seconds: number
+  started_at: string | null
+  errors: number
+}
+
 export interface PipelineStatus {
   max_concurrent_tasks: number
   running_tasks: number
   available_slots: number
+  batch_progress?: BatchProgress
 }
 
 export interface DocumentStatusInfo {

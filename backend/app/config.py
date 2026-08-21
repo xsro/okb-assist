@@ -13,7 +13,7 @@ class Settings:
     # ── MinerU ──
     @property
     def mineru_url(self) -> str:
-        return get_config()["mineru"]["url"]
+        return get_config()["mineru"]["url"].rstrip("/")
 
     @property
     def mineru_key(self) -> str:

@@ -21,14 +21,14 @@ OKB-Assist 是一个**本地学术文献库管理系统**（论文与专著）�
 ```bash
 cd backend
 uv sync                                  # 安装依赖（或 uv pip install -e .）
-uv run okb_assist_main.py                # 启动主程序（uvicorn，host 0.0.0.0，port 5001，reload=True）
+uv run okb_assist_main.py                # 启动主程序（uvicorn，默认 host 0.0.0.0、port 5001、reload=False）
 uv run python -m uvicorn okb_assist_main:app --host 0.0.0.0 --port 5001   # 生产式启动
 uv run scripts/fastembed_server.py       # 启动 Fastembed 嵌入服务
 uv run scripts/<name>.py ...             # 运行维护脚本（见 backend/scripts/）
 ```
 
 > 注意：
-> - `README.md` 里 `uv run okb_assist_main.py --host 0.0.0.0` 的 `--host` 参数脚本并不解析（无 argparse），会被静默忽略，host 本就是 `0.0.0.0`。
+> - `okb_assist_main.py` 已支持 argparse，可接收 `--host`、`--port`、`--reload` 参数（默认 `0.0.0.0` / `5001` / `False`）。`--reload` 需显式传入才开启热重载，否则默认关闭。
 > - `config.json` 与 `system.json` 默认在**启动时的工作目录**创建/读取。为保持路径稳定，建议始终从 `backend/` 目录启动后端。
 
 ## 目录结构
@@ -58,21 +58,33 @@ uv run scripts/<name>.py ...             # 运行维护脚本（见 backend/scri
 - 配置读取层：`backend/app/config_manager.py`（带锁 + 进程内缓存）；`backend/app/config.py:Settings` 是单例代理，属性每次从 JSON 实时读取。
 - 添加新配置字段时：在 `backend/app/config_manager.py` 的 `DEFAULT_CONFIG` / `DEFAULT_SYSTEM` 加默认值；若是敏感字段，扩展 `mask_sensitive` / `mask_system_config` 脱敏函数。
 - 文件路径来自 `system.json` 的路径模板（含 `{id}` 占位符），在 `backend/app/paths.py` 解析，**不要**在 `Document` 模型里加路径列。
-- 环境变量极少：`HF_ENDPOINT=https://hf-mirror.com`、`HF_HUB_DISABLE_XET=1`（Fastembed 中国镜像，硬编码在 `backend/okb_assist_main.py` 与 `backend/scripts/fastembed_server.py`）；`OKB_ASSIST_TOKEN`/`OKB_ASSIST_URL` 被部分脚本与 OpenWebUI 集成读取。
+- 环境变量极少：`HF_ENDPOINT=https://hf-mirror.com`、`HF_HUB_DISABLE_XET=1`（Fastembed 中国镜像，硬编码在 `backend/scripts/fastembed_server.py`）；`OKB_ASSIST_TOKEN`/`OKB_ASSIST_URL` 被部分脚本与 OpenWebUI 集成读取。
 
 ## 架构与请求流
 
-1. **Web/API 层**：`backend/okb_assist_main.py` + `backend/app/routers/*`。`TokenMiddleware` 仅对 `/assist/api/*` 校验 `X-Token`/query `token`，放行 `/assist/mcp`、`/assist/static`、`/assist/uploads`、`/assist/file`、`/redirect`、图片 URL。CORS 限定前端来源（开发 `localhost:5173`，生产同源）。
+1. **Web/API 层**：`backend/okb_assist_main.py` + `backend/app/routers/*`。`TokenMiddleware` 仅对 `/assist/api/*` 校验 `X-Token`/query `token`，放行 `/assist/mcp`、`/assist/assets`（前端静态资源）、`/assist/uploads`、`/assist/file`、`/redirect`，以及对 `/assist/api/documents/` 下含 `/image/` 的图片 URL 放行。`token` 为 `change-me`（或未设置）时整体跳过校验；来自 `192.168.1.0/24` 局域网的请求也免校验（见 `okb_assist_main.py` 的 `TokenMiddleware`）。CORS 限定前端来源（开发 `localhost:5173`，生产同源 `localhost:5001`）。
 2. **数据模型**：`Document`（主记录 + 状态）、`DocumentVectorIndex`（每个向量库的索引状态，唯一键 `(document_id, vector_db_id)`）。状态机用 `DocStatus` / `IndexStatus` 枚举（`backend/app/models.py`）。
 3. **摄取流水线**（`backend/app/routers/pipeline.py`，核心状态机）：
    - parse（MinerU）→ `parsing` → `markdown_done`
    - extract（Ollama）→ `extracting` → `meta_done`
    - index（向量库）→ `indexing` → `indexed`
    - 含批量控制器、暂停/恢复/重置、信号量并发限制（受 `max_concurrent_tasks` 约束）。
+   - **所有阶段均在后台执行**（见下方「后台任务」一节）—— 请求先返回，协程在事件循环继续；进度与状态机记录在 `Document` 上，可轮询查询。
 4. **文档管理**（`documents.py`）：CRUD、上传、按路径登记、语义搜索 `/search`、全文搜索 `/grep-search`、`/assist/markdown` 读写、PDF/图片服务、去重。
 5. **配置/管理**（`config.py`、`admin.py`）：查看/更新服务配置、重连测试、统计、迁移、索引重置。
 6. **向量库抽象**（`vector_db.py` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
 7. **MCP 服务**（`backend/app/mcp_server.py`）：Streamable HTTP 端点 `/assist/mcp/stream`，旧版 SSE 挂载在 `/assist/mcp`；Bearer token 用 `system.json` 的 `mcp_token` 校验。完整工具列表见 `document/mcp.md`。
+
+## 后台任务（异步执行）
+
+后端大量耗时操作**不在请求内同步完成**，而是在后台运行，请求通常立即返回、由前端轮询状态。理解这一点对排查"为什么改了没生效 / 任务卡住"至关重要。
+
+- **机制**：摄取阶段（parse / extract / crossref / extract-pdf-meta / index / process）及批量端点（`/batch/start`、`/batch/resume`、`/batch/start-parse`、`/batch/start-extract`、`/batch/start-index`、`/batch/start-full`）通过 FastAPI `BackgroundTasks` 提交协程。协程在 HTTP 响应发出后由同一个事件循环调度（协作式异步，**不是独立线程**），状态机（`DocStatus`）流转记录在数据库中。
+- **并发限制**：受 `asyncio.Semaphore(max_concurrent_tasks)` 约束（`system.json` 默认 `3`）。同时运行的任务数不超过该值，超出排队。
+- **批量进度 / 暂停状态存于进程内存全局变量**：`_batch_progress`、`_batch_paused`、`_running_tasks` 等是模块级变量，**进程重启即丢失**。暂停（`/batch/pause`）只在处理完当前任务后生效；重启后由 `lifespan` 中的 `reset_stuck_tasks()` 把卡在 `parsing`/`extracting`/`indexing` 的文档重置回上一状态（见 `okb_assist_main.py`）。因此**批量任务进度不持久化**，重启后需手动重新触发。
+- **真·fire-and-forget**：删除文档（`documents.py` 的 `delete_document`）时，SQLite 记录与本地文件先同步删除，而 Qdrant 中对应向量点的删除通过 `asyncio.ensure_future`（`app/services/qdrant.py:delete_document_points`）脱离请求生命周期异步执行，**请求不等待、失败也不可见**。
+- **前台（非后台）操作**：连接测试 `/assist/api/config/test`、服务状态 `/assist/api/admin/services/status`、语义/全文搜索、上传均在前端 `await` 内同步完成。MCP 端点是唯一的流式长连接通道（`/assist/mcp/stream` 与 `/assist/mcp` SSE），但工具函数内部检索仍是同步 await。
+- **无定时任务**：全仓库没有 `APScheduler`/`schedule`/守护线程；后台仅为事件循环协程，不要假设存在周期性任务。
 
 ## 路由前缀
 
@@ -105,15 +117,15 @@ npm run type-check   # TypeScript 类型检查
 
 ## ⚠️ 易错点（编辑前必读）
 
-1. **`.vscode/launch.json` 的 `program` 写的是 `main.py`，但实际入口是 `backend/okb_assist_main.py`，不存在 `main.py`**。调试该配置会失败。
+1. **`.vscode/launch.json` 的 `program` 写的是 `okb_assist_main.py`，但 `cwd` 是 `${workspaceFolder}/`（项目根目录），而入口文件位于 `backend/` 子目录下**，相对路径找不到文件，调试该配置仍会失败。修复：把 `cwd` 改为 `${workspaceFolder}/backend`。
 2. **配置改动不会自动生效**：`config.json` 改后需 reload；`system.json` 改后需重启进程（进程内缓存）。
 3. **MCP 路由注册顺序有依赖**（`backend/okb_assist_main.py`）：必须在 SSE 挂载 `app.mount("/assist/mcp", ...)` **之前**，用 `app.add_route("/assist/mcp/stream", ...)` 精确注册 Streamable HTTP 端点，且在模块加载时完成。否则 `/assist/mcp/stream` 会被 SSE 挂载吞掉或 404。**不要“整理”这个顺序。**
 4. **`mcp` 依赖锁定 `<2`**（`pyproject.toml`）。曾因升级到 2.x 导致 MCP 端点失效。不要擅自升到 2.x，除非重新验证 MCP 端点。
 5. **没有测试、没有 lint**：编辑后无法跑测试验证。应在 `backend/` 目录手动 `uv run okb_assist_main.py` 确认能启动，并用 curl 校验端点。`backend/app/routers/pipeline.py` 与 `backend/app/routers/documents.py` 是大文件，改动要小心。
-6. **硬编码的局域网 IP**（`192.168.1.x`）出现在 `config.json`、`system.json`、脚本中，是部署相关配置，视为环境配置而非代码。
+6. **硬编码的局域网 IP**（`192.168.1.x`）出现在 `config.json`、`system.json`、脚本中，是部署相关配置，视为环境配置而非代码。`okb_assist_main.py` 的 `TokenMiddleware` 另把 `192.168.1.0/24` 作为 **LAN 免 Token 白名单**硬编码，改动需谨慎。
 7. **`uploads/` 按文档数字 ID 建子目录**（git 忽略），`_next_available_id` 与别名逻辑依赖此布局，勿改。
 8. **SQLite 单写者**：`database.py` 设 `check_same_thread=False`，并发写入可行但仍是瓶颈，勿引入大量并发写。
-9. **SPA Fallback 路由**（`backend/okb_assist_main.py`）：`@app.get("/assist/{full_path:.*}")` 必须放在所有路由之后，它会拦截所有 `/assist/*` 请求并返回 `frontend/dist/index.html`。但必须跳过 `api/`、`mcp/`、`uploads/`、`file/` 前缀，否则会吞掉 API 和 MCP 端点。
+9. **SPA Fallback 路由**（`backend/okb_assist_main.py`）：`@app.get("/assist/{full_path:path}")` 必须放在所有路由之后，它会拦截所有 `/assist/*` 请求并返回 `frontend/dist/index.html`。命中 `api/`、`mcp/`、`uploads/`、`file/` 前缀时会被重定向到带斜杠地址或返回 404，避免吞掉 API 和 MCP 端点。
 10. **前端构建产物在 `frontend/dist/`**：`npm run build` 输出到 `frontend/dist/`，构建后 `frontend/dist/index.html` 是 SPA 入口。后端无需额外配置即可 serving。
 11. **CORS 已限定**：开发环境只允许 `localhost:5173`，生产环境只允许同源 `localhost:5001`。如需其他前端域名，修改 `backend/okb_assist_main.py` 中的 `allow_origins` 列表。
 

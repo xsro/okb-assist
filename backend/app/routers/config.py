@@ -93,6 +93,7 @@ async def test_connection(req: TestConnectionRequest):
 
 async def _test_mineru(url: str, key: str) -> dict:
     """测试 MinerU 连接。"""
+    url = url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             headers = {}

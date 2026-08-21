@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.config import get_settings
+
+settings = get_settings()
 from app.config_manager import get_config
 from app.database import get_db, engine
 from app.models import Document, DocStatus
@@ -49,9 +51,11 @@ def get_stats(db: Session = Depends(get_db)):
 async def get_services_status():
     """Check status of all external services (MinerU, Ollama, VectorDBs)."""
     cfg = get_config()
+    mineru_url = settings.mineru_url  # 已自动去除尾部斜杠
+    mineru_key = settings.mineru_key
 
     result = {
-        "mineru": {"status": "unknown", "url": cfg["mineru"]["url"]},
+        "mineru": {"status": "unknown", "url": mineru_url},
         "ollama": {"status": "unknown", "url": cfg["ollama"]["url"]},
         "fastembed": {"status": "unknown", "url": cfg.get("fastembed", {}).get("url", "http://127.0.0.1:8003")},
     }
@@ -60,9 +64,9 @@ async def get_services_status():
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             headers = {}
-            if cfg["mineru"].get("key"):
-                headers["Authorization"] = f"Bearer {cfg['mineru']['key']}"
-            response = await client.get(f"{cfg['mineru']['url']}/health", headers=headers)
+            if mineru_key:
+                headers["Authorization"] = f"Bearer {mineru_key}"
+            response = await client.get(f"{mineru_url}/health", headers=headers)
             if response.status_code == 200:
                 health = response.json()
                 result["mineru"]["status"] = "connected"
