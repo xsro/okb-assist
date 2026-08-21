@@ -7,7 +7,7 @@ export default defineConfig({
   base: '/assist/',
   resolve: {
     alias: {
-      '@': resolve(__dirname, 'src')
+      '@': resolve(import.meta.dirname, 'src')
     }
   },
   server: {
@@ -28,10 +28,18 @@ export default defineConfig({
     chunkSizeWarningLimit: 2000,
     rollupOptions: {
       output: {
-        manualChunks: {
-          vendor: ['vue', 'vue-router', 'pinia'],
-          marked: ['marked'],
-          axios: ['axios']
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('vue') || id.includes('vue-router') || id.includes('pinia')) {
+              return 'vendor'
+            }
+            if (id.includes('marked')) {
+              return 'marked'
+            }
+            if (id.includes('axios')) {
+              return 'axios'
+            }
+          }
         }
       }
     }

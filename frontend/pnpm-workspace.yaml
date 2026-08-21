@@ -2,3 +2,5 @@ allowBuilds:
   '@parcel/watcher': false
   esbuild: false
   vue-demi: false
+minimumReleaseAgeExclude:
+  - sass@1.103.1
