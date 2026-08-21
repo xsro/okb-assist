@@ -313,5 +313,34 @@ async def serve_spa(full_path: str = "", request: Request = None):
 
 
 if __name__ == "__main__":
+    import argparse
     import uvicorn
-    uvicorn.run("okb_assist_main:app", host="0.0.0.0", port=5001, reload=True)
+
+    parser = argparse.ArgumentParser(
+        description="OKB-Assist 启动参数"
+    )
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="监听地址 (默认: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=5001,
+        help="监听端口 (默认: 5001)",
+    )
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        default=False,
+        help="启用自动重载（开发模式）",
+    )
+    args = parser.parse_args()
+
+    uvicorn.run(
+        "okb_assist_main:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+    )
