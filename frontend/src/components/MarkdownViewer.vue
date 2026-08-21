@@ -26,7 +26,7 @@ const rendered = computed(() => {
   const old_image_renderer=renderer.image;
   renderer.image=e=>{
       if (loadImages) {
-        return  old_image_renderer(e)
+        return old_image_renderer.call(renderer, e)
       }
       const {title, text}=e;
       const label = text || title || '图片'
