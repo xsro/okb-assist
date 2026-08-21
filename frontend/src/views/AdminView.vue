@@ -71,6 +71,7 @@
     <div class="section">
       <h3>维护操作</h3>
       <div class="action-buttons">
+        <button class="btn btn-outline" @click="batchParse">批量解析已上传</button>
         <button class="btn btn-outline" @click="migrate">数据库迁移</button>
         <button class="btn btn-outline" @click="recalcHashes">重新计算哈希</button>
         <button class="btn btn-outline" @click="resetIndex">重置索引</button>
@@ -88,6 +89,7 @@ import {
   recalculateHashes,
   resetIndex
 } from '@/api/admin'
+import { startBatchParse } from '@/api/pipeline'
 import { useToast } from '@/composables/useToast'
 import type { SystemStats, ServiceStatus, ServiceStatusItem } from '@/types/config'
 
@@ -148,6 +150,16 @@ async function testConnection(service: string) {
     showToast(`${service}: ${item.status}`, isOk(item) ? 'success' : 'error')
   } catch {
     showError('连接测试失败')
+  }
+}
+
+async function batchParse() {
+  if (!confirm('确定批量解析所有已上传/待解析的文档？')) return
+  try {
+    const res = await startBatchParse()
+    showInfo(res.detail)
+  } catch {
+    showError('批量解析提交失败')
   }
 }
 

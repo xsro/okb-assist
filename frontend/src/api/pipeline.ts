@@ -91,6 +91,13 @@ export function startBatch() {
   )
 }
 
+/** 批量解析所有待解析文档 */
+export function startBatchParse() {
+  return apiPost<{ detail: string; pending: number }>(
+    '/assist/api/pipeline/batch/start-parse/'
+  )
+}
+
 /** 批量暂停 */
 export function pauseBatch() {
   return apiPost<{ detail: string }>('/assist/api/pipeline/batch/pause/')
