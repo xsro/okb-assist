@@ -336,16 +336,18 @@ def redirect_by_network(request: Request, doc_id: int):
 #   1. 如果命中 frontend/dist 中的真实文件，直接返回该文件；
 #   2. 否则返回前端 index.html，由 Vue Router 处理客户端路由。
 
-@app.get("/assist", include_in_schema=False)
-@app.get("/assist/{full_path:path}", include_in_schema=False)
+@app.api_route("/assist", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"], include_in_schema=False)
+@app.api_route("/assist/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"], include_in_schema=False)
 async def serve_spa(full_path: str = "", request: Request = None):
     """Serve the built frontend under /assist/."""
     from fastapi import HTTPException
     from fastapi.responses import FileResponse, RedirectResponse
 
     # 这些前缀由其他路由处理，不应 fallback；
-    # 如果请求路径缺少末尾斜杠（如 /assist/api/documents），
-    # 重定向到带斜杠的地址，让 APIRouter 的 redirect_slashes 生效。
+    # 注意：此前路由仅接受 GET，导致 POST/PUT/DELETE 等请求
+    # 被 Starlette 路由匹配层拦截（path match but method mismatch）
+    # 返回 405 Method Not Allowed。现已改为接受所有方法，
+    # 使得函数内的 skip_prefixes 逻辑能够对 POST 等请求生效。
     skip_prefixes = (
         "api/",
         "mcp/",

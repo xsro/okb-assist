@@ -105,7 +105,7 @@ def _headers(token: str = None) -> dict:
 def check_exists_by_doi(base_url: str, doi: str, token: str = None) -> dict | None:
     """通过 DOI 查询文档是否存在。"""
     try:
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=30, follow_redirects=True) as client:
             resp = client.get(
                 f"{base_url}/assist/api/documents/by-doi/{doi}",
                 headers=_headers(token),
@@ -122,7 +122,7 @@ def check_exists_by_doi(base_url: str, doi: str, token: str = None) -> dict | No
 def check_exists_by_hash(base_url: str, file_hash: str, token: str = None) -> dict | None:
     """通过文件哈希查询文档是否存在。"""
     try:
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=30, follow_redirects=True) as client:
             resp = client.get(
                 f"{base_url}/assist/api/documents/by-hash/{file_hash}",
                 headers=_headers(token),
@@ -142,7 +142,7 @@ def upload_document(base_url: str, file_path: str, token: str = None) -> dict | 
         headers = {}
         if token:
             headers["X-Token"] = token
-        with httpx.Client(timeout=120) as client:
+        with httpx.Client(timeout=120, follow_redirects=True) as client:
             with open(file_path, "rb") as f:
                 resp = client.post(
                     f"{base_url}/assist/api/documents/upload",
@@ -161,7 +161,7 @@ def upload_document(base_url: str, file_path: str, token: str = None) -> dict | 
 def update_document_metadata(base_url: str, doc_id: int, metadata: dict, token: str = None) -> bool:
     """更新文档元数据。"""
     try:
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=30, follow_redirects=True) as client:
             resp = client.put(
                 f"{base_url}/assist/api/documents/{doc_id}",
                 json=metadata,
@@ -179,7 +179,7 @@ def save_document_info(base_url, doc_id, info, token):
     """POST the full non-empty CSV row to the server, which persists it
     into markdowns/{doc_id}.json."""
     headers = {"X-Token": token, "Content-Type": "application/json"}
-    with httpx.Client(timeout=120) as client:
+    with httpx.Client(timeout=120, follow_redirects=True) as client:
         resp = client.post(
             f"{base_url}/assist/api/documents/{doc_id}/info",
             json={"info": info},
@@ -590,7 +590,7 @@ def main():
     # ── 2. 与服务器做 diff ──
     dois = [d["doi"] for d in local_docs]
     try:
-        with httpx.Client(timeout=120) as client:
+        with httpx.Client(timeout=120, follow_redirects=True) as client:
             resp = client.post(
                 f"{args.base_url}/assist/api/documents/diff-dois",
                 json={"dois": dois},
