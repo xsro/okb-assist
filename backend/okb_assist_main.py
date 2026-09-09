@@ -373,7 +373,10 @@ async def serve_spa(full_path: str = "", request: Request = None):
     if os.path.exists(FRONTEND_INDEX_PATH):
         cache_control = _get_cache_control(FRONTEND_INDEX_PATH)
         return FileResponse(FRONTEND_INDEX_PATH, headers={"Cache-Control": cache_control})
-    return {"detail": f"前端未构建，请运行 cd {os.path.dirname(FRONTEND_DIST_DIR)} && pnpm run build"}
+    else:
+        return {"detail": f"前端未构建，请运行 cd {os.path.dirname(FRONTEND_DIST_DIR)} && pnpm run build"}
+
+    return {"detail":f"error when request {full_path}","request":request}
 
 
 if __name__ == "__main__":
