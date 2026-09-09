@@ -40,4 +40,7 @@ function cancel() {
 
 // 暴露全局调用
 (window as any).showConfirm = show
+
+// 暴露给父组件 ref
+defineExpose({ show })
 </script>

@@ -44,7 +44,15 @@ uv run scripts/<name>.py ...             # 运行维护脚本（见 backend/scri
 | `backend/app/paths.py` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
 | `backend/app/mcp_server.py` | MCP 服务（`FastMCP("OKB-Assist")`） |
 | `backend/scripts/` | 维护/迁移脚本 + shell 启动器 |
-| `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 构建，输出到 `frontend/dist/`） |
+| `frontend/src/components/` | Vue 组件：`AceEditor.vue`（590 行，编辑+分屏预览+KaTeX）、`MarkdownViewer.vue`（marked 渲染）、`ConfirmDialog.vue`（确认弹窗）、`AppHeader.vue`、`AppNav.vue`、`StatusBadge.vue`、`Toast.vue`、`TokenModal.vue`、`McpConfigPanel.vue` |
+| `frontend/src/views/` | 页面视图：`MarkdownEditView.vue`、`MarkdownView.vue`、`HomeView.vue`、`DetailView.vue`、`DocManageView.vue`、`UploadView.vue`、`ConfigView.vue`、`AdminView.vue`、`MonitorView.vue`、`PointView.vue`、`DuplicatesView.vue`、`ToolsView.vue`、`McpSetupView.vue` |
+| `frontend/src/router/` | Vue Router 配置（15+ 路由，`base: '/assist/'`） |
+| `frontend/src/stores/` | Pinia 存储：`pipeline.ts`、`toast.ts`、`token.ts` |
+| `frontend/src/composables/` | 组合式函数：`useToast.ts`、`useRequireToken.ts` |
+| `frontend/src/types/` | TypeScript 类型定义：`document.ts`、`config.ts`、`pipeline.ts` |
+| `frontend/src/utils/` | 工具：`mathRenderer.ts`（KaTeX/MathJax 公式渲染） |
+| `frontend/src/api/` | API 客户端：`client.ts`、`documents.ts`、`pipeline.ts`、`admin.ts`、`config.ts` |
+| `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 构建，输出到 `frontend/dist/`，包管理器 `pnpm`） |
 | `frontend/dist/` | 前端构建产物（`index.html`、`assets/`），由后端 serving |
 | `backend/config.json` | 服务配置（MinerU/Ollama/向量库），**git 忽略，可由 UI 编辑** |
 | `backend/system.json` | 系统配置（token、DB URL、上传路径、路径模板），**git 忽略，需手动改** |
@@ -98,13 +106,71 @@ uv run scripts/<name>.py ...             # 运行维护脚本（见 backend/scri
 
 ```bash
 cd frontend
-npm install          # 安装前端依赖
-npm run dev          # 启动开发服务器（端口 5173，代理 /assist 到后端 5001）
-npm run build        # 构建到 frontend/dist/
-npm run type-check   # TypeScript 类型检查
+pnpm install         # 安装前端依赖
+pnpm run dev         # 启动开发服务器（端口 5173，代理 /assist 到后端 5001）
+pnpm run build       # 构建到 frontend/dist/
+pnpm run type-check  # TypeScript 类型检查
 ```
 
 开发时前端独立端口运行，通过 Vite proxy 访问后端 API。生产环境构建后由 FastAPI 直接 serving 静态文件。
+
+## 前端架构
+
+### 构建与部署
+- **包管理器**：`pnpm`（锁文件 `pnpm-lock.yaml`）
+- **构建工具**：Vite 8，输出到 `frontend/dist/`
+- **base 路径**：`vite.config.ts` 设 `base: '/assist/'`，因此所有 JS/CSS 资源 URL 以 `/assist/assets/` 开头。后端 `okb_assist_main.py` 的 `serve_spa` 路由通过 `/assist/{full_path:path}` 匹配资源路径并返回对应文件。
+- **Vite proxy**：开发模式下代理 `/assist` → `http://localhost:5001`，前后端分离开发
+
+### 路由（`src/router/index.ts`）
+所有前端路由前缀为 `/assist/`，由 Vue Router 的 `createWebHistory()` 处理：
+- `/assist` — 文献列表
+- `/assist/detail/:id` — 文档详情
+- `/assist/markdown/:id` — 只读 Markdown 查看
+- `/assist/markdown/:id/edit` — Markdown 编辑（AceEditor）
+- `/assist/upload` — 上传 PDF
+- `/assist/config` — 服务配置
+- `/assist/admin` — 管理面板
+- `/assist/duplicates` — 去重
+- `/assist/mcp-setup` — MCP 配置引导
+- `/assist/monitor` — 任务监控
+- `/assist/point`、`/assist/tools` — 工具页面
+
+### AceEditor 编辑器组件（`src/components/AceEditor.vue`）
+基于 `ace-builds@1.44.0` 封装的 Markdown 编辑器，内置完整编辑工具栏：
+- **Markdown 快捷插入**：加粗/斜体/删除线/H1-H3/列表/引用/链接/图片/行内代码/代码块/表格/分割线
+- **分屏预览**：编辑+预览并排，预览仅渲染编辑器**视口可见行**（通过 `getFirstVisibleRow()` + `screenToDocumentRow()` 实现）
+- **全屏模式**：固定定位铺满窗口
+- **搜索替换**：Ctrl+F / Ctrl+H（`ext-searchbox`）
+- **字体缩放**：Ctrl+滚轮 / A+ A− 按钮（范围 8-30px）
+- **撤销/重做**：Ctrl+Z / Ctrl+Shift+Z
+- **光标/选中信息**：行号列号 + 选中字符数 + 总字数
+- **数学公式**：预览通过 `MarkdownViewer` 组件渲染 KaTeX（`katex@0.18.4`）
+- **模块加载**：核心模块（theme/mode）静态 import 注入 AMD 系统；`ext-searchbox` 和 `ext-language_tools` 动态 import（处理自引用依赖）。生产环境 `basePath` 使用 CDN 兜住 extension 的合法动态请求。
+
+### MarkdownViewer 渲染组件（`src/components/MarkdownViewer.vue`）
+- 使用 `marked` 解析 Markdown（GFM + 换行）
+- 通过 `renderMath()`（`src/utils/mathRenderer.ts`）预处理 KaTeX 公式（`$$...$$` 块级、`$...$` 行内）
+- `DOMPurify.sanitize()` 净化 HTML，同时保留数学标签
+- 支持 `mathMode` 切换（`katex` / `mathjax` / `none`）
+- 支持 `loadImages` 开关控制图片加载
+
+### 状态管理
+- `useToast()`（`src/composables/useToast.ts`）：`showSuccess()` / `showError()` / `showInfo()` / `showToast()`
+- `useRequireToken()`（`src/composables/useRequireToken.ts`）：Token 校验引导
+- Pinia stores：`pipeline.ts`（任务状态）、`toast.ts`（消息队列）、`token.ts`（认证令牌）
+
+### API 层
+`src/api/` 通过 `axios` 请求后端：
+- `client.ts`：axios 实例（baseURL `/assist/api`，自动附加 X-Token）
+- `documents.ts`：CRUD + 搜索 + 上传
+- `pipeline.ts`：流水线操作
+- `admin.ts`、`config.ts`：管理/配置
+
+### 类型定义
+- `src/types/document.ts` — `Document`、`DocStatus`、`SearchResult`
+- `src/types/config.ts` — `ServiceConfig`、`SystemConfig`
+- `src/types/pipeline.ts` — `PipelineState`、`BatchProgress`
 
 ## 编码约定
 
@@ -117,16 +183,15 @@ npm run type-check   # TypeScript 类型检查
 
 ## ⚠️ 易错点（编辑前必读）
 
-1. **`.vscode/launch.json` 的 `program` 写的是 `okb_assist_main.py`，但 `cwd` 是 `${workspaceFolder}/`（项目根目录），而入口文件位于 `backend/` 子目录下**，相对路径找不到文件，调试该配置仍会失败。修复：把 `cwd` 改为 `${workspaceFolder}/backend`。
+
 2. **配置改动不会自动生效**：`config.json` 改后需 reload；`system.json` 改后需重启进程（进程内缓存）。
 3. **MCP 路由注册顺序有依赖**（`backend/okb_assist_main.py`）：必须在 SSE 挂载 `app.mount("/assist/mcp", ...)` **之前**，用 `app.add_route("/assist/mcp/stream", ...)` 精确注册 Streamable HTTP 端点，且在模块加载时完成。否则 `/assist/mcp/stream` 会被 SSE 挂载吞掉或 404。**不要“整理”这个顺序。**
 4. **`mcp` 依赖锁定 `<2`**（`pyproject.toml`）。曾因升级到 2.x 导致 MCP 端点失效。不要擅自升到 2.x，除非重新验证 MCP 端点。
 5. **没有测试、没有 lint**：编辑后无法跑测试验证。应在 `backend/` 目录手动 `uv run okb_assist_main.py` 确认能启动，并用 curl 校验端点。`backend/app/routers/pipeline.py` 与 `backend/app/routers/documents.py` 是大文件，改动要小心。
 6. **硬编码的局域网 IP**（`192.168.1.x`）出现在 `config.json`、`system.json`、脚本中，是部署相关配置，视为环境配置而非代码。`okb_assist_main.py` 的 `TokenMiddleware` 另把 `192.168.1.0/24` 作为 **LAN 免 Token 白名单**硬编码，改动需谨慎。
-7. **`uploads/` 按文档数字 ID 建子目录**（git 忽略），`_next_available_id` 与别名逻辑依赖此布局，勿改。
 8. **SQLite 单写者**：`database.py` 设 `check_same_thread=False`，并发写入可行但仍是瓶颈，勿引入大量并发写。
 9. **SPA Fallback 路由**（`backend/okb_assist_main.py`）：`@app.get("/assist/{full_path:path}")` 必须放在所有路由之后，它会拦截所有 `/assist/*` 请求并返回 `frontend/dist/index.html`。命中 `api/`、`mcp/`、`uploads/`、`file/` 前缀时会被重定向到带斜杠地址或返回 404，避免吞掉 API 和 MCP 端点。
-10. **前端构建产物在 `frontend/dist/`**：`npm run build` 输出到 `frontend/dist/`，构建后 `frontend/dist/index.html` 是 SPA 入口。后端无需额外配置即可 serving。
+10. **前端构建产物在 `frontend/dist/`**：`pnpm run build` 输出到 `frontend/dist/`，构建后 `frontend/dist/index.html` 是 SPA 入口。`vite.config.ts` 的 `base: '/assist/'` 使所有资源 URL 以 `/assist/assets/` 开头，与后端 `serve_spa` 路由匹配。
 11. **CORS 已限定**：开发环境只允许 `localhost:5173`，生产环境只允许同源 `localhost:5001`。如需其他前端域名，修改 `backend/okb_assist_main.py` 中的 `allow_origins` 列表。
 
 ## 入口与关键文件速查

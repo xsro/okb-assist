@@ -39,6 +39,9 @@ export default defineConfig({
             if (id.includes('axios')) {
               return 'axios'
             }
+            if (id.includes('ace-builds')) {
+              return 'ace'
+            }
           }
         }
       }
