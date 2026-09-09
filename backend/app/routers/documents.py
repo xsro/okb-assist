@@ -1000,8 +1000,17 @@ def update_markdown(
 
     # markdown 路径由 system.json 推导
     abs_markdown_path = get_markdown_path(doc_id)
+
+    # 保存前反向替换：将 /assist/api/documents/{id}/image/xxx.jpg 还原为 images/xxx.jpg
+    import re
+    content = re.sub(
+        rf'\]\(/assist/api/documents/{doc_id}/image/([^)]+)\)',
+        r'](images/\1)',
+        data.content
+    )
+
     with open(abs_markdown_path, "w", encoding="utf-8") as f:
-        f.write(data.content)
+        f.write(content)
     return {"detail": "Markdown 已更新"}
 
 
