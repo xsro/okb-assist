@@ -28,8 +28,6 @@ from starlette.responses import Response
 from app.config import get_settings
 from app.database import SessionLocal
 from app.models import Document, DocStatus
-from app.services.qdrant import search_similar, list_collections
-from app.services.ollama import get_embedding
 from app.paths import get_markdown_path, get_pdf_path
 
 settings = get_settings()
@@ -105,10 +103,9 @@ _auth_enabled = bool(_token) and _token != "change-me"
 _mcp_kwargs: dict = {
     "instructions": (
         "OKB-Assist provides MCP tools for a local academic document library. "
-        "Use search_documents for semantic search, grep_search for full-text "
-        "keyword/regex search, list_documents to browse records, read_markdown "
-        "to read parsed document text, and get_document_info/get_stats for "
-        "metadata and library status."
+        "Use grep_search for full-text keyword/regex search, list_documents "
+        "to browse records, read_markdown to read parsed document text, "
+        "and get_document_info/get_stats for metadata and library status."
     ),
     # The Streamable HTTP endpoint is mounted at the EXACT path
     # /assist/mcp/stream (no trailing slash) in okb_assist_main.py via an exact
@@ -222,9 +219,21 @@ def _format_doc(doc: Document) -> dict:
 
 
 @mcp.tool()
-async def grep_search(query: str, limit: int = 10, context: int = 2, doc_ids: str = "", algorithm: str = "full", regex: bool = True) -> str:
+async def grep_search(
+    query: str,
+    limit: int = 10,
+    context: int = 2,
+    doc_ids: str = "",
+    algorithm: str = "full",
+    regex: bool = True,
+    journal: str = "",
+    year_start: int = 0,
+    year_end: int = 0,
+) -> str:
     """
     全文搜索文献内容（基于 grep，轻量快速）。无需向量数据库，支持正则表达式。
+
+    可通过期刊名和年份范围进行元数据预过滤，再在候选文档中执行 grep 搜索。
 
     Args:
         query: 搜索关键词（支持正则表达式）
@@ -233,6 +242,9 @@ async def grep_search(query: str, limit: int = 10, context: int = 2, doc_ids: st
         doc_ids: 文档 ID 限定范围，支持逗号与区间（如 "1,2,5-100,4"），留空搜索全部
         algorithm: 搜索算法，"full"=全量扫描(原)，"fast"=元数据预筛候选（需未指定 doc_ids）
         regex: 是否按正则匹配，True 时为正则（默认），False 时为字面量匹配
+        journal: 期刊名模糊匹配（可选，留空不限制）
+        year_start: 起始年份（含，可选，0 表示不限制）
+        year_end: 结束年份（含，可选，0 表示不限制）
     """
     if not query.strip():
         return json.dumps({"error": "查询不能为空"}, ensure_ascii=False)
@@ -248,7 +260,11 @@ async def grep_search(query: str, limit: int = 10, context: int = 2, doc_ids: st
         except ValueError:
             return json.dumps({"error": "doc_ids 格式无效，支持逗号与区间，如 1,2,5-100"}, ensure_ascii=False)
 
-    # 透传 algorithm / regex 参数：默认 full + 正则，与原行为一致
+    # year_start/year_end 为 0 时表示未指定，转为 None
+    ys = year_start if year_start > 0 else None
+    ye = year_end if year_end > 0 else None
+
+    # 透传 algorithm / regex / journal / year 参数：默认 full + 正则，与原行为一致
     db = _get_db()
     results = await do_grep(
         query=query,
@@ -258,6 +274,9 @@ async def grep_search(query: str, limit: int = 10, context: int = 2, doc_ids: st
         algorithm=algorithm,
         regex=regex,
         db=db,
+        journal=journal or None,
+        year_start=ys,
+        year_end=ye,
     )
 
     # 复用上方已获取的 db 会话（避免重复创建导致 fast 模式会话泄漏）
@@ -352,59 +371,6 @@ async def search_info(query: str, limit: int = 10) -> str:
     finally:
         db.close()
 
-
-@mcp.tool()
-async def search_documents(query: str, limit: int = 5, vector_db_id: str = "") -> str:
-    """
-    语义搜索文献内容。使用向量数据库进行相似度搜索，返回最相关的文档片段。
-
-    Args:
-        query: 搜索查询（支持中文和英文）
-        limit: 返回结果数量，默认5
-        vector_db_id: 向量数据库 ID（如 "small"），留空使用默认数据库
-    """
-    if not query.strip():
-        return json.dumps({"error": "查询不能为空"}, ensure_ascii=False)
-
-    results = await search_similar(
-        user_id=0,
-        query=query,
-        get_embedding_func=get_embedding,
-        limit=limit,
-        vector_db_id=vector_db_id or None,
-    )
-
-    if not results:
-        return json.dumps({"message": "未找到相关结果", "query": query}, ensure_ascii=False)
-
-    # Enrich with document info
-    db = _get_db()
-    try:
-        enriched = []
-        for hit in results:
-            doc_id = hit.get("document_id")
-            doc_info = {}
-            if doc_id:
-                doc = db.query(Document).filter(Document.id == doc_id).first()
-                if doc:
-                    doc_info = {
-                        "filename": doc.filename,
-                        "title": doc.title,
-                        "authors": doc.authors,
-                        "year": doc.year,
-                        "journal": doc.journal,
-                        "pdf_url": f"/assist/api/documents/{doc.id}/pdf",
-                    }
-            enriched.append({
-                "score": round(hit.get("score", 0), 4),
-                "document_id": doc_id,
-                "chunk_text": hit.get("chunk_text", "")[:500],
-                **doc_info,
-            })
-    finally:
-        db.close()
-
-    return json.dumps({"query": query, "results": enriched}, ensure_ascii=False, indent=2)
 
 
 @mcp.tool()
