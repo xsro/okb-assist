@@ -34,10 +34,10 @@ settings = get_settings()
 MCP_MOUNT_PATH = "/assist/mcp"
 
 
-# ── Bearer Token 认证 ──────────────────────────────────────────────────────
+# ── Bearer Token Authentication ──────────────────────────────────────────────
 
 class StaticTokenVerifier:
-    """使用 system.json 中 mcp_token 验证 Bearer Token。"""
+    """Verifies Bearer Token using mcp_token from system.json."""
 
     def __init__(self, token: str):
         self.token = token
@@ -52,12 +52,14 @@ class StaticTokenVerifier:
         return None
 
 
-# ── 局域网白名单：192.168.1.0/24 免 Token 访问 ────────────────────────────────
-# FastMCP 在构建 Streamable HTTP / SSE app 时，固定用模块级符号
-# `mcp.server.fastmcp.server.BearerAuthBackend` 来验证 Bearer Token。
-# 我们在其 `authenticate`（即 Token 校验发生的位置）最前面加一段子网判断：
-# 来自 192.168.1.0/24 的请求直接视为已认证，跳过 Token 校验；其它 IP 仍走原逻辑。
-# 通过替换该模块级符号，让 FastMCP 构建 app 时自动使用带白名单的后端。
+# ── LAN Whitelist: 192.168.1.0/24 Token-Free Access ────────────────────────────
+# When FastMCP builds the Streamable HTTP / SSE app, it uses the module-level
+# symbol `mcp.server.fastmcp.server.BearerAuthBackend` to verify Bearer Token.
+# We prepend a subnet check before its `authenticate` (where Token verification
+# happens): requests from 192.168.1.0/24 are treated as authenticated,
+# bypassing Token verification; other IPs follow the original logic.
+# By replacing this module-level symbol, FastMCP automatically uses the
+# whitelisted backend when building the app.
 
 from mcp.server.auth.middleware.bearer_auth import (
     BearerAuthBackend,
@@ -69,7 +71,7 @@ _LAN_NETWORK = ipaddress.ip_network("192.168.1.0/24")
 
 
 def _ip_in_lan(client_ip: str | None) -> bool:
-    """判断客户端 IP 是否落在 192.168.1.0/24；非法 IP 回退到 Token 校验。"""
+    """Check if the client IP is in 192.168.1.0/24; invalid IPs fall back to Token verification."""
     if not client_ip:
         return False
     try:
@@ -79,19 +81,21 @@ def _ip_in_lan(client_ip: str | None) -> bool:
 
 
 class LanBypassBearerAuthBackend(BearerAuthBackend):
-    """在验证 Bearer Token 前放行 192.168.1.0/24 内网请求。"""
+    """Allow 192.168.1.0/24 LAN requests before Bearer Token verification."""
 
     async def authenticate(self, conn):
         client_ip = conn.client.host if conn.client else None
         if _ip_in_lan(client_ip):
-            # 视为已认证：复用已配置的 token 生成一张合法 AccessToken，
-            # 使后续鉴权路径与“携带有效 Token”完全一致。
+            # Treated as authenticated: reuse the configured token to generate
+            # a valid AccessToken, keeping the subsequent auth path identical to
+            # carrying a valid Token.
             access_token = await self.token_verifier.verify_token(self.token_verifier.token)
             return AuthCredentials(access_token.scopes), AuthenticatedUser(access_token)
         return await super().authenticate(conn)
 
 
-# 让 FastMCP 构建 app 时使用带白名单的后端（仅影响本进程内的 FastMCP 实例）。
+# Make FastMCP use the whitelisted backend when building the app
+# (only affects FastMCP instances in this process).
 import mcp.server.fastmcp.server as _fastmcp_server
 
 _fastmcp_server.BearerAuthBackend = LanBypassBearerAuthBackend
@@ -190,7 +194,7 @@ def _format_doc(doc: Document) -> dict:
         except (ValueError, TypeError):
             year = None
 
-    # 检查 markdown 文件是否存在（路径由 system.json 推导）
+    # Check if the markdown file exists (path derived from system.json)
     abs_markdown_path = get_markdown_path(doc.id)
     has_markdown = os.path.exists(abs_markdown_path)
 
@@ -231,20 +235,22 @@ async def grep_search(
     year_end: int = 0,
 ) -> str:
     """
-    全文搜索文献内容（基于 grep，轻量快速）。无需向量数据库，支持正则表达式。
+    Full-text search of document content (grep-based, lightweight and fast).
+    No vector database required, supports regex.
 
-    可通过期刊名和年份范围进行元数据预过滤，再在候选文档中执行 grep 搜索。
+    Metadata pre-filtering by journal name and year range, then grep search
+    on candidate documents.
 
     Args:
-        query: 搜索关键词（支持正则表达式）
-        limit: 返回结果数量，默认10
-        context: 匹配行前后的上下文行数，默认2
-        doc_ids: 文档 ID 限定范围，支持逗号与区间（如 "1,2,5-100,4"），留空搜索全部
-        algorithm: 搜索算法，"full"=全量扫描(原)，"fast"=元数据预筛候选（需未指定 doc_ids）
-        regex: 是否按正则匹配，True 时为正则（默认），False 时为字面量匹配
-        journal: 期刊名模糊匹配（可选，留空不限制）
-        year_start: 起始年份（含，可选，0 表示不限制）
-        year_end: 结束年份（含，可选，0 表示不限制）
+        query: Search keywords (supports regex)
+        limit: Number of results to return, default 10
+        context: Number of context lines before and after the match, default 2
+        doc_ids: Document ID scope, supports commas and ranges (e.g., "1,2,5-100,4"), empty means search all
+        algorithm: Search algorithm, "full"=full scan (original), "fast"=metadata pre-filter candidates (doc_ids must be unspecified)
+        regex: Whether to match as regex, True for regex (default), False for literal match
+        journal: Fuzzy match on journal name (optional, empty means no restriction)
+        year_start: Starting year inclusive (optional, 0 means no restriction)
+        year_end: Ending year inclusive (optional, 0 means no restriction)
     """
     if not query.strip():
         return json.dumps({"error": "查询不能为空"}, ensure_ascii=False)
@@ -252,7 +258,7 @@ async def grep_search(
     from app.services.grep_search import grep_search as do_grep
     from app.services.grep_search import parse_doc_ids
 
-    # 解析 doc_ids（支持逗号与区间，如 1,2,5-100）
+    # Parse doc_ids (supports commas and ranges, e.g., 1,2,5-100)
     id_list = None
     if doc_ids and doc_ids.strip():
         try:
@@ -260,11 +266,11 @@ async def grep_search(
         except ValueError:
             return json.dumps({"error": "doc_ids 格式无效，支持逗号与区间，如 1,2,5-100"}, ensure_ascii=False)
 
-    # year_start/year_end 为 0 时表示未指定，转为 None
+    # year_start/year_end of 0 means unspecified, convert to None
     ys = year_start if year_start > 0 else None
     ye = year_end if year_end > 0 else None
 
-    # 透传 algorithm / regex / journal / year 参数：默认 full + 正则，与原行为一致
+    # Pass through algorithm / regex / journal / year params: default full + regex, consistent with original behavior
     db = _get_db()
     results = await do_grep(
         query=query,
@@ -279,7 +285,7 @@ async def grep_search(
         year_end=ye,
     )
 
-    # 复用上方已获取的 db 会话（避免重复创建导致 fast 模式会话泄漏）
+    # Reuse the db session obtained above (avoid duplicate creation causing session leak in fast mode)
     try:
         enriched = []
         for hit in results:
@@ -312,12 +318,13 @@ async def grep_search(
 @mcp.tool()
 async def search_info(query: str, limit: int = 10) -> str:
     """
-    搜索文献元数据信息（标题、作者、期刊、关键词、摘要、DOI 等）。
-    返回匹配文献的完整信息，适合按作者、标题、期刊等条件查找文献。
+    Search document metadata (title, authors, journal, keywords, abstract, DOI, etc.).
+    Returns complete info for matching documents, suitable for finding documents
+    by author, title, journal, etc.
 
     Args:
-        query: 搜索关键词（模糊匹配标题、作者、期刊、关键词、摘要、DOI 等字段）
-        limit: 返回结果数量，默认10
+        query: Search keywords (fuzzy match on title, authors, journal, keywords, abstract, DOI, etc.)
+        limit: Number of results to return, default 10
     """
     if not query.strip():
         return json.dumps({"error": "查询不能为空"}, ensure_ascii=False)
@@ -376,12 +383,13 @@ async def search_info(query: str, limit: int = 10) -> str:
 @mcp.tool()
 def read_markdown(doc_id: int, page: int = 1, page_size: int = 5000) -> str:
     """
-    读取文献的 Markdown 内容（分页）。Markdown 是从 PDF 解析后的文本格式，包含公式、表格等。
+    Read document Markdown content (paginated). Markdown is the text format parsed
+    from PDF, containing formulas, tables, etc.
 
     Args:
-        doc_id: 文档 ID
-        page: 页码，从1开始
-        page_size: 每页字符数，默认5000
+        doc_id: Document ID
+        page: Page number, starting from 1
+        page_size: Characters per page, default 5000
     """
     db = _get_db()
     try:
@@ -389,10 +397,10 @@ def read_markdown(doc_id: int, page: int = 1, page_size: int = 5000) -> str:
         if not doc:
             return json.dumps({"error": f"文档 {doc_id} 不存在"}, ensure_ascii=False)
 
-        # markdown 路径由 system.json 推导
+        # Markdown path is derived from system.json
         abs_markdown_path = get_markdown_path(doc_id)
         if not os.path.exists(abs_markdown_path):
-            return json.dumps({"error": "Markdown 文件尚未生成，请先解析 PDF"}, ensure_ascii=False)
+            return json.dumps({"error": "Markdown file not yet generated, please parse the PDF first"}, ensure_ascii=False)
 
         with open(abs_markdown_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -417,10 +425,11 @@ def read_markdown(doc_id: int, page: int = 1, page_size: int = 5000) -> str:
 @mcp.tool()
 def get_document_info(doc_id: int) -> str:
     """
-    获取文献的详细信息，包括元数据、处理状态、PDF 和 Markdown 链接。
+    Get detailed document information, including metadata, processing status,
+    PDF and Markdown links.
 
     Args:
-        doc_id: 文档 ID
+        doc_id: Document ID
     """
     db = _get_db()
     try:
@@ -436,14 +445,15 @@ def get_document_info(doc_id: int) -> str:
 @mcp.tool()
 def list_documents(query: str = "", status: str = "", doc_type: str = "", page: int = 1, page_size: int = 20) -> str:
     """
-    搜索或列出文献。支持按标题/作者搜索、按状态和文献类型过滤。
+    Search or list documents. Supports search by title/author, filter by status
+    and document type.
 
     Args:
-        query: 搜索关键词（可选，匹配标题、作者、文件名）
-        status: 状态过滤（可选，逗号分隔：uploaded/parsing/markdown_done/extracting/meta_done/indexing/indexed/error）
-        doc_type: 文献类型过滤（可选，逗号分隔，Zotero 类型：journalArticle/book/conferencePaper/thesis/report/preprint/bookSection 等）
-        page: 页码
-        page_size: 每页数量
+        query: Search keywords (optional, matches title, authors, filename)
+        status: Status filter (optional, comma-separated: uploaded/parsing/markdown_done/extracting/meta_done/indexing/indexed/error)
+        doc_type: Document type filter (optional, comma-separated, Zotero types: journalArticle/book/conferencePaper/thesis/report/preprint/bookSection etc.)
+        page: Page number
+        page_size: Items per page
     """
     db = _get_db()
     try:
@@ -484,10 +494,10 @@ def list_documents(query: str = "", status: str = "", doc_type: str = "", page: 
 @mcp.tool()
 def get_pdf_url(doc_id: int) -> str:
     """
-    获取文献的 PDF 下载/预览链接。
+    Get the PDF download/preview link for a document.
 
     Args:
-        doc_id: 文档 ID
+        doc_id: Document ID
     """
     db = _get_db()
     try:
@@ -495,10 +505,10 @@ def get_pdf_url(doc_id: int) -> str:
         if not doc:
             return json.dumps({"error": f"文档 {doc_id} 不存在"}, ensure_ascii=False)
 
-        # 源 PDF 路径由 system.json 推导
+        # Source PDF path is derived from system.json
         abs_file_path = get_pdf_path(doc_id)
         if not os.path.exists(abs_file_path):
-            return json.dumps({"error": "PDF 文件不存在"}, ensure_ascii=False)
+            return json.dumps({"error": "PDF file does not exist"}, ensure_ascii=False)
 
         base_url = settings.mineru_url.rstrip("/assist")  # Get base URL
         return json.dumps({
@@ -514,10 +524,11 @@ def get_pdf_url(doc_id: int) -> str:
 @mcp.tool()
 def get_document_abstract(doc_id: int) -> str:
     """
-    获取文献的摘要信息。如果有多语言摘要，会同时返回。
+    Get document abstract information. If there are multi-language abstracts,
+    both will be returned.
 
     Args:
-        doc_id: 文档 ID
+        doc_id: Document ID
     """
     db = _get_db()
     try:
@@ -543,20 +554,21 @@ def get_document_abstract(doc_id: int) -> str:
 @mcp.tool()
 def get_stats() -> str:
     """
-    获取知识库统计信息，包括文献总数、各状态数量、各类型数量。
+    Get knowledge base statistics, including total document count, counts by
+    status, and counts by type.
     """
     db = _get_db()
     try:
         total = db.query(Document).count()
 
-        # 按状态统计
+        # Count by status
         status_counts = {}
         for s in DocStatus:
             count = db.query(Document).filter(Document.status == s).count()
             if count > 0:
                 status_counts[s.value] = count
 
-        # 按类型统计
+        # Count by type
         type_rows = (
             db.query(Document.doc_type)
             .filter(Document.doc_type.isnot(None), Document.doc_type != "")
@@ -579,7 +591,7 @@ def get_stats() -> str:
 @mcp.tool()
 def list_doc_types() -> str:
     """
-    列出知识库中所有已使用的文献类型（Zotero 标准类型）。
+    List all document types used in the knowledge base (Zotero standard types).
     """
     db = _get_db()
     try:
@@ -600,7 +612,7 @@ def list_doc_types() -> str:
 
 @mcp.resource("okb://documents/{doc_id}")
 def get_document_resource(doc_id: int) -> str:
-    """获取文献详情资源"""
+    """Get document detail resource"""
     db = _get_db()
     try:
         doc = db.query(Document).filter(Document.id == doc_id).first()
@@ -613,17 +625,17 @@ def get_document_resource(doc_id: int) -> str:
 
 @mcp.resource("okb://documents/{doc_id}/markdown")
 def get_markdown_resource(doc_id: int) -> str:
-    """获取文献 Markdown 内容资源"""
+    """Get document Markdown content resource"""
     db = _get_db()
     try:
         doc = db.query(Document).filter(Document.id == doc_id).first()
         if not doc:
-            return f"Error: 文档 {doc_id} 不存在"
+            return f"Error: Document {doc_id} does not exist"
 
-        # markdown 路径由 system.json 推导
+        # Markdown path is derived from system.json
         abs_markdown_path = get_markdown_path(doc_id)
         if not os.path.exists(abs_markdown_path):
-            return "Error: Markdown 文件尚未生成"
+            return "Error: Markdown file not yet generated"
 
         with open(abs_markdown_path, "r", encoding="utf-8") as f:
             return f.read()
