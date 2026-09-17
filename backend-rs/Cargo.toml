@@ -30,3 +30,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 http = "1.0"
 lopdf = "0.35"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }

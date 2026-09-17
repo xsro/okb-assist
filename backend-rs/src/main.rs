@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use clap::Parser;
 use axum::Extension;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -26,6 +27,19 @@ use config::Settings;
 use config_manager::ConfigManager;
 use database::Database;
 
+/// 命令行参数
+#[derive(Parser, Debug)]
+#[command(name = "okb_assist", version, about = "OKB-Assist 后端（Rust 版）")]
+struct Args {
+    /// 监听地址
+    #[arg(long, default_value = "0.0.0.0")]
+    host: String,
+
+    /// 监听端口
+    #[arg(long, default_value = "5001", value_parser = clap::value_parser!(u16))]
+    port: u16,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -34,6 +48,8 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("okb_assist=info")),
         )
         .init();
+
+    let args = Args::parse();
 
     let config_manager = Arc::new(ConfigManager::new());
     let settings = Arc::new(Settings::new(config_manager.clone()));
@@ -47,8 +63,9 @@ async fn main() -> anyhow::Result<()> {
     // 构建应用
     let app = create_app(db_arc.clone(), config_manager.clone(), settings.clone());
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:5001").await?;
-    tracing::info!("OKB-Assist (Rust) listening on http://0.0.0.0:5001");
+    let addr = format!("{}:{}", args.host, args.port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    tracing::info!("OKB-Assist (Rust) listening on http://{}", addr);
     axum::serve::serve(listener, app).await?;
 
     Ok(())
