@@ -37,15 +37,15 @@ uv run scripts/<name>.py ...             # 运行维护脚本（见 backend/scri
 |------|------|
 | `backend/okb_assist_main.py` | **入口**：创建 FastAPI app、挂载路由/MCP/中间件 |
 | `backend/app/routers/` | 路由组：`documents.py`、`pipeline.py`、`admin.py`、`config.py`、`openapi.py` |
-| `backend/app/services/` | 后端适配器：`qdrant.py`、`ollama.py`、`mineru.py`、`milvus.py`、`chroma.py`、`grep_search.py`、`vector_db.py`（抽象接口） |
+| `backend/app/services/` | 后端适配器：`qdrant.py`、`ollama.py`、`mineru.py`、`milvus.py`、`chroma.py`、`grep_search.py`、`crossref.py`、`pdf_meta.py`、`vector_db.py`（抽象接口） |
 | `backend/app/mineru_fast_api/` | MinerU 解析服务的**自动生成 OpenAPI 客户端**（勿手改） |
 | `backend/app/models.py`、`backend/app/database.py` | 数据模型与 SQLite 连接（`init_db()` 启动时建表） |
 | `backend/app/config_manager.py`、`backend/app/config.py` | 配置加载（JSON 文件，带缓存） |
 | `backend/app/paths.py` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
 | `backend/app/mcp_server.py` | MCP 服务（`FastMCP("OKB-Assist")`） |
 | `backend/scripts/` | 维护/迁移脚本 + shell 启动器 |
-| `frontend/src/components/` | Vue 组件：`AceEditor.vue`（590 行，编辑+分屏预览+KaTeX）、`MarkdownViewer.vue`（marked 渲染）、`ConfirmDialog.vue`（确认弹窗）、`AppHeader.vue`、`AppNav.vue`、`StatusBadge.vue`、`Toast.vue`、`TokenModal.vue`、`McpConfigPanel.vue` |
-| `frontend/src/views/` | 页面视图：`MarkdownEditView.vue`、`MarkdownView.vue`、`HomeView.vue`、`DetailView.vue`、`DocManageView.vue`、`UploadView.vue`、`ConfigView.vue`、`AdminView.vue`、`MonitorView.vue`、`PointView.vue`、`DuplicatesView.vue`、`ToolsView.vue`、`McpSetupView.vue` |
+| `frontend/src/components/` | Vue 组件：`AceEditor.vue`（编辑+分屏预览+KaTeX）、`MarkdownViewer.vue`（marked 渲染）、`ConfirmDialog.vue`（确认弹窗）、`AppHeader.vue`（含汉堡菜单）、`AppNav.vue`（桌面端导航）、`MobileMenu.vue`（移动端侧滑菜单）、`StatusBadge.vue`、`Toast.vue`、`TokenModal.vue`、`McpConfigPanel.vue` |
+| `frontend/src/views/` | 页面视图：`MarkdownEditView.vue`、`MarkdownView.vue`、`HomeView.vue`（桌面表格/移动卡片）、`DetailView.vue`（桌面表格/移动堆叠）、`DocManageView.vue`、`UploadView.vue`、`ConfigView.vue`、`AdminView.vue`、`MonitorView.vue`、`PointView.vue`、`DuplicatesView.vue`、`ToolsView.vue`、`McpSetupView.vue` |
 | `frontend/src/router/` | Vue Router 配置（15+ 路由，`base: '/assist/'`） |
 | `frontend/src/stores/` | Pinia 存储：`pipeline.ts`、`toast.ts`、`token.ts` |
 | `frontend/src/composables/` | 组合式函数：`useToast.ts`、`useRequireToken.ts` |
@@ -109,8 +109,9 @@ cd frontend
 pnpm install         # 安装前端依赖
 pnpm run dev         # 启动开发服务器（端口 5173，代理 /assist 到后端 5001）
 pnpm run build       # 构建到 frontend/dist/
-pnpm run type-check  # TypeScript 类型检查
 ```
+
+> **注意**：`pnpm run type-check` 目前不可用（`vue-tsc` 与当前 TypeScript 版本不兼容）。构建通过即视为类型检查通过。
 
 开发时前端独立端口运行，通过 Vite proxy 访问后端 API。生产环境构建后由 FastAPI 直接 serving 静态文件。
 
@@ -121,6 +122,15 @@ pnpm run type-check  # TypeScript 类型检查
 - **构建工具**：Vite 8，输出到 `frontend/dist/`
 - **base 路径**：`vite.config.ts` 设 `base: '/assist/'`，因此所有 JS/CSS 资源 URL 以 `/assist/assets/` 开头。后端 `okb_assist_main.py` 的 `serve_spa` 路由通过 `/assist/{full_path:path}` 匹配资源路径并返回对应文件。
 - **Vite proxy**：开发模式下代理 `/assist` → `http://localhost:5001`，前后端分离开发
+
+### 响应式设计
+- **断点**：`<= 480px`（小屏手机）、`<= 768px`（平板/大屏手机）、`769px-1024px`（平板横屏）
+- **导航**：桌面端水平导航（`AppNav`），移动端汉堡菜单（`MobileMenu` 侧滑面板）
+- **文档列表**：桌面端表格，移动端卡片式布局
+- **信息表**：桌面端表格，移动端纵向堆叠
+- **表单**：多列布局在移动端自动堆叠为单列
+- **触摸目标**：最小 44px，按钮支持 `:active` 缩放反馈
+- **横向滚动**：表格、代码块、编辑器工具栏在小屏自动横向滚动
 
 ### 路由（`src/router/index.ts`）
 所有前端路由前缀为 `/assist/`，由 Vue Router 的 `createWebHistory()` 处理：
@@ -147,6 +157,7 @@ pnpm run type-check  # TypeScript 类型检查
 - **光标/选中信息**：行号列号 + 选中字符数 + 总字数
 - **数学公式**：预览通过 `MarkdownViewer` 组件渲染 KaTeX（`katex@0.18.4`）
 - **模块加载**：核心模块（theme/mode）静态 import 注入 AMD 系统；`ext-searchbox` 和 `ext-language_tools` 动态 import（处理自引用依赖）。生产环境 `basePath` 使用 CDN 兜住 extension 的合法动态请求。
+- **移动端**：工具栏横向滚动，状态栏三段式换行
 
 ### MarkdownViewer 渲染组件（`src/components/MarkdownViewer.vue`）
 - 使用 `marked` 解析 Markdown（GFM + 换行）
@@ -180,19 +191,23 @@ pnpm run type-check  # TypeScript 类型检查
 - 状态用 `enum.Enum`（`DocStatus`、`IndexStatus`）。
 - 生成的 MinerU 客户端（`backend/app/mineru_fast_api/`）勿手改，应重新生成。
 - 新增路径需求改 `system.json` 模板，而非数据库。
+- 前端响应式断点：`480px` / `768px` / `1024px`，移动优先。
+- 前端组件使用 `<script setup lang="ts">`，样式用 `<style scoped>`。
 
 ## ⚠️ 易错点（编辑前必读）
 
-
+1. **Token 校验**：`token` 为 `change-me`（或未设置）时整体跳过校验；来自 `192.168.1.0/24` 局域网的请求也免校验。`TokenMiddleware` 仅对 `/assist/api/*` 生效。
 2. **配置改动不会自动生效**：`config.json` 改后需 reload；`system.json` 改后需重启进程（进程内缓存）。
-3. **MCP 路由注册顺序有依赖**（`backend/okb_assist_main.py`）：必须在 SSE 挂载 `app.mount("/assist/mcp", ...)` **之前**，用 `app.add_route("/assist/mcp/stream", ...)` 精确注册 Streamable HTTP 端点，且在模块加载时完成。否则 `/assist/mcp/stream` 会被 SSE 挂载吞掉或 404。**不要“整理”这个顺序。**
+3. **MCP 路由注册顺序有依赖**（`backend/okb_assist_main.py`）：必须在 SSE 挂载 `app.mount("/assist/mcp", ...)` **之前**，用 `app.add_route("/assist/mcp/stream", ...)` 精确注册 Streamable HTTP 端点，且在模块加载时完成。否则 `/assist/mcp/stream` 会被 SSE 挂载吞掉或 404。**不要"整理"这个顺序。**
 4. **`mcp` 依赖锁定 `<2`**（`pyproject.toml`）。曾因升级到 2.x 导致 MCP 端点失效。不要擅自升到 2.x，除非重新验证 MCP 端点。
 5. **没有测试、没有 lint**：编辑后无法跑测试验证。应在 `backend/` 目录手动 `uv run okb_assist_main.py` 确认能启动，并用 curl 校验端点。`backend/app/routers/pipeline.py` 与 `backend/app/routers/documents.py` 是大文件，改动要小心。
 6. **硬编码的局域网 IP**（`192.168.1.x`）出现在 `config.json`、`system.json`、脚本中，是部署相关配置，视为环境配置而非代码。`okb_assist_main.py` 的 `TokenMiddleware` 另把 `192.168.1.0/24` 作为 **LAN 免 Token 白名单**硬编码，改动需谨慎。
+7. **前端构建验证**：`pnpm run build` 通过即视为正确（`vue-tsc` 当前不可用）。构建前确保 `<=` 等比较运算符在 JS 中不带 CSS 单位（如 `768px` 应写 `768`）。
 8. **SQLite 单写者**：`database.py` 设 `check_same_thread=False`，并发写入可行但仍是瓶颈，勿引入大量并发写。
 9. **SPA Fallback 路由**（`backend/okb_assist_main.py`）：`@app.get("/assist/{full_path:path}")` 必须放在所有路由之后，它会拦截所有 `/assist/*` 请求并返回 `frontend/dist/index.html`。命中 `api/`、`mcp/`、`uploads/`、`file/` 前缀时会被重定向到带斜杠地址或返回 404，避免吞掉 API 和 MCP 端点。
 10. **前端构建产物在 `frontend/dist/`**：`pnpm run build` 输出到 `frontend/dist/`，构建后 `frontend/dist/index.html` 是 SPA 入口。`vite.config.ts` 的 `base: '/assist/'` 使所有资源 URL 以 `/assist/assets/` 开头，与后端 `serve_spa` 路由匹配。
 11. **CORS 已限定**：开发环境只允许 `localhost:5173`，生产环境只允许同源 `localhost:5001`。如需其他前端域名，修改 `backend/okb_assist_main.py` 中的 `allow_origins` 列表。
+12. **移动端导航**：`MobileMenu` 通过 Vue 的 `provide/inject` 机制与 `AppHeader` 通信。`App.vue` 提供 `toggleMobileMenu` / `closeMobileMenu`，`AppHeader` 注入并控制汉堡菜单状态。
 
 ## 入口与关键文件速查
 
