@@ -137,6 +137,7 @@ fn create_app(
         .layer(Extension(config_manager))
         .layer(Extension(settings.clone()))
         .layer(Extension(db.clone()))
+        .layer(middleware::from_fn(error_log_middleware))
         .layer(middleware::from_fn(token_middleware));
 
     let app = axum::Router::new()
@@ -234,6 +235,48 @@ async fn serve_file_alias(
         ).into_response(),
         Err(_) => axum::Json(serde_json::json!({"detail": "文件不存在"})).into_response(),
     }
+}
+
+/// 错误日志中间件：当响应状态码为 4xx/5xx 时，在控制台打印错误详情。
+async fn error_log_middleware(req: axum::extract::Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+
+    let response = next.run(req).await;
+
+    let status = response.status();
+    if !(status.is_client_error() || status.is_server_error()) {
+        return response;
+    }
+
+    // 读取响应体以提取错误详情（错误响应通常为 JSON `{"detail": ...}`）
+    let (parts, body) = response.into_parts();
+    let body_bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap_or_default();
+    let body_text = String::from_utf8_lossy(&body_bytes).to_string();
+    let detail = serde_json::from_str::<serde_json::Value>(&body_text)
+        .ok()
+        .and_then(|v| v.get("detail").and_then(|d| d.as_str()).map(|s| s.to_string()))
+        .unwrap_or_else(|| format!("(非 JSON 响应，{} 字节)", body_bytes.len()));
+
+    if status.is_server_error() {
+        tracing::error!(
+            method = %method,
+            uri = %uri,
+            status = %status.as_u16(),
+            detail = %detail,
+            "API 请求失败"
+        );
+    } else {
+        tracing::warn!(
+            method = %method,
+            uri = %uri,
+            status = %status.as_u16(),
+            detail = %detail,
+            "API 请求返回错误"
+        );
+    }
+
+    axum::response::Response::from_parts(parts, axum::body::Body::from(body_bytes))
 }
 
 /// Token 鉴权中间件。
