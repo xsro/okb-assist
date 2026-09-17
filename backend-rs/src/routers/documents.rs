@@ -997,6 +997,21 @@ async fn semantic_search(
     Json(json!({"results": enriched, "query": q})).into_response()
 }
 
+/// 解析 query 中的布尔值（兼容 Python/Pydantic 的宽松 bool：1/0、true/false、yes/no、on/off 等）。
+fn de_flexible_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    let t = raw.trim().to_ascii_lowercase();
+    Ok(match t.as_str() {
+        "1" | "true" | "t" | "yes" | "y" | "on" => Some(true),
+        "0" | "false" | "f" | "no" | "n" | "off" | "" => Some(false),
+        // 无法识别的值按未提供处理（宽松，避免 400）
+        _ => None,
+    })
+}
+
 /// 全文 grep 搜索
 #[derive(Debug, Deserialize)]
 pub struct GrepSearchQuery {
@@ -1005,6 +1020,7 @@ pub struct GrepSearchQuery {
     pub context: Option<i64>,
     pub doc_ids: Option<String>,
     pub algorithm: Option<String>,
+    #[serde(default, deserialize_with = "de_flexible_bool")]
     pub regex: Option<bool>,
     pub journal: Option<String>,
     pub year_start: Option<i64>,
@@ -1178,6 +1194,7 @@ fn restore_image_paths(content: &str, doc_id: i64) -> String {
 pub struct MarkdownQuery {
     pub page: Option<i64>,
     pub page_size: Option<i64>,
+    #[serde(default, deserialize_with = "de_flexible_bool")]
     pub full: Option<bool>,
 }
 
