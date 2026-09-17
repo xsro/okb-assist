@@ -1,4 +1,4 @@
 target
 /*.json
-okb_assist.db
+okb_assist.db*
 data/

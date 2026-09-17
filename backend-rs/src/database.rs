@@ -1,6 +1,8 @@
 //! SQLite 数据库连接管理。
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
+};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -59,8 +61,12 @@ impl Database {
             }
         }
 
+        // WAL 模式：读不阻塞写、写不阻塞读，适合流水线后台写 + 前台读并发的场景；
+        // synchronous=NORMAL 是 WAL 下的推荐组合（兼顾性能与安全性，不损坏数据库）。
         let opts = SqliteConnectOptions::from_str(&url)?
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal);
 
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
