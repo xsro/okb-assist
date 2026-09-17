@@ -27,6 +27,28 @@ use config::Settings;
 use config_manager::ConfigManager;
 use database::Database;
 
+/// 日志级别
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            LogLevel::Trace => "trace",
+            LogLevel::Debug => "debug",
+            LogLevel::Info => "info",
+            LogLevel::Warn => "warn",
+            LogLevel::Error => "error",
+        }
+    }
+}
+
 /// 命令行参数
 #[derive(Parser, Debug)]
 #[command(name = "okb_assist", version, about = "OKB-Assist 后端（Rust 版）")]
@@ -38,18 +60,22 @@ struct Args {
     /// 监听端口
     #[arg(long, default_value = "5001", value_parser = clap::value_parser!(u16))]
     port: u16,
+
+    /// 日志级别
+    #[arg(long, value_enum, default_value = "info")]
+    log_level: LogLevel,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("okb_assist=info")),
-        )
-        .init();
-
     let args = Args::parse();
+
+    // 初始化日志：RUST_LOG 环境变量优先，否则使用 --log-level 指定的级别。
+    let level = args.log_level.as_str();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        tracing_subscriber::EnvFilter::new(format!("okb_assist={level},tower_http={level}"))
+    });
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let config_manager = Arc::new(ConfigManager::new());
     let settings = Arc::new(Settings::new(config_manager.clone()));
@@ -58,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
     // 初始化数据库
     let db = Database::new(&settings.database_url()).await?;
     db.init().await?;
+    tracing::info!("数据库初始化完成: {}", settings.database_url());
     let db_arc = Arc::new(db);
 
     // 构建应用
@@ -97,7 +124,15 @@ fn create_app(
         ]);
 
     let middleware = ServiceBuilder::new()
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(
+                    tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO),
+                )
+                .on_response(
+                    tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO),
+                ),
+        )
         .layer(cors)
         .layer(Extension(config_manager))
         .layer(Extension(settings.clone()))
