@@ -67,12 +67,15 @@ function insertMathJax(text: string, matches: MathMatch[]): string {
   return result
 }
 
-/** 保持原样，不渲染 */
+/** 公式以代码框显示（none 模式） */
 function insertMathNone(text: string, matches: MathMatch[]): string {
   let result = text
   for (const { id, latex, displayMode } of matches) {
-    const raw = displayMode ? `$$${latex}$$` : `$${latex}$`
-    result = result.replace(id, raw)
+    const escaped = latex.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const html = displayMode
+      ? `<pre class="math-codeblock"><code>$$${escaped}$$</code></pre>`
+      : `<code class="math-inline-code">$${escaped}$</code>`
+    result = result.replace(id, html)
   }
   return result
 }

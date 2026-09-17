@@ -1,5 +1,8 @@
 <template>
-  <div class="markdown-viewer" v-html="rendered"></div>
+  <div v-if="showSource" class="markdown-source">
+    <pre><code>{{ content }}</code></pre>
+  </div>
+  <div v-else class="markdown-viewer" v-html="rendered"></div>
 </template>
 
 <script setup lang="ts">
@@ -12,6 +15,7 @@ const props = defineProps<{
   content: string
   mathMode?: MathMode
   loadImages?: boolean
+  showSource?: boolean
 }>()
 
 const rendered = computed(() => {
@@ -73,5 +77,52 @@ watch(
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.4;
+}
+
+.math-codeblock {
+  background: #f5f5f5;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 12px 0;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.math-codeblock code {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  background: transparent;
+  padding: 0;
+}
+
+.math-inline-code {
+  background: #f0f0f0;
+  border: 1px solid #ddd;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.9em;
+}
+
+.markdown-source {
+  background: #f8f9fa;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+  overflow-x: auto;
+}
+
+.markdown-source pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.markdown-source code {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #333;
 }
 </style>

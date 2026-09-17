@@ -10,6 +10,13 @@
         >
           {{ viewAll ? '分页查看' : '查看全部' }}
         </button>
+        <button
+          class="btn btn-sm"
+          :class="showSource ? 'btn-primary' : 'btn-outline'"
+          @click="showSource = !showSource"
+        >
+          {{ showSource ? '预览' : '源码' }}
+        </button>
         <div v-if="!viewAll" class="page-nav">
           <button :disabled="currentPage <= 1" @click="prevPage">上一页</button>
           <span>第 {{ currentPage }} / {{ totalPages }} 页</span>
@@ -38,7 +45,7 @@
       </div>
     </div>
     <div class="markdown-content">
-      <MarkdownViewer :content="content" :math-mode="mathMode" :load-images="loadImages" />
+      <MarkdownViewer :content="content" :math-mode="mathMode" :load-images="loadImages" :show-source="showSource" />
     </div>
   </div>
 </template>
@@ -61,9 +68,12 @@ const currentPage = ref(1)
 const totalPages = ref(1)
 const totalLength = ref(0)
 const viewAll = ref(false)
+const showSource = ref(false)
 const pageSize = ref(100000)
 const mathMode = ref<'none' | 'katex' | 'mathjax'>('katex')
 const loadImages = ref(false)
+
+const LARGE_FILE_THRESHOLD = 50000
 
 const pageSizeOptions = [
   { value: 10000, label: '1万字符/页' },
@@ -100,6 +110,11 @@ function prevPage() {
 
 function toggleViewAll() {
   viewAll.value = !viewAll.value
+  if (viewAll.value && totalLength.value > LARGE_FILE_THRESHOLD) {
+    mathMode.value = 'none'
+    loadImages.value = false
+  }
+  showSource.value = false
   load()
 }
 

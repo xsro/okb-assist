@@ -80,9 +80,21 @@ export async function grepSearch(
     context?: number
     algorithm?: 'full' | 'fast'
     regex?: boolean
+    journal?: string
+    yearStart?: number
+    yearEnd?: number
   } = {}
 ) {
-  const { docIds, limit = 10, context = 2, algorithm = 'full', regex = true } = options
+  const {
+    docIds,
+    limit = 10,
+    context = 2,
+    algorithm = 'full',
+    regex = true,
+    journal,
+    yearStart,
+    yearEnd
+  } = options
   const res = await apiGet<{ results: SearchResult[]; query: string }>(
     '/assist/api/documents/grep-search/',
     {
@@ -91,7 +103,10 @@ export async function grepSearch(
       context,
       doc_ids: docIds?.join(','),
       algorithm,
-      regex
+      regex,
+      journal,
+      year_start: yearStart,
+      year_end: yearEnd
     }
   )
   res.results = res.results.map((r) => ({

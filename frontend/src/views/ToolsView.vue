@@ -62,6 +62,38 @@
             placeholder="例如：1,3,7"
           />
         </div>
+        <div class="option-row" style="margin-top: 12px;">
+          <div class="form-group">
+            <label>期刊名</label>
+            <input
+              v-model="grepJournal"
+              type="text"
+              placeholder="例如：Nature, Science"
+            />
+          </div>
+          <div class="form-group">
+            <label>年份范围</label>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <input
+                v-model.number="grepYearStart"
+                type="number"
+                placeholder="起始年"
+                min="1900"
+                max="2030"
+                style="width: 100px;"
+              />
+              <span>—</span>
+              <input
+                v-model.number="grepYearEnd"
+                type="number"
+                placeholder="结束年"
+                min="1900"
+                max="2030"
+                style="width: 100px;"
+              />
+            </div>
+          </div>
+        </div>
       </div>
 
       <div v-if="grepResults" class="search-results">
@@ -135,6 +167,9 @@ const grepContext = ref(2)
 const grepAlgorithm = ref<'full' | 'fast'>('full')
 const grepRegex = ref(true)
 const grepDocIds = ref('')
+const grepJournal = ref('')
+const grepYearStart = ref<number | null>(null)
+const grepYearEnd = ref<number | null>(null)
 
 const semanticQuery = ref('')
 const semanticResults = ref<SearchResult[] | null>(null)
@@ -165,7 +200,10 @@ async function doGrepSearch() {
       context: grepContext.value,
       algorithm: grepAlgorithm.value,
       regex: grepRegex.value,
-      docIds: parseDocIds(grepDocIds.value)
+      docIds: parseDocIds(grepDocIds.value),
+      journal: grepJournal.value.trim() || undefined,
+      yearStart: grepYearStart.value || undefined,
+      yearEnd: grepYearEnd.value || undefined
     })
     grepResults.value = res.results
   } catch {
