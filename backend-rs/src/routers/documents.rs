@@ -85,6 +85,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/:id/image/:filename", get(get_image_from_zip))
         .route("/assist/api/documents/:id/markdown/", get(get_markdown).put(update_markdown))
         .route("/assist/api/documents/:id/markdown", get(get_markdown).put(update_markdown))
+        .route("/assist/api/documents/:id/parse-result/", post(upload_parse_result))
+        .route("/assist/api/documents/:id/parse-result", post(upload_parse_result))
         .route("/assist/api/documents/:id/pdf/", get(get_pdf).post(replace_pdf).head(check_pdf_exists))
         .route("/assist/api/documents/:id/pdf", get(get_pdf).post(replace_pdf).head(check_pdf_exists))
         .route("/assist/api/documents/:id/file-alias/", get(file_alias))
@@ -1283,6 +1285,55 @@ async fn update_markdown(
         Ok(_) => Json(json!({"detail": "Markdown 已更新"})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
     }
+}
+
+/// 上传 MinerU 解析结果（Markdown 内容）到文档，并更新状态为 markdown_done。
+///
+/// 与 pipeline 的 parse 阶段完成等价，但由外部脚本直接上传解析结果。
+#[derive(Debug, Deserialize)]
+pub struct ParseResultBody {
+    pub content: String,
+}
+
+async fn upload_parse_result(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+    Json(data): Json<ParseResultBody>,
+) -> Response {
+    // 校验文档存在
+    let doc = match fetch_doc(&db, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    };
+
+    // 写入 Markdown 文件（不存在则创建）
+    let md_path = paths::get_markdown_path(&settings, id);
+    if let Some(parent) = std::path::Path::new(&md_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&md_path, &data.content) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": format!("写入 Markdown 失败: {}", e)}))).into_response();
+    }
+
+    // 仅当处于解析前状态时升级为 markdown_done，不降级后续状态
+    let new_status = match doc.status.as_str() {
+        "uploaded" | "parsing" | "error" => "markdown_done",
+        other => other,
+    };
+    let _ = sqlx::query(
+        "UPDATE documents SET status = ?, status_message = ?, progress = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(new_status)
+    .bind("PDF 解析完成")
+    .bind(100.0)
+    .bind(now_datetime())
+    .bind(id)
+    .execute(db.pool())
+    .await;
+
+    Json(json!({"id": id, "status": new_status, "markdown_path": md_path})).into_response()
 }
 
 async fn get_pdf(
