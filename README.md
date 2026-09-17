@@ -1,16 +1,18 @@
 # 个人文献库
 
-本仓库实现一个简易的文献库，可以通过mcp访问。
+本仓库实现一个简易的文献库，可以通过 MCP 访问。
 
-后端代码位于 `backend/` 目录，启动前请先进入该目录：
+## 后端（Rust）
+
+后端代码位于 `backend-rs/` 目录，使用 Cargo 启动：
 
 ```bash
-cd backend
-uv run okb_assist_main.py --host 0.0.0.0
-# 或生产式启动：uv run python -m uvicorn okb_assist_main:app --host 0.0.0.0 --port 5001
+cd backend-rs
+cargo build --release
+cargo run -- --host 0.0.0.0 --port 5001
 ```
 
-### 启动向量化数据库和索引服务
+## 启动向量化数据库和索引服务
 
 ```bash
 cd data
@@ -18,26 +20,34 @@ qdrant
 ```
 
 ```bash
-cd backend
-uv run scripts/fastembed_server.py
+cd backend-rs
+# Fastembed 嵌入服务（如需）
+# 旧版 Python 脚本已移除，如需启动请查看 scripts/ 目录或使用 Docker
 ```
 
-### 启动webui服务
+## 启动 Web UI
 
 ```bash
-cd backend
-bash scripts/start-openwebui.sh
+cd frontend
+pnpm run build
+# 构建产物由后端直接 serving，访问 http://localhost:5001/assist/
 ```
 
+开发模式：
+
+```bash
+cd frontend
+pnpm run dev
+# 访问 http://localhost:5173/assist/
+```
 
 ## 其他选择
 
-### 使用docker启动向量数据库
+### 使用 Docker 启动向量数据库
 
 ```
 sudo docker pull docker.1ms.run/qdrant/qdrant:latest
 sudo docker run -p 6333:6333 -v $(pwd)/qdrant_data:/qdrant/storage docker.1ms.run/qdrant/qdrant:latest
 ```
-可以访问`http://:6333/dashboard`管理向量数据库
 
-
+可以访问 `http://localhost:6333/dashboard` 管理向量数据库。
