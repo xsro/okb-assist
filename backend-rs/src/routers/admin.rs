@@ -374,7 +374,7 @@ async fn recalculate_hashes(
     Extension(settings): Extension<Arc<Settings>>,
 ) -> Json<Value> {
     let docs: Vec<Document> = sqlx::query_as::<_, Document>(
-        "SELECT id, filename, file_hash, title, authors, year, doi, source, journal, \
+        "SELECT id, filename, file_hash, title, authors, CAST(NULLIF(year, '') AS INTEGER) AS year, doi, source, journal, \
          keywords, abstract, category, doc_type, language, title_en, authors_en, \
          keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
          progress, qdrant_collection, vector_db_id, created_at, updated_at \
@@ -417,7 +417,7 @@ async fn recalculate_hashes(
 
 async fn reset_index(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
     let indexed_docs: Vec<Document> = sqlx::query_as::<_, Document>(
-        "SELECT id, filename, file_hash, title, authors, year, doi, source, journal, \
+        "SELECT id, filename, file_hash, title, authors, CAST(NULLIF(year, '') AS INTEGER) AS year, doi, source, journal, \
          keywords, abstract, category, doc_type, language, title_en, authors_en, \
          keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
          progress, qdrant_collection, vector_db_id, created_at, updated_at \

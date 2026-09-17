@@ -74,3 +74,8 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
+
+/// 返回当前 UTC 时间的 SQLite DateTime 字符串（微秒级，与 Python SQLAlchemy 存储格式一致）
+pub fn now_datetime() -> String {
+    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+}

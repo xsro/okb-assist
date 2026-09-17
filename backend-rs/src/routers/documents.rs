@@ -15,7 +15,7 @@ use crate::database::Database;
 use crate::models::Document;
 use crate::paths;
 use crate::services::pdf_meta::{extract_pdf_metadata, normalize_doi};
-use crate::utils::{calculate_file_hash, now_iso, sha256_hex};
+use crate::utils::{calculate_file_hash, now_datetime, now_iso, sha256_hex};
 
 /// 全局文件别名表（内存，重启即丢失，与 Python 版一致）
 static FILE_ALIASES: std::sync::OnceLock<RwLock<std::collections::HashMap<String, i64>>> =
@@ -165,7 +165,7 @@ pub struct DocumentOut {
     pub updated_at: Option<String>,
 }
 
-const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, year, doi, source, journal, \
+const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, CAST(NULLIF(year, '') AS INTEGER) AS year, doi, source, journal, \
     keywords, abstract, category, doc_type, language, title_en, authors_en, \
     keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
     progress, qdrant_collection, vector_db_id, created_at, updated_at";
@@ -570,11 +570,12 @@ fn fill_meta_fields(doc: &mut Document, meta: &Value) {
 
 /// 插入新文档记录
 async fn insert_document(db: &Database, doc: Document) -> Result<i64, String> {
+    let now = now_datetime();
     let result = sqlx::query(
         "INSERT INTO documents (filename, file_hash, title, authors, year, doi, source, journal, \
          keywords, abstract, category, doc_type, language, title_en, authors_en, keywords_en, \
-         abstract_en, journal_en, status, progress) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', 0.0)",
+         abstract_en, journal_en, status, progress, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', 0.0, ?, ?)",
     )
     .bind(&doc.filename)
     .bind(&doc.file_hash)
@@ -594,6 +595,8 @@ async fn insert_document(db: &Database, doc: Document) -> Result<i64, String> {
     .bind(&doc.keywords_en)
     .bind(&doc.abstract_en)
     .bind(&doc.journal_en)
+    .bind(&now)
+    .bind(&now)
     .execute(db.pool())
     .await
     .map_err(|e| e.to_string())?;
@@ -675,11 +678,12 @@ async fn upload_document(
         Some(id) => {
             doc.id = id;
             // 用指定 ID 插入
+            let now = now_datetime();
             let result = sqlx::query(
                 "INSERT INTO documents (id, filename, file_hash, title, authors, year, doi, source, journal, \
                  keywords, abstract, category, doc_type, language, title_en, authors_en, keywords_en, \
-                 abstract_en, journal_en, status, progress) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', 0.0)",
+                 abstract_en, journal_en, status, progress, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', 0.0, ?, ?)",
             )
             .bind(id)
             .bind(&doc.filename)
@@ -700,6 +704,8 @@ async fn upload_document(
             .bind(&doc.keywords_en)
             .bind(&doc.abstract_en)
             .bind(&doc.journal_en)
+            .bind(&now)
+            .bind(&now)
             .execute(db.pool())
             .await;
 
