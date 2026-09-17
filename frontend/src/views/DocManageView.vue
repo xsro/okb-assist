@@ -89,6 +89,7 @@
         <span class="action-label">危险操作</span>
         <div class="action-buttons">
           <button class="btn btn-danger" @click="reset">重置</button>
+          <button class="btn btn-danger" @click="removeDocument">删除文档</button>
         </div>
       </div>
     </div>
@@ -140,8 +141,8 @@
 
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue'
-import { useRoute } from 'vue-router'
-import { getDocument, updateDocument, replacePdf } from '@/api/documents'
+import { useRoute, useRouter } from 'vue-router'
+import { getDocument, updateDocument, replacePdf, deleteDocument } from '@/api/documents'
 import { getServiceConfig } from '@/api/config'
 import {
   parseDocument,
@@ -159,6 +160,7 @@ import type { VectorDbConfig } from '@/types/config'
 import type { DocumentIndexInfo } from '@/types/pipeline'
 
 const route = useRoute()
+const router = useRouter()
 const { showSuccess, showError } = useToast()
 const { requireToken } = useRequireToken()
 
@@ -242,6 +244,20 @@ async function reset() {
     load()
   } catch {
     showError('重置失败')
+  }
+}
+
+async function removeDocument() {
+  const id = parseInt(route.params.id as string)
+  const title = doc.value?.title || `#${id}`
+  if (!confirm(`确定删除文档「${title}」吗？\n此操作将永久删除数据库记录与本地文件（PDF、Markdown 等），且不可恢复！`)) return
+  if (!confirm('再次确认：真的要永久删除该文档吗？')) return
+  try {
+    await deleteDocument(id)
+    showSuccess('文档已删除')
+    router.push({ name: 'home' })
+  } catch {
+    showError('删除失败')
   }
 }
 
