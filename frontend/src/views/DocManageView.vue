@@ -425,23 +425,69 @@ onMounted(() => {
   flex: 1;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .action-group {
     flex-direction: column;
     align-items: flex-start;
     gap: 10px;
+    padding: 10px 0;
   }
 
   .action-label {
     width: auto;
+    font-size: 13px;
+    min-width: 70px;
+  }
+
+  .action-buttons {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 
   .index-control {
     width: 100%;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 
   .select {
     flex: 1;
+    min-width: 140px;
+  }
+
+  .form-row {
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .form-row .form-group {
+    width: 100%;
+  }
+
+  .detail-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .detail-header h2 {
+    font-size: 16px;
+  }
+
+  .detail-header .btn {
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .action-group {
+    gap: 8px;
+  }
+
+  .action-label {
+    min-width: 60px;
+    font-size: 12px;
   }
 }
 </style>

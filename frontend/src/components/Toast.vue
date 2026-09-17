@@ -51,4 +51,34 @@ const store = useToastStore()
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
 }
+
+/* 移动端 Toast 适配 */
+@media (max-width: 768px) {
+  .toast-container {
+    top: 56px;
+    right: 0;
+    left: 0;
+    padding: 0 12px;
+  }
+
+  .toast {
+    min-width: 0;
+    width: 100%;
+    margin: 0;
+    padding: 12px 16px 12px 44px;
+    font-size: 14px;
+  }
+
+  .toast-close {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+@media (max-width: 480px) {
+  .toast {
+    padding: 10px 14px 10px 40px;
+    font-size: 13px;
+  }
+}
 </style>

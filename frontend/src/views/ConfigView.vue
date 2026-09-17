@@ -215,4 +215,62 @@ onMounted(load)
 .checkbox-group input {
   width: auto;
 }
+
+@media (max-width: 768px) {
+  .vector-db-card {
+    padding: 12px;
+  }
+
+  .vector-db-card .form-row {
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .vector-db-card .form-group {
+    width: 100%;
+  }
+
+  .vector-db-card .form-group input,
+  .vector-db-card .form-group select {
+    font-size: 14px;
+  }
+
+  .action-buttons {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .action-buttons .btn {
+    width: 100%;
+  }
+
+  .config-output {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .config-output pre {
+    width: 100%;
+    font-size: 12px;
+    padding: 12px;
+  }
+
+  .config-output button {
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .vector-db-card {
+    padding: 10px;
+  }
+
+  .vector-db-card .form-group label {
+    font-size: 12px;
+  }
+
+  .config-output pre {
+    font-size: 11px;
+  }
+}
 </style>

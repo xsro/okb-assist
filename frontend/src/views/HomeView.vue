@@ -49,8 +49,8 @@
     <!-- 加载提示 -->
     <div v-if="loading" class="loading-hint">加载中...</div>
 
-    <!-- 文档表格 -->
-    <table v-else class="doc-table">
+    <!-- 桌面端表格 -->
+    <table v-if="!isMobile" class="doc-table">
       <thead>
         <tr>
           <th>ID</th>
@@ -95,6 +95,39 @@
       </tbody>
     </table>
 
+    <!-- 移动端卡片 -->
+    <div v-else class="doc-cards-container">
+      <div v-for="doc in documents" :key="doc.id" class="doc-card">
+        <div class="doc-card-header">
+          <span class="doc-card-id">#{{ doc.id }}</span>
+          <StatusBadge :status="doc.status" />
+        </div>
+        <router-link :to="{ name: 'detail', params: { id: doc.id } }" class="doc-card-title">
+          {{ doc.title }}
+        </router-link>
+        <div class="doc-card-meta">
+          <span v-if="doc.authors">👤 {{ doc.authors }}</span>
+          <span v-if="doc.year">📅 {{ doc.year }}</span>
+          <span v-if="doc.doc_type">📋 {{ doc.doc_type }}</span>
+        </div>
+        <div v-if="doc.indexed_dbs && doc.indexed_dbs.length" class="doc-card-indexes">
+          <span
+            v-for="dbId in doc.indexed_dbs"
+            :key="dbId"
+            class="index-db-tag"
+          >{{ dbId }}</span>
+        </div>
+        <div class="doc-card-actions">
+          <router-link
+            :to="{ name: 'docManage', params: { id: doc.id } }"
+            class="btn btn-sm btn-outline"
+          >
+            管理
+          </router-link>
+        </div>
+      </div>
+    </div>
+
     <!-- 分页 -->
     <div class="pagination">
       <button :disabled="page <= 1" @click="page--; load()">上一页</button>
@@ -119,6 +152,13 @@ import type { Document } from '@/types/document'
 
 const { showError } = useToast()
 const { requireToken } = useRequireToken()
+
+const viewportWidth = ref(window.innerWidth)
+const isMobile = computed(() => viewportWidth.value <= 768)
+
+function onResize() {
+  viewportWidth.value = window.innerWidth
+}
 
 const documents = ref<Document[]>([])
 const loading = ref(false)
@@ -215,6 +255,7 @@ function closeScopePanelOnOutside(event: MouseEvent) {
 
 onMounted(async () => {
   document.addEventListener('click', closeScopePanelOnOutside)
+  window.addEventListener('resize', onResize)
   try {
     const res = await getDocTypes()
     docTypes.value = res.doc_types
@@ -224,6 +265,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   document.removeEventListener('click', closeScopePanelOnOutside)
+  window.removeEventListener('resize', onResize)
 })
 </script>
 
@@ -286,6 +328,70 @@ onUnmounted(() => {
 
 .scope-option input[type='checkbox'] {
   cursor: pointer;
+}
+
+.doc-cards-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.doc-card {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 0;
+}
+
+.doc-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.doc-card-id {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: monospace;
+}
+
+.doc-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--primary);
+  line-height: 1.4;
+  display: block;
+  margin-bottom: 10px;
+}
+
+.doc-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.doc-card-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.doc-card-indexes {
+  margin-bottom: 10px;
+}
+
+.doc-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.doc-card-actions .btn {
+  flex: 1;
 }
 
 @media (max-width: 640px) {

@@ -61,4 +61,33 @@ onMounted(load)
   padding: 60px;
   color: var(--text-secondary);
 }
+
+@media (max-width: 768px) {
+  .action-buttons {
+    flex-wrap: wrap;
+  }
+
+  .action-buttons .btn {
+    flex: 1;
+    min-width: 100px;
+  }
+
+  .collection-card {
+    padding: 14px;
+  }
+
+  .collection-card h4 {
+    font-size: 15px;
+  }
+
+  .empty {
+    padding: 40px 20px;
+  }
+}
+
+@media (max-width: 480px) {
+  .collection-card {
+    padding: 12px;
+  }
+}
 </style>

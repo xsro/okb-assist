@@ -1,6 +1,7 @@
 <template>
   <div id="app">
     <AppHeader />
+    <MobileMenu v-if="showMobileMenu" @close="showMobileMenu = false" />
     <Toast />
     <main class="main-content">
       <router-view />
@@ -13,13 +14,23 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, ref, provide } from 'vue'
 import { useTokenStore } from '@/stores/token'
 import AppHeader from '@/components/AppHeader.vue'
 import Toast from '@/components/Toast.vue'
 import TokenModal from '@/components/TokenModal.vue'
+import MobileMenu from '@/components/MobileMenu.vue'
 
 const tokenStore = useTokenStore()
+const showMobileMenu = ref(false)
+
+// 向子组件提供菜单控制函数
+provide('toggleMobileMenu', () => {
+  showMobileMenu.value = !showMobileMenu.value
+})
+provide('closeMobileMenu', () => {
+  showMobileMenu.value = false
+})
 
 onMounted(() => {
   window.addEventListener('auth:required', () => {

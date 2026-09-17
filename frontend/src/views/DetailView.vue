@@ -14,7 +14,8 @@
 
     <!-- 元信息 -->
     <div class="section">
-      <table class="info-table">
+      <!-- 桌面端表格 -->
+      <table v-if="!isMobile" class="info-table">
         <tr><th>ID</th><td>{{ doc.id }}</td></tr>
         <tr><th>作者</th><td>{{ doc.authors || '-' }}</td></tr>
         <tr><th>期刊</th><td>{{ doc.journal || '-' }}</td></tr>
@@ -41,6 +42,75 @@
         <tr><th>创建时间</th><td>{{ doc.created_at }}</td></tr>
         <tr><th>更新时间</th><td>{{ doc.updated_at }}</td></tr>
       </table>
+
+      <!-- 移动端堆叠 -->
+      <div v-else class="info-table-stack">
+        <div class="info-row">
+          <span class="info-label">ID</span>
+          <span class="info-value">{{ doc.id }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">标题</span>
+          <span class="info-value">{{ doc.title }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">作者</span>
+          <span class="info-value">{{ doc.authors || '-' }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">期刊</span>
+          <span class="info-value">{{ doc.journal || '-' }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">年份</span>
+          <span class="info-value">{{ doc.year || '-' }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">文档类型</span>
+          <span class="info-value">{{ doc.doc_type || '-' }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">DOI</span>
+          <span class="info-value">{{ doc.doi || '-' }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">关键词</span>
+          <span class="info-value">{{ doc.keywords || '-' }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">文件哈希</span>
+          <span class="info-value">{{ doc.file_hash || '-' }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">文件大小</span>
+          <span class="info-value">{{ formatSize(doc.file_size) }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">状态</span>
+          <span class="info-value"><StatusBadge :status="doc.status" /></span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">已索引库</span>
+          <span class="info-value">
+            <span v-if="!doc.indexed_dbs || doc.indexed_dbs.length === 0">-</span>
+            <span v-else class="index-dbs">
+              <span
+                v-for="dbId in doc.indexed_dbs"
+                :key="dbId"
+                class="index-db-tag"
+              >{{ dbId }}</span>
+            </span>
+          </span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">创建时间</span>
+          <span class="info-value">{{ doc.created_at }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">更新时间</span>
+          <span class="info-value">{{ doc.updated_at }}</span>
+        </div>
+      </div>
     </div>
 
     <!-- 摘要 -->
@@ -75,7 +145,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, watch, computed, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { getDocument, getMarkdown, getFileAlias } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
@@ -87,6 +157,13 @@ import type { Document } from '@/types/document'
 const route = useRoute()
 const { showError } = useToast()
 const { requireToken } = useRequireToken()
+
+const viewportWidth = ref(window.innerWidth)
+const isMobile = computed(() => viewportWidth.value <= 768)
+
+function onResize() {
+  viewportWidth.value = window.innerWidth
+}
 
 const doc = ref<Document | null>(null)
 const markdownContent = ref('')
@@ -139,7 +216,14 @@ async function loadMarkdown() {
 }
 
 watch(() => route.params.id, load)
-onMounted(load)
+onMounted(() => {
+  load()
+  window.addEventListener('resize', onResize)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', onResize)
+})
 </script>
 
 <style scoped>
@@ -174,6 +258,41 @@ onMounted(load)
   font-weight: 600;
   color: var(--text-secondary);
   background: #f7f7f7;
+}
+
+/* 移动端信息表堆叠 */
+.info-table-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.info-table-stack .info-row {
+  display: flex;
+  align-items: flex-start;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  gap: 12px;
+}
+
+.info-table-stack .info-row:last-child {
+  border-bottom: none;
+}
+
+.info-table-stack .info-label {
+  width: 100px;
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding-top: 2px;
+}
+
+.info-table-stack .info-value {
+  flex: 1;
+  font-size: 14px;
+  color: var(--text);
+  word-break: break-word;
 }
 .abstract-text {
   margin-top: 8px;

@@ -226,10 +226,61 @@ onMounted(load)
   height: auto;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .markdown-header {
     flex-direction: column;
     align-items: flex-start;
+    gap: 12px;
+    padding-bottom: 12px;
+  }
+
+  .markdown-controls {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .page-nav {
+    width: 100%;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .page-nav button {
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+
+  .page-size-select,
+  .math-mode-select {
+    flex: 1;
+    min-width: 100px;
+  }
+
+  .image-toggle {
+    flex: 1;
+    justify-content: center;
+  }
+}
+
+@media (max-width: 480px) {
+  .markdown-controls {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .page-nav {
+    order: 3;
+    width: 100%;
+  }
+
+  .page-nav span {
+    width: 100%;
+    text-align: center;
+  }
+
+  .page-nav button {
+    flex: 1;
   }
 }
 </style>

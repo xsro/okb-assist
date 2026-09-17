@@ -564,13 +564,32 @@ watch(() => props.mode, (newMode) => {
   .ace-md-toolbar {
     padding: 3px 4px;
     gap: 1px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+  }
+
+  .ace-md-toolbar::-webkit-scrollbar {
+    display: none;
   }
 
   .tb-btn {
-    min-width: 24px;
-    height: 24px;
+    min-width: 36px;
+    height: 36px;
     font-size: 11px;
     padding: 0 4px;
+    flex-shrink: 0;
+  }
+
+  .tb-btn strong,
+  .tb-btn em,
+  .tb-btn s {
+    font-size: 13px;
+  }
+
+  .tb-sep {
+    flex-shrink: 0;
   }
 
   .ace-body.ace-split {
@@ -586,6 +605,73 @@ watch(() => props.mode, (newMode) => {
   .status-cursor,
   .status-select {
     display: none;
+  }
+
+  .ace-statusbar {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 8px;
+  }
+
+  .status-left,
+  .status-center,
+  .status-right {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .status-left {
+    margin-right: 0;
+    order: 1;
+  }
+
+  .status-center {
+    order: 2;
+    margin: 4px 0;
+  }
+
+  .status-right {
+    margin-left: 0;
+    order: 3;
+    justify-content: flex-start;
+  }
+
+  .status-wordcount {
+    font-size: 10px;
+  }
+
+  .stat-btn {
+    min-width: 36px;
+    height: 30px;
+    font-size: 11px;
+  }
+
+  .status-fontsize {
+    font-size: 11px;
+    padding: 0 4px;
+  }
+}
+
+@media (max-width: 480px) {
+  .ace-md-toolbar {
+    padding: 2px;
+  }
+
+  .tb-btn {
+    min-width: 40px;
+    height: 40px;
+    font-size: 10px;
+  }
+
+  .ace-statusbar {
+    padding: 4px 6px;
+    gap: 4px;
+  }
+
+  .status-left,
+  .status-center,
+  .status-right {
+    gap: 2px;
   }
 }
 </style>

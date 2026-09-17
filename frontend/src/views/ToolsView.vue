@@ -228,7 +228,15 @@ async function doSemanticSearch() {
   gap: 4px;
   margin-bottom: 20px;
   border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  flex-wrap: nowrap;
 }
+
+.tools-tabs::-webkit-scrollbar {
+  display: none;
+}
+
 .tab {
   padding: 10px 20px;
   border: none;
@@ -238,6 +246,8 @@ async function doSemanticSearch() {
   color: var(--text-secondary);
   border-bottom: 2px solid transparent;
   transition: all 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .tab.active {
   color: var(--primary);
@@ -345,5 +355,80 @@ async function doSemanticSearch() {
   padding: 40px;
   color: var(--text-secondary);
   font-size: 14px;
+}
+
+@media (max-width: 768px) {
+  .search-input {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .search-input input {
+    width: 100%;
+  }
+
+  .search-input .btn {
+    width: 100%;
+  }
+
+  .advanced-options {
+    padding: 12px;
+  }
+
+  .option-row {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .form-group {
+    width: 100%;
+  }
+
+  .form-group input,
+  .form-group select {
+    width: 100%;
+  }
+
+  .checkbox-option {
+    width: 100%;
+  }
+
+  .doc-ids-group input {
+    max-width: 100%;
+  }
+
+  .result-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .result-header a {
+    font-size: 15px;
+  }
+
+  .snippet {
+    font-size: 13px;
+  }
+}
+
+@media (max-width: 480px) {
+  .tab {
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+
+  .advanced-options {
+    padding: 10px;
+  }
+
+  .result-item {
+    padding: 10px 0;
+  }
+
+  .empty-hint {
+    padding: 30px 16px;
+    font-size: 13px;
+  }
 }
 </style>

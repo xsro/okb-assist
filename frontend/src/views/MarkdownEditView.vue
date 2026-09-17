@@ -117,4 +117,48 @@ onMounted(load)
 .btn-outline {
   background: transparent;
 }
+
+@media (max-width: 768px) {
+  .markdown-edit-view {
+    padding: 10px;
+    height: calc(100vh - 56px);
+    gap: 10px;
+  }
+
+  .edit-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .edit-header h2 {
+    font-size: 16px;
+  }
+
+  .edit-actions {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .edit-actions .btn {
+    flex: 1;
+    min-width: 100px;
+  }
+}
+
+@media (max-width: 480px) {
+  .markdown-edit-view {
+    padding: 8px;
+  }
+
+  .edit-header h2 {
+    font-size: 15px;
+  }
+
+  .edit-actions .btn {
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+}
 </style>

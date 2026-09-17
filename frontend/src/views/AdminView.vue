@@ -206,4 +206,71 @@ onMounted(load)
 }
 .status-dot.ok { background: var(--success); }
 .status-dot.error { background: var(--danger); }
+
+@media (max-width: 768px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+
+  .stat-card {
+    padding: 14px;
+  }
+
+  .stat-value {
+    font-size: 24px;
+  }
+
+  .action-buttons {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .action-buttons .btn {
+    flex: 1;
+    min-width: 120px;
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+
+  .doc-table th,
+  .doc-table td {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+
+  .doc-table th {
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 480px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .stat-card {
+    padding: 12px;
+  }
+
+  .stat-value {
+    font-size: 22px;
+  }
+
+  .action-buttons .btn {
+    min-width: 100px;
+    font-size: 12px;
+    padding: 8px 10px;
+  }
+
+  .doc-table {
+    font-size: 11px;
+  }
+
+  .doc-table th,
+  .doc-table td {
+    padding: 6px 8px;
+  }
+}
 </style>

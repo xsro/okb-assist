@@ -390,15 +390,70 @@ async function startUpload() {
   gap: 8px;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
+  .upload-area {
+    padding: 32px 20px;
+  }
+
+  .upload-icon {
+    width: 40px;
+    height: 40px;
+  }
+
+  .upload-hint {
+    font-size: 15px;
+  }
+
+  .upload-subhint {
+    font-size: 13px;
+  }
+
   .upload-queue-item {
     grid-template-columns: 1fr;
     gap: 10px;
+    padding: 12px;
   }
 
   .upload-toolbar {
     flex-direction: column;
     align-items: flex-start;
+    gap: 12px;
+  }
+
+  .upload-actions {
+    width: 100%;
+  }
+
+  .upload-actions .btn {
+    flex: 1;
+  }
+
+  .file-actions {
+    flex-wrap: wrap;
+  }
+
+  .file-actions .btn {
+    flex: 1;
+    min-width: 80px;
+  }
+}
+
+@media (max-width: 480px) {
+  .upload-area {
+    padding: 24px 16px;
+  }
+
+  .upload-icon {
+    width: 36px;
+    height: 36px;
+  }
+
+  .upload-hint {
+    font-size: 14px;
+  }
+
+  .upload-queue-item {
+    padding: 10px;
   }
 }
 </style>

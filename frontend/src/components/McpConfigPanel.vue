@@ -124,7 +124,15 @@ onMounted(load)
   gap: 4px;
   margin-bottom: 16px;
   border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  flex-wrap: nowrap;
 }
+
+.client-tabs::-webkit-scrollbar {
+  display: none;
+}
+
 .tab {
   padding: 10px 20px;
   border: none;
@@ -134,6 +142,8 @@ onMounted(load)
   color: var(--text-secondary);
   border-bottom: 2px solid transparent;
   transition: all 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .tab.active {
   color: var(--primary);
@@ -181,5 +191,49 @@ onMounted(load)
   width: 120px;
   color: var(--text-secondary);
   background: #f7f7f7;
+}
+
+@media (max-width: 768px) {
+  .config-output {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .config-output pre {
+    width: 100%;
+    font-size: 12px;
+    padding: 12px;
+  }
+
+  .config-output button {
+    width: 100%;
+  }
+
+  .info-table th,
+  .info-table td {
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+
+  .info-table th {
+    width: 100px;
+  }
+
+  .info-table td {
+    word-break: break-all;
+  }
+}
+
+@media (max-width: 480px) {
+  .config-output pre {
+    font-size: 11px;
+    padding: 10px;
+  }
+
+  .info-table th,
+  .info-table td {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
 }
 </style>

@@ -85,4 +85,42 @@ onMounted(load)
   padding: 60px;
   color: var(--text-secondary);
 }
+
+@media (max-width: 768px) {
+  .group-card {
+    padding: 12px;
+    margin-bottom: 16px;
+  }
+
+  .group-card h4 {
+    font-size: 15px;
+  }
+
+  .doc-table th,
+  .doc-table td {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+
+  .doc-table .btn {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+
+  .empty {
+    padding: 40px 20px;
+  }
+}
+
+@media (max-width: 480px) {
+  .group-card {
+    padding: 10px;
+  }
+
+  .doc-table th,
+  .doc-table td {
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+}
 </style>
