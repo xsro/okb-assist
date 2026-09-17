@@ -252,9 +252,14 @@ async def grep_search(
     doc_ids: Optional[str] = None,
     algorithm: str = Query("full", description="搜索算法：full=全量扫描(原), fast=元数据预筛候选"),
     regex: bool = Query(True, description="是否按正则匹配（False 时按字面量匹配）"),
+    journal: Optional[str] = Query(None, description="期刊名模糊匹配"),
+    year_start: Optional[int] = Query(None, description="起始年份（含）"),
+    year_end: Optional[int] = Query(None, description="结束年份（含）"),
     db: Session = Depends(get_db),
 ):
     """基于系统 grep 的轻量全文搜索（无需向量数据库）。
+
+    支持通过期刊名和年份范围进行元数据预过滤，再在候选文档中执行 grep 搜索。
 
     Args:
         q: 搜索关键词（支持正则）
@@ -263,6 +268,9 @@ async def grep_search(
         doc_ids: 逗号分隔的文档 ID 列表，限定搜索范围（如 "1,2,3"）
         algorithm: 搜索算法，full 或 fast
         regex: 是否按正则匹配
+        journal: 期刊名模糊匹配（可选）
+        year_start: 起始年份（含，可选）
+        year_end: 结束年份（含，可选）
     """
     if not q.strip():
         return {"results": [], "query": q}
@@ -276,7 +284,7 @@ async def grep_search(
     except ValueError:
         raise HTTPException(status_code=400, detail="doc_ids 格式无效，支持逗号与区间，如 1,2,5-100")
 
-    # 透传 algorithm / regex 参数：默认 full + 正则，与原行为一致
+    # 透传 algorithm / regex / journal / year 参数：默认 full + 正则，与原行为一致
     results = await do_grep(
         query=q,
         context_lines=context,
@@ -285,6 +293,9 @@ async def grep_search(
         algorithm=algorithm,
         regex=regex,
         db=db,
+        journal=journal,
+        year_start=year_start,
+        year_end=year_end,
     )
 
     # 补充文档元数据

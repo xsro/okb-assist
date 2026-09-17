@@ -42,6 +42,9 @@ async def grep_search(
     algorithm: str = "full",   # "full"=原算法（全量扫描）；"fast"=元数据预筛候选
     regex: bool = True,        # True=正则（原行为）；False=字面匹配（-F）
     db=None,                   # SQLAlchemy Session，fast 模式预筛需要
+    journal: str | None = None,
+    year_start: int | None = None,
+    year_end: int | None = None,
 ) -> list[dict]:
     """使用系统 grep 搜索文档的 markdown 内容。
 
@@ -54,6 +57,11 @@ async def grep_search(
       关键词/作者）做 LIKE 预筛，只扫描候选文档；若没有任何元数据命中，则回退到
       全量枚举，保证结果不遗漏。regex=False 时使用 grep -F 做字面匹配。
 
+    期刊/年份过滤：当指定 journal（期刊名模糊匹配）或 year_start/year_end
+    （年份范围）时，会先通过数据库查询符合条件的文档 ID，再在这些候选文档
+    的 markdown 文件中执行 grep 搜索。此过滤与 doc_ids 逻辑是叠加关系：
+    先应用 journal/year 过滤得到候选集，再与 doc_ids 取交集。
+
     Args:
         query: 搜索关键词（支持正则，regex=True 时）
         context_lines: 匹配行前后的上下文行数
@@ -62,12 +70,31 @@ async def grep_search(
         algorithm: 搜索算法，"full" 或 "fast"
         regex: 是否按正则表达式匹配（False 时按字面量匹配）
         db: 数据库连接（SQLAlchemy Session），fast 模式预筛需要
+        journal: 期刊名模糊匹配（可选）
+        year_start: 起始年份（可选，含）
+        year_end: 结束年份（可选，含）
 
     Returns:
         [{document_id, content, file_path}, ...]
     """
     import os
     from app.paths import get_markdown_path
+
+    # 期刊/年份过滤：先从 DB 获取候选文档 ID
+    meta_filtered_ids: list[int] | None = None
+    if db is not None and (journal or year_start is not None or year_end is not None):
+        meta_filtered_ids = _meta_filter_ids(db, journal, year_start, year_end)
+        if not meta_filtered_ids:
+            # 没有符合条件的文档，直接返回空
+            return []
+
+    # 如果同时有 meta_filtered_ids 和 doc_ids，取交集
+    if meta_filtered_ids is not None and doc_ids is not None:
+        doc_ids = [did for did in doc_ids if did in set(meta_filtered_ids)]
+        if not doc_ids:
+            return []
+    elif meta_filtered_ids is not None:
+        doc_ids = meta_filtered_ids
 
     # fast 模式仅在未指定 doc_ids、且提供了 db 时启用
     fast_enabled = (
@@ -176,6 +203,46 @@ def _build_grep_cmd(
         query,
         *search_paths,
     ]
+
+
+def _meta_filter_ids(
+    db,
+    journal: str | None = None,
+    year_start: int | None = None,
+    year_end: int | None = None,
+) -> list[int]:
+    """根据期刊名和年份范围查询匹配的文档 ID。
+
+    在 grep 搜索前调用，通过数据库元数据预筛选候选文档。
+    journal 使用 LIKE 模糊匹配（忽略大小写），年份范围含端点。
+    多个条件之间是 AND 关系。
+
+    Args:
+        db: SQLAlchemy Session
+        journal: 期刊名（模糊匹配，可选）
+        year_start: 起始年份（含，可选）
+        year_end: 结束年份（含，可选）
+
+    Returns:
+        符合条件的文档 ID 列表
+    """
+    from app.models import Document
+
+    q = db.query(Document.id)
+
+    if journal and journal.strip():
+        q = q.filter(
+            Document.journal.ilike(f"%{journal.strip()}%")
+        )
+
+    if year_start is not None:
+        q = q.filter(Document.year >= year_start)
+
+    if year_end is not None:
+        q = q.filter(Document.year <= year_end)
+
+    rows = q.all()
+    return [r[0] for r in rows]
 
 
 def _metadata_candidate_ids(db, query: str) -> list[int]:
