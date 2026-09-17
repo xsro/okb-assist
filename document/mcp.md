@@ -6,7 +6,7 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
 
 | 工具名称 | 功能 | 参数 |
 |---------|------|------|
-| `grep_search` | 全文搜索（基于 grep，轻量快速） | `query: str`, `limit: int = 10`, `context: int = 2`, `doc_ids: str`, `journal: str`, `year_start: int`, `year_end: int` |
+| `grep_search` | 全文搜索（基于 grep，轻量快速） | `query: str`, `limit: int = 10`, `context: int = 2`, `doc_ids: str`, `algorithm: str = "full"`, `regex: bool = true`, `journal: str`, `year_start: int`, `year_end: int` |
 | `search_info` | 搜索文献元数据（标题、作者、期刊等） | `query: str`, `limit: int = 10` |
 | `read_markdown` | 读取文献 Markdown 内容（分页） | `doc_id: int`, `page: int = 1`, `page_size: int = 5000` |
 | `get_document_info` | 获取文献详细信息 | `doc_id: int` |
@@ -298,6 +298,40 @@ npx @modelcontextprotocol/inspector uv run python -m app.mcp_server
 - **列出文献**: "列出所有已索引的 journalArticle 类型文献"
 - **统计信息**: "知识库有多少篇文献？各类型分别多少？"
 - **文献类型**: "知识库中有哪些文献类型？"
+
+### grep query 语法（grep_search）
+
+`grep_search` 的 `query` 底层调用系统 `grep`，**始终忽略大小写**（`-i`），支持两种匹配模式：
+
+- **正则模式（默认，`regex=true`）**：`query` 按 **BRE（基本正则表达式）** 解析。
+- **字面模式（`regex=false`）**：`query` 按固定字符串匹配（`-F`），所有字符按原义处理。
+
+**BRE 常用语法**
+
+| 语法 | 含义 |
+|------|------|
+| `transformer` | 字面匹配（忽略大小写） |
+| `.` | 任意单个字符 |
+| `*` | 前一元素出现 0 次或多次 |
+| `[abc]` / `[0-9]` / `[^a-z]` | 字符类 / 取反 |
+| `^` / `$` | 行首 / 行尾 |
+| `\+` / `\?` / `\|` | 1 次及以上 / 0 或 1 次 / 或 |
+| `\(...\)` | 分组 |
+| `\{m,n\}` | 重复 m 到 n 次 |
+
+**注意（BRE 与常见 PCRE 的差异）**
+
+- `+`、`?`、`|`、`(`、`)`、`{`、`}` 在 BRE 中默认是**字面量**，需加 `\` 转义才具有正则含义。
+- 不支持 `\d` 等 PCRE 简写；数字用 `[0-9]`，空白用 `[ \t]` 或 `[[:space:]]`。
+- 匹配 `.`、`*`、`[` 等元字符本身时需转义（如 `\.`），或改用 `regex=false`。
+
+**示例**
+
+| 意图 | query | 说明 |
+|------|-------|------|
+| 搜 transformer 或 attention | `transformer\|attention` | BRE 中 `\|` 表示或 |
+| LQR 后跟空白再跟“控制” | `LQR[[:space:]]\+控制` | `\+` 表示 1 次及以上 |
+| 精确匹配含括号的公式 | `(A+B)` 且 `regex=false` | 字面模式，括号无需转义 |
 
 ---
 
