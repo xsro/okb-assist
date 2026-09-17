@@ -89,6 +89,7 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/:id/pdf", get(get_pdf).post(replace_pdf).head(check_pdf_exists))
         .route("/assist/api/documents/:id/file-alias/", get(file_alias))
         .route("/assist/api/documents/:id/file-alias", get(file_alias))
+        .layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024))
 }
 
 /// 列表查询参数（与 Python 版 /assist/api/documents/ 对齐）
@@ -612,8 +613,11 @@ async fn upload_document(
         if let Some(name) = field.name() {
             if name == "file" {
                 filename = field.file_name().map(String::from);
-                if let Ok(bytes) = field.bytes().await {
-                    content = bytes.to_vec();
+                match field.bytes().await {
+                    Ok(bytes) => content = bytes.to_vec(),
+                    Err(e) => {
+                        return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("读取文件内容失败: {}", e)}))).into_response();
+                    }
                 }
             }
         }
@@ -1529,8 +1533,11 @@ async fn replace_pdf(
     while let Ok(Some(field)) = multipart.next_field().await {
         if field.name() == Some("file") {
             file_name = field.file_name().map(|s| s.to_string());
-            if let Ok(bytes) = field.bytes().await {
-                content = bytes.to_vec();
+            match field.bytes().await {
+                Ok(bytes) => content = bytes.to_vec(),
+                Err(e) => {
+                    return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("读取文件内容失败: {}", e)}))).into_response();
+                }
             }
         }
     }
