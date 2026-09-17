@@ -6,7 +6,7 @@ use std::sync::RwLock;
 use axum::extract::{Path, Query};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, head, post};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -15,7 +15,7 @@ use crate::database::Database;
 use crate::models::Document;
 use crate::paths;
 use crate::services::pdf_meta::{extract_pdf_metadata, normalize_doi};
-use crate::utils::calculate_file_hash;
+use crate::utils::{calculate_file_hash, now_iso, sha256_hex};
 
 /// 全局文件别名表（内存，重启即丢失，与 Python 版一致）
 static FILE_ALIASES: std::sync::OnceLock<RwLock<std::collections::HashMap<String, i64>>> =
@@ -74,28 +74,38 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/by-hash/:hash/", get(by_hash))
         .route("/assist/api/documents/by-hash/:hash", get(by_hash))
         .route("/assist/api/documents/by-doi/:doi/", get(by_doi))
+        .route("/assist/api/documents/by-doi/:doi", get(by_doi))
+        .route("/assist/api/documents/diff-dois/", post(diff_dois))
+        .route("/assist/api/documents/diff-dois", post(diff_dois))
         .route("/assist/api/documents/:id/", get(get_document).put(update_document).delete(delete_document))
         .route("/assist/api/documents/:id", get(get_document).put(update_document).delete(delete_document))
+        .route("/assist/api/documents/:id/info/", get(get_document_info).post(save_document_info))
+        .route("/assist/api/documents/:id/info", get(get_document_info).post(save_document_info))
+        .route("/assist/api/documents/:id/image/:filename/", get(get_image_from_zip))
+        .route("/assist/api/documents/:id/image/:filename", get(get_image_from_zip))
         .route("/assist/api/documents/:id/markdown/", get(get_markdown).put(update_markdown))
         .route("/assist/api/documents/:id/markdown", get(get_markdown).put(update_markdown))
-        .route("/assist/api/documents/:id/pdf/", get(get_pdf))
-        .route("/assist/api/documents/:id/pdf", get(get_pdf))
+        .route("/assist/api/documents/:id/pdf/", get(get_pdf).post(replace_pdf).head(check_pdf_exists))
+        .route("/assist/api/documents/:id/pdf", get(get_pdf).post(replace_pdf).head(check_pdf_exists))
         .route("/assist/api/documents/:id/file-alias/", get(file_alias))
         .route("/assist/api/documents/:id/file-alias", get(file_alias))
 }
 
-/// 列表查询参数
+/// 列表查询参数（与 Python 版 /assist/api/documents/ 对齐）
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
     pub page: Option<i64>,
     pub page_size: Option<i64>,
     pub q: Option<String>,
-    pub status: Option<String>,
-    pub doc_type: Option<String>,
+    pub status_filter: Option<String>,
+    pub doc_type_filter: Option<String>,
+    pub search_fields: Option<String>,
+    pub sort_by: Option<String>,
+    pub sort_order: Option<String>,
+    // 向后兼容旧参数（Python 版无这些，仅作扩展）
     pub category: Option<String>,
     pub year: Option<i64>,
     pub journal: Option<String>,
-    pub sort: Option<String>,
 }
 
 /// 文档输出格式
@@ -123,7 +133,7 @@ pub struct DocumentOut {
     pub journal: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keywords: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "abstract", skip_serializing_if = "Option::is_none")]
     pub abstract_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
@@ -159,7 +169,25 @@ const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, year, doi, s
     keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
     progress, qdrant_collection, vector_db_id, created_at, updated_at";
 
-fn doc_to_out(doc: &Document, settings: &Settings) -> DocumentOut {
+/// 查询文档已索引的向量数据库列表（仅 indexed 状态）
+async fn indexed_dbs(db: &Database, doc_id: i64) -> Option<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT vector_db_id FROM document_vector_index \
+         WHERE document_id = ? AND status = 'indexed' ORDER BY vector_db_id",
+    )
+    .bind(doc_id)
+    .fetch_all(db.pool())
+    .await
+    .unwrap_or_default();
+
+    if rows.is_empty() {
+        None
+    } else {
+        Some(rows.into_iter().map(|(v,)| v).collect())
+    }
+}
+
+async fn doc_to_out(doc: &Document, settings: &Settings, db: &Database) -> DocumentOut {
     DocumentOut {
         id: doc.id,
         filename: doc.filename.clone(),
@@ -185,7 +213,7 @@ fn doc_to_out(doc: &Document, settings: &Settings) -> DocumentOut {
         status: doc.status.clone(),
         status_message: doc.status_message.clone(),
         progress: Some(doc.progress),
-        indexed_dbs: None,
+        indexed_dbs: indexed_dbs(db, doc.id).await,
         created_at: doc.created_at.clone(),
         updated_at: doc.updated_at.clone(),
     }
@@ -215,6 +243,49 @@ async fn next_available_id(db: &Database) -> Option<i64> {
     None
 }
 
+/// 可搜索字段名 → SQL 列名映射（与 Python 版一致）
+const SEARCHABLE_COLUMNS: &[(&str, &str)] = &[
+    ("title", "title"),
+    ("authors", "authors"),
+    ("keywords", "keywords"),
+    ("abstract", "abstract"),
+    ("journal", "journal"),
+    ("doi", "doi"),
+    ("source", "source"),
+    ("filename", "filename"),
+    ("category", "category"),
+    ("doc_type", "doc_type"),
+    ("language", "language"),
+    ("title_en", "title_en"),
+    ("authors_en", "authors_en"),
+    ("keywords_en", "keywords_en"),
+    ("abstract_en", "abstract_en"),
+    ("journal_en", "journal_en"),
+];
+
+/// 可排序字段名 → SQL 列名映射（与 Python 版一致）
+const SORTABLE_COLUMNS: &[(&str, &str)] = &[
+    ("id", "id"),
+    ("title", "title"),
+    ("authors", "authors"),
+    ("year", "year"),
+    ("doc_type", "doc_type"),
+    ("status", "status"),
+    ("journal", "journal"),
+    ("language", "language"),
+    ("doi", "doi"),
+    ("category", "category"),
+    ("created_at", "created_at"),
+    ("updated_at", "updated_at"),
+];
+
+fn column_for(field: &str, table: &[(&str, &str)]) -> Option<String> {
+    table
+        .iter()
+        .find(|(k, _)| *k == field)
+        .map(|(_, col)| col.to_string())
+}
+
 async fn list_documents(
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
@@ -229,23 +300,48 @@ async fn list_documents(
 
     if let Some(q) = &params.q {
         if !q.trim().is_empty() {
+            // 解析搜索字段；为空时使用默认字段（title/authors/filename）
+            let mut cols: Vec<String> = Vec::new();
+            if let Some(sf) = &params.search_fields {
+                for f in sf.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    if let Some(c) = column_for(f, SEARCHABLE_COLUMNS) {
+                        cols.push(c);
+                    }
+                }
+            }
+            if cols.is_empty() {
+                cols = vec!["title".to_string(), "authors".to_string(), "filename".to_string()];
+            }
             let like = format!("%{}%", q.trim());
-            conditions.push("(title LIKE ? OR filename LIKE ? OR authors LIKE ? OR doi LIKE ?)".to_string());
-            for _ in 0..4 {
+            let ors = cols
+                .iter()
+                .map(|c| format!("{} LIKE ?", c))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            conditions.push(format!("({})", ors));
+            for _ in 0..cols.len() {
                 binds.push(like.clone());
             }
         }
     }
-    if let Some(status) = &params.status {
-        if !status.trim().is_empty() {
-            conditions.push("status = ?".to_string());
-            binds.push(status.clone());
+    if let Some(status) = &params.status_filter {
+        let statuses: Vec<&str> = status.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        if !statuses.is_empty() {
+            let placeholders = statuses.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            conditions.push(format!("status IN ({})", placeholders));
+            for s in statuses {
+                binds.push(s.to_string());
+            }
         }
     }
-    if let Some(dt) = &params.doc_type {
-        if !dt.trim().is_empty() {
-            conditions.push("doc_type = ?".to_string());
-            binds.push(dt.clone());
+    if let Some(dt) = &params.doc_type_filter {
+        let types: Vec<&str> = dt.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        if !types.is_empty() {
+            let placeholders = types.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            conditions.push(format!("doc_type IN ({})", placeholders));
+            for t in types {
+                binds.push(t.to_string());
+            }
         }
     }
     if let Some(year) = params.year {
@@ -272,13 +368,14 @@ async fn list_documents(
     }
     let total: i64 = count_query.fetch_one(db.pool()).await.unwrap_or(0);
 
-    let order = match params.sort.as_deref() {
-        Some("year_desc") => "ORDER BY year DESC",
-        Some("year_asc") => "ORDER BY year ASC",
-        Some("title") => "ORDER BY title",
-        Some("created_desc") => "ORDER BY created_at DESC",
-        _ => "ORDER BY id DESC",
-    };
+    // 排序：sort_by + sort_order（默认 created_at desc）
+    let sort_col = params
+        .sort_by
+        .as_deref()
+        .and_then(|f| column_for(f, SORTABLE_COLUMNS))
+        .unwrap_or_else(|| "created_at".to_string());
+    let order_dir = if params.sort_order.as_deref() == Some("asc") { "ASC" } else { "DESC" };
+    let order = format!("ORDER BY {} {}", sort_col, order_dir);
 
     let sql = format!(
         "SELECT {} FROM documents{} {} LIMIT ? OFFSET ?",
@@ -296,7 +393,10 @@ async fn list_documents(
         .await
         .unwrap_or_default();
 
-    let items: Vec<DocumentOut> = docs.iter().map(|d| doc_to_out(d, &settings)).collect();
+    let mut items: Vec<DocumentOut> = Vec::with_capacity(docs.len());
+    for d in &docs {
+        items.push(doc_to_out(d, &settings, &db).await);
+    }
     let total_pages = (total as f64 / page_size as f64).ceil() as i64;
 
     Json(json!({
@@ -314,7 +414,7 @@ async fn get_document(
     Path(id): Path<i64>,
 ) -> Response {
     match fetch_doc(&db, id).await {
-        Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings)))).into_response(),
+        Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"detail": "Document not found"}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
     }
@@ -621,7 +721,7 @@ async fn upload_document(
 
     // 返回文档信息
     match fetch_doc(&db, doc_id).await {
-        Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings)))).into_response(),
+        Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response(),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "文档创建失败"}))).into_response(),
     }
 }
@@ -722,7 +822,7 @@ async fn register_document_by_path(
     }
 
     match fetch_doc(&db, doc_id).await {
-        Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings)))).into_response(),
+        Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response(),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "文档创建失败"}))).into_response(),
     }
 }
@@ -744,7 +844,7 @@ async fn find_similar_titles(
     for doc in &docs {
         if let Some(title) = &doc.title {
             let key: String = title.chars().take(20).collect::<String>().to_lowercase();
-            let out = doc_to_out(doc, &settings);
+            let out = doc_to_out(doc, &settings, &db).await;
             groups.entry(key).or_default().push(out);
         }
     }
@@ -820,7 +920,10 @@ async fn search_info(
         .await
         .unwrap_or_default();
 
-    let results: Vec<DocumentOut> = docs.iter().map(|d| doc_to_out(d, &settings)).collect();
+    let mut results: Vec<DocumentOut> = Vec::with_capacity(docs.len());
+    for d in &docs {
+        results.push(doc_to_out(d, &settings, &db).await);
+    }
     let total = results.len();
     Json(json!({"results": results, "query": q, "total": total}))
 }
@@ -923,20 +1026,7 @@ async fn grep_search(
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"detail": "doc_ids 格式无效，支持逗号与区间，如 1,2,5-100"}))).into_response(),
     };
 
-    // 构建搜索路径
     let settings = crate::settings::get_settings();
-    let sample = paths::get_markdown_path(&settings, 0);
-    let dir = match std::path::Path::new(&sample).parent() {
-        Some(d) if d.is_dir() => d.to_path_buf(),
-        _ => return Json(json!({"results": [], "query": q})).into_response(),
-    };
-
-    let search_paths: Vec<String> = if let Some(ids) = &id_list {
-        ids.iter().map(|id| paths::get_markdown_path(&settings, *id)).filter(|p| std::path::Path::new(p).exists()).collect()
-    } else {
-        vec![dir.to_string_lossy().to_string()]
-    };
-
     let results = crate::services::grep_search::grep_search(
         q.trim(),
         params.context.unwrap_or(2) as usize,
@@ -944,7 +1034,11 @@ async fn grep_search(
         id_list.as_deref(),
         params.algorithm.as_deref().unwrap_or("full"),
         params.regex.unwrap_or(true),
-        &search_paths,
+        db.pool(),
+        &settings,
+        params.journal.as_deref(),
+        params.year_start,
+        params.year_end,
     )
     .await;
 
@@ -982,6 +1076,9 @@ async fn by_hash(
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(hash): Path<String>,
 ) -> Response {
+    if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "哈希格式无效，需要 64 位 SHA256"}))).into_response();
+    }
     let doc: Option<Document> = sqlx::query_as::<_, Document>(&format!(
         "SELECT {} FROM documents WHERE file_hash = ? LIMIT 1", DOC_COLUMNS
     ))
@@ -991,8 +1088,8 @@ async fn by_hash(
     .unwrap_or(None);
 
     match doc {
-        Some(d) => (StatusCode::OK, Json(json!(doc_to_out(&d, &settings)))).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(json!({"detail": "Document not found"}))).into_response(),
+        Some(d) => (StatusCode::OK, Json(json!(doc_to_out(&d, &settings, &db).await))).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({"detail": "未找到匹配的文档"}))).into_response(),
     }
 }
 
@@ -1001,6 +1098,9 @@ async fn by_doi(
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(doi): Path<String>,
 ) -> Response {
+    if doi.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "DOI 不能为空"}))).into_response();
+    }
     let doc: Option<Document> = sqlx::query_as::<_, Document>(&format!(
         "SELECT {} FROM documents WHERE doi = ? LIMIT 1", DOC_COLUMNS
     ))
@@ -1010,8 +1110,8 @@ async fn by_doi(
     .unwrap_or(None);
 
     match doc {
-        Some(d) => (StatusCode::OK, Json(json!(doc_to_out(&d, &settings)))).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(json!({"detail": "Document not found"}))).into_response(),
+        Some(d) => (StatusCode::OK, Json(json!(doc_to_out(&d, &settings, &db).await))).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({"detail": "未找到匹配的文档"}))).into_response(),
     }
 }
 
@@ -1185,18 +1285,289 @@ async fn get_pdf(
 
 async fn file_alias(
     axum::Extension(db): axum::Extension<Arc<Database>>,
-    axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(id): Path<i64>,
 ) -> Response {
     match fetch_doc(&db, id).await {
         Ok(Some(doc)) => {
             let alias = get_or_create_alias(id, doc.year, doc.title.as_deref());
             Json(json!({
-                "filename": alias,
-                "url": format!("{}/assist/file/{}", settings.public_url(), alias),
+                "url": format!("/assist/file/{}", alias),
             })).into_response()
         }
         Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiffDoisRequest {
+    pub dois: Vec<String>,
+}
+
+/// POST /assist/api/documents/diff-dois/ —— 判断哪些 DOI 已在库中
+async fn diff_dois(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    Json(payload): Json<DiffDoisRequest>,
+) -> Response {
+    let submitted = payload.dois.iter().filter(|d| !d.trim().is_empty()).map(|d| d.trim().to_string()).collect::<Vec<_>>();
+
+    let mut present: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for doi in &submitted {
+        let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM documents WHERE doi = ? LIMIT 1")
+            .bind(doi)
+            .fetch_optional(db.pool())
+            .await
+            .unwrap_or(None);
+        if exists.is_some() {
+            present.push(doi.clone());
+        } else {
+            missing.push(doi.clone());
+        }
+    }
+    present.sort();
+
+    Json(json!({
+        "submitted": submitted,
+        "present": present,
+        "missing": missing,
+        "present_count": present.len(),
+        "missing_count": missing.len(),
+    })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InfoPayload {
+    #[serde(default)]
+    pub info: serde_json::Map<String, serde_json::Value>,
+}
+
+/// POST /assist/api/documents/{id}/info —— 合并写入 markdowns/{id}.json
+async fn save_document_info(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+    Json(payload): Json<InfoPayload>,
+) -> Response {
+    match fetch_doc(&db, id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    }
+
+    let info_path = std::path::PathBuf::from(paths::get_info_path(&settings, id));
+    if let Some(parent) = info_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let mut existing: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    if info_path.exists() {
+        if let Ok(raw) = std::fs::read_to_string(&info_path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(obj) = v.as_object() {
+                    existing = obj.clone();
+                }
+            }
+        }
+    }
+
+    for (k, v) in payload.info.iter() {
+        let is_empty = match v {
+            serde_json::Value::String(s) => s.trim().is_empty(),
+            serde_json::Value::Null => true,
+            _ => false,
+        };
+        if !is_empty {
+            existing.insert(k.clone(), v.clone());
+        }
+    }
+
+    let written = serde_json::to_string_pretty(&serde_json::Value::Object(existing.clone())).unwrap_or_default();
+    if let Err(e) = std::fs::write(&info_path, written) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
+    }
+
+    Json(json!({"id": id, "info_path": info_path.to_string_lossy(), "keys": existing.len()})).into_response()
+}
+
+/// GET /assist/api/documents/{id}/info —— 读取 markdowns/{id}.json
+async fn get_document_info(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+) -> Response {
+    match fetch_doc(&db, id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    }
+
+    let info_path = std::path::PathBuf::from(paths::get_info_path(&settings, id));
+    if !info_path.exists() {
+        return (StatusCode::NOT_FOUND, Json(json!({"detail": "信息文件不存在"}))).into_response();
+    }
+    match std::fs::read_to_string(&info_path) {
+        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(v) => Json(json!({"id": id, "info": v})).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
+        },
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
+    }
+}
+
+fn image_mime(filename: &str) -> &'static str {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
+/// GET /assist/api/documents/{id}/image/{filename} —— 从图片资源 zip 中读取图片
+async fn get_image_from_zip(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path((id, filename)): Path<(i64, String)>,
+) -> Response {
+    match fetch_doc(&db, id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文档不存在"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    }
+
+    let zip_path = std::path::PathBuf::from(paths::get_asset_path(&settings, id));
+    if !zip_path.exists() {
+        return (StatusCode::NOT_FOUND, Json(json!({"detail": "图片包不存在"}))).into_response();
+    }
+
+    let raw = match std::fs::read(&zip_path) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
+    };
+
+    let cursor = std::io::Cursor::new(raw);
+    let mut archive = match zip::ZipArchive::new(cursor) {
+        Ok(a) => a,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "图片包损坏"}))).into_response(),
+    };
+
+    let target = {
+        let mut found = None;
+        for i in 0..archive.len() {
+            if let Ok(entry) = archive.by_index(i) {
+                if let Some(name) = entry.enclosed_name() {
+                    let base = std::path::Path::new(&name)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if base == filename {
+                        found = Some(name.to_path_buf());
+                        break;
+                    }
+                }
+            }
+        }
+        found
+    };
+
+    let target = match target {
+        Some(t) => t,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "图片不存在"}))).into_response(),
+    };
+
+    let mut img_data = Vec::new();
+    if let Ok(mut entry) = archive.by_name(&target.to_string_lossy()) {
+        use std::io::Read;
+        if entry.read_to_end(&mut img_data).is_err() {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "读取图片失败"}))).into_response();
+        }
+    }
+
+    let mime = image_mime(&filename);
+    (StatusCode::OK, [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "public, max-age=86400")], img_data).into_response()
+}
+
+/// POST /assist/api/documents/{id}/pdf/ —— 替换已有文档的 PDF
+async fn replace_pdf(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    match fetch_doc(&db, id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文档不存在"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    }
+
+    let mut file_name: Option<String> = None;
+    let mut content: Vec<u8> = Vec::new();
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("file") {
+            file_name = field.file_name().map(|s| s.to_string());
+            if let Ok(bytes) = field.bytes().await {
+                content = bytes.to_vec();
+            }
+        }
+    }
+
+    let file_name = match file_name {
+        Some(f) => f,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少文件"}))).into_response(),
+    };
+
+    if !file_name.to_lowercase().ends_with(".pdf") {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "只支持 PDF 文件"}))).into_response();
+    }
+
+    let file_hash = sha256_hex(&content);
+    let pdf_path = std::path::PathBuf::from(paths::get_pdf_path(&settings, id));
+    if let Some(parent) = pdf_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&pdf_path, &content) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
+    }
+
+    let now = now_iso();
+    if let Err(e) = sqlx::query("UPDATE documents SET file_hash = ?, status = 'uploaded', updated_at = ? WHERE id = ?")
+        .bind(&file_hash)
+        .bind(&now)
+        .bind(id)
+        .execute(db.pool())
+        .await
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
+    }
+
+    match fetch_doc(&db, id).await {
+        Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "文档更新失败"}))).into_response(),
+    }
+}
+
+/// HEAD /assist/api/documents/{id}/pdf —— 检查 PDF 是否存在
+async fn check_pdf_exists(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+) -> Response {
+    match fetch_doc(&db, id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    }
+    let pdf_path = std::path::PathBuf::from(paths::get_pdf_path(&settings, id));
+    if pdf_path.exists() {
+        StatusCode::OK.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
     }
 }

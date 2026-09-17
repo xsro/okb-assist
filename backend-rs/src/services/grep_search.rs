@@ -1,6 +1,10 @@
 //! 基于系统 grep 的轻量全文搜索服务。
 
+use std::collections::HashSet;
+use std::path::Path;
 use std::process::Command;
+
+use sqlx::Row;
 
 /// 解析 '1,2,5-100,4' 形式的文档 ID 列表
 pub fn parse_doc_ids(s: &str) -> Result<Option<Vec<i64>>, String> {
@@ -30,7 +34,10 @@ pub fn parse_doc_ids(s: &str) -> Result<Option<Vec<i64>>, String> {
     Ok(Some(ids))
 }
 
-/// 执行 grep 搜索
+/// 执行 grep 搜索（完整对齐 Python 版逻辑）。
+///
+/// 内部完成：期刊/年份元数据预筛 → 与 doc_ids 取交集 → fast 算法候选预筛 →
+/// 构建搜索路径 → 调用系统 grep → 解析输出。
 pub async fn grep_search(
     query: &str,
     context_lines: usize,
@@ -38,8 +45,57 @@ pub async fn grep_search(
     doc_ids: Option<&[i64]>,
     algorithm: &str,
     regex: bool,
-    search_paths: &[String],
+    db: &sqlx::SqlitePool,
+    settings: &crate::config::Settings,
+    journal: Option<&str>,
+    year_start: Option<i64>,
+    year_end: Option<i64>,
 ) -> Vec<serde_json::Value> {
+    let mut doc_ids_owned: Option<Vec<i64>> = doc_ids.map(|v| v.to_vec());
+
+    // 1. 期刊/年份元数据预筛
+    if journal.is_some() || year_start.is_some() || year_end.is_some() {
+        let meta = meta_filter_ids(db, journal, year_start, year_end).await;
+        if meta.is_empty() {
+            return Vec::new();
+        }
+        match doc_ids_owned.as_mut() {
+            Some(ids) => {
+                let set: HashSet<i64> = meta.iter().copied().collect();
+                ids.retain(|id| set.contains(id));
+                if ids.is_empty() {
+                    return Vec::new();
+                }
+            }
+            None => doc_ids_owned = Some(meta),
+        }
+    }
+
+    // 2. fast 模式：元数据预筛候选文档，无命中回退全量
+    let fast_enabled = algorithm == "fast" && doc_ids_owned.is_none();
+
+    let search_paths: Vec<String> = if fast_enabled {
+        let candidates = metadata_candidate_ids(db, query).await;
+        let mut paths: Vec<String> = candidates
+            .iter()
+            .map(|did| crate::paths::get_markdown_path(settings, *did))
+            .filter(|p| Path::new(p).exists())
+            .collect();
+        if paths.is_empty() {
+            paths = list_all_markdown_paths(settings);
+        }
+        paths
+    } else {
+        match &doc_ids_owned {
+            Some(ids) if !ids.is_empty() => ids
+                .iter()
+                .map(|did| crate::paths::get_markdown_path(settings, *did))
+                .filter(|p| Path::new(p).exists())
+                .collect(),
+            _ => list_all_markdown_paths(settings),
+        }
+    };
+
     if search_paths.is_empty() {
         return Vec::new();
     }
@@ -50,7 +106,7 @@ pub async fn grep_search(
         cmd.arg("-F");
     }
     cmd.arg(query);
-    for path in search_paths {
+    for path in &search_paths {
         cmd.arg(path);
     }
 
@@ -145,7 +201,7 @@ fn parse_grep_line(line: &str) -> Option<(String, String, String)> {
     ))
 }
 
-fn extract_doc_id(file_path: &str) -> Option<i64> {
+pub fn extract_doc_id(file_path: &str) -> Option<i64> {
     let re = regex::Regex::new(r"/(\d+)\.md$").ok()?;
     if let Some(caps) = re.captures(file_path) {
         return caps.get(1)?.as_str().parse().ok();
@@ -163,7 +219,6 @@ fn extract_doc_id(file_path: &str) -> Option<i64> {
 
 /// 列出所有 markdown 文件路径
 pub fn list_all_markdown_paths(settings: &crate::config::Settings) -> Vec<String> {
-    use std::path::Path;
     let sample = crate::paths::get_markdown_path(settings, 0);
     let dir = match Path::new(&sample).parent() {
         Some(d) => d,
@@ -202,55 +257,25 @@ pub async fn metadata_candidate_ids(
     }
 }
 
-/// 期刊/年份过滤
+/// 期刊/年份过滤（AND 关系，journal 忽略大小写 LIKE 模糊匹配）
 pub async fn meta_filter_ids(
     db: &sqlx::SqlitePool,
     journal: Option<&str>,
     year_start: Option<i64>,
     year_end: Option<i64>,
 ) -> Vec<i64> {
-    let mut query_str = String::from("SELECT id FROM documents WHERE 1=1");
-    let mut binds: Vec<serde_json::Value> = Vec::new();
-
+    let mut qb = sqlx::QueryBuilder::new("SELECT id FROM documents WHERE 1=1");
     if let Some(j) = journal {
         if !j.trim().is_empty() {
-            query_str.push_str(" AND journal LIKE ?");
-            binds.push(serde_json::Value::String(format!("%{}%", j.trim())));
+            qb.push(" AND journal LIKE ").push_bind(format!("%{}%", j.trim()));
         }
     }
     if let Some(ys) = year_start {
-        query_str.push_str(" AND year >= ?");
-        binds.push(serde_json::Value::Number(ys.into()));
+        qb.push(" AND year >= ").push_bind(ys);
     }
     if let Some(ye) = year_end {
-        query_str.push_str(" AND year <= ?");
-        binds.push(serde_json::Value::Number(ye.into()));
+        qb.push(" AND year <= ").push_bind(ye);
     }
-
-    // For simplicity, use a simpler approach with individual queries
-    if journal.is_some() && year_start.is_some() && year_end.is_some() {
-        let j = journal.unwrap();
-        let like = format!("%{}%", j.trim());
-        match sqlx::query_as::<_, (i64,)>(
-            "SELECT id FROM documents WHERE journal LIKE ? AND year >= ? AND year <= ?"
-        )
-            .bind(&like)
-            .bind(year_start.unwrap())
-            .bind(year_end.unwrap())
-            .fetch_all(db)
-            .await
-        {
-            Ok(rows) => return rows.into_iter().map(|(id,)| id).collect(),
-            Err(_) => return Vec::new(),
-        }
-    }
-
-    // Fallback: just return all IDs
-    match sqlx::query_as::<_, (i64,)>("SELECT id FROM documents")
-        .fetch_all(db)
-        .await
-    {
-        Ok(rows) => rows.into_iter().map(|(id,)| id).collect(),
-        Err(_) => Vec::new(),
-    }
+    let rows = qb.build().fetch_all(db).await.unwrap_or_default();
+    rows.iter().map(|r| r.get::<i64, _>("id")).collect()
 }

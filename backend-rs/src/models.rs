@@ -108,6 +108,7 @@ pub struct Document {
     pub source: Option<String>,
     pub journal: Option<String>,
     pub keywords: Option<String>,
+    #[sqlx(rename = "abstract")]
     pub abstract_text: Option<String>,
     pub category: Option<String>,
     pub doc_type: Option<String>,

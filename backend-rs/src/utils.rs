@@ -61,3 +61,16 @@ pub fn path_exists(path: &str) -> bool {
 pub fn join_path(base: &str, name: &str) -> PathBuf {
     Path::new(base).join(name)
 }
+
+/// 计算字节数组的 SHA256 哈希（十六进制）
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// 返回当前 UTC 时间 ISO8601 字符串（秒级精度，带 Z 后缀）
+pub fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}

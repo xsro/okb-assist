@@ -5,8 +5,9 @@
 use std::sync::Arc;
 
 use axum::Extension;
-use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
@@ -83,7 +84,8 @@ fn create_app(
         .layer(cors)
         .layer(Extension(config_manager))
         .layer(Extension(settings.clone()))
-        .layer(Extension(db.clone()));
+        .layer(Extension(db.clone()))
+        .layer(middleware::from_fn(token_middleware));
 
     let app = axum::Router::new()
         .merge(routers::documents::router())
@@ -91,6 +93,7 @@ fn create_app(
         .merge(routers::admin::router())
         .merge(routers::config::router())
         .merge(routers::openapi::router())
+        .route("/assist/mcp/stream", post(mcp_server::mcp_stream_handler))
         .route("/assist/file/:filename", get(serve_file_alias))
         .route("/", get(root_redirect))
         .route("/redirect/:doc_id", get(redirect_by_network))
@@ -181,24 +184,203 @@ async fn serve_file_alias(
     }
 }
 
-async fn spa_fallback(
-    Extension(_settings): Extension<Arc<Settings>>,
-) -> impl IntoResponse {
+/// Token 鉴权中间件。
+///
+/// 仅保护 `/assist/api/*`，与 Python `TokenMiddleware` 行为一致：
+/// - token 为 `change-me` 或未设置时跳过校验；
+/// - 来自 192.168.1.0/24 局域网的请求免校验；
+/// - 通过 `X-Token` 头或 `token` 查询参数校验；
+/// - `/assist/api/documents/` 下含 `/image/` 的图片 URL 放行。
+async fn token_middleware(req: axum::extract::Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+
+    // 仅保护 API 路径
+    if !path.starts_with("/assist/api/") {
+        return next.run(req).await;
+    }
+
+    // 图片 URL 放行
+    if path.contains("/image/") {
+        return next.run(req).await;
+    }
+
+    let settings = req.extensions().get::<Arc<Settings>>().cloned();
+    if let Some(settings) = settings {
+        let token = settings.token();
+
+        // token 未设置或为 change-me 时跳过校验
+        if token.is_empty() || token == "change-me" {
+            return next.run(req).await;
+        }
+
+        // 局域网 192.168.1.0/24 免校验
+        let client_ip = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(',').next().unwrap_or("").trim().to_string());
+        if let Some(ip) = client_ip {
+            if ip.starts_with("192.168.1.") {
+                return next.run(req).await;
+            }
+        }
+
+        // 校验 X-Token 头或 token 查询参数
+        let provided = req
+            .headers()
+            .get("x-token")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                req.uri().query().and_then(|q| {
+                    q.split('&').find_map(|kv| {
+                        let (k, v) = kv.split_once('=')?;
+                        if k == "token" {
+                            Some(v.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                })
+            });
+
+        if provided.as_deref() == Some(token.as_str()) {
+            return next.run(req).await;
+        }
+
+        return (
+            http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"detail": "未授权：无效或缺失的 token"})),
+        )
+            .into_response();
+    }
+
+    next.run(req).await
+}
+
+/// SPA fallback：命中 frontend/dist 真实文件则返回文件，否则返回 index.html。
+///
+/// 与 Python `serve_spa` 对齐：
+/// - api/、mcp/、uploads/、file/ 前缀应由其他路由处理，未命中则 404；
+/// - 命中真实文件时按扩展名返回 MIME 与缓存策略；
+/// - 其余客户端路由回退到 index.html。
+async fn spa_fallback(uri: axum::http::Uri) -> Response {
     let dist_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("frontend")
         .join("dist");
     let index = dist_dir.join("index.html");
 
+    let path = uri.path();
+    let full_path = match path.strip_prefix("/assist") {
+        Some(rest) => rest.trim_start_matches('/'),
+        None => {
+            // 仅处理 /assist 前缀的 SPA 路径，其余 404（对齐 Python）
+            return (
+                http::StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({"detail": "Not Found"})),
+            )
+                .into_response();
+        }
+    };
+
+    // 这些前缀应由其他路由处理，未命中则 404
+    for prefix in ["api/", "mcp/", "uploads/", "file/"] {
+        if full_path.starts_with(prefix) {
+            return (
+                http::StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({"detail": "Not Found"})),
+            )
+                .into_response();
+        }
+    }
+
+    // 命中真实文件（防路径穿越）
+    if !full_path.is_empty() {
+        if let Some(file) = resolve_frontend_file(&dist_dir, full_path) {
+            if let Ok(bytes) = std::fs::read(&file) {
+                return (
+                    http::StatusCode::OK,
+                    [
+                        (http::header::CONTENT_TYPE, mime_for_path(&file)),
+                        (http::header::CACHE_CONTROL, cache_control_for(&file)),
+                    ],
+                    bytes,
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // 返回 index.html
     if index.exists() {
         (
-            [(http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            http::StatusCode::OK,
+            [
+                (http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (http::header::CACHE_CONTROL, "no-cache, must-revalidate"),
+            ],
             std::fs::read(&index).unwrap_or_default(),
         )
+            .into_response()
     } else {
         (
+            http::StatusCode::OK,
             [(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
             b"Frontend not built. Run: cd frontend && pnpm run build".to_vec(),
         )
+            .into_response()
+    }
+}
+
+/// 在 frontend/dist 内解析请求路径（防路径穿越）。
+fn resolve_frontend_file(dist_dir: &std::path::Path, path: &str) -> Option<std::path::PathBuf> {
+    let normalized = path.trim_start_matches('/');
+    let candidate = dist_dir.join(normalized);
+    let candidate = candidate.canonicalize().ok()?;
+    let dist_canon = dist_dir.canonicalize().ok()?;
+    if candidate.starts_with(&dist_canon) && candidate.is_file() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// 根据扩展名返回 MIME 类型。
+fn mime_for_path(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "application/javascript",
+        "css" => "text/css; charset=utf-8",
+        "json" | "map" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "eot" => "application/vnd.ms-fontobject",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+/// 与 Python `_get_cache_control` 对齐的缓存策略。
+fn cache_control_for(path: &std::path::Path) -> &'static str {
+    let basename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if basename == "index.html" || ext.is_empty() {
+        return "no-cache, must-revalidate";
+    }
+    match ext.as_str() {
+        "js" | "css" | "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" | "woff"
+        | "woff2" | "ttf" | "eot" | "map" | "webp" | "avif" => {
+            "public, max-age=31536000, immutable"
+        }
+        _ => "public, max-age=86400",
     }
 }
