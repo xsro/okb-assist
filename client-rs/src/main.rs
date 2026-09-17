@@ -121,7 +121,7 @@ fn canonical_key(col: &str) -> String {
         "abstract" => "abstract",
         "tags" => "tags",
         "type" => "type",
-        "item type" => "type",
+        "item type" => "item_type",
         "publisher" => "publisher",
         "place" => "place",
         "volume" => "volume",
@@ -392,9 +392,13 @@ fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
     let doi = row.get("doi").filter(|s| !s.is_empty()).cloned();
 
     // ── 期刊 / 来源 ──
+    // Zotero CSV 中 "Item Type" 才是文献类型，"Type" 是另一字段（常为空或自定义），
+    // 因此优先取 "Item Type"，回退到 "Type"。
     let item_type = row
-        .get("type")
+        .get("item_type")
         .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .or_else(|| row.get("type").map(|s| s.trim().to_lowercase()))
         .unwrap_or_default();
 
     let mut journal = row.get("journal").filter(|s| !s.is_empty()).cloned();
@@ -427,7 +431,7 @@ fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
     let doc_type = if item_type.is_empty() {
         None
     } else {
-        Some(map_doc_type(row.get("type").unwrap_or(&String::new())))
+        Some(map_doc_type(&item_type))
     };
 
     // ── 语言 ──
