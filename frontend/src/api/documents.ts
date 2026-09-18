@@ -40,9 +40,10 @@ export function deleteDocument(id: number) {
 // ── 上传与登记 ──────────────────────────────────────────
 
 /** 上传 PDF */
-export function uploadPdf(file: File) {
+export function uploadPdf(file: File, force = false) {
   const fd = new FormData()
   fd.append('file', file)
+  fd.append('force', String(force))
   return apiUpload<Document>('/assist/api/documents/upload/', fd)
 }
 

@@ -613,6 +613,7 @@ async fn upload_document(
 ) -> Response {
     let mut filename: Option<String> = None;
     let mut content: Vec<u8> = Vec::new();
+    let mut force = false;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         if let Some(name) = field.name() {
@@ -624,6 +625,9 @@ async fn upload_document(
                         return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("读取文件内容失败: {}", e)}))).into_response();
                     }
                 }
+            } else if name == "force" {
+                let val = field.bytes().await.unwrap_or_default();
+                force = std::str::from_utf8(&val).unwrap_or("false") == "true";
             }
         }
     }
@@ -643,6 +647,28 @@ async fn upload_document(
         use sha2::{Digest, Sha256};
         format!("{:x}", Sha256::digest(&content))
     };
+
+    // 检查重复（默认去重，force 可跳过）
+    if !force {
+        let duplicate: Option<(i64,)> = sqlx::query_as(
+            "SELECT id FROM documents WHERE file_hash = ? LIMIT 1",
+        )
+        .bind(&file_hash)
+        .fetch_optional(db.pool())
+        .await
+        .unwrap_or(None);
+        if let Some((existing_id,)) = duplicate {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "duplicate",
+                    "message": format!("文件已存在 (hash: {}...)", &file_hash[..16.min(file_hash.len())]),
+                    "existing_id": existing_id,
+                })),
+            )
+            .into_response();
+        }
+    }
 
     let mut doc = Document {
         id: 0,

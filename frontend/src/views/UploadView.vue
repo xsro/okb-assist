@@ -39,6 +39,10 @@
         <button class="btn" :disabled="!canUpload" @click="startUpload">
           {{ isUploading ? '上传中...' : '开始上传' }}
         </button>
+        <label class="force-checkbox">
+          <input type="checkbox" v-model="forceUpload" />
+          强制上传（跳过重复检查）
+        </label>
       </div>
     </div>
 
@@ -109,6 +113,7 @@ const isDragover = ref(false)
 const fileInput = ref<HTMLInputElement>()
 const queue = ref<QueueItem[]>([])
 const isUploading = ref(false)
+const forceUpload = ref(false)
 
 const canUpload = computed(() =>
   queue.value.some((item) => item.status === 'pending' || item.status === 'error')
@@ -195,7 +200,7 @@ async function uploadItem(item: QueueItem) {
       }
     }, 200)
 
-    await uploadPdf(item.file)
+    await uploadPdf(item.file, forceUpload.value)
 
     window.clearInterval(progressTimer)
     item.progress = 100
@@ -203,7 +208,12 @@ async function uploadItem(item: QueueItem) {
   } catch (e: any) {
     item.status = 'error'
     item.progress = 0
-    item.error = e?.response?.data?.detail || '上传失败'
+    const data = e?.response?.data
+    if (data?.error === 'duplicate') {
+      item.error = `${data.message}（文档 ID: ${data.existing_id}）`
+    } else {
+      item.error = data?.detail || '上传失败'
+    }
   }
 }
 
@@ -307,6 +317,20 @@ async function startUpload() {
 .upload-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
+}
+
+.force-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.force-checkbox input {
+  width: auto;
 }
 
 .upload-queue {
