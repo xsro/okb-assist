@@ -329,15 +329,6 @@ impl ConfigManager {
                     }
                 }
             }
-            if let Some(mcp_token) = obj.get_mut("mcp_token") {
-                if let Some(t) = mcp_token.as_str() {
-                    if t.len() > 4 {
-                        *mcp_token = serde_json::Value::String(format!("{}***", &t[..4]));
-                    } else {
-                        *mcp_token = serde_json::Value::String("***".to_string());
-                    }
-                }
-            }
         }
         masked
     }

@@ -1,6 +1,6 @@
 # OKB-Assist MCP 工具配置指南
 
-OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) 服务器，允许 AI 助手（如 Codebuddy、 Claude Desktop、Cursor 等）直接调用文献管理工具。
+OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) 服务器，允许 AI 助手（如 CodeBuddy、 Claude Desktop、 Codex、 Pi Agent、 OpenCode、 Cursor 等）直接调用文献管理工具。
 
 ## 可用工具
 
@@ -146,6 +146,41 @@ startup_timeout_sec = 20
 tool_timeout_sec = 120
 http_headers = {
     Authorization = "Bearer <token>"
+}
+```
+
+#### Pi Agent 配置
+
+在 `~/.config/mcp/mcp.json`（或项目级 `.mcp.json`）中配置：
+
+```json
+{
+  "mcpServers": {
+    "okb-assist": {
+      "url": "http://192.168.1.100:5001/assist/mcp/stream",
+      "headers": {
+        "Authorization": "Bearer <token>"
+      }
+    }
+  }
+}
+```
+
+#### OpenCode 配置
+
+在 `~/.config/opencode/opencode.json`（或项目级 `opencode.json`）中配置：
+
+```json
+{
+  "mcp": {
+    "okb-assist": {
+      "type": "remote",
+      "url": "http://192.168.1.100:5001/assist/mcp/stream",
+      "headers": {
+        "Authorization": "Bearer <token>"
+      }
+    }
+  }
 }
 ```
 

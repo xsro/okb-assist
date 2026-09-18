@@ -1,7 +1,7 @@
 <template>
   <div class="mcp-config-panel">
     <p class="hint">
-      将以下配置复制到你的 MCP 客户端（CodeBuddy / Claude / Codex），
+      将以下配置复制到你的 MCP 客户端（CodeBuddy / Claude / Codex / Pi / OpenCode），
       即可使用 OKB-Assist 的工具与资源。
     </p>
 
@@ -49,7 +49,9 @@ const mcpToken = ref('change-me')
 const clients = [
   { key: 'codebuddy', label: 'CodeBuddy' },
   { key: 'claude', label: 'Claude Desktop' },
-  { key: 'codex', label: 'Codex' }
+  { key: 'codex', label: 'Codex' },
+  { key: 'pi', label: 'Pi Agent' },
+  { key: 'opencode', label: 'OpenCode' }
 ]
 const activeClient = ref('codebuddy')
 
@@ -57,7 +59,9 @@ const configPath = computed(() => {
   const paths: Record<string, string> = {
     codebuddy: '~/.codebuddy/.mcp.json（具体路径以 CodeBuddy 设置为准，https://www.codebuddy.ai/docs/zh/cli/mcp#%E9%85%8D%E7%BD%AE%E6%96%87%E4%BB%B6）',
     claude: 'macOS: ~/Library/Application Support/Claude/claude_desktop_config.json；Linux: ~/.config/claude-desktop/config.json',
-    codex: '~/.codex/config.toml（或 ~/.config/codex/config.toml）'
+    codex: '~/.codex/config.toml（或 ~/.config/codex/config.toml）',
+    pi: '~/.config/mcp/mcp.json（或项目级 .mcp.json）',
+    opencode: '~/.config/opencode/opencode.json（或项目级 opencode.json）'
   }
   return paths[activeClient.value] || ''
 })
@@ -67,7 +71,7 @@ const clientConfig = computed(() => {
     codebuddy: `{
   "mcpServers": {
     "okb-assist": {
-      "type": "sse",
+      "type": "http",
       "url": "${mcpUrl.value}",
       "headers": {
         "Authorization": "Bearer ${mcpToken.value}"
@@ -78,11 +82,10 @@ const clientConfig = computed(() => {
     claude: `{
   "mcpServers": {
     "okb-assist": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-sse"],
-      "env": {
-        "MCP_URL": "${mcpUrl.value}",
-        "MCP_TOKEN": "${mcpToken.value}"
+      "type": "http",
+      "url": "${mcpUrl.value}",
+      "headers": {
+        "Authorization": "Bearer ${mcpToken.value}"
       }
     }
   }
@@ -93,7 +96,28 @@ url = "${mcpUrl.value}"
 http_headers = {
     Authorization = "Bearer ${mcpToken.value}"
 }
-`
+`,
+    pi: `{
+  "mcpServers": {
+    "okb-assist": {
+      "url": "${mcpUrl.value}",
+      "headers": {
+        "Authorization": "Bearer ${mcpToken.value}"
+      }
+    }
+  }
+}`,
+    opencode: `{
+  "mcp": {
+    "okb-assist": {
+      "type": "remote",
+      "url": "${mcpUrl.value}",
+      "headers": {
+        "Authorization": "Bearer ${mcpToken.value}"
+      }
+    }
+  }
+}`
   }
   return configs[activeClient.value] || ''
 })
