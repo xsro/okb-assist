@@ -3,17 +3,13 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-/// 文档状态枚举
+/// 文档状态枚举（仅主流程串行状态）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DocStatus {
     Uploaded,
     Parsing,
     MarkdownDone,
-    Extracting,
-    MetaDone,
-    Indexing,
-    Indexed,
     Error,
 }
 
@@ -23,10 +19,6 @@ impl DocStatus {
             DocStatus::Uploaded => "uploaded",
             DocStatus::Parsing => "parsing",
             DocStatus::MarkdownDone => "markdown_done",
-            DocStatus::Extracting => "extracting",
-            DocStatus::MetaDone => "meta_done",
-            DocStatus::Indexing => "indexing",
-            DocStatus::Indexed => "indexed",
             DocStatus::Error => "error",
         }
     }
@@ -45,11 +37,9 @@ impl std::str::FromStr for DocStatus {
             "uploaded" => Ok(DocStatus::Uploaded),
             "parsing" => Ok(DocStatus::Parsing),
             "markdown_done" => Ok(DocStatus::MarkdownDone),
-            "extracting" => Ok(DocStatus::Extracting),
-            "meta_done" => Ok(DocStatus::MetaDone),
-            "indexing" => Ok(DocStatus::Indexing),
-            "indexed" => Ok(DocStatus::Indexed),
             "error" => Ok(DocStatus::Error),
+            // 向后兼容：旧状态视为 markdown_done
+            "extracting" | "meta_done" | "indexing" | "indexed" => Ok(DocStatus::MarkdownDone),
             _ => Err(format!("Unknown status: {}", s)),
         }
     }

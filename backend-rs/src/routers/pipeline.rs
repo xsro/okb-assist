@@ -360,19 +360,13 @@ fn value_list_json(v: &Value, key: &str) -> Option<String> {
 }
 
 async fn do_extract_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
-    update_doc_status(&db, doc_id, DocStatus::Extracting, Some("正在提取元数据..."), Some(10.0)).await;
-
     let doc = match fetch_doc(&db, doc_id).await {
         Some(d) => d,
-        None => {
-            update_doc_status(&db, doc_id, DocStatus::Error, Some("文档不存在"), None).await;
-            return;
-        }
+        None => return,
     };
 
     let md_path = paths::get_markdown_path(&settings, doc_id);
     if !std::path::Path::new(&md_path).exists() {
-        update_doc_status(&db, doc_id, DocStatus::Error, Some("Markdown 文件不存在"), None).await;
         return;
     }
 
@@ -381,25 +375,13 @@ async fn do_extract_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64
         && doc.authors.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
         && doc.year.is_some()
     {
-        let _ = sqlx::query(
-            "UPDATE documents SET status = 'meta_done', status_message = '元数据已存在，跳过提取', progress = 100, updated_at = ? WHERE id = ?",
-        )
-        .bind(now_iso())
-        .bind(doc_id)
-        .execute(db.pool())
-        .await;
         return;
     }
 
     let markdown_content = match std::fs::read_to_string(&md_path) {
         Ok(c) => c,
-        Err(e) => {
-            update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("元数据提取失败: {}", e)), None).await;
-            return;
-        }
+        Err(_) => return,
     };
-
-    update_doc_status(&db, doc_id, DocStatus::Extracting, Some("正在调用 Ollama..."), Some(30.0)).await;
 
     let ollama_key = settings.ollama_key();
     let ollama = OllamaClient::new(
@@ -410,10 +392,7 @@ async fn do_extract_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64
 
     let metadata = match ollama.extract_metadata(&markdown_content).await {
         Ok(m) => m,
-        Err(e) => {
-            update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("元数据提取失败: {}", e)), None).await;
-            return;
-        }
+        Err(_) => return,
     };
 
     let title = value_str(&metadata, "title").unwrap_or_default();
@@ -421,11 +400,8 @@ async fn do_extract_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64
     let doc_type = normalize_doc_type(metadata.get("type").and_then(|t| t.as_str()).unwrap_or(""));
 
     if title.is_empty() && authors.is_empty() {
-        update_doc_status(&db, doc_id, DocStatus::Error, Some("元数据提取失败: 未能获取到标题和作者信息"), None).await;
         return;
     }
-
-    update_doc_status(&db, doc_id, DocStatus::Extracting, Some("正在保存元数据..."), Some(80.0)).await;
 
     // 仅填充空字段
     let authors_json = serde_json::to_string(&authors).unwrap_or_else(|_| "[]".to_string());
@@ -449,7 +425,6 @@ async fn do_extract_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64
             category = COALESCE(NULLIF(category, ''), ?), \
             doc_type = COALESCE(NULLIF(doc_type, ''), ?), \
             language = COALESCE(NULLIF(language, ''), ?), \
-            status = 'meta_done', status_message = '元数据提取完成', progress = 100, \
             updated_at = ? WHERE id = ?",
     )
     .bind(&title)
@@ -527,13 +502,10 @@ async fn do_index_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64, 
     .execute(db.pool())
     .await;
 
-    update_doc_status(&db, doc_id, DocStatus::Indexing, Some(&format!("正在索引到 {}...", vector_db_id)), Some(10.0)).await;
-
     let doc = match fetch_doc(&db, doc_id).await {
         Some(d) => d,
         None => {
             set_index_error(&db, doc_id, &vector_db_id, "文档不存在").await;
-            update_doc_status(&db, doc_id, DocStatus::Error, Some("文档不存在"), None).await;
             return;
         }
     };
@@ -541,18 +513,16 @@ async fn do_index_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64, 
     let md_path = paths::get_markdown_path(&settings, doc_id);
     if !std::path::Path::new(&md_path).exists() {
         set_index_error(&db, doc_id, &vector_db_id, "Markdown 文件不存在").await;
-        update_doc_status(&db, doc_id, DocStatus::Error, Some("Markdown 文件不存在"), None).await;
         return;
     }
 
     // 获取向量数据库配置
-    let manager = crate::config_manager::ConfigManager::new(".");
+    let manager = crate::config_manager::ConfigManager::new("system.json");
     let vdb_config = match manager.get_vector_db_by_id(&vector_db_id) {
         Some(c) => c,
         None => {
             let msg = format!("向量数据库 {} 配置不存在", vector_db_id);
             set_index_error(&db, doc_id, &vector_db_id, &msg).await;
-            update_doc_status(&db, doc_id, DocStatus::Error, Some(&msg), None).await;
             return;
         }
     };
@@ -561,12 +531,9 @@ async fn do_index_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64, 
         Ok(c) => c,
         Err(e) => {
             set_index_error(&db, doc_id, &vector_db_id, &e.to_string()).await;
-            update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("索引失败: {}", e)), None).await;
             return;
         }
     };
-
-    update_doc_status(&db, doc_id, DocStatus::Indexing, Some("正在生成向量..."), Some(30.0)).await;
 
     let metadata = json!({
         "title": doc.title.clone().unwrap_or_default(),
@@ -579,7 +546,6 @@ async fn do_index_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64, 
     let chunks = chunk_text_by_markdown(&markdown_content, CHUNK_SIZE, MIN_CHUNK_SIZE);
     if chunks.is_empty() {
         set_index_error(&db, doc_id, &vector_db_id, "Markdown 内容为空，无法索引").await;
-        update_doc_status(&db, doc_id, DocStatus::Error, Some("Markdown 内容为空，无法索引"), None).await;
         return;
     }
 
@@ -596,18 +562,14 @@ async fn do_index_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64, 
         Ok(e) => e,
         Err(e) => {
             set_index_error(&db, doc_id, &vector_db_id, &e.to_string()).await;
-            update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("索引失败: {}", e)), None).await;
             return;
         }
     };
-
-    update_doc_status(&db, doc_id, DocStatus::Indexing, Some("正在上传到向量数据库..."), Some(60.0)).await;
 
     let adapter = match get_vector_db(Some(&vector_db_id)) {
         Ok(a) => a,
         Err(e) => {
             set_index_error(&db, doc_id, &vector_db_id, &e.to_string()).await;
-            update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("索引失败: {}", e)), None).await;
             return;
         }
     };
@@ -616,7 +578,6 @@ async fn do_index_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64, 
         Ok(c) => c,
         Err(e) => {
             set_index_error(&db, doc_id, &vector_db_id, &e.to_string()).await;
-            update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("索引失败: {}", e)), None).await;
             return;
         }
     };
@@ -633,7 +594,7 @@ async fn do_index_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64, 
     .await;
 
     let _ = sqlx::query(
-        "UPDATE documents SET qdrant_collection = ?, vector_db_id = ?, status = 'indexed', \
+        "UPDATE documents SET qdrant_collection = ?, vector_db_id = ?, \
          status_message = ?, progress = 100, updated_at = ? WHERE id = ?",
     )
     .bind(&collection_name)
@@ -871,7 +832,7 @@ async fn process_index_batch(
     // 查询待索引文档（排除已索引到该库的）
     let rows: Vec<(i64,)> = sqlx::query_as(
         "SELECT d.id FROM documents d \
-         WHERE d.status IN ('meta_done', 'indexed') \
+         WHERE d.status = 'markdown_done' \
          AND d.id NOT IN (SELECT document_id FROM document_vector_index WHERE vector_db_id = ? AND status = 'indexed') \
          ORDER BY d.id",
     )
@@ -1088,8 +1049,7 @@ async fn active_tasks(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
 
 async fn batch_status(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
     let pending = count_status(&db, "uploaded").await + count_status(&db, "error").await;
-    let processing = count_status(&db, "parsing").await + count_status(&db, "extracting").await + count_status(&db, "indexing").await;
-    let completed = count_status(&db, "indexed").await;
+    let processing = count_status(&db, "parsing").await;
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents")
         .fetch_one(db.pool())
         .await
@@ -1111,7 +1071,6 @@ async fn batch_status(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
     let uploaded = count_status(&db, "uploaded").await;
     let error = count_status(&db, "error").await;
     let markdown_done = count_status(&db, "markdown_done").await;
-    let meta_done = count_status(&db, "meta_done").await;
 
     let batch_progress = batch_progress_map().read().unwrap().clone();
 
@@ -1119,7 +1078,7 @@ async fn batch_status(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
         "paused": BATCH_PAUSED.load(Ordering::SeqCst),
         "pending": pending,
         "processing": processing,
-        "completed": completed,
+        "completed": 0,
         "total": total,
         "running_tasks": RUNNING_TASKS.load(Ordering::SeqCst),
         "max_concurrent": max_concurrent_tasks(),
@@ -1128,7 +1087,6 @@ async fn batch_status(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
             "error": error,
             "timeout_error": timeout_error,
             "markdown_done": markdown_done,
-            "meta_done": meta_done,
             "ready_to_promote": ready_to_promote,
         },
         "batch_progress": batch_progress,
@@ -1193,14 +1151,14 @@ async fn batch_start_index(
 ) -> Response {
     let vector_db_id = query.vector_db_id.unwrap_or_else(|| "default".to_string());
 
-    let manager = crate::config_manager::ConfigManager::new(".");
+    let manager = crate::config_manager::ConfigManager::new("system.json");
     if manager.get_vector_db_by_id(&vector_db_id).is_none() {
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("向量数据库 {} 配置不存在", vector_db_id)}))).into_response();
     }
 
     let total_available: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM documents d \
-         WHERE d.status IN ('meta_done', 'indexed') \
+         WHERE d.status = 'markdown_done' \
          AND d.id NOT IN (SELECT document_id FROM document_vector_index WHERE vector_db_id = ? AND status = 'indexed')",
     )
     .bind(&vector_db_id)
@@ -1262,7 +1220,6 @@ async fn batch_reset_errors(
         let new_status = match query.target_status.as_deref() {
             Some("uploaded") => "uploaded",
             Some("markdown_done") => "markdown_done",
-            Some("meta_done") => "meta_done",
             _ => {
                 if std::path::Path::new(&paths::get_markdown_path(&settings, doc.id)).exists() {
                     "markdown_done"
@@ -1305,7 +1262,6 @@ async fn batch_reset_timeout_errors(
         let new_status = match query.target_status.as_deref() {
             Some("uploaded") => "uploaded",
             Some("markdown_done") => "markdown_done",
-            Some("meta_done") => "meta_done",
             _ => {
                 if std::path::Path::new(&paths::get_markdown_path(&settings, doc.id)).exists() {
                     "markdown_done"
@@ -1340,19 +1296,9 @@ async fn batch_promote_ready(Extension(db): Extension<Arc<Database>>) -> Json<Va
         return Json(json!({"detail": "没有符合条件的文档", "promote_count": 0}));
     }
 
-    let mut promote_count = 0i64;
-    for doc in &docs {
-        let _ = sqlx::query(
-            "UPDATE documents SET status = 'meta_done', status_message = '元数据已存在，跳过提取', progress = 100, updated_at = ? WHERE id = ?",
-        )
-        .bind(now_iso())
-        .bind(doc.id)
-        .execute(db.pool())
-        .await;
-        promote_count += 1;
-    }
+    let promote_count = docs.len() as i64;
 
-    Json(json!({"detail": format!("已将 {} 个文档标记为已提取", promote_count), "promote_count": promote_count}))
+    Json(json!({"detail": format!("已找到 {} 个可提取元数据的文档", promote_count), "promote_count": promote_count}))
 }
 
 // ── 单文档端点 ──
@@ -1399,17 +1345,9 @@ async fn extract(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("当前状态 {} 不允许提取元数据", doc.status)}))).into_response();
     }
 
-    let _ = sqlx::query(
-        "UPDATE documents SET status = 'extracting', status_message = '任务已提交，等待处理...', progress = 0, updated_at = ? WHERE id = ?",
-    )
-    .bind(now_iso())
-    .bind(id)
-    .execute(db.pool())
-    .await;
-
     tokio::spawn(run_tracked(id, "extract", do_extract_impl(db, settings, id)));
 
-    Json(json!({"detail": "元数据提取任务已提交", "status": "extracting"})).into_response()
+    Json(json!({"detail": "元数据提取任务已提交", "status": "markdown_done"})).into_response()
 }
 
 async fn crossref(
@@ -1449,7 +1387,7 @@ async fn index(
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
     };
 
-    let allowed = [DocStatus::MetaDone, DocStatus::Indexed, DocStatus::Error, DocStatus::MarkdownDone];
+    let allowed = [DocStatus::Error, DocStatus::MarkdownDone];
     if !allowed.contains(&doc.doc_status()) {
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("当前状态 {} 不允许索引", doc.status)}))).into_response();
     }
@@ -1458,23 +1396,14 @@ async fn index(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "Markdown 文件不存在，无法索引"}))).into_response();
     }
 
-    let manager = crate::config_manager::ConfigManager::new(".");
+    let manager = crate::config_manager::ConfigManager::new("system.json");
     if manager.get_vector_db_by_id(&vector_db_id).is_none() {
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("向量数据库 {} 配置不存在", vector_db_id)}))).into_response();
     }
 
-    let _ = sqlx::query(
-        "UPDATE documents SET status = 'indexing', status_message = ?, progress = 0, updated_at = ? WHERE id = ?",
-    )
-    .bind(format!("正在索引到 {}...", vector_db_id))
-    .bind(now_iso())
-    .bind(id)
-    .execute(db.pool())
-    .await;
-
     tokio::spawn(run_tracked(id, "index", do_index_impl(db, settings, id, vector_db_id.clone())));
 
-    Json(json!({"detail": format!("索引任务已提交到 {}", vector_db_id), "status": "indexing"})).into_response()
+    Json(json!({"detail": format!("索引任务已提交到 {}", vector_db_id), "status": "markdown_done"})).into_response()
 }
 
 async fn indexes(
@@ -1556,12 +1485,8 @@ async fn reset(
     let current = doc.doc_status();
     let valid_targets: Vec<&str> = match current {
         DocStatus::Parsing => vec!["uploaded"],
-        DocStatus::MarkdownDone => vec!["uploaded", "meta_done"],
-        DocStatus::Extracting => vec!["uploaded", "markdown_done"],
-        DocStatus::MetaDone => vec!["uploaded", "markdown_done"],
-        DocStatus::Indexing => vec!["uploaded", "markdown_done", "meta_done"],
-        DocStatus::Indexed => vec!["uploaded", "markdown_done", "meta_done"],
-        DocStatus::Error => vec!["uploaded", "markdown_done", "meta_done"],
+        DocStatus::MarkdownDone => vec!["uploaded"],
+        DocStatus::Error => vec!["uploaded", "markdown_done"],
         DocStatus::Uploaded => vec!["uploaded"],
     };
 
@@ -1620,7 +1545,10 @@ async fn full(
                 do_extract_impl(db2.clone(), settings2.clone(), id).await;
                 let d2 = fetch_doc(&db2, id).await;
                 if let Some(d2) = d2 {
-                    if d2.doc_status() == DocStatus::MetaDone {
+                    // 提取完成后检查元数据是否已填充
+                    let has_meta = d2.title.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+                        && d2.authors.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+                    if has_meta {
                         do_index_impl(db2.clone(), settings2.clone(), id, "default".to_string()).await;
                     }
                 }
@@ -1641,7 +1569,7 @@ async fn stop(
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
     };
     let status = doc.doc_status();
-    if matches!(status, DocStatus::Parsing | DocStatus::Extracting | DocStatus::Indexing) {
+    if matches!(status, DocStatus::Parsing) {
         let _ = sqlx::query(
             "UPDATE documents SET status = 'error', status_message = '任务已停止', updated_at = ? WHERE id = ?",
         )

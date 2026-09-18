@@ -4,10 +4,6 @@ export type DocStatus =
   | 'uploaded'
   | 'parsing'
   | 'markdown_done'
-  | 'extracting'
-  | 'meta_done'
-  | 'indexing'
-  | 'indexed'
   | 'error'
 
 export type IndexStatus = 'not_indexed' | 'indexing' | 'indexed' | 'error'

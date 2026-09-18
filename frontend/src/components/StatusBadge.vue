@@ -14,10 +14,6 @@ const statusMap: Record<string, { label: string; class: string }> = {
   uploaded: { label: '已上传', class: 'badge-gray' },
   parsing: { label: '解析中', class: 'badge-warning pulse' },
   markdown_done: { label: '解析完成', class: 'badge-info' },
-  extracting: { label: '提取中', class: 'badge-warning pulse' },
-  meta_done: { label: '提取完成', class: 'badge-info' },
-  indexing: { label: '索引中', class: 'badge-warning pulse' },
-  indexed: { label: '已索引', class: 'badge-success' },
   error: { label: '错误', class: 'badge-error' },
   // 索引状态
   not_indexed: { label: '未索引', class: 'badge-gray' },

@@ -65,9 +65,9 @@ struct Args {
     #[arg(long, value_enum, default_value = "info")]
     log_level: LogLevel,
 
-    /// 配置文件目录（包含 system.json / config.json），默认当前目录
-    #[arg(long, default_value = ".")]
-    config_dir: String,
+    /// system.json 文件路径（config.json 路径由此文件中的 config_path 字段确定）
+    #[arg(long, default_value = "system.json")]
+    system_path: String,
 }
 
 #[tokio::main]
@@ -79,9 +79,25 @@ async fn main() -> anyhow::Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new(format!("okb_assist={level},tower_http={level}"))
     });
-    tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let config_manager = Arc::new(ConfigManager::new(&args.config_dir));
+    // 先加载 system.json 确定 log_path
+    let config_manager = Arc::new(ConfigManager::new(&args.system_path));
+    let system = config_manager.load_system_config();
+    let log_path = system
+        .get("log_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("stdout");
+
+    if log_path != "stdout" && !log_path.is_empty() {
+        let log_file = std::fs::File::create(log_path)
+            .map_err(|e| anyhow::anyhow!("无法创建日志文件 {}: {}", log_path, e))?;
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::sync::Mutex::new(log_file))
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
     let settings = Arc::new(Settings::new(config_manager.clone()));
     settings::init_settings(settings.clone());
 

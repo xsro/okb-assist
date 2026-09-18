@@ -175,7 +175,7 @@ fn get_vector_size(db_config: &Value) -> usize {
 
 /// 获取向量数据库适配器
 pub fn get_vector_db(db_id: Option<&str>) -> anyhow::Result<Box<dyn VectorDBAdapter>> {
-    let config_manager = crate::config_manager::ConfigManager::new(".");
+    let config_manager = crate::config_manager::ConfigManager::new("system.json");
     let db_config = if let Some(id) = db_id {
         config_manager.get_vector_db_by_id(id)
     } else {

@@ -183,7 +183,7 @@ async fn check_fastembed(settings: &Settings) -> Value {
 async fn services_status(
     Extension(settings): Extension<Arc<Settings>>,
 ) -> Json<Value> {
-    let cm = crate::config_manager::ConfigManager::new(".");
+    let cm = crate::config_manager::ConfigManager::new("system.json");
     let cfg = cm.get_config();
 
     let (mineru, ollama, fastembed) = tokio::join!(
@@ -272,10 +272,6 @@ async fn stats(
         DocStatus::Uploaded,
         DocStatus::Parsing,
         DocStatus::MarkdownDone,
-        DocStatus::Extracting,
-        DocStatus::MetaDone,
-        DocStatus::Indexing,
-        DocStatus::Indexed,
         DocStatus::Error,
     ] {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents WHERE status = ?")
@@ -457,11 +453,13 @@ async fn recalculate_hashes(
 
 async fn reset_index(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
     let indexed_docs: Vec<Document> = sqlx::query_as::<_, Document>(
-        "SELECT id, filename, file_hash, title, authors, CAST(NULLIF(year, '') AS INTEGER) AS year, doi, source, journal, \
-         keywords, abstract, category, doc_type, language, title_en, authors_en, \
-         keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
-         progress, qdrant_collection, vector_db_id, created_at, updated_at \
-         FROM documents WHERE status = 'indexed'",
+        "SELECT d.id, d.filename, d.file_hash, d.title, d.authors, CAST(NULLIF(d.year, '') AS INTEGER) AS year, d.doi, d.source, d.journal, \
+         d.keywords, d.abstract, d.category, d.doc_type, d.language, d.title_en, d.authors_en, \
+         d.keywords_en, d.abstract_en, d.journal_en, d.mineru_task_id, d.status, d.status_message, \
+         d.progress, d.qdrant_collection, d.vector_db_id, d.created_at, d.updated_at \
+         FROM documents d \
+         INNER JOIN document_vector_index v ON d.id = v.document_id \
+         WHERE v.status = 'indexed'",
     )
     .fetch_all(db.pool())
     .await
@@ -492,7 +490,7 @@ async fn reset_index(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
     // 重置文档状态
     for doc in &indexed_docs {
         let _ = sqlx::query(
-            "UPDATE documents SET status = 'meta_done', qdrant_collection = NULL, \
+            "UPDATE documents SET status = 'markdown_done', qdrant_collection = NULL, \
              status_message = NULL, progress = 0 WHERE id = ?",
         )
         .bind(doc.id)

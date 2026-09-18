@@ -437,10 +437,6 @@ impl McpServer {
             DocStatus::Uploaded,
             DocStatus::Parsing,
             DocStatus::MarkdownDone,
-            DocStatus::Extracting,
-            DocStatus::MetaDone,
-            DocStatus::Indexing,
-            DocStatus::Indexed,
             DocStatus::Error,
         ] {
             let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents WHERE status = ?")

@@ -1,0 +1,29 @@
+{
+  "mineru": {
+    "type": "local",
+    "key": "key",
+    "max_tasks": 3,
+    "task_timeout": 300,
+    "url": "http://192.168.1.185:8002",
+    "model_version": "vlm"
+  },
+  "ollama": {
+    "key": "",
+    "model": "qwen3.5:9b",
+    "url": "http://127.0.0.1:11434"
+  },
+  "vector_dbs": [
+    {
+      "collection": "documents",
+      "embedding": {
+        "model": "nomic-embed-text",
+        "source": "ollama"
+      },
+      "enabled": true,
+      "id": "default",
+      "name": "默认 Qdrant",
+      "type": "qdrant",
+      "url": "http://127.0.0.1:6333"
+    }
+  ]
+}

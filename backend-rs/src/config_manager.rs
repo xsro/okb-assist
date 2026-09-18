@@ -57,7 +57,8 @@ pub fn default_system() -> serde_json::Value {
         "pdf_path": "data/uploads/{id}/{id}.pdf",
         "public_url": "http://localhost:5001",
         "subnet_url": "http://192.168.1.100:5001",
-        "config_path": "config.json"
+        "config_path": "config.json",
+        "log_path": "stdout"
     })
 }
 
@@ -71,18 +72,29 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
-    pub fn new(config_dir: &str) -> Self {
-        // 先加载 system.json，从中读取 config.json 路径
-        let system_path = PathBuf::from(config_dir).join("system.json");
+    /// 从 system.json 路径创建配置管理器。
+    /// config.json 的路径从 system.json 的 config_path 字段读取，
+    /// 若为相对路径则相对于 system.json 所在目录解析。
+    pub fn new(system_path: &str) -> Self {
+        let system_path = PathBuf::from(system_path);
         let system = Self::load_json_file(&system_path, &default_system());
         let config_path = system
             .get("config_path")
             .and_then(|v| v.as_str())
             .unwrap_or("config.json")
             .to_string();
+        // 若 config_path 是相对路径，相对于 system.json 所在目录解析
+        let config_file = if PathBuf::from(&config_path).is_absolute() {
+            PathBuf::from(&config_path)
+        } else {
+            system_path
+                .parent()
+                .unwrap_or(&PathBuf::from("."))
+                .join(&config_path)
+        };
 
         Self {
-            config_file: PathBuf::from(&config_path),
+            config_file,
             system_file: system_path,
             cache: Arc::new(RwLock::new(None)),
             system_cache: Arc::new(RwLock::new(None)),
@@ -97,7 +109,7 @@ impl ConfigManager {
                     if let Some(bv) = result.get(k) {
                         result[k] = Self::deep_merge(bv, v);
                     } else {
-                        result[k] = v.clone();
+                        result.insert(k.clone(), v.clone());
                     }
                 }
                 serde_json::Value::Object(result)
@@ -333,6 +345,6 @@ impl ConfigManager {
 
 impl Default for ConfigManager {
     fn default() -> Self {
-        Self::new(".")
+        Self::new("system.json")
     }
 }
