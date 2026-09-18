@@ -34,7 +34,7 @@ pub fn normalize_doi(raw: &str) -> Option<String> {
 }
 
 /// 从 PDF 字节内容中提取元数据
-pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>) -> serde_json::Value {
+pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>, pdfcpu_path: Option<&str>) -> serde_json::Value {
     let mut result = serde_json::Map::new();
 
     // 先尝试 lopdf
@@ -98,7 +98,7 @@ pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>) -> serde_jso
     let has_title = result.contains_key("title");
     let has_authors = result.contains_key("authors");
     if !has_title || !has_authors {
-        if let Some(pdfcpu_meta) = extract_pdf_metadata_pdfcpu(content) {
+        if let Some(pdfcpu_meta) = extract_pdf_metadata_pdfcpu(content, pdfcpu_path) {
             for (k, v) in pdfcpu_meta.as_object().unwrap() {
                 if !result.contains_key(k) {
                     result.insert(k.clone(), v.clone());
@@ -111,7 +111,9 @@ pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>) -> serde_jso
 }
 
 /// 通过 pdfcpu info 命令行工具提取 PDF 元数据（需要安装 pdfcpu）
-fn extract_pdf_metadata_pdfcpu(content: &[u8]) -> Option<serde_json::Value> {
+fn extract_pdf_metadata_pdfcpu(content: &[u8], pdfcpu_path: Option<&str>) -> Option<serde_json::Value> {
+    let pdfcpu_bin = pdfcpu_path.unwrap_or("pdfcpu");
+
     // 写入临时文件
     let temp_dir = std::env::temp_dir();
     let temp_path = temp_dir.join(format!("okb_meta_{}.pdf", std::process::id()));
@@ -120,7 +122,7 @@ fn extract_pdf_metadata_pdfcpu(content: &[u8]) -> Option<serde_json::Value> {
     }
 
     let path_str = temp_path.to_str()?;
-    let output = Command::new("pdfcpu")
+    let output = Command::new(pdfcpu_bin)
         .args(["info", path_str])
         .output()
         .ok()?;

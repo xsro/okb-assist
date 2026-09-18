@@ -36,8 +36,9 @@ fn run_grep(
     regex: bool,
     paths: &[String],
     limit: usize,
+    grep_bin: &str,
 ) -> Vec<serde_json::Value> {
-    let mut cmd = Command::new("grep");
+    let mut cmd = Command::new(grep_bin);
     cmd.arg("-rn").arg("-i").arg(format!("-C{}", context_lines));
     if !regex {
         cmd.arg("-F");
@@ -66,8 +67,9 @@ fn run_grep_dir(
     regex: bool,
     parent_dir: &str,
     limit: usize,
+    grep_bin: &str,
 ) -> Vec<serde_json::Value> {
-    let mut cmd = Command::new("grep");
+    let mut cmd = Command::new(grep_bin);
     cmd.arg("-r")
         .arg("--include=*.md")
         .arg("-rn")
@@ -168,6 +170,7 @@ pub async fn grep_search(
 
     // 2. 确定搜索模式：目录递归 or 指定文件列表
     let fast_enabled = algorithm == "fast" && doc_ids_owned.is_none();
+    let grep_bin = settings.grep_path();
 
     if fast_enabled {
         let candidates = metadata_candidate_ids(db, query).await;
@@ -179,12 +182,12 @@ pub async fn grep_search(
         if paths.is_empty() {
             // 无候选 → 回退全量目录扫描
             match markdown_parent_dir(settings) {
-                Some(dir) => return run_grep_dir(query, context_lines, regex, &dir, limit),
+                Some(dir) => return run_grep_dir(query, context_lines, regex, &dir, limit, &grep_bin),
                 None => return Vec::new(),
             }
         }
         // 有候选 → 分批精确搜索
-        return run_grep_batched(query, context_lines, regex, &paths, limit);
+        return run_grep_batched(query, context_lines, regex, &paths, limit, &grep_bin);
     }
 
     // 非 fast 模式
@@ -198,12 +201,12 @@ pub async fn grep_search(
             if paths.is_empty() {
                 return Vec::new();
             }
-            run_grep_batched(query, context_lines, regex, &paths, limit)
+            run_grep_batched(query, context_lines, regex, &paths, limit, &grep_bin)
         }
         _ => {
             // 全量扫描 → 目录递归
             match markdown_parent_dir(settings) {
-                Some(dir) => run_grep_dir(query, context_lines, regex, &dir, limit),
+                Some(dir) => run_grep_dir(query, context_lines, regex, &dir, limit, &grep_bin),
                 None => Vec::new(),
             }
         }
@@ -308,6 +311,7 @@ fn run_grep_batched(
     regex: bool,
     paths: &[String],
     limit: usize,
+    grep_bin: &str,
 ) -> Vec<serde_json::Value> {
     const BATCH: usize = 500;
     let mut results = Vec::new();
@@ -315,7 +319,7 @@ fn run_grep_batched(
         if results.len() >= limit {
             break;
         }
-        let mut batch = run_grep(query, context_lines, regex, chunk, limit - results.len());
+        let mut batch = run_grep(query, context_lines, regex, chunk, limit - results.len(), grep_bin);
         results.append(&mut batch);
     }
     results

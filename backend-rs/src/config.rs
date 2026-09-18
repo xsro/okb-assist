@@ -232,4 +232,18 @@ impl Settings {
             .unwrap_or("data/uploads/{id}/{id}.pdf")
             .to_string()
     }
+
+    pub fn grep_path(&self) -> String {
+        self.get_system_config()["grep_path"]
+            .as_str()
+            .unwrap_or("grep")
+            .to_string()
+    }
+
+    pub fn pdfcpu_path(&self) -> String {
+        self.get_system_config()["pdfcpu_path"]
+            .as_str()
+            .unwrap_or("pdfcpu")
+            .to_string()
+    }
 }
