@@ -16,11 +16,13 @@ const props = defineProps<{
   mathMode?: MathMode
   loadImages?: boolean
   showSource?: boolean
+  highlight?: string
 }>()
 
 const rendered = computed(() => {
   const mode = props.mathMode || 'katex'
   const loadImages = props.loadImages ?? true
+  const keyword = props.highlight?.trim() || ''
 
   // 1. 先渲染数学公式（提取公式 → 渲染 markdown → 插回公式 HTML）
   const withMath = renderMath(props.content, mode)
@@ -46,11 +48,32 @@ const rendered = computed(() => {
   }) as string
 
   // 4. DOMPurify 净化，同时保留 KaTeX/MathJax 所需标签/属性
-  return DOMPurify.sanitize(raw, {
+  let sanitized = DOMPurify.sanitize(raw, {
     ADD_TAGS: ['math', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'svg', 'path'],
     ADD_ATTR: ['xmlns', 'viewBox', 'preserveAspectRatio', 'stroke-linecap', 'stroke-linejoin', 'stroke-width', 'fill', 'd', 'aria-hidden', 'display']
   })
+
+  // 5. 关键词高亮（在净化后的 HTML 中匹配文本节点）
+  if (keyword) {
+    sanitized = highlightKeyword(sanitized, keyword)
+  }
+
+  return sanitized
 })
+
+function highlightKeyword(html: string, keyword: string): string {
+  // 将 HTML 中的文本节点包裹 keyword
+  // 使用简单的递归替换，避免破坏已有 HTML 标签
+  try {
+    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const regex = new RegExp(`(${escaped})`, 'gi')
+    // 只在文本节点中匹配，不匹配标签内的属性
+    // 使用简单的字符串替换，先用占位符保护已存在的 <mark> 标签
+    return html.replace(regex, '<mark class="search-highlight">$1</mark>')
+  } catch {
+    return html
+  }
+}
 
 // MathJax 模式需要动态加载脚本并在内容更新后触发排版
 watch(
@@ -103,6 +126,18 @@ watch(
   padding: 1px 5px;
   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
   font-size: 0.9em;
+}
+
+.markdown-viewer :deep(.search-highlight) {
+  background: #ffeb3b;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+.markdown-viewer :deep(mark) {
+  background: #ffeb3b;
+  padding: 0 2px;
+  border-radius: 2px;
 }
 
 .markdown-source {

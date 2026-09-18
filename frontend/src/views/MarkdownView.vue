@@ -45,13 +45,13 @@
       </div>
     </div>
     <div class="markdown-content">
-      <MarkdownViewer :content="content" :math-mode="mathMode" :load-images="loadImages" :show-source="showSource" />
+      <MarkdownViewer :content="content" :math-mode="mathMode" :load-images="loadImages" :show-source="showSource" :highlight="highlight" />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getMarkdown } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
@@ -63,6 +63,7 @@ const router = useRouter()
 const { showError } = useToast()
 const { requireToken } = useRequireToken()
 
+const highlight = ref('')
 const content = ref('')
 const currentPage = ref(1)
 const totalPages = ref(1)
@@ -89,6 +90,16 @@ const mathModeOptions = [
   { value: 'katex', label: 'KaTeX' },
   { value: 'mathjax', label: 'MathJax' }
 ]
+
+function scrollToHighlight() {
+  if (!highlight.value.trim()) return
+  nextTick(() => {
+    const marks = document.querySelectorAll('.markdown-viewer mark, .markdown-viewer .search-highlight')
+    if (marks.length > 0) {
+      marks[0].scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  })
+}
 
 function goBack() {
   router.back()
@@ -139,6 +150,8 @@ async function load() {
     content.value = res.content
     totalPages.value = res.total_pages
     totalLength.value = res.total_length
+    await nextTick()
+    scrollToHighlight()
   } catch {
     showError('加载失败')
   }
@@ -149,6 +162,10 @@ watch(() => route.params.id, () => {
   viewAll.value = false
   load()
 })
+
+watch(() => route.query.highlight, (val) => {
+  highlight.value = (val as string) || ''
+}, { immediate: true })
 onMounted(load)
 </script>
 

@@ -27,21 +27,21 @@ export function getActiveTasks() {
 /** 解析文档 */
 export function parseDocument(id: number) {
   return apiPost<{ detail: string; status: string }>(
-    `/assist/api/pipeline/${id}/parse/`
+    `/assist/api/pipeline/parse/${id}/`
   )
 }
 
 /** 提取元数据 */
 export function extractDocument(id: number) {
   return apiPost<{ detail: string; status: string }>(
-    `/assist/api/pipeline/${id}/extract/`
+    `/assist/api/pipeline/extract/${id}/`
   )
 }
 
 /** 建立索引 */
 export function indexDocument(id: number, vectorDbId?: string) {
   return apiPost<{ detail: string; status: string }>(
-    `/assist/api/pipeline/${id}/index/`,
+    `/assist/api/pipeline/index/${id}/`,
     undefined,
     { params: vectorDbId ? { vector_db_id: vectorDbId } : undefined }
   )
@@ -50,35 +50,35 @@ export function indexDocument(id: number, vectorDbId?: string) {
 /** 获取文档在各数据库的索引状态 */
 export function getDocumentIndexes(id: number) {
   return apiGet<{ document_id: number; indexes: DocumentIndexInfo[] }>(
-    `/assist/api/pipeline/${id}/indexes/`
+    `/assist/api/pipeline/indexes/${id}/`
   )
 }
 
 /** 重置文档状态 */
 export function resetDocument(id: number) {
   return apiPost<{ detail: string }>(
-    `/assist/api/pipeline/${id}/reset/`
+    `/assist/api/pipeline/reset/${id}/`
   )
 }
 
 /** 获取文档状态 */
 export function getDocumentStatus(id: number) {
   return apiGet<DocumentStatusInfo>(
-    `/assist/api/pipeline/${id}/status/`
+    `/assist/api/pipeline/status/${id}/`
   )
 }
 
 /** Crossref 补充元数据 */
 export function crossrefDocument(id: number) {
   return apiPost<{ detail: string; status: string }>(
-    `/assist/api/pipeline/${id}/crossref/`
+    `/assist/api/pipeline/crossref/${id}/`
   )
 }
 
 /** 从 PDF 内嵌元数据提取 */
 export function extractPdfMeta(id: number) {
   return apiPost<{ detail: string; status: string }>(
-    `/assist/api/pipeline/${id}/extract-pdf-meta/`
+    `/assist/api/pipeline/extract-pdf-meta/${id}/`
   )
 }
 

@@ -20,10 +20,12 @@
         <input
           v-model="grepPattern"
           type="text"
-          placeholder="输入正则表达式..."
+          placeholder="输入搜索关键词..."
           @keyup.enter="doGrepSearch"
         />
-        <button class="btn" @click="doGrepSearch">搜索</button>
+        <button class="btn" :disabled="grepSearching" @click="doGrepSearch">
+          {{ grepSearching ? '搜索中...' : '搜索' }}
+        </button>
       </div>
 
       <div class="advanced-toggle">
@@ -104,6 +106,10 @@
               {{ r.title }}
             </router-link>
             <span class="doc-id">ID: {{ r.id }}</span>
+            <span class="result-actions">
+              <router-link :to="{ name: 'detail', params: { id: r.id } }" class="btn btn-sm btn-outline">详情</router-link>
+              <router-link :to="{ name: 'markdown', params: { id: r.id }, query: { highlight: grepPattern } }" class="btn btn-sm btn-outline">Markdown</router-link>
+            </span>
           </div>
           <p v-if="r.snippet" class="snippet" v-html="highlightSnippet(r.snippet, grepPattern)" />
         </div>
@@ -165,7 +171,8 @@ const showGrepAdvanced = ref(false)
 const grepLimit = ref(20)
 const grepContext = ref(2)
 const grepAlgorithm = ref<'full' | 'fast'>('full')
-const grepRegex = ref(true)
+const grepRegex = ref(false)
+const grepSearching = ref(false)
 const grepDocIds = ref('')
 const grepJournal = ref('')
 const grepYearStart = ref<number | null>(null)
@@ -183,9 +190,15 @@ function parseDocIds(raw: string): number[] | undefined {
 }
 
 function highlightSnippet(snippet: string, pattern: string): string {
-  if (!pattern.trim() || !grepRegex.value) return snippet
+  if (!pattern.trim()) return snippet
   try {
-    const regex = new RegExp(`(${pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi')
+    if (grepRegex.value) {
+      const regex = new RegExp(`(${pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi')
+      return snippet.replace(regex, '<mark>$1</mark>')
+    }
+    // 非正则模式：简单子串高亮（大小写不敏感）
+    const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const regex = new RegExp(`(${escaped})`, 'gi')
     return snippet.replace(regex, '<mark>$1</mark>')
   } catch {
     return snippet
@@ -194,6 +207,7 @@ function highlightSnippet(snippet: string, pattern: string): string {
 
 async function doGrepSearch() {
   if (!requireToken() || !grepPattern.value.trim()) return
+  grepSearching.value = true
   try {
     const res = await grepSearch(grepPattern.value.trim(), {
       limit: grepLimit.value,
@@ -208,6 +222,8 @@ async function doGrepSearch() {
     grepResults.value = res.results
   } catch {
     showError('搜索失败')
+  } finally {
+    grepSearching.value = false
   }
 }
 
@@ -333,6 +349,16 @@ async function doSemanticSearch() {
   font-size: 12px;
   color: var(--text-secondary);
 }
+.result-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.result-actions .btn {
+  padding: 4px 12px;
+  font-size: 12px;
+}
 .snippet {
   margin-top: 8px;
   font-size: 13px;
@@ -369,6 +395,16 @@ async function doSemanticSearch() {
 
   .search-input .btn {
     width: 100%;
+  }
+
+  .result-actions {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .result-actions .btn {
+    flex: 1;
   }
 
   .advanced-options {

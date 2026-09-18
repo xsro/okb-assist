@@ -1145,32 +1145,61 @@ async fn by_doi(
 
 /// 将 Markdown 按段落分页
 fn split_into_pages(content: &str, max_chars: usize) -> Vec<String> {
-    if content.len() <= max_chars {
+    // 使用字符数而非字节数判断，避免 UTF-8 多字节字符切片 panic
+    let char_count: usize = content.chars().count();
+    if char_count <= max_chars {
         return vec![content.to_string()];
     }
 
     let mut pages = Vec::new();
-    let mut current_pos = 0;
+    let mut current_char_idx = 0;
 
-    while current_pos < content.len() {
-        if current_pos + max_chars >= content.len() {
-            pages.push(content[current_pos..].to_string());
+    // 构建字符索引到字节偏移的映射，用于安全切片
+    let char_offsets: Vec<usize> = content.char_indices().map(|(i, _)| i).collect();
+    let content_len = content.len();
+
+    while current_char_idx < char_count {
+        if current_char_idx + max_chars >= char_count {
+            let byte_start = char_offsets[current_char_idx];
+            pages.push(content[byte_start..].to_string());
             break;
         }
 
-        let search_start = current_pos + max_chars - 500;
-        let search_end = (current_pos + max_chars).min(content.len());
-        let chunk = &content[search_start..search_end];
-
-        if let Some(break_pos) = chunk.rfind("\n\n") {
-            pages.push(content[current_pos..search_start + break_pos].to_string());
-            current_pos = search_start + break_pos + 2;
-        } else if let Some(break_pos) = chunk.rfind('\n') {
-            pages.push(content[current_pos..search_start + break_pos].to_string());
-            current_pos = search_start + break_pos + 1;
+        let search_start_char = if max_chars >= 500 {
+            current_char_idx + max_chars - 500
         } else {
-            pages.push(content[current_pos..current_pos + max_chars].to_string());
-            current_pos += max_chars;
+            current_char_idx
+        };
+        let search_end_char = (current_char_idx + max_chars).min(char_count);
+
+        let byte_start = char_offsets[current_char_idx];
+        let byte_search_start = char_offsets[search_start_char];
+        let byte_search_end = char_offsets.get(search_end_char).copied().unwrap_or(content_len);
+
+        let chunk = &content[byte_search_start..byte_search_end];
+
+        if let Some(break_byte_offset) = chunk.rfind("\n\n") {
+            let split_byte = byte_search_start + break_byte_offset;
+            pages.push(content[byte_start..split_byte].to_string());
+            // 找到 split_byte 之后第一个字符的索引
+            let remainder = &content[split_byte..];
+            let skip = remainder.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+            let remainder_start = split_byte + skip;
+            // 计算跳过的字符数
+            let skipped = content[byte_start..remainder_start].chars().count();
+            current_char_idx += skipped;
+        } else if let Some(break_byte_offset) = chunk.rfind('\n') {
+            let split_byte = byte_search_start + break_byte_offset;
+            pages.push(content[byte_start..split_byte].to_string());
+            let remainder = &content[split_byte..];
+            let skip = remainder.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+            let remainder_start = split_byte + skip;
+            let skipped = content[byte_start..remainder_start].chars().count();
+            current_char_idx += skipped;
+        } else {
+            let byte_end = char_offsets.get(current_char_idx + max_chars).copied().unwrap_or(content_len);
+            pages.push(content[byte_start..byte_end].to_string());
+            current_char_idx += max_chars;
         }
     }
 
