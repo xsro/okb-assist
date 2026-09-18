@@ -223,7 +223,7 @@ fn parse_grep_output(output: &str, limit: usize) -> Vec<serde_json::Value> {
                     if !seen_files.contains(&doc_id) {
                         seen_files.insert(doc_id);
                         results.push(serde_json::json!({
-                            "document_id": doc_id,
+                            "id": doc_id,
                             "content": current_lines.join("\n"),
                             "file_path": current_file,
                         }));
@@ -243,7 +243,7 @@ fn parse_grep_output(output: &str, limit: usize) -> Vec<serde_json::Value> {
                     if !seen_files.contains(&doc_id) {
                         seen_files.insert(doc_id);
                         results.push(serde_json::json!({
-                            "document_id": doc_id,
+                            "id": doc_id,
                             "content": current_lines.join("\n"),
                             "file_path": current_file,
                         }));
@@ -266,7 +266,7 @@ fn parse_grep_output(output: &str, limit: usize) -> Vec<serde_json::Value> {
         if let Some(doc_id) = extract_doc_id(&current_file) {
             if !seen_files.contains(&doc_id) {
                 results.push(serde_json::json!({
-                    "document_id": doc_id,
+                    "id": doc_id,
                     "content": current_lines.join("\n"),
                     "file_path": current_file,
                 }));

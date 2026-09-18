@@ -72,11 +72,11 @@ impl McpServer {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "doc_id": {"type": "integer"},
+                        "id": {"type": "integer"},
                         "page": {"type": "integer", "default": 1},
                         "page_size": {"type": "integer", "default": 5000}
                     },
-                    "required": ["doc_id"]
+                    "required": ["id"]
                 }
             }),
             json!({
@@ -84,8 +84,8 @@ impl McpServer {
                 "description": "Get detailed document information, including metadata, processing status, PDF and Markdown links.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"doc_id": {"type": "integer"}},
-                    "required": ["doc_id"]
+                    "properties": {"id": {"type": "integer"}},
+                    "required": ["id"]
                 }
             }),
             json!({
@@ -107,8 +107,8 @@ impl McpServer {
                 "description": "Get the PDF download/preview link for a document.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"doc_id": {"type": "integer"}},
-                    "required": ["doc_id"]
+                    "properties": {"id": {"type": "integer"}},
+                    "required": ["id"]
                 }
             }),
             json!({
@@ -116,8 +116,8 @@ impl McpServer {
                 "description": "Get document abstract information. Multi-language abstracts are both returned when available.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"doc_id": {"type": "integer"}},
-                    "required": ["doc_id"]
+                    "properties": {"id": {"type": "integer"}},
+                    "required": ["id"]
                 }
             }),
             json!({
@@ -233,9 +233,9 @@ impl McpServer {
 
         let mut enriched = Vec::new();
         for hit in &results {
-            let doc_id = hit["document_id"].as_i64();
+            let doc_id = hit["id"].as_i64();
             let mut info = json!({
-                "document_id": doc_id,
+                "id": doc_id,
                 "content": hit["content"],
             });
             if let Some(id) = doc_id {
@@ -302,7 +302,7 @@ impl McpServer {
     }
 
     async fn tool_read_markdown(&self, args: &Value) -> String {
-        let doc_id = args["doc_id"].as_i64().unwrap_or(0);
+        let doc_id = args["id"].as_i64().unwrap_or(0);
         let page = args["page"].as_i64().unwrap_or(1).max(1) as usize;
         let page_size = args["page_size"].as_i64().unwrap_or(5000).max(1) as usize;
 
@@ -331,7 +331,7 @@ impl McpServer {
         };
 
         Self::pretty(&json!({
-            "doc_id": doc_id,
+            "id": doc_id,
             "title": doc.title.clone().unwrap_or_else(|| doc.filename.clone()),
             "page": page,
             "total_pages": total_pages,
@@ -340,7 +340,7 @@ impl McpServer {
     }
 
     async fn tool_get_document_info(&self, args: &Value) -> String {
-        let doc_id = args["doc_id"].as_i64().unwrap_or(0);
+        let doc_id = args["id"].as_i64().unwrap_or(0);
         match self.fetch_doc(doc_id).await {
             Some(doc) => Self::pretty(&self.format_doc(&doc)),
             None => Self::pretty(&json!({"error": format!("文档 {} 不存在", doc_id)})),
@@ -387,7 +387,7 @@ impl McpServer {
     }
 
     async fn tool_get_pdf_url(&self, args: &Value) -> String {
-        let doc_id = args["doc_id"].as_i64().unwrap_or(0);
+        let doc_id = args["id"].as_i64().unwrap_or(0);
         let doc = match self.fetch_doc(doc_id).await {
             Some(d) => d,
             None => return Self::pretty(&json!({"error": format!("文档 {} 不存在", doc_id)})),
@@ -397,7 +397,7 @@ impl McpServer {
             return Self::pretty(&json!({"error": "PDF file does not exist"}));
         }
         Self::pretty(&json!({
-            "doc_id": doc_id,
+            "id": doc_id,
             "filename": doc.filename,
             "pdf_url": format!("/assist/api/documents/{}/pdf", doc_id),
             "title": doc.title,
@@ -405,13 +405,13 @@ impl McpServer {
     }
 
     async fn tool_get_document_abstract(&self, args: &Value) -> String {
-        let doc_id = args["doc_id"].as_i64().unwrap_or(0);
+        let doc_id = args["id"].as_i64().unwrap_or(0);
         let doc = match self.fetch_doc(doc_id).await {
             Some(d) => d,
             None => return Self::pretty(&json!({"error": format!("文档 {} 不存在", doc_id)})),
         };
         let mut result = json!({
-            "doc_id": doc_id,
+            "id": doc_id,
             "title": doc.title.clone().unwrap_or_else(|| doc.filename.clone()),
             "abstract": doc.abstract_text,
         });
