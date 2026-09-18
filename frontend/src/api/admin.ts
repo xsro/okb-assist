@@ -23,11 +23,6 @@ export function getServiceStatus() {
 
 // ── 维护操作 ────────────────────────────────────────────
 
-/** 数据库迁移 */
-export function migrateDatabase() {
-  return apiPost<{ message: string }>('/assist/api/admin/db/migrate')
-}
-
 /** 重新计算哈希 */
 export function recalculateHashes() {
   return apiPost<{ message: string }>(
@@ -35,11 +30,10 @@ export function recalculateHashes() {
   )
 }
 
-/** 重置索引 */
-export function resetIndex(documentId?: number) {
-  return apiPost<{ message: string }>(
-    '/assist/api/admin/reset-index',
-    documentId ? { document_id: documentId } : {}
+/** 文献去重（按文件哈希合并重复文档） */
+export function deduplicateDocuments() {
+  return apiPost<{ message: string; merged_groups: number; deleted_docs: number }>(
+    '/assist/api/admin/dedup'
   )
 }
 

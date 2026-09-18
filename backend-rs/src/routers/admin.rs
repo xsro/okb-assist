@@ -41,12 +41,57 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/admin/qdrant/collections", get(qdrant_collections))
         .route("/assist/api/admin/qdrant/point/:point_id/", get(qdrant_point))
         .route("/assist/api/admin/qdrant/point/:point_id", get(qdrant_point))
-        .route("/assist/api/admin/db/migrate/", post(migrate))
-        .route("/assist/api/admin/db/migrate", post(migrate))
         .route("/assist/api/admin/recalculate-hashes/", post(recalculate_hashes))
         .route("/assist/api/admin/recalculate-hashes", post(recalculate_hashes))
-        .route("/assist/api/admin/reset-index/", post(reset_index))
-        .route("/assist/api/admin/reset-index", post(reset_index))
+        .route("/assist/api/admin/dedup/", post(dedup))
+        .route("/assist/api/admin/dedup", post(dedup))
+}
+
+async fn dedup(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
+    // 查找所有有 file_hash 的文档，按 hash 分组
+    let rows: Vec<(String, i64, String)> = sqlx::query_as(
+        "SELECT file_hash, id, filename FROM documents WHERE file_hash IS NOT NULL ORDER BY file_hash, id",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap_or_default();
+
+    // 按 hash 分组
+    use std::collections::HashMap;
+    let mut groups: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+    for (hash, id, filename) in &rows {
+        groups.entry(hash.clone()).or_default().push((*id, filename.clone()));
+    }
+
+    let mut merged_groups = 0;
+    let mut deleted_docs = 0;
+
+    for (hash, docs) in &groups {
+        if docs.len() <= 1 {
+            continue;
+        }
+        // 保留第一个（最小 id），删除其余
+        let keep_id = docs[0].0;
+        for (del_id, _) in &docs[1..] {
+            // 删除 Qdrant 向量
+            if let Ok(adapter) = get_vector_db(None) {
+                let _ = adapter.delete_document(0, *del_id).await;
+            }
+            // 删除文档记录
+            let _ = sqlx::query("DELETE FROM documents WHERE id = ?")
+                .bind(del_id)
+                .execute(db.pool())
+                .await;
+            deleted_docs += 1;
+        }
+        merged_groups += 1;
+    }
+
+    Json(json!({
+        "detail": format!("去重完成: {} 组重复, 删除 {} 个文档", merged_groups, deleted_docs),
+        "merged_groups": merged_groups,
+        "deleted_docs": deleted_docs,
+    }))
 }
 
 async fn status() -> Json<Value> {
@@ -393,18 +438,6 @@ async fn qdrant_point(
     }
 }
 
-async fn migrate(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
-    // Rust 版本建表时已包含全部列，无需迁移；此处做一次幂等建表确认。
-    let _ = db.init().await;
-    Json(json!({
-        "detail": "Migration completed",
-        "migrations": [
-            "mineru_task_id column already exists",
-            "vector_db_id column already exists",
-        ],
-    }))
-}
-
 async fn recalculate_hashes(
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
@@ -451,56 +484,3 @@ async fn recalculate_hashes(
     }))
 }
 
-async fn reset_index(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
-    let indexed_docs: Vec<Document> = sqlx::query_as::<_, Document>(
-        "SELECT d.id, d.filename, d.file_hash, d.title, d.authors, CAST(NULLIF(d.year, '') AS INTEGER) AS year, d.doi, d.source, d.journal, \
-         d.keywords, d.abstract, d.category, d.doc_type, d.language, d.title_en, d.authors_en, \
-         d.keywords_en, d.abstract_en, d.journal_en, d.mineru_task_id, d.status, d.status_message, \
-         d.progress, d.qdrant_collection, d.vector_db_id, d.created_at, d.updated_at \
-         FROM documents d \
-         INNER JOIN document_vector_index v ON d.id = v.document_id \
-         WHERE v.status = 'indexed'",
-    )
-    .fetch_all(db.pool())
-    .await
-    .unwrap_or_default();
-
-    let count = indexed_docs.len();
-
-    // 收集需要删除的集合名
-    let mut collections: Vec<String> = Vec::new();
-    for doc in &indexed_docs {
-        if let Some(col) = doc.qdrant_collection.as_deref() {
-            if !col.is_empty() && !collections.contains(&col.to_string()) {
-                collections.push(col.to_string());
-            }
-        }
-    }
-
-    // 删除集合
-    let mut deleted: Vec<String> = Vec::new();
-    if let Ok(adapter) = get_vector_db(None) {
-        for col in &collections {
-            if adapter.delete_collection(col).await.unwrap_or(false) {
-                deleted.push(col.clone());
-            }
-        }
-    }
-
-    // 重置文档状态
-    for doc in &indexed_docs {
-        let _ = sqlx::query(
-            "UPDATE documents SET status = 'markdown_done', qdrant_collection = NULL, \
-             status_message = NULL, progress = 0 WHERE id = ?",
-        )
-        .bind(doc.id)
-        .execute(db.pool())
-        .await;
-    }
-
-    Json(json!({
-        "detail": format!("索引重置完成: {} 个文档已重置为已提取状态", count),
-        "reset_count": count,
-        "deleted_collections": deleted,
-    }))
-}

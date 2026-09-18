@@ -72,9 +72,8 @@
       <h3>维护操作</h3>
       <div class="action-buttons">
         <button class="btn btn-outline" @click="batchParse">批量解析已上传</button>
-        <button class="btn btn-outline" @click="migrate">数据库迁移</button>
         <button class="btn btn-outline" @click="recalcHashes">重新计算哈希</button>
-        <button class="btn btn-outline" @click="resetIndex">重置索引</button>
+        <button class="btn btn-outline" @click="dedup">文献去重</button>
       </div>
     </div>
   </div>
@@ -85,9 +84,8 @@ import { ref, onMounted, computed } from 'vue'
 import {
   getStats,
   getServiceStatus,
-  migrateDatabase,
   recalculateHashes,
-  resetIndex
+  deduplicateDocuments
 } from '@/api/admin'
 import { startBatchParse } from '@/api/pipeline'
 import { useToast } from '@/composables/useToast'
@@ -163,16 +161,6 @@ async function batchParse() {
   }
 }
 
-async function migrate() {
-  if (!confirm('确定执行数据库迁移？')) return
-  try {
-    const res = await migrateDatabase()
-    showToast(res.message, 'success')
-  } catch {
-    showError('数据库迁移失败')
-  }
-}
-
 async function recalcHashes() {
   if (!confirm('确定重新计算所有文档哈希？')) return
   try {
@@ -183,13 +171,13 @@ async function recalcHashes() {
   }
 }
 
-async function resetIndex() {
-  if (!confirm('确定重置所有索引？此操作不可逆！')) return
+async function dedup() {
+  if (!confirm('确定按文件哈希去重？相同哈希的文档将保留最早的一个，其余删除。此操作不可逆！')) return
   try {
-    const res = await resetIndex()
+    const res = await deduplicateDocuments()
     showToast(res.message, 'success')
   } catch {
-    showError('索引重置失败')
+    showError('文献去重失败')
   }
 }
 
