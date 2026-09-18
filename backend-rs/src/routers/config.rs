@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 
 use crate::config::Settings;
 use crate::config_manager::ConfigManager;
+use crate::services::mineru::MineruType;
 
 pub fn router() -> axum::Router<()> {
     axum::Router::new()
@@ -155,7 +156,10 @@ async fn test_service(Json(req): Json<TestServiceRequest>) -> Response {
     match req.service_type.as_str() {
         "mineru" => {
             let url = req.url.unwrap_or_default().trim_end_matches('/').to_string();
-            Json(test_mineru(&url, req.key.unwrap_or_default().as_str()).await).into_response()
+            let mineru_type = req.key.clone().unwrap_or_else(|| "local".to_string());
+            // 实际上 type 字段应该从 mineru_type 传入，这里从 key 字段临时读取
+            // 前端提交的 TestServiceRequest 中 key 字段实际存储的是 mineru type
+            Json(test_mineru(&url, "", &mineru_type).await).into_response()
         }
         "ollama" => {
             let url = req.url.unwrap_or_default().trim_end_matches('/').to_string();
@@ -183,7 +187,12 @@ async fn test_connection(
     Json(req): Json<TestConnectionRequest>,
 ) -> Response {
     match req.service.as_str() {
-        "mineru" => Json(test_mineru(&settings.mineru_url(), &settings.mineru_key()).await).into_response(),
+        "mineru" => {
+            let url = settings.mineru_url();
+            let key = settings.mineru_key();
+            let mineru_type = settings.mineru_type();
+            Json(test_mineru(&url, &key, &mineru_type).await).into_response()
+        }
         "ollama" => Json(test_ollama(&settings.ollama_url(), &settings.ollama_model()).await).into_response(),
         "qdrant" => Json(test_qdrant(&settings.qdrant_url()).await).into_response(),
         "fastembed" => Json(test_fastembed(&settings.fastembed_url()).await).into_response(),
@@ -195,26 +204,46 @@ async fn test_connection(
     }
 }
 
-async fn test_mineru(url: &str, key: &str) -> Value {
+async fn test_mineru(url: &str, key: &str, mineru_type: &str) -> Value {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .unwrap_or_default();
-    let mut req = client.get(format!("{}/health", url));
-    if !key.is_empty() {
-        req = req.bearer_auth(key);
-    }
-    match req.send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let data = resp.json::<Value>().await.unwrap_or(json!({}));
-            json!({
-                "status": "connected",
-                "detail": "MinerU 连接成功",
-                "version": data.get("version").unwrap_or(&json!("unknown")),
-            })
+
+    match MineruType::from_str(mineru_type) {
+        MineruType::Local => {
+            let mut req = client.get(format!("{}/health", url));
+            if !key.is_empty() {
+                req = req.bearer_auth(key);
+            }
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let data = resp.json::<Value>().await.unwrap_or(json!({}));
+                    json!({
+                        "status": "connected",
+                        "detail": "MinerU 本地服务连接成功",
+                        "version": data.get("version").unwrap_or(&json!("unknown")),
+                    })
+                }
+                Ok(resp) => json!({"status": "error", "detail": format!("HTTP {}", resp.status())}),
+                Err(e) => json!({"status": "disconnected", "detail": format!("无法连接到 {}: {}", url, e)}),
+            }
         }
-        Ok(resp) => json!({"status": "error", "detail": format!("HTTP {}", resp.status())}),
-        Err(e) => json!({"status": "disconnected", "detail": format!("无法连接到 {}: {}", url, e)}),
+        MineruType::Official => {
+            // 官方精准解析 API：通过请求 API 根路径验证连通性
+            let resp = client.get(url).bearer_auth(key).send().await;
+            match resp {
+                Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
+                    json!({
+                        "status": "connected",
+                        "detail": "MinerU 官方 API 连接成功",
+                        "version": json!("v4"),
+                    })
+                }
+                Ok(resp) => json!({"status": "error", "detail": format!("HTTP {}", resp.status())}),
+                Err(e) => json!({"status": "disconnected", "detail": format!("无法连接到官方 API {}: {}", url, e)}),
+            }
+        }
     }
 }
 

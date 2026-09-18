@@ -17,6 +17,7 @@ use crate::config::Settings;
 use crate::database::Database;
 use crate::models::{DocStatus, Document};
 use crate::paths;
+use crate::services::mineru::MineruType;
 use crate::services::vector_db::get_vector_db;
 use crate::utils::calculate_file_hash;
 
@@ -60,38 +61,63 @@ async fn status() -> Json<Value> {
 async fn check_mineru(settings: &Settings) -> Value {
     let url = settings.mineru_url();
     let key = settings.mineru_key();
-    let mut item = json!({"status": "unknown", "url": url});
+    let mineru_type = settings.mineru_type();
+    let mut item = json!({"status": "unknown", "url": url, "type": mineru_type});
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .unwrap_or_default();
-    let mut req = client.get(format!("{}/health", url));
-    if !key.is_empty() {
-        req = req.bearer_auth(key);
-    }
-    match req.send().await {
-        Ok(resp) if resp.status().is_success() => {
-            if let Ok(health) = resp.json::<Value>().await {
-                item["status"] = json!("connected");
-                item["version"] = health.get("version").cloned().unwrap_or(json!("unknown"));
-                item["queued_tasks"] = health.get("queued_tasks").cloned().unwrap_or(json!(0));
-                item["processing_tasks"] = health.get("processing_tasks").cloned().unwrap_or(json!(0));
-                item["completed_tasks"] = health.get("completed_tasks").cloned().unwrap_or(json!(0));
-                item["failed_tasks"] = health.get("failed_tasks").cloned().unwrap_or(json!(0));
-                item["max_concurrent"] = health.get("max_concurrent_requests").cloned().unwrap_or(json!(0));
-            } else {
-                item["status"] = json!("connected");
+
+    match MineruType::from_str(&mineru_type) {
+        MineruType::Local => {
+            let mut req = client.get(format!("{}/health", url));
+            if !key.is_empty() {
+                req = req.bearer_auth(key);
+            }
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(health) = resp.json::<Value>().await {
+                        item["status"] = json!("connected");
+                        item["version"] = health.get("version").cloned().unwrap_or(json!("unknown"));
+                        item["queued_tasks"] = health.get("queued_tasks").cloned().unwrap_or(json!(0));
+                        item["processing_tasks"] = health.get("processing_tasks").cloned().unwrap_or(json!(0));
+                        item["completed_tasks"] = health.get("completed_tasks").cloned().unwrap_or(json!(0));
+                        item["failed_tasks"] = health.get("failed_tasks").cloned().unwrap_or(json!(0));
+                        item["max_concurrent"] = health.get("max_concurrent_requests").cloned().unwrap_or(json!(0));
+                    } else {
+                        item["status"] = json!("connected");
+                    }
+                }
+                Ok(resp) => {
+                    item["status"] = json!("error");
+                    item["error"] = json!(format!("HTTP {}", resp.status()));
+                }
+                Err(e) => {
+                    item["status"] = json!("disconnected");
+                    item["error"] = json!(e.to_string());
+                }
             }
         }
-        Ok(resp) => {
-            item["status"] = json!("error");
-            item["error"] = json!(format!("HTTP {}", resp.status()));
-        }
-        Err(e) => {
-            item["status"] = json!("disconnected");
-            item["error"] = json!(e.to_string());
+        MineruType::Official => {
+            let resp = client.get(&url).bearer_auth(&key).send().await;
+            match resp {
+                Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
+                    item["status"] = json!("connected");
+                    item["version"] = json!("v4");
+                    item["api_type"] = json!("精准解析 API");
+                }
+                Ok(resp) => {
+                    item["status"] = json!("error");
+                    item["error"] = json!(format!("HTTP {}", resp.status()));
+                }
+                Err(e) => {
+                    item["status"] = json!("disconnected");
+                    item["error"] = json!(e.to_string());
+                }
+            }
         }
     }
+
     item
 }
 
@@ -303,26 +329,40 @@ async fn stats(
 
 async fn mineru_tasks(Extension(settings): Extension<Arc<Settings>>) -> Json<Value> {
     let url = settings.mineru_url();
+    let key = settings.mineru_key();
+    let mineru_type = settings.mineru_type();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap_or_default();
-    let mut req = client.get(format!("{}/tasks", url));
-    let key = settings.mineru_key();
-    if !key.is_empty() {
-        req = req.bearer_auth(key);
-    }
-    match req.send().await {
-        Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
-            Ok(data) => Json(data),
-            Err(e) => Json(json!({"error": e.to_string()})),
-        },
-        Ok(resp) => {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            Json(json!({"error": format!("HTTP {}", status), "detail": text}))
+
+    match MineruType::from_str(&mineru_type) {
+        MineruType::Local => {
+            let mut req = client.get(format!("{}/tasks", url));
+            if !key.is_empty() {
+                req = req.bearer_auth(key);
+            }
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
+                    Ok(data) => Json(data),
+                    Err(e) => Json(json!({"error": e.to_string()})),
+                },
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    Json(json!({"error": format!("HTTP {}", status), "detail": text}))
+                }
+                Err(e) => Json(json!({"error": e.to_string()})),
+            }
         }
-        Err(e) => Json(json!({"error": e.to_string()})),
+        MineruType::Official => {
+            // 官方精准解析 API 不支持任务列表查询，返回空列表
+            Json(json!({
+                "tasks": [],
+                "message": "官方精准解析 API 不支持任务列表查询",
+                "api_type": "official"
+            }))
+        }
     }
 }
 

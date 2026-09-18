@@ -40,6 +40,13 @@ impl Settings {
             .to_string()
     }
 
+    pub fn mineru_type(&self) -> String {
+        self.get_config()["mineru"]["type"]
+            .as_str()
+            .unwrap_or("local")
+            .to_string()
+    }
+
     pub fn mineru_tasks(&self) -> usize {
         self.get_config()["mineru"]["max_tasks"]
             .as_u64()
@@ -50,6 +57,13 @@ impl Settings {
         self.get_config()["mineru"]["task_timeout"]
             .as_u64()
             .unwrap_or(300)
+    }
+
+    pub fn mineru_model_version(&self) -> String {
+        self.get_config()["mineru"]["model_version"]
+            .as_str()
+            .unwrap_or("vlm")
+            .to_string()
     }
 
     // ── Ollama ──

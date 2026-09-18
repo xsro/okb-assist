@@ -13,10 +13,12 @@ use std::sync::{Arc, RwLock};
 pub fn default_config() -> serde_json::Value {
     serde_json::json!({
         "mineru": {
+            "type": "local",
             "url": "http://127.0.0.1:8002",
             "key": "key",
             "max_tasks": 3,
-            "task_timeout": 300
+            "task_timeout": 300,
+            "model_version": "vlm"
         },
         "ollama": {
             "url": "http://127.0.0.1:11434",

@@ -206,7 +206,12 @@ fn remove_dir_all_ignore(path: &std::path::Path) {
 // ── 后台任务实现 ──
 
 async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
-    let mineru = MinerUClient::new(&settings.mineru_url(), &settings.mineru_key());
+    let mineru = MinerUClient::new(
+        &settings.mineru_url(),
+        &settings.mineru_key(),
+        &settings.mineru_type(),
+        &settings.mineru_model_version(),
+    );
     let uploads_folder = settings.uploads_folder();
     let pdf_path = paths::get_pdf_path(&settings, doc_id);
     let abs_file_path = absolute_path(&pdf_path);

@@ -16,9 +16,11 @@ export interface VectorDbConfig {
 
 export interface ServiceConfig {
   mineru: {
+    type: string
     url: string
     key: string
     task_timeout: number
+    model_version?: string
   }
   ollama: {
     url: string

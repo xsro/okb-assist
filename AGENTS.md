@@ -1,6 +1,11 @@
-# CODEBUDDY.md — OKB-Assist
+# AGENTS.md — OKB-Assist
 
-面向 AI 编程助手（CodeBuddy / Claude / Cursor）的工作指南。修改本仓库前先读此文件。
+面向 AI 编程助手的工作指南。修改本仓库前先读此文件。
+
+如果在嵌入式设备上运行，例如orangepi，请不要编译后端，执行代码检查即可。
+```
+cargo check
+```
 
 ## 项目简介
 

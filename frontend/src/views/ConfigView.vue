@@ -7,12 +7,27 @@
       <div class="section">
         <h3>MinerU</h3>
         <div class="form-group">
+          <label>类型</label>
+          <select v-model="config.mineru.type">
+            <option value="local">本地服务</option>
+            <option value="official">官方精准解析 API</option>
+          </select>
+        </div>
+        <div class="form-group">
           <label>URL</label>
-          <input v-model="config.mineru.url" type="text" />
+          <input v-model="config.mineru.url" type="text" :placeholder="config.mineru.type === 'official' ? 'https://mineru.net' : 'http://127.0.0.1:8002'" />
         </div>
         <div class="form-group">
           <label>API Key</label>
-          <input v-model="config.mineru.key" type="password" />
+          <input v-model="config.mineru.key" type="password" :placeholder="config.mineru.type === 'official' ? 'sk-...' : '本地服务无需填写'" />
+        </div>
+        <div class="form-group" v-if="config.mineru.type === 'official'">
+          <label>模型版本</label>
+          <select v-model="config.mineru.model_version">
+            <option value="vlm">vlm（推荐）</option>
+            <option value="pipeline">pipeline</option>
+            <option value="MinerU-HTML">MinerU-HTML</option>
+          </select>
         </div>
         <div class="form-group">
           <label>任务超时 (秒)</label>
