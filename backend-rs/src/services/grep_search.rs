@@ -3,8 +3,103 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use sqlx::Row;
+
+// ── 编译一次、全局复用的正则 ──
+static GREP_LINE_RE: OnceLock<regex::Regex> = OnceLock::new();
+static DOC_ID_RE_1: OnceLock<regex::Regex> = OnceLock::new();
+static DOC_ID_RE_2: OnceLock<regex::Regex> = OnceLock::new();
+static DOC_ID_RE_3: OnceLock<regex::Regex> = OnceLock::new();
+
+fn grep_line_re() -> &'static regex::Regex {
+    GREP_LINE_RE.get_or_init(|| regex::Regex::new(r"^(.+?)[\:\-](\d+)[\:\-](.*)$").unwrap())
+}
+
+fn doc_id_re_1() -> &'static regex::Regex {
+    DOC_ID_RE_1.get_or_init(|| regex::Regex::new(r"/(\d+)\.md$").unwrap())
+}
+
+fn doc_id_re_2() -> &'static regex::Regex {
+    DOC_ID_RE_2.get_or_init(|| regex::Regex::new(r"/(\d+)/\1\.md$").unwrap())
+}
+
+fn doc_id_re_3() -> &'static regex::Regex {
+    DOC_ID_RE_3.get_or_init(|| regex::Regex::new(r"/(\d+)/[^/]+\.md$").unwrap())
+}
+
+/// grep 单批文件，返回解析结果（受 limit 限制）。
+fn run_grep(
+    query: &str,
+    context_lines: usize,
+    regex: bool,
+    paths: &[String],
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    let mut cmd = Command::new("grep");
+    cmd.arg("-rn").arg("-i").arg(format!("-C{}", context_lines));
+    if !regex {
+        cmd.arg("-F");
+    }
+    cmd.arg(query);
+    for p in paths {
+        cmd.arg(p);
+    }
+
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.code().unwrap_or(1) > 1 {
+                return Vec::new();
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            parse_grep_output(&stdout, limit)
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// grep 递归目录模式（仅扫 *.md），不受 ARG_MAX 限制。
+fn run_grep_dir(
+    query: &str,
+    context_lines: usize,
+    regex: bool,
+    parent_dir: &str,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    let mut cmd = Command::new("grep");
+    cmd.arg("-r")
+        .arg("--include=*.md")
+        .arg("-rn")
+        .arg("-i")
+        .arg(format!("-C{}", context_lines));
+    if !regex {
+        cmd.arg("-F");
+    }
+    cmd.arg(query).arg(parent_dir);
+
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.code().unwrap_or(1) > 1 {
+                return Vec::new();
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            parse_grep_output(&stdout, limit)
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 获取 markdown 文件所在父目录（从 system.json 模板推导）。
+fn markdown_parent_dir(settings: &crate::config::Settings) -> Option<String> {
+    let sample = crate::paths::get_markdown_path(settings, 0);
+    let dir = Path::new(&sample).parent()?;
+    if dir.is_dir() {
+        Some(dir.to_string_lossy().to_string())
+    } else {
+        None
+    }
+}
 
 /// 解析 '1,2,5-100,4' 形式的文档 ID 列表
 pub fn parse_doc_ids(s: &str) -> Result<Option<Vec<i64>>, String> {
@@ -71,55 +166,47 @@ pub async fn grep_search(
         }
     }
 
-    // 2. fast 模式：元数据预筛候选文档，无命中回退全量
+    // 2. 确定搜索模式：目录递归 or 指定文件列表
     let fast_enabled = algorithm == "fast" && doc_ids_owned.is_none();
 
-    let search_paths: Vec<String> = if fast_enabled {
+    if fast_enabled {
         let candidates = metadata_candidate_ids(db, query).await;
-        let mut paths: Vec<String> = candidates
+        let paths: Vec<String> = candidates
             .iter()
             .map(|did| crate::paths::get_markdown_path(settings, *did))
             .filter(|p| Path::new(p).exists())
             .collect();
         if paths.is_empty() {
-            paths = list_all_markdown_paths(settings);
+            // 无候选 → 回退全量目录扫描
+            match markdown_parent_dir(settings) {
+                Some(dir) => return run_grep_dir(query, context_lines, regex, &dir, limit),
+                None => return Vec::new(),
+            }
         }
-        paths
-    } else {
-        match &doc_ids_owned {
-            Some(ids) if !ids.is_empty() => ids
+        // 有候选 → 分批精确搜索
+        return run_grep_batched(query, context_lines, regex, &paths, limit);
+    }
+
+    // 非 fast 模式
+    match &doc_ids_owned {
+        Some(ids) if !ids.is_empty() => {
+            let paths: Vec<String> = ids
                 .iter()
                 .map(|did| crate::paths::get_markdown_path(settings, *did))
                 .filter(|p| Path::new(p).exists())
-                .collect(),
-            _ => list_all_markdown_paths(settings),
-        }
-    };
-
-    if search_paths.is_empty() {
-        return Vec::new();
-    }
-
-    let mut cmd = Command::new("grep");
-    cmd.arg("-rn").arg("-i").arg(format!("-C{}", context_lines));
-    if !regex {
-        cmd.arg("-F");
-    }
-    cmd.arg(query);
-    for path in &search_paths {
-        cmd.arg(path);
-    }
-
-    let output = cmd.output();
-    match output {
-        Ok(output) => {
-            if output.status.code().unwrap_or(1) > 1 {
+                .collect();
+            if paths.is_empty() {
                 return Vec::new();
             }
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            parse_grep_output(&stdout, limit)
+            run_grep_batched(query, context_lines, regex, &paths, limit)
         }
-        Err(_) => Vec::new(),
+        _ => {
+            // 全量扫描 → 目录递归
+            match markdown_parent_dir(settings) {
+                Some(dir) => run_grep_dir(query, context_lines, regex, &dir, limit),
+                None => Vec::new(),
+            }
+        }
     }
 }
 
@@ -192,7 +279,7 @@ fn parse_grep_output(output: &str, limit: usize) -> Vec<serde_json::Value> {
 }
 
 fn parse_grep_line(line: &str) -> Option<(String, String, String)> {
-    let re = regex::Regex::new(r"^(.+?)[\:\-](\d+)[\:\-](.*)$").ok()?;
+    let re = grep_line_re();
     let caps = re.captures(line)?;
     Some((
         caps.get(1)?.as_str().to_string(),
@@ -202,22 +289,39 @@ fn parse_grep_line(line: &str) -> Option<(String, String, String)> {
 }
 
 pub fn extract_doc_id(file_path: &str) -> Option<i64> {
-    let re = regex::Regex::new(r"/(\d+)\.md$").ok()?;
-    if let Some(caps) = re.captures(file_path) {
+    if let Some(caps) = doc_id_re_1().captures(file_path) {
         return caps.get(1)?.as_str().parse().ok();
     }
-    let re2 = regex::Regex::new(r"/(\d+)/\1\.md$").ok()?;
-    if let Some(caps) = re2.captures(file_path) {
+    if let Some(caps) = doc_id_re_2().captures(file_path) {
         return caps.get(1)?.as_str().parse().ok();
     }
-    let re3 = regex::Regex::new(r"/(\d+)/[^/]+\.md$").ok()?;
-    if let Some(caps) = re3.captures(file_path) {
+    if let Some(caps) = doc_id_re_3().captures(file_path) {
         return caps.get(1)?.as_str().parse().ok();
     }
     None
 }
 
-/// 列出所有 markdown 文件路径
+/// 分批执行 grep（避免 ARG_MAX 溢出），每批最多 500 个文件。
+fn run_grep_batched(
+    query: &str,
+    context_lines: usize,
+    regex: bool,
+    paths: &[String],
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    const BATCH: usize = 500;
+    let mut results = Vec::new();
+    for chunk in paths.chunks(BATCH) {
+        if results.len() >= limit {
+            break;
+        }
+        let mut batch = run_grep(query, context_lines, regex, chunk, limit - results.len());
+        results.append(&mut batch);
+    }
+    results
+}
+
+/// 列出所有 markdown 文件路径（用于调试 / 兼容旧调用）
 pub fn list_all_markdown_paths(settings: &crate::config::Settings) -> Vec<String> {
     let sample = crate::paths::get_markdown_path(settings, 0);
     let dir = match Path::new(&sample).parent() {
