@@ -1,10 +1,10 @@
 //! 轻量级 PDF 元数据（含 DOI）提取。
 //!
-//! 注意：Rust 生态中没有 pypdf 的完整等价物。
-//! 本模块使用 `lopdf` crate 提取 Info 字典与文档文本（用于 DOI 扫描）。
-//! XMP 元数据提取和正文标题推断功能做了简化实现。
+//! 优先使用 `lopdf` 提取 Info 字典；
+//! 对于 XMP 元数据或 lopdf 无法解析的 PDF，回退到 `pdfcpu info` 命令行工具。
 
 use lopdf::Document;
+use std::process::Command;
 
 /// 规范化 DOI
 pub fn normalize_doi(raw: &str) -> Option<String> {
@@ -37,6 +37,7 @@ pub fn normalize_doi(raw: &str) -> Option<String> {
 pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>) -> serde_json::Value {
     let mut result = serde_json::Map::new();
 
+    // 先尝试 lopdf
     if let Ok(doc) = Document::load_mem(content) {
         // 尝试从 Info 字典提取
         if let Ok(info_obj) = doc.trailer.get(b"Info") {
@@ -93,7 +94,137 @@ pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>) -> serde_jso
         }
     }
 
+    // 如果 lopdf 没有提取到标题或作者，尝试 pdfcpu
+    let has_title = result.contains_key("title");
+    let has_authors = result.contains_key("authors");
+    if !has_title || !has_authors {
+        if let Some(pdfcpu_meta) = extract_pdf_metadata_pdfcpu(content) {
+            for (k, v) in pdfcpu_meta.as_object().unwrap() {
+                if !result.contains_key(k) {
+                    result.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+
     serde_json::Value::Object(result)
+}
+
+/// 通过 pdfcpu info 命令行工具提取 PDF 元数据（需要安装 pdfcpu）
+fn extract_pdf_metadata_pdfcpu(content: &[u8]) -> Option<serde_json::Value> {
+    // 写入临时文件
+    let temp_dir = std::env::temp_dir();
+    let temp_path = temp_dir.join(format!("okb_meta_{}.pdf", std::process::id()));
+    if std::fs::write(&temp_path, content).is_err() {
+        return None;
+    }
+
+    let path_str = temp_path.to_str()?;
+    let output = Command::new("pdfcpu")
+        .args(["info", path_str])
+        .output()
+        .ok()?;
+
+    let _ = std::fs::remove_file(&temp_path);
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut result = serde_json::Map::new();
+
+    let mut in_properties = false;
+    let mut current_keywords: Vec<String> = Vec::new();
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+
+        // 检测 Properties 区域
+        if trimmed == "Properties:" {
+            in_properties = true;
+            continue;
+        }
+        if trimmed.starts_with("━━━━") {
+            if in_properties {
+                in_properties = false;
+            }
+            continue;
+        }
+
+        if in_properties {
+            // Properties 区域：查找 doi = ... 行
+            if let Some(doi_part) = trimmed.strip_prefix("doi = ") {
+                let doi = doi_part.trim();
+                if let Some(norm) = normalize_doi(doi) {
+                    result.insert("doi".to_string(), serde_json::Value::String(norm));
+                }
+            }
+            continue;
+        }
+
+        // 解析键值对
+        if let Some(colon_pos) = trimmed.find(':') {
+            let key = trimmed[..colon_pos].trim().to_lowercase();
+            let value = trimmed[colon_pos + 1..].trim().to_string();
+
+            match key.as_str() {
+                "title" => {
+                    if !value.is_empty() {
+                        result.insert("title".to_string(), serde_json::Value::String(value));
+                    }
+                }
+                "author" => {
+                    if !value.is_empty() {
+                        let authors = split_authors(&value);
+                        result.insert("authors".to_string(), serde_json::json!(authors));
+                    }
+                }
+                "subject" => {
+                    if !value.is_empty() {
+                        // Subject 可能包含 DOI
+                        if let Some(doi) = scan_doi(&value) {
+                            result.insert("doi".to_string(), serde_json::Value::String(doi));
+                        }
+                        // 如果长度足够，作为 abstract
+                        if value.len() > 80 {
+                            result.insert("abstract".to_string(), serde_json::Value::String(value));
+                        }
+                    }
+                }
+                "keywords" => {
+                    if !value.is_empty() {
+                        current_keywords.push(value);
+                    }
+                }
+                "creation date" => {
+                    if let Some(year) = parse_year_from_date(&value) {
+                        result.insert("year".to_string(), serde_json::Value::Number(year.into()));
+                    }
+                }
+                _ => {}
+            }
+        } else if !trimmed.is_empty()
+            && !trimmed.starts_with("pdfcpu")
+            && !trimmed.starts_with("./")
+        {
+            // Keywords 的续行（缩进的非键值对行）
+            if !current_keywords.is_empty() && !trimmed.starts_with("━━") {
+                current_keywords.push(trimmed.to_string());
+            }
+        }
+    }
+
+    // 保存 keywords
+    if !current_keywords.is_empty() {
+        result.insert("keywords".to_string(), serde_json::json!(current_keywords));
+    }
+
+    if result.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(result))
+    }
 }
 
 /// 从 lopdf Document 提取全部文本（用于 DOI 扫描，只取前若干页）
