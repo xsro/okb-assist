@@ -15,6 +15,6 @@ pub fn init_settings(settings: Arc<Settings>) {
 /// 获取全局 Settings
 pub fn get_settings() -> Arc<Settings> {
     GLOBAL_SETTINGS
-        .get_or_init(|| Arc::new(Settings::new(Arc::new(ConfigManager::new()))))
+        .get_or_init(|| Arc::new(Settings::new(Arc::new(ConfigManager::new(".")))))
         .clone()
 }

@@ -64,6 +64,10 @@ struct Args {
     /// 日志级别
     #[arg(long, value_enum, default_value = "info")]
     log_level: LogLevel,
+
+    /// 配置文件目录（包含 system.json / config.json），默认当前目录
+    #[arg(long, default_value = ".")]
+    config_dir: String,
 }
 
 #[tokio::main]
@@ -77,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
     });
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let config_manager = Arc::new(ConfigManager::new());
+    let config_manager = Arc::new(ConfigManager::new(&args.config_dir));
     let settings = Arc::new(Settings::new(config_manager.clone()));
     settings::init_settings(settings.clone());
 

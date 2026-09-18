@@ -69,9 +69,9 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
-    pub fn new() -> Self {
-        // 先加载 system.json（路径硬编码），从中读取 config.json 路径
-        let system_path = PathBuf::from("system.json");
+    pub fn new(config_dir: &str) -> Self {
+        // 先加载 system.json，从中读取 config.json 路径
+        let system_path = PathBuf::from(config_dir).join("system.json");
         let system = Self::load_json_file(&system_path, &default_system());
         let config_path = system
             .get("config_path")
@@ -331,6 +331,6 @@ impl ConfigManager {
 
 impl Default for ConfigManager {
     fn default() -> Self {
-        Self::new()
+        Self::new(".")
     }
 }

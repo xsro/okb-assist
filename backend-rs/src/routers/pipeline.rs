@@ -541,7 +541,7 @@ async fn do_index_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64, 
     }
 
     // 获取向量数据库配置
-    let manager = crate::config_manager::ConfigManager::new();
+    let manager = crate::config_manager::ConfigManager::new(".");
     let vdb_config = match manager.get_vector_db_by_id(&vector_db_id) {
         Some(c) => c,
         None => {
@@ -1188,7 +1188,7 @@ async fn batch_start_index(
 ) -> Response {
     let vector_db_id = query.vector_db_id.unwrap_or_else(|| "default".to_string());
 
-    let manager = crate::config_manager::ConfigManager::new();
+    let manager = crate::config_manager::ConfigManager::new(".");
     if manager.get_vector_db_by_id(&vector_db_id).is_none() {
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("向量数据库 {} 配置不存在", vector_db_id)}))).into_response();
     }
@@ -1453,7 +1453,7 @@ async fn index(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "Markdown 文件不存在，无法索引"}))).into_response();
     }
 
-    let manager = crate::config_manager::ConfigManager::new();
+    let manager = crate::config_manager::ConfigManager::new(".");
     if manager.get_vector_db_by_id(&vector_db_id).is_none() {
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("向量数据库 {} 配置不存在", vector_db_id)}))).into_response();
     }

@@ -877,7 +877,7 @@ async fn find_similar_titles(
 }
 
 async fn list_vector_dbs() -> Json<Value> {
-    let cm = crate::config_manager::ConfigManager::new();
+    let cm = crate::config_manager::ConfigManager::new(".");
     let dbs = cm.list_vector_dbs();
     Json(json!({"vector_dbs": dbs}))
 }

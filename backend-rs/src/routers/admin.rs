@@ -157,7 +157,7 @@ async fn check_fastembed(settings: &Settings) -> Value {
 async fn services_status(
     Extension(settings): Extension<Arc<Settings>>,
 ) -> Json<Value> {
-    let cm = crate::config_manager::ConfigManager::new();
+    let cm = crate::config_manager::ConfigManager::new(".");
     let cfg = cm.get_config();
 
     let (mineru, ollama, fastembed) = tokio::join!(
