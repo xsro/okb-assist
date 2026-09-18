@@ -54,7 +54,8 @@ pub fn default_system() -> serde_json::Value {
         "markdown_asset_path": "data/uploads/{id}/{id}.zip",
         "pdf_path": "data/uploads/{id}/{id}.pdf",
         "public_url": "http://localhost:5001",
-        "subnet_url": "http://192.168.1.100:5001"
+        "subnet_url": "http://192.168.1.100:5001",
+        "config_path": "config.json"
     })
 }
 
@@ -69,9 +70,18 @@ pub struct ConfigManager {
 
 impl ConfigManager {
     pub fn new() -> Self {
+        // 先加载 system.json（路径硬编码），从中读取 config.json 路径
+        let system_path = PathBuf::from("system.json");
+        let system = Self::load_json_file(&system_path, &default_system());
+        let config_path = system
+            .get("config_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("config.json")
+            .to_string();
+
         Self {
-            config_file: PathBuf::from("config.json"),
-            system_file: PathBuf::from("system.json"),
+            config_file: PathBuf::from(&config_path),
+            system_file: system_path,
             cache: Arc::new(RwLock::new(None)),
             system_cache: Arc::new(RwLock::new(None)),
         }
