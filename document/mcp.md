@@ -8,7 +8,7 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
 |---------|------|------|
 | `grep_search` | 全文搜索（基于 grep，轻量快速），支持分页与上下文截断 | `query: str`, `limit: int = 10`, `max_results: int`, `page: int = 1`, `offset: int = 0`, `context: int = 2`, `max_context_chars: int = 500`, `doc_ids: str`, `algorithm: str = "full"`, `regex: bool = true`, `journal: str`, `year_start: int`, `year_end: int` |
 | `search_info` | 搜索文献元数据（中英文），支持分页、字段过滤与年份/类型过滤 | `query: str`, `limit: int = 10`, `max_results: int`, `page: int = 1`, `offset: int = 0`, `year_from: int`, `year_to: int`, `doc_type: str`, `fields: list[str]` |
-| `read_markdown` | 读取文献 Markdown 内容（分页） | `id: int`, `page: int = 1`, `page_size: int = 5000` |
+| `read_markdown` | 读取文献 Markdown 内容（分页），或按标题提取指定章节 | `id: int`, `page: int = 1`, `page_size: int = 5000`, `section: str`, `sections: list[str]` |
 | `get_document_info` | 获取文献详细信息 | `id: int` |
 | `list_documents` | 搜索/列出文献，支持字段过滤 | `query: str`, `status: str`, `doc_type: str`, `page: int`, `page_size: int = 20`, `limit: int`, `fields: list[str]` |
 | `get_pdf_url` | 获取 PDF 链接 | `id: int` |
@@ -16,7 +16,7 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
 | `get_stats` | 获取知识库统计信息 | 无 |
 | `list_doc_types` | 列出所有已使用的文献类型 | 无 |
 
-### 分页、字段过滤与统一错误格式
+### 分页、字段过滤、章节提取与统一错误格式
 
 `grep_search`、`search_info`、`list_documents` 支持以下通用参数：
 
@@ -25,6 +25,7 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
   - `grep_search` 基于流式 grep，无法廉价计算总数，返回 `has_more`（是否还有下一页）与 `returned`（本页条数）。
 - **字段过滤**：`fields` 参数传入字段名数组（如 `["id", "title", "year"]`），只返回指定字段；省略时返回全部字段。
 - **上下文截断**：`grep_search` 的 `max_context_chars`（默认 500）限制每条结果 `content` 的字符数，设为 `0` 不截断。
+- **章节提取**：`read_markdown` 的 `section`（单个标题）或 `sections`（多个标题数组）可按标题提取章节，不区分大小写，支持子串匹配（如 `"Intro"` 可匹配 `"Introduction"`），并自动包含其子章节；提供后优先于分页。未匹配到章节时返回 `error`，并在 `available_sections` 中给出顶层标题供参考。
 - **统一错误格式**：工具出错时返回 `{"error": {"code": "...", "message": "..."}}`，常见错误码：`invalid_argument`、`not_found`。
 
 ## 可用资源
