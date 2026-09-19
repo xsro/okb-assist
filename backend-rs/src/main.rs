@@ -84,19 +84,19 @@ async fn main() -> anyhow::Result<()> {
 
     // 先加载 system.json 确定 log_path
     let config_manager = Arc::new(ConfigManager::new(&args.system_path));
+    // 切换到工作目录，这样所有相对路径自然解析
+    let cwd = config_manager.cwd();
+    std::env::set_current_dir(&cwd)
+        .map_err(|e| anyhow::anyhow!("无法切换到工作目录 {}: {}", cwd, e))?;
+    tracing::info!("工作目录: {}", cwd);
     let system = config_manager.load_system_config();
     let log_path_raw = system
         .get("log_path")
         .and_then(|v| v.as_str())
         .unwrap_or("stdout")
         .to_string();
-    // 应用变量替换
-    let log_path = ConfigManager::substitute_path_variables(
-        &log_path_raw,
-        0,
-        &config_manager.system_dir(),
-        &config_manager.system_path(),
-    );
+    // 应用变量替换（仅 {id} 和 {env:VAR}）
+    let log_path = ConfigManager::substitute_path_variables(&log_path_raw, 0);
 
     if log_path != "stdout" && !log_path.is_empty() {
         let log_file = std::fs::File::create(&log_path)

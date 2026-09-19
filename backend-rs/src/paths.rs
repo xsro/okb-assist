@@ -2,10 +2,7 @@
 //!
 //! 支持以下变量替换（通过 ConfigManager::substitute_path_variables）：
 //! - `{id}` — 文档 ID
-//! - `{system_dir}` — system.json 所在目录的绝对路径
-//! - `{system_path}` — system.json 的完整绝对路径
 //! - `{env:VAR_NAME}` — 环境变量 VAR_NAME 的值
-//! - `{cwd}` — 当前工作目录
 
 use std::path::PathBuf;
 
@@ -15,17 +12,9 @@ use crate::config::Settings;
 ///
 /// 支持的变量：
 /// - `{id}` — 文档 ID
-/// - `{system_dir}` — system.json 所在目录的绝对路径
-/// - `{system_path}` — system.json 的完整绝对路径
 /// - `{env:VAR_NAME}` — 环境变量 VAR_NAME 的值
-/// - `{cwd}` — 当前工作目录
-pub fn resolve_template(template: &str, doc_id: i64, settings: &Settings) -> String {
-    crate::config_manager::ConfigManager::substitute_path_variables(
-        template,
-        doc_id,
-        &settings.system_dir(),
-        &settings.system_path(),
-    )
+pub fn resolve_template(template: &str, doc_id: i64, _settings: &Settings) -> String {
+    crate::config_manager::ConfigManager::substitute_path_variables(template, doc_id)
 }
 
 pub fn get_markdown_path(settings: &Settings, doc_id: i64) -> String {

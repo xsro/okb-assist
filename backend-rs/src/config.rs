@@ -216,17 +216,15 @@ impl Settings {
     pub fn database_url(&self) -> String {
         self.get_system_config()["database_url"]
             .as_str()
-            .unwrap_or("sqlite:///./okb_assist.db")
+            .unwrap_or("sqlite:///data/okb_assist.db")
             .to_string()
     }
 
     pub fn uploads_folder(&self) -> String {
-        let raw = self.get_system_config()["uploads_folder"]
+        self.get_system_config()["uploads_folder"]
             .as_str()
             .unwrap_or("data/_uploads")
-            .to_string();
-        // 应用变量替换（{system_dir}, {system_path}, {env:VAR}, {cwd}）
-        self.substitute_path(&raw, 0)
+            .to_string()
     }
 
     /// 获取 config.json 中的 base_url（部署基础地址）。
@@ -300,6 +298,11 @@ impl Settings {
     }
 
     // ── system.json 路径信息（用于路径变量替换） ──
+    /// 返回解析后的工作目录（绝对路径）。
+    pub fn cwd(&self) -> String {
+        self.manager.cwd()
+    }
+
     /// 返回 system.json 所在目录的路径（绝对路径）。
     pub fn system_dir(&self) -> String {
         self.manager.system_dir()
@@ -310,20 +313,8 @@ impl Settings {
         self.manager.system_path()
     }
 
-    /// 解析路径模板中的变量。
-    ///
-    /// 支持的变量：
-    /// - `{id}` — 文档 ID
-    /// - `{system_dir}` — system.json 所在目录的绝对路径
-    /// - `{system_path}` — system.json 的完整绝对路径
-    /// - `{env:VAR_NAME}` — 环境变量 VAR_NAME 的值
-    /// - `{cwd}` — 当前工作目录
+    /// 解析路径模板中的变量（仅 {id} 和 {env:VAR}）。
     pub fn substitute_path(&self, template: &str, doc_id: i64) -> String {
-        crate::config_manager::ConfigManager::substitute_path_variables(
-            template,
-            doc_id,
-            &self.system_dir(),
-            &self.system_path(),
-        )
+        crate::config_manager::ConfigManager::substitute_path_variables(template, doc_id)
     }
 }

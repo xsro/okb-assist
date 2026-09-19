@@ -30,15 +30,29 @@ cargo run -- --host 0.0.0.0 --port 5001
 > 修改 `system.json` 后需**重启进程**才能生效（进程内缓存）。
 > 修改 `config.json` 后需调用 `/assist/api/config/reload` 端点或重启才能生效。
 
-系统配置文件为 `backend-rs/system.json`，修改后需要重启服务生效。路径属性支持变量替换：
+系统配置文件为 `backend-rs/system.json`，修改后需要重启服务生效。
 
-| 变量 | 说明 |
-|------|------|
-| `{id}` | 文档 ID |
-| `{system_dir}` | system.json 所在目录的绝对路径 |
-| `{system_path}` | system.json 的完整绝对路径 |
-| `{env:VAR_NAME}` | 环境变量 `VAR_NAME` 的值 |
-| `{cwd}` | 当前工作目录 |
+### 工作目录（`cwd`）
+
+程序启动时会 `chdir` 到 `cwd` 指定的目录，后续所有相对路径都相对于该目录解析。`cwd` 的值支持 `{system_dir}` 和 `{system_path}` 变量替换：
+
+```json
+{
+  "cwd": "{system_dir}"
+}
+```
+
+### 路径属性
+
+除了 `cwd` 和 `config_path` 支持 `{system_dir}` 替换外，其他路径属性均为相对于 `cwd` 的相对路径，仅支持 `{id}` 变量（文档 ID）：
+
+| 属性 | 说明 | 示例 |
+|------|------|------|
+| `database_url` | SQLite 连接串 | `"sqlite:///data/okb_assist.db"` |
+| `markdown_path` | Markdown 文件路径 | `"data/markdowns/{id}.md"` |
+| `pdf_path` | PDF 文件路径 | `"data/pdfs/{id}/{id}.pdf"` |
+| `info_path` | 元信息 JSON 路径 | `"data/markdowns/{id}.json"` |
+| `uploads_folder` | 上传目录 | `"data/_uploads"` |
 
 详见 [AGENTS.md](AGENTS.md) 的配置章节。
 

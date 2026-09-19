@@ -52,13 +52,14 @@ pub fn default_system() -> serde_json::Value {
         "token": "change-me",
         "mcp_token": "change-me",
         "max_concurrent_tasks": 3,
-        "database_url": "sqlite:///./okb_assist.db",
+        "database_url": "sqlite:///data/okb_assist.db",
+        "cwd": "{system_dir}",
         "uploads_folder": "data/_uploads",
-        "markdown_path": "data/uploads/{id}/{id}.md",
-        "info_path": "data/uploads/{id}/{id}.json",
-        "crossref_path": "data/uploads/{id}/{id}_crossref.json",
-        "markdown_asset_path": "data/uploads/{id}/{id}.zip",
-        "pdf_path": "data/uploads/{id}/{id}.pdf",
+        "markdown_path": "data/markdowns/{id}.md",
+        "info_path": "data/markdowns/{id}.json",
+        "crossref_path": "data/markdowns/{id}_crossref.json",
+        "markdown_asset_path": "data/pdfs/{id}/{id}.zip",
+        "pdf_path": "data/pdfs/{id}/{id}.pdf",
         "config_path": "config.json",
         "log_path": "stdout"
     })
@@ -69,6 +70,7 @@ pub fn default_system() -> serde_json::Value {
 pub struct ConfigManager {
     config_file: PathBuf,
     system_file: PathBuf,
+    cwd: String,
     cache: Arc<RwLock<Option<serde_json::Value>>>,
     system_cache: Arc<RwLock<Option<serde_json::Value>>>,
 }
@@ -77,7 +79,7 @@ impl ConfigManager {
     /// 从 system.json 路径创建配置管理器。
     /// config.json 的路径从 system.json 的 config_path 字段读取，
     /// 若为相对路径则相对于 system.json 所在目录解析。
-    /// 支持在 config_path 中使用变量：{system_dir}, {system_path}, {env:VAR}, {cwd}。
+    /// cwd 和 config_path 支持 {system_dir} 变量替换。
     pub fn new(system_path: &str) -> Self {
         let system_path = PathBuf::from(system_path);
         let system = Self::load_json_file(&system_path, &default_system());
@@ -87,14 +89,22 @@ impl ConfigManager {
             .to_string_lossy()
             .to_string();
         let system_path_str = system_path.to_string_lossy().to_string();
-        
+
+        // 解析 cwd（支持 {system_dir} 替换）
+        let cwd = system
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .unwrap_or("{system_dir}")
+            .to_string();
+        let cwd = cwd.replace("{system_dir}", &system_dir).replace("{system_path}", &system_path_str);
+
+        // 解析 config_path（支持 {system_dir} 替换）
         let config_path = system
             .get("config_path")
             .and_then(|v| v.as_str())
             .unwrap_or("config.json")
             .to_string();
-        // 应用变量替换
-        let config_path = Self::substitute_path_variables(&config_path, 0, &system_dir, &system_path_str);
+        let config_path = config_path.replace("{system_dir}", &system_dir).replace("{system_path}", &system_path_str);
         // 若 config_path 是相对路径，相对于 system.json 所在目录解析
         let config_file = if PathBuf::from(&config_path).is_absolute() {
             PathBuf::from(&config_path)
@@ -108,6 +118,7 @@ impl ConfigManager {
         Self {
             config_file,
             system_file: system_path,
+            cwd,
             cache: Arc::new(RwLock::new(None)),
             system_cache: Arc::new(RwLock::new(None)),
         }
@@ -133,31 +144,21 @@ impl ConfigManager {
         self.system_file.to_string_lossy().to_string()
     }
 
+    /// 返回解析后的工作目录（绝对路径）。
+    pub fn cwd(&self) -> String {
+        self.cwd.clone()
+    }
+
     /// 解析路径模板中的变量。
     ///
     /// 支持的变量：
     /// - `{id}` — 文档 ID
-    /// - `{system_dir}` — system.json 所在目录的绝对路径
-    /// - `{system_path}` — system.json 的完整绝对路径
     /// - `{env:VAR_NAME}` — 环境变量 VAR_NAME 的值
-    /// - `{cwd}` — 当前工作目录
-    pub fn substitute_path_variables(template: &str, doc_id: i64, system_dir: &str, system_path: &str) -> String {
+    pub fn substitute_path_variables(template: &str, doc_id: i64) -> String {
         let mut result = template.to_string();
 
-        // 先替换 {id}
+        // 替换 {id}
         result = result.replace("{id}", &doc_id.to_string());
-
-        // 替换 {system_dir}
-        result = result.replace("{system_dir}", system_dir);
-
-        // 替换 {system_path}
-        result = result.replace("{system_path}", system_path);
-
-        // 替换 {cwd}
-        let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string());
-        result = result.replace("{cwd}", &cwd);
 
         // 替换 {env:VAR_NAME}
         Self::substitute_env_vars(&result)

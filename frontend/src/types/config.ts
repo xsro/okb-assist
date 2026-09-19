@@ -38,7 +38,7 @@ export interface SystemConfig {
   token: string
   mcp_token: string
   database_url: string
-  upload_dir: string
+  cwd: string
 }
 
 export interface ServiceStatusItem {

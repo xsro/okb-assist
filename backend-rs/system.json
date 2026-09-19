@@ -1,8 +1,8 @@
 {
   "crossref_path": "data/markdowns/{id}_crossref.json",
   "database_url": "sqlite:///./data/okb_assist.db",
-  "config_path":"./config.json",
-  "log_path":"stdout",
+  "config_path": "config.json",
+  "log_path": "stdout",
   "info_path": "data/markdowns/{id}.json",
   "markdown_asset_path": "data/pdfs/{id}/{id}.zip",
   "markdown_path": "data/markdowns/{id}.md",
@@ -11,6 +11,7 @@
   "pdf_path": "data/pdfs/{id}/{id}.pdf",
   "token": "change-me",
   "uploads_folder": "data/_uploads",
+  "cwd": "{system_dir}",
   "grep_path": "grep",
   "pdfcpu_path": "pdfcpu"
 }

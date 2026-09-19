@@ -91,31 +91,40 @@ cargo build --release
 - 添加新配置字段时：在 `config_manager.rs` 的默认值中加默认值；若是敏感字段，扩展脱敏函数。
 - 文件路径来自 `system.json` 的路径模板（含 `{id}` 占位符），在 `backend-rs/src/paths.rs` 解析，**不要**在 `Document` 模型里加路径列。
 
-### 路径变量替换
+### 工作目录与路径解析
 
-system.json 中的路径属性支持以下变量：
+程序启动时会 `chdir` 到 `cwd` 指定的目录，后续所有相对路径都相对于该目录解析。
 
-| 变量 | 说明 |
-|------|------|
-| `{id}` | 文档 ID |
-| `{system_dir}` | system.json 所在目录的绝对路径 |
-| `{system_path}` | system.json 的完整绝对路径 |
-| `{env:VAR_NAME}` | 环境变量 `VAR_NAME` 的值 |
-| `{cwd}` | 当前工作目录 |
+- `cwd` 的值支持 `{system_dir}` 和 `{system_path}` 变量替换（在 `ConfigManager::new()` 中解析）
+- `config_path` 也支持 `{system_dir}` 替换
+- 其他路径属性均为相对于 `cwd` 的相对路径，仅支持 `{id}` 变量（文档 ID）
+- `env:VAR_NAME` 语法在所有路径属性中均支持
 
-支持变量替换的路径属性：`markdown_path`、`info_path`、`crossref_path`、`markdown_asset_path`、`pdf_path`、`uploads_folder`、`config_path`、`log_path`。
+支持的路径属性：
+
+| 属性 | 说明 | 默认值 |
+|------|------|--------|
+| `database_url` | SQLite 连接串 | `sqlite:///data/okb_assist.db` |
+| `markdown_path` | Markdown 文件路径 | `data/markdowns/{id}.md` |
+| `info_path` | 元信息 JSON 路径 | `data/markdowns/{id}.json` |
+| `crossref_path` | Crossref 数据路径 | `data/markdowns/{id}_crossref.json` |
+| `markdown_asset_path` | Markdown 资产包路径 | `data/pdfs/{id}/{id}.zip` |
+| `pdf_path` | PDF 文件路径 | `data/pdfs/{id}/{id}.pdf` |
+| `uploads_folder` | 上传目录 | `data/_uploads` |
+| `config_path` | config.json 路径 | `config.json` |
+| `log_path` | 日志路径 | `stdout` |
 
 示例：
 
 ```json
 {
-  "markdown_path": "{system_dir}/data/markdowns/{id}.md",
-  "pdf_path": "{system_dir}/data/pdfs/{id}/{id}.pdf",
-  "uploads_folder": "{system_dir}/data/_uploads"
+  "cwd": "{system_dir}",
+  "database_url": "sqlite:///data/okb_assist.db",
+  "markdown_path": "data/markdowns/{id}.md",
+  "pdf_path": "data/pdfs/{id}/{id}.pdf",
+  "uploads_folder": "data/_uploads"
 }
 ```
-
-> 所有路径属性保持向后兼容：不使用变量时，相对路径相对于当前工作目录解析。
 
 ## 架构与请求流
 
