@@ -2,12 +2,15 @@
 
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, Query};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, head, post};
 use serde::{Deserialize, Serialize};
+use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 
 use crate::config::Settings;
@@ -23,6 +26,56 @@ static FILE_ALIASES: std::sync::OnceLock<RwLock<std::collections::HashMap<String
 
 fn aliases() -> &'static RwLock<std::collections::HashMap<String, i64>> {
     FILE_ALIASES.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
+}
+
+// ── 临时 PDF 下载令牌 ──────────────────────────────────
+
+/// 临时令牌存储：token -> (doc_id, expires_at_unix_timestamp)
+/// 用于 MCP 工具返回临时下载链接，有效期 5 分钟。
+static TEMP_PDF_TOKENS: std::sync::OnceLock<RwLock<std::collections::HashMap<String, (i64, u64)>>> =
+    std::sync::OnceLock::new();
+
+fn temp_tokens() -> &'static RwLock<std::collections::HashMap<String, (i64, u64)>> {
+    TEMP_PDF_TOKENS.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
+}
+
+/// 生成临时 PDF 下载令牌，有效期 5 分钟。
+/// 返回 (token, expires_at_iso_string)
+pub fn generate_temp_pdf_token(doc_id: i64) -> (String, String) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let expires_at = now + 300; // 5 minutes
+    let token = format!("{:x}", now ^ doc_id as u64 ^ 0x5e5e5e5e);
+    // 用简单哈希确保唯一性
+    let hash = sha256_hex(format!("{}-{}-temp", doc_id, now).as_bytes());
+    let token = hash[..16].to_string();
+    let expires_iso = Utc::now() + Duration::seconds(300);
+    let expires_iso = expires_iso.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    if let Ok(mut lock) = temp_tokens().write() {
+        lock.insert(token.clone(), (doc_id, expires_at));
+    }
+    (token, expires_iso)
+}
+
+/// 验证临时令牌，返回 doc_id（有效则移除令牌，防止重复使用）
+pub fn consume_temp_pdf_token(token: &str) -> Option<i64> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if let Ok(mut lock) = temp_tokens().write() {
+        if let Some(&(doc_id, expires_at)) = lock.get(token) {
+            if now < expires_at {
+                lock.remove(token);
+                return Some(doc_id);
+            } else {
+                lock.remove(token);
+            }
+        }
+    }
+    None
 }
 
 /// 通过别名查找文档 ID
@@ -89,6 +142,7 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/:id/parse-result", post(upload_parse_result))
         .route("/assist/api/documents/:id/pdf/", get(get_pdf).post(replace_pdf).head(check_pdf_exists))
         .route("/assist/api/documents/:id/pdf", get(get_pdf).post(replace_pdf).head(check_pdf_exists))
+        .route("/assist/api/documents/:id/pdf/temp", get(get_temp_pdf))
         .route("/assist/api/documents/:id/file-alias/", get(file_alias))
         .route("/assist/api/documents/:id/file-alias", get(file_alias))
         .layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024))
@@ -1413,6 +1467,43 @@ async fn get_pdf(
             bytes,
         ).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, Json(json!({"detail": "PDF 文件不存在"}))).into_response(),
+    }
+}
+
+/// 临时 PDF 下载（通过 token，无需认证）
+async fn get_temp_pdf(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+    if token.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少 token 参数"}))).into_response();
+    }
+
+    match consume_temp_pdf_token(token) {
+        Some(doc_id) if doc_id == id => {
+            // 验证通过，返回 PDF
+            match fetch_doc(&db, id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+            }
+            let pdf_path = paths::get_pdf_path(&settings, id);
+            match std::fs::read(&pdf_path) {
+                Ok(bytes) => (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "application/pdf"),
+                        (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+                    ],
+                    bytes,
+                ).into_response(),
+                Err(_) => (StatusCode::NOT_FOUND, Json(json!({"detail": "PDF 文件不存在"}))).into_response(),
+            }
+        }
+        _ => (StatusCode::UNAUTHORIZED, Json(json!({"detail": "token 无效或已过期"}))).into_response(),
     }
 }
 

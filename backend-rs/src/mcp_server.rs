@@ -15,6 +15,7 @@ use crate::config::Settings;
 use crate::database::Database;
 use crate::models::{DocStatus, Document};
 use crate::paths;
+use crate::routers::documents::generate_temp_pdf_token;
 use crate::services::grep_search::{grep_search as do_grep, parse_doc_ids};
 
 /// Document 全部列的 SELECT 语句（列顺序与 `Document` 结构体字段一致）。
@@ -174,6 +175,7 @@ impl McpServer {
         let has_markdown = std::path::Path::new(&paths::get_markdown_path(&self.settings, doc.id)).exists();
         let base = self.settings.base_url();
         let prefix = if base.is_empty() { String::new() } else { base };
+        let (temp_token, temp_expires) = generate_temp_pdf_token(doc.id);
         json!({
             "id": doc.id,
             "filename": doc.filename,
@@ -190,6 +192,8 @@ impl McpServer {
             "status": doc.status,
             "has_markdown": has_markdown,
             "pdf_url": format!("{}/assist/api/documents/{}/pdf", prefix, doc.id),
+            "temp_downloadable_pdf_url": format!("{}/assist/api/documents/{}/pdf/temp?token={}", prefix, doc.id, temp_token),
+            "temp_downloadable_pdf_expiration": temp_expires,
             "markdown_url": format!("{}/assist/markdown/{}", prefix, doc.id),
             "detail_url": format!("{}/assist/detail/{}", prefix, doc.id),
         })
