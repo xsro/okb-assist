@@ -2,15 +2,16 @@
 //!
 //! 基于 Axum + SQLx + Tokio，保持与 Python 版本 API 接口兼容。
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use clap::Parser;
+use axum::extract::ConnectInfo;
 use axum::Extension;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use tower::ServiceBuilder;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{cors::CorsLayer, trace::{MakeSpan, TraceLayer}};
 
 mod config_manager;
 mod config;
@@ -154,9 +155,7 @@ fn create_app(
     let middleware = ServiceBuilder::new()
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(
-                    tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO),
-                )
+                .make_span_with(IpMakeSpan)
                 .on_response(
                     tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO),
                 ),
@@ -240,6 +239,7 @@ async fn serve_file_alias(
 async fn error_log_middleware(req: axum::extract::Request, next: Next) -> Response {
     let method = req.method().clone();
     let uri = req.uri().clone();
+    let client_ip = extract_client_ip(&req);
 
     let response = next.run(req).await;
 
@@ -259,6 +259,7 @@ async fn error_log_middleware(req: axum::extract::Request, next: Next) -> Respon
 
     if status.is_server_error() {
         tracing::error!(
+            client_ip = %client_ip,
             method = %method,
             uri = %uri,
             status = %status.as_u16(),
@@ -267,6 +268,7 @@ async fn error_log_middleware(req: axum::extract::Request, next: Next) -> Respon
         );
     } else {
         tracing::warn!(
+            client_ip = %client_ip,
             method = %method,
             uri = %uri,
             status = %status.as_u16(),
@@ -460,6 +462,44 @@ fn mime_for_path(path: &std::path::Path) -> &'static str {
         "eot" => "application/vnd.ms-fontobject",
         "txt" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+/// 从请求中提取真实客户端 IP（基于 TCP 连接，不可伪造）。
+///
+/// 优先使用 `ConnectInfo` 获取 TCP 对端地址；若不可用（如测试环境），
+/// 回退到 `X-Forwarded-For` 头部。
+fn extract_client_ip<B>(req: &axum::extract::Request<B>) -> String {
+    // 优先使用 TCP 连接的真实对端地址
+    if let Some(connect_info) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        return connect_info.0.ip().to_string();
+    }
+    // 回退到 X-Forwarded-For（代理环境）
+    if let Some(xff) = req.headers().get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+    {
+        let ip = xff.split(',').next().unwrap_or("").trim();
+        if !ip.is_empty() {
+            return ip.to_string();
+        }
+    }
+    "unknown".to_string()
+}
+
+/// 自定义 MakeSpan：在每个请求的 span 中包含真实客户端 IP。
+#[derive(Clone, Default)]
+struct IpMakeSpan;
+
+impl<B, S> MakeSpan<B, S> for IpMakeSpan {
+    fn make_span(&self, req: &axum::extract::Request<B>) -> tracing::Span {
+        let client_ip = extract_client_ip(req);
+        tracing::span!(
+            tracing::Level::INFO,
+            "request",
+            client_ip = %client_ip,
+            method = %req.method(),
+            uri = %req.uri(),
+        )
     }
 }
 
