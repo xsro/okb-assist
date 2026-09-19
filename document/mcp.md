@@ -11,7 +11,6 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
 | `read_markdown` | 读取文献 Markdown 内容（分页），或按标题提取指定章节 | `id: int`, `page: int = 1`, `page_size: int = 5000`, `section: str`, `sections: list[str]` |
 | `get_document_info` | 获取文献详细信息 | `id: int` |
 | `list_documents` | 搜索/列出文献，支持字段过滤 | `query: str`, `status: str`, `doc_type: str`, `page: int`, `page_size: int = 20`, `limit: int`, `fields: list[str]` |
-| `get_pdf_url` | 获取 PDF 链接 | `id: int` |
 | `get_document_abstract` | 获取文献摘要 | `id: int` |
 | `get_stats` | 获取知识库统计信息 | 无 |
 | `list_doc_types` | 列出所有已使用的文献类型 | 无 |

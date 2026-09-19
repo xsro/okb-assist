@@ -118,15 +118,6 @@ impl McpServer {
                 }
             }),
             json!({
-                "name": "get_pdf_url",
-                "description": "Get the PDF download/preview link for a document.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {"id": {"type": "integer"}},
-                    "required": ["id"]
-                }
-            }),
-            json!({
                 "name": "get_document_abstract",
                 "description": "Get document abstract information. Multi-language abstracts are both returned when available.",
                 "inputSchema": {
@@ -155,7 +146,6 @@ impl McpServer {
             "read_markdown" => self.tool_read_markdown(args).await,
             "get_document_info" => self.tool_get_document_info(args).await,
             "list_documents" => self.tool_list_documents(args).await,
-            "get_pdf_url" => self.tool_get_pdf_url(args).await,
             "get_document_abstract" => self.tool_get_document_abstract(args).await,
             "get_stats" => self.tool_get_stats().await,
             "list_doc_types" => self.tool_list_doc_types().await,
@@ -544,24 +534,6 @@ impl McpServer {
             "page_size": page_size,
             "total_pages": if total == 0 { 0 } else { (total + page_size - 1) / page_size },
             "items": items,
-        }))
-    }
-
-    async fn tool_get_pdf_url(&self, args: &Value) -> String {
-        let doc_id = args["id"].as_i64().unwrap_or(0);
-        let doc = match self.fetch_doc(doc_id).await {
-            Some(d) => d,
-            None => return Self::err("not_found", &format!("文档 {} 不存在", doc_id)),
-        };
-        let pdf_path = paths::get_pdf_path(&self.settings, doc_id);
-        if !std::path::Path::new(&pdf_path).exists() {
-            return Self::err("not_found", "PDF file does not exist");
-        }
-        Self::pretty(&json!({
-            "id": doc_id,
-            "filename": doc.filename,
-            "pdf_url": format!("/assist/api/documents/{}/pdf", doc_id),
-            "title": doc.title,
         }))
     }
 
