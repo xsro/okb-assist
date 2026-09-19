@@ -66,15 +66,21 @@ pub fn get_or_create_alias(doc_id: i64, year: Option<i64>, title: Option<&str>, 
 
     // 生成新别名
     let y = year.map(|v| v.to_string()).unwrap_or_else(|| "unknown".to_string());
+    // short_title：用 _ 替代空格，最大 20 字符
     let t: String = title
-        .map(|t| t.chars().take(30).collect::<String>())
+        .map(|t| {
+            t.chars()
+                .take(60)
+                .collect::<String>()
+                .replace(' ', "_")
+        })
         .unwrap_or_else(|| "untitled".to_string());
     let rand_str: String = {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         (0..6).map(|_| rng.gen_range(b'a'..=b'z') as char).collect()
     };
-    let alias = format!("{}_{}_{}", y, t, rand_str);
+    let alias = format!("{}_{}_{}{}.pdf", y, t, rand_str, doc_id);
     aliases().write().unwrap().insert(alias.clone(), (doc_id, expires_at));
 
     let expires_iso = DateTime::from_timestamp(expires_at as i64, 0)
