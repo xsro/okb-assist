@@ -77,14 +77,24 @@ impl ConfigManager {
     /// 从 system.json 路径创建配置管理器。
     /// config.json 的路径从 system.json 的 config_path 字段读取，
     /// 若为相对路径则相对于 system.json 所在目录解析。
+    /// 支持在 config_path 中使用变量：{system_dir}, {system_path}, {env:VAR}, {cwd}。
     pub fn new(system_path: &str) -> Self {
         let system_path = PathBuf::from(system_path);
         let system = Self::load_json_file(&system_path, &default_system());
+        let system_dir = system_path
+            .parent()
+            .unwrap_or(&PathBuf::from("."))
+            .to_string_lossy()
+            .to_string();
+        let system_path_str = system_path.to_string_lossy().to_string();
+        
         let config_path = system
             .get("config_path")
             .and_then(|v| v.as_str())
             .unwrap_or("config.json")
             .to_string();
+        // 应用变量替换
+        let config_path = Self::substitute_path_variables(&config_path, 0, &system_dir, &system_path_str);
         // 若 config_path 是相对路径，相对于 system.json 所在目录解析
         let config_file = if PathBuf::from(&config_path).is_absolute() {
             PathBuf::from(&config_path)
@@ -101,6 +111,80 @@ impl ConfigManager {
             cache: Arc::new(RwLock::new(None)),
             system_cache: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// 返回 system.json 所在目录的路径（绝对路径）。
+    pub fn system_dir(&self) -> String {
+        match self.system_file.parent() {
+            Some(dir) => {
+                let s = dir.to_string_lossy().to_string();
+                if s.is_empty() {
+                    ".".to_string()
+                } else {
+                    s
+                }
+            }
+            None => ".".to_string(),
+        }
+    }
+
+    /// 返回 system.json 的完整路径（绝对路径）。
+    pub fn system_path(&self) -> String {
+        self.system_file.to_string_lossy().to_string()
+    }
+
+    /// 解析路径模板中的变量。
+    ///
+    /// 支持的变量：
+    /// - `{id}` — 文档 ID
+    /// - `{system_dir}` — system.json 所在目录的绝对路径
+    /// - `{system_path}` — system.json 的完整绝对路径
+    /// - `{env:VAR_NAME}` — 环境变量 VAR_NAME 的值
+    /// - `{cwd}` — 当前工作目录
+    pub fn substitute_path_variables(template: &str, doc_id: i64, system_dir: &str, system_path: &str) -> String {
+        let mut result = template.to_string();
+
+        // 先替换 {id}
+        result = result.replace("{id}", &doc_id.to_string());
+
+        // 替换 {system_dir}
+        result = result.replace("{system_dir}", system_dir);
+
+        // 替换 {system_path}
+        result = result.replace("{system_path}", system_path);
+
+        // 替换 {cwd}
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+        result = result.replace("{cwd}", &cwd);
+
+        // 替换 {env:VAR_NAME}
+        Self::substitute_env_vars(&result)
+    }
+
+    /// 扫描字符串中的 {env:VAR_NAME} 模式并替换为环境变量值。
+    fn substitute_env_vars(s: &str) -> String {
+        let mut result = s.to_string();
+        let mut start = 0;
+        while let Some(pos) = result[start..].find("{env:") {
+            let abs_pos = start + pos;
+            if let Some(end_pos) = result[abs_pos..].find('}') {
+                let end_abs = abs_pos + end_pos;
+                let var_expr = &result[abs_pos + 5..end_abs];
+                if let Some(env_val) = std::env::var(var_expr).ok() {
+                    let before = &result[..abs_pos];
+                    let after = &result[end_abs + 1..];
+                    result = format!("{}{}{}", before, env_val, after);
+                    start = abs_pos + env_val.len();
+                } else {
+                    start = end_abs + 1;
+                }
+            } else {
+                break;
+            }
+        }
+        result
     }
 
     fn deep_merge(base: &serde_json::Value, override_val: &serde_json::Value) -> serde_json::Value {

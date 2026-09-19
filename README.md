@@ -25,8 +25,22 @@ cargo build --release
 cargo run -- --host 0.0.0.0 --port 5001
 ```
 
+## 配置
+
 > 修改 `system.json` 后需**重启进程**才能生效（进程内缓存）。
 > 修改 `config.json` 后需调用 `/assist/api/config/reload` 端点或重启才能生效。
+
+系统配置文件为 `backend-rs/system.json`，修改后需要重启服务生效。路径属性支持变量替换：
+
+| 变量 | 说明 |
+|------|------|
+| `{id}` | 文档 ID |
+| `{system_dir}` | system.json 所在目录的绝对路径 |
+| `{system_path}` | system.json 的完整绝对路径 |
+| `{env:VAR_NAME}` | 环境变量 `VAR_NAME` 的值 |
+| `{cwd}` | 当前工作目录 |
+
+详见 [AGENTS.md](AGENTS.md) 的配置章节。
 
 ## 启动向量化数据库和索引服务
 
