@@ -24,7 +24,7 @@ use crate::paths;
 use crate::services::crossref::CrossrefClient;
 use crate::services::mineru::MinerUClient;
 use crate::services::ollama::OllamaClient;
-use crate::services::pdf_meta::{extract_pdf_metadata, normalize_doi};
+use crate::services::pdf_meta::{extract_pdf_metadata, looks_like_placeholder, normalize_doi};
 use crate::services::vector_db::{chunk_text_by_markdown, get_vector_db};
 use crate::utils::{absolute_path, now_iso};
 
@@ -711,6 +711,14 @@ async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id
         Some(d) => d,
         None => return,
     };
+
+    // 如果当前标题是占位符（如 "Entire document"），先清空以便后续更新
+    if doc.title.as_deref().map_or(false, |t| looks_like_placeholder(t)) {
+        let _ = sqlx::query("UPDATE documents SET title = '' WHERE id = ?")
+            .bind(doc_id)
+            .execute(db.pool())
+            .await;
+    }
 
     let pdf_path = paths::get_pdf_path(&settings, doc_id);
     let content = match std::fs::read(&pdf_path) {

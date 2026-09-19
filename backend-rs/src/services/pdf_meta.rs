@@ -49,7 +49,10 @@ pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>, pdfcpu_path:
                         match key_str.as_str() {
                             "title" => {
                                 let t = val.trim().to_string();
-                                if !t.is_empty() && !looks_like_filename(&t, filename) {
+                                if !t.is_empty()
+                                    && !looks_like_filename(&t, filename)
+                                    && !looks_like_placeholder(&t)
+                                {
                                     result.insert("title".to_string(), serde_json::Value::String(t));
                                 }
                             }
@@ -172,7 +175,7 @@ fn extract_pdf_metadata_pdfcpu(content: &[u8], pdfcpu_path: Option<&str>) -> Opt
 
             match key.as_str() {
                 "title" => {
-                    if !value.is_empty() {
+                    if !value.is_empty() && !looks_like_placeholder(&value) {
                         result.insert("title".to_string(), serde_json::Value::String(value));
                     }
                 }
@@ -287,6 +290,29 @@ fn looks_like_filename(title: &str, filename: Option<&str>) -> bool {
         return true;
     }
     false
+}
+
+/// 检测是否为占位标题（如 "Entire document"、"Untitled" 等）
+pub(crate) fn looks_like_placeholder(title: &str) -> bool {
+    let t = title.trim().to_lowercase();
+    if t.is_empty() {
+        return true;
+    }
+    let placeholders = [
+        "entire document",
+        "untitled",
+        "document",
+        "title",
+        "unknown",
+        "n/a",
+        "no title",
+        "not available",
+        "confidential",
+        "draft",
+        "new document",
+        "new doc",
+    ];
+    placeholders.contains(&t.as_str())
 }
 
 fn split_authors(raw: &str) -> Vec<String> {
