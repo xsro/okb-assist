@@ -256,9 +256,11 @@ claude mcp add okb-assist --transport sse http://192.168.1.100:5001/assist/mcp/s
 
 ---
 
-### 方式二：stdio 本地连接
+### 方式二：HTTP 本地连接
 
-适用于 AI 工具与 OKB-Assist 在同一台机器上运行的情况。MCP 服务器通过标准输入/输出通信。
+适用于 AI 工具与 OKB-Assist 在同一台机器上运行的情况。MCP 服务器通过 HTTP 协议通信。
+
+> Rust 后端仅支持 HTTP 方式（Streamable HTTP / SSE），不再支持 stdio 模式。
 
 #### Claude Desktop 配置
 
@@ -266,9 +268,8 @@ claude mcp add okb-assist --transport sse http://192.168.1.100:5001/assist/mcp/s
 {
   "mcpServers": {
     "okb-assist": {
-      "command": "uv",
-      "args": ["run", "python", "-m", "app.mcp_server"],
-      "cwd": "/path/to/okb-assist/backend"
+      "type": "http",
+      "url": "http://localhost:5001/assist/mcp/stream"
     }
   }
 }
@@ -276,9 +277,13 @@ claude mcp add okb-assist --transport sse http://192.168.1.100:5001/assist/mcp/s
 
 #### Claude Code 配置
 
+Claude Code 支持 HTTP 方式连接 MCP 服务：
+
 ```bash
-claude mcp add okb-assist -- sh -c "cd /path/to/okb-assist/backend && uv run python -m app.mcp_server"
+claude mcp add okb-assist --url http://localhost:5001/assist/mcp/stream
 ```
+
+> 需要先启动后端：`cd backend-rs && cargo run`
 
 #### Cursor 配置
 
@@ -286,15 +291,14 @@ claude mcp add okb-assist -- sh -c "cd /path/to/okb-assist/backend && uv run pyt
 {
   "mcpServers": {
     "okb-assist": {
-      "command": "uv",
-      "args": ["run", "python", "-m", "app.mcp_server"],
-      "cwd": "/path/to/okb-assist/backend"
+      "type": "http",
+      "url": "http://localhost:5001/assist/mcp/stream"
     }
   }
 }
 ```
 
-> **注意**: 将 `cwd` 替换为 OKB-Assist 项目的实际路径。
+> **注意**: 将 URL 中的 `localhost:5001` 替换为实际的后端服务地址。
 
 ---
 
@@ -324,8 +328,15 @@ curl -s -N http://192.168.1.100:5001/assist/mcp/sse \
 ### 3. 使用 MCP Inspector 测试
 
 ```bash
-cd /path/to/okb-assist/backend
-npx @modelcontextprotocol/inspector uv run python -m app.mcp_server
+cd /path/to/okb-assist/backend-rs
+cargo run
+# 记下服务地址（默认 http://localhost:5001）
+```
+
+然后在浏览器中打开 MCP Inspector，将端点 URL 设置为：
+
+```
+http://localhost:5001/assist/mcp/stream
 ```
 
 ---
@@ -413,12 +424,13 @@ http://192.168.1.100:5001/assist/tools
 - 向量搜索需要文档先被索引到 Qdrant
 - 全文搜索（grep）不需要索引，可直接使用
 
-### stdio 模式启动失败
+### 服务未启动
 
-- 确认在 `backend/` 目录下运行
-- 检查 Python 环境：`uv run python -c "import mcp; print('OK')"`
+- 确认在 `backend-rs/` 目录下运行：`cargo run`
+- 检查 Rust 工具链：`cargo --version`
+- 检查端口 5001 是否被占用
 
 ### SSE 消息端点404
 
-- 确认使用最新版本的 MCP 配置（`mount_path=""` 已修复路径重复问题）
+- 确认使用正确的端点路径：Streamable HTTP 为 `/assist/mcp/stream`，SSE 为 `/assist/mcp`
 - 重启服务后重试
