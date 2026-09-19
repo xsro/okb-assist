@@ -177,7 +177,6 @@ fn create_app(
         .route("/assist/mcp/stream", post(mcp_server::mcp_stream_handler))
         .route("/assist/file/:filename", get(serve_file_alias))
         .route("/", get(root_redirect))
-        .route("/redirect/:doc_id", get(redirect_by_network))
         .nest_service("/assist/uploads", tower_http::services::ServeDir::new(settings.uploads_folder()))
         .layer(middleware);
 
@@ -190,34 +189,6 @@ async fn root_redirect() -> impl IntoResponse {
     (
         http::StatusCode::FOUND,
         [(http::header::LOCATION, "/assist")],
-    )
-}
-
-/// 根据请求 Host 自动跳转到对应地址的详情页
-async fn redirect_by_network(
-    axum::extract::Path(doc_id): axum::extract::Path<i64>,
-    axum::Extension(settings): axum::Extension<Arc<Settings>>,
-    headers: http::HeaderMap,
-) -> impl IntoResponse {
-    let host = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("");
-    // 从 public_url 提取 host（如 http://localhost:5001 → localhost:5001）
-    let public_host = settings
-        .public_url()
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .to_string();
-    let base = if host == public_host {
-        settings.public_url()
-    } else {
-        settings.subnet_url()
-    };
-    let target = format!("{}/assist/detail/{}", base, doc_id);
-    (
-        http::StatusCode::FOUND,
-        [(http::header::LOCATION, target)],
     )
 }
 

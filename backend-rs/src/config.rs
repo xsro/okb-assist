@@ -249,20 +249,6 @@ impl Settings {
             .max(1)
     }
 
-    pub fn public_url(&self) -> String {
-        self.get_system_config()["public_url"]
-            .as_str()
-            .unwrap_or("http://localhost:5001")
-            .to_string()
-    }
-
-    pub fn subnet_url(&self) -> String {
-        self.get_system_config()["subnet_url"]
-            .as_str()
-            .unwrap_or("http://192.168.1.100:5001")
-            .to_string()
-    }
-
     // ── 路径模板 ──
     pub fn markdown_path_template(&self) -> String {
         self.get_system_config()["markdown_path"]

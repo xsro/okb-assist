@@ -59,8 +59,6 @@ pub fn default_system() -> serde_json::Value {
         "crossref_path": "data/uploads/{id}/{id}_crossref.json",
         "markdown_asset_path": "data/uploads/{id}/{id}.zip",
         "pdf_path": "data/uploads/{id}/{id}.pdf",
-        "public_url": "http://localhost:5001",
-        "subnet_url": "http://192.168.1.100:5001",
         "config_path": "config.json",
         "log_path": "stdout"
     })
