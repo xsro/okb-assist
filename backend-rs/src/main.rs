@@ -327,11 +327,6 @@ async fn token_middleware(req: axum::extract::Request, next: Next) -> Response {
         return next.run(req).await;
     }
 
-    // 临时 PDF 下载 URL 放行（通过 token 参数鉴权）
-    if path.contains("/pdf/temp") {
-        return next.run(req).await;
-    }
-
     let settings = req.extensions().get::<Arc<Settings>>().cloned();
     if let Some(settings) = settings {
         let token = settings.token();

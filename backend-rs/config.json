@@ -1,5 +1,6 @@
 {
   "base_url": "http://127.0.0.1:5001/",
+  "alias_expiration_hours": 1,
   "mineru": [
     {
       "key": "key",

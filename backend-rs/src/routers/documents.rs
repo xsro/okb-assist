@@ -10,7 +10,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, head, post};
 use serde::{Deserialize, Serialize};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 use crate::config::Settings;
@@ -21,74 +21,49 @@ use crate::services::pdf_meta::{extract_pdf_metadata, normalize_doi};
 use crate::utils::{calculate_file_hash, now_datetime, now_iso, sha256_hex};
 
 /// 全局文件别名表（内存，重启即丢失，与 Python 版一致）
-static FILE_ALIASES: std::sync::OnceLock<RwLock<std::collections::HashMap<String, i64>>> =
+/// 存储格式：alias -> (doc_id, expires_at_unix_timestamp)
+/// 有效期由 config.json 的 alias_expiration_hours 控制，默认 1 小时。
+static FILE_ALIASES: std::sync::OnceLock<RwLock<std::collections::HashMap<String, (i64, u64)>>> =
     std::sync::OnceLock::new();
 
-fn aliases() -> &'static RwLock<std::collections::HashMap<String, i64>> {
+fn aliases() -> &'static RwLock<std::collections::HashMap<String, (i64, u64)>> {
     FILE_ALIASES.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
 }
 
-// ── 临时 PDF 下载令牌 ──────────────────────────────────
-
-/// 临时令牌存储：token -> (doc_id, expires_at_unix_timestamp)
-/// 用于 MCP 工具返回临时下载链接，有效期 5 分钟。
-static TEMP_PDF_TOKENS: std::sync::OnceLock<RwLock<std::collections::HashMap<String, (i64, u64)>>> =
-    std::sync::OnceLock::new();
-
-fn temp_tokens() -> &'static RwLock<std::collections::HashMap<String, (i64, u64)>> {
-    TEMP_PDF_TOKENS.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
-}
-
-/// 生成临时 PDF 下载令牌，有效期 5 分钟。
-/// 返回 (token, expires_at_iso_string)
-pub fn generate_temp_pdf_token(doc_id: i64) -> (String, String) {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let expires_at = now + 300; // 5 minutes
-    let token = format!("{:x}", now ^ doc_id as u64 ^ 0x5e5e5e5e);
-    // 用简单哈希确保唯一性
-    let hash = sha256_hex(format!("{}-{}-temp", doc_id, now).as_bytes());
-    let token = hash[..16].to_string();
-    let expires_iso = Utc::now() + Duration::seconds(300);
-    let expires_iso = expires_iso.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    if let Ok(mut lock) = temp_tokens().write() {
-        lock.insert(token.clone(), (doc_id, expires_at));
-    }
-    (token, expires_iso)
-}
-
-/// 验证临时令牌，返回 doc_id（有效则移除令牌，防止重复使用）
-pub fn consume_temp_pdf_token(token: &str) -> Option<i64> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    if let Ok(mut lock) = temp_tokens().write() {
-        if let Some(&(doc_id, expires_at)) = lock.get(token) {
-            if now < expires_at {
-                lock.remove(token);
-                return Some(doc_id);
-            } else {
-                lock.remove(token);
-            }
-        }
-    }
-    None
-}
-
-/// 通过别名查找文档 ID
+/// 通过别名查找文档 ID（自动过滤已过期的别名）
 pub fn get_doc_by_alias(alias: &str) -> Option<i64> {
-    aliases().read().unwrap().get(alias).copied()
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    aliases().read().unwrap().get(alias).and_then(|&(doc_id, expires_at)| {
+        if now < expires_at {
+            Some(doc_id)
+        } else {
+            None
+        }
+    })
 }
 
-/// 为文档生成/获取别名
-fn get_or_create_alias(doc_id: i64, year: Option<i64>, title: Option<&str>) -> String {
+/// 为文档生成/获取别名链接。
+/// 返回 (alias, expires_at_iso_string)。
+/// 如果已有未过期的别名则直接返回，否则生成新别名。
+pub fn get_or_create_alias(doc_id: i64, year: Option<i64>, title: Option<&str>, expiration_hours: i64) -> (String, String) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let expires_at = now + (expiration_hours as u64) * 3600;
+
     // 先查找已有别名
-    if let Some(existing) = aliases().read().unwrap().iter().find(|(_, &v)| v == doc_id) {
-        return existing.0.clone();
+    if let Some(existing) = aliases().read().unwrap().iter().find(|(_, &(id, exp))| id == doc_id && now < exp) {
+        let alias = existing.0.clone();
+        let expires_iso = DateTime::from_timestamp(expires_at as i64, 0)
+            .unwrap_or_else(|| Utc::now())
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        return (alias, expires_iso);
     }
+
     // 生成新别名
     let y = year.map(|v| v.to_string()).unwrap_or_else(|| "unknown".to_string());
     let t: String = title
@@ -100,8 +75,12 @@ fn get_or_create_alias(doc_id: i64, year: Option<i64>, title: Option<&str>) -> S
         (0..6).map(|_| rng.gen_range(b'a'..=b'z') as char).collect()
     };
     let alias = format!("{}_{}_{}", y, t, rand_str);
-    aliases().write().unwrap().insert(alias.clone(), doc_id);
-    alias
+    aliases().write().unwrap().insert(alias.clone(), (doc_id, expires_at));
+
+    let expires_iso = DateTime::from_timestamp(expires_at as i64, 0)
+        .unwrap_or_else(|| Utc::now())
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    (alias, expires_iso)
 }
 
 pub fn router() -> axum::Router<()> {
@@ -142,7 +121,6 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/:id/parse-result", post(upload_parse_result))
         .route("/assist/api/documents/:id/pdf/", get(get_pdf).post(replace_pdf).head(check_pdf_exists))
         .route("/assist/api/documents/:id/pdf", get(get_pdf).post(replace_pdf).head(check_pdf_exists))
-        .route("/assist/api/documents/:id/pdf/temp", get(get_temp_pdf))
         .route("/assist/api/documents/:id/file-alias/", get(file_alias))
         .route("/assist/api/documents/:id/file-alias", get(file_alias))
         .layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024))
@@ -1470,52 +1448,18 @@ async fn get_pdf(
     }
 }
 
-/// 临时 PDF 下载（通过 token，无需认证）
-async fn get_temp_pdf(
-    axum::Extension(db): axum::Extension<Arc<Database>>,
-    axum::Extension(settings): axum::Extension<Arc<Settings>>,
-    Path(id): Path<i64>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
-) -> Response {
-    let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
-    if token.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少 token 参数"}))).into_response();
-    }
-
-    match consume_temp_pdf_token(token) {
-        Some(doc_id) if doc_id == id => {
-            // 验证通过，返回 PDF
-            match fetch_doc(&db, id).await {
-                Ok(Some(_)) => {}
-                Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
-                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
-            }
-            let pdf_path = paths::get_pdf_path(&settings, id);
-            match std::fs::read(&pdf_path) {
-                Ok(bytes) => (
-                    StatusCode::OK,
-                    [
-                        (header::CONTENT_TYPE, "application/pdf"),
-                        (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
-                    ],
-                    bytes,
-                ).into_response(),
-                Err(_) => (StatusCode::NOT_FOUND, Json(json!({"detail": "PDF 文件不存在"}))).into_response(),
-            }
-        }
-        _ => (StatusCode::UNAUTHORIZED, Json(json!({"detail": "token 无效或已过期"}))).into_response(),
-    }
-}
-
+/// 通过别名获取文档信息（用于 /assist/file/ 路由）
 async fn file_alias(
     axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(id): Path<i64>,
 ) -> Response {
     match fetch_doc(&db, id).await {
         Ok(Some(doc)) => {
-            let alias = get_or_create_alias(id, doc.year, doc.title.as_deref());
+            let (alias, expires_iso) = get_or_create_alias(id, doc.year, doc.title.as_deref(), settings.alias_expiration_hours());
             Json(json!({
                 "url": format!("/assist/file/{}", alias),
+                "expires_at": expires_iso,
             })).into_response()
         }
         Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),

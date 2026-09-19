@@ -240,6 +240,15 @@ impl Settings {
             .to_string()
     }
 
+    /// 获取 config.json 中的 alias_expiration_hours（别名链接有效期，单位：小时）。
+    /// 默认 1 小时。
+    pub fn alias_expiration_hours(&self) -> i64 {
+        self.get_config()["alias_expiration_hours"]
+            .as_i64()
+            .unwrap_or(1)
+            .max(1)
+    }
+
     pub fn public_url(&self) -> String {
         self.get_system_config()["public_url"]
             .as_str()
