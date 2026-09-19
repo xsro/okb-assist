@@ -172,6 +172,8 @@ impl McpServer {
     fn format_doc(&self, doc: &Document) -> Value {
         let year = doc.year;
         let has_markdown = std::path::Path::new(&paths::get_markdown_path(&self.settings, doc.id)).exists();
+        let base = self.settings.base_url();
+        let prefix = if base.is_empty() { String::new() } else { base };
         json!({
             "id": doc.id,
             "filename": doc.filename,
@@ -187,9 +189,9 @@ impl McpServer {
             "language": doc.language,
             "status": doc.status,
             "has_markdown": has_markdown,
-            "pdf_url": format!("/assist/api/documents/{}/pdf", doc.id),
-            "markdown_url": format!("/assist/markdown/{}", doc.id),
-            "detail_url": format!("/assist/detail/{}", doc.id),
+            "pdf_url": format!("{}/assist/api/documents/{}/pdf", prefix, doc.id),
+            "markdown_url": format!("{}/assist/markdown/{}", prefix, doc.id),
+            "detail_url": format!("{}/assist/detail/{}", prefix, doc.id),
         })
     }
 

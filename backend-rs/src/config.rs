@@ -229,6 +229,17 @@ impl Settings {
         self.substitute_path(&raw, 0)
     }
 
+    /// 获取 config.json 中的 base_url（部署基础地址）。
+    /// 用于拼接完整的文档链接（pdf_url / markdown_url / detail_url）。
+    /// 未设置或为空时返回空字符串，调用方需自行拼接相对路径。
+    pub fn base_url(&self) -> String {
+        self.get_config()["base_url"]
+            .as_str()
+            .unwrap_or("")
+            .trim_end_matches('/')
+            .to_string()
+    }
+
     pub fn public_url(&self) -> String {
         self.get_system_config()["public_url"]
             .as_str()

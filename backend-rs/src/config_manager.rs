@@ -12,6 +12,7 @@ use std::sync::{Arc, RwLock};
 /// 默认服务配置
 pub fn default_config() -> serde_json::Value {
     serde_json::json!({
+        "base_url": "",
         "mineru": [
             {
                 "type": "local",
