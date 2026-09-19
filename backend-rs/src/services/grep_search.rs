@@ -22,7 +22,7 @@ fn doc_id_re_1() -> &'static regex::Regex {
 }
 
 fn doc_id_re_2() -> &'static regex::Regex {
-    DOC_ID_RE_2.get_or_init(|| regex::Regex::new(r"/(\d+)/\1\.md$").unwrap())
+    DOC_ID_RE_2.get_or_init(|| regex::Regex::new(r"/(\d+)/(\d+)\.md$").unwrap())
 }
 
 fn doc_id_re_3() -> &'static regex::Regex {
@@ -296,7 +296,11 @@ pub fn extract_doc_id(file_path: &str) -> Option<i64> {
         return caps.get(1)?.as_str().parse().ok();
     }
     if let Some(caps) = doc_id_re_2().captures(file_path) {
-        return caps.get(1)?.as_str().parse().ok();
+        let dir_id = caps.get(1)?.as_str();
+        let file_id = caps.get(2)?.as_str();
+        if dir_id == file_id {
+            return dir_id.parse().ok();
+        }
     }
     if let Some(caps) = doc_id_re_3().captures(file_path) {
         return caps.get(1)?.as_str().parse().ok();
