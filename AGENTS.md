@@ -91,6 +91,32 @@ cargo build --release
 - 添加新配置字段时：在 `config_manager.rs` 的默认值中加默认值；若是敏感字段，扩展脱敏函数。
 - 文件路径来自 `system.json` 的路径模板（含 `{id}` 占位符），在 `backend-rs/src/paths.rs` 解析，**不要**在 `Document` 模型里加路径列。
 
+### 路径变量替换
+
+system.json 中的路径属性支持以下变量：
+
+| 变量 | 说明 |
+|------|------|
+| `{id}` | 文档 ID |
+| `{system_dir}` | system.json 所在目录的绝对路径 |
+| `{system_path}` | system.json 的完整绝对路径 |
+| `{env:VAR_NAME}` | 环境变量 `VAR_NAME` 的值 |
+| `{cwd}` | 当前工作目录 |
+
+支持变量替换的路径属性：`markdown_path`、`info_path`、`crossref_path`、`markdown_asset_path`、`pdf_path`、`uploads_folder`、`config_path`、`log_path`。
+
+示例：
+
+```json
+{
+  "markdown_path": "{system_dir}/data/markdowns/{id}.md",
+  "pdf_path": "{system_dir}/data/pdfs/{id}/{id}.pdf",
+  "uploads_folder": "{system_dir}/data/_uploads"
+}
+```
+
+> 所有路径属性保持向后兼容：不使用变量时，相对路径相对于当前工作目录解析。
+
 ## 架构与请求流
 
 1. **Web/API 层**：`backend-rs/src/main.rs` + `backend-rs/src/routers/*`。`TokenMiddleware` 仅对 `/assist/api/*` 校验 `X-Token`/query `token`，放行 `/assist/mcp`、`/assist/assets`（前端静态资源）、`/assist/uploads`、`/assist/file`、`/redirect`，以及对 `/assist/api/documents/` 下含 `/image/` 的图片 URL 放行。`token` 为 `change-me`（或未设置）时整体跳过校验；来自 `192.168.1.0/24` 局域网的请求也免校验。CORS 限定前端来源（开发 `localhost:5173`，生产同源 `localhost:5001`）。

@@ -83,13 +83,21 @@ async fn main() -> anyhow::Result<()> {
     // 先加载 system.json 确定 log_path
     let config_manager = Arc::new(ConfigManager::new(&args.system_path));
     let system = config_manager.load_system_config();
-    let log_path = system
+    let log_path_raw = system
         .get("log_path")
         .and_then(|v| v.as_str())
-        .unwrap_or("stdout");
+        .unwrap_or("stdout")
+        .to_string();
+    // 应用变量替换
+    let log_path = ConfigManager::substitute_path_variables(
+        &log_path_raw,
+        0,
+        &config_manager.system_dir(),
+        &config_manager.system_path(),
+    );
 
     if log_path != "stdout" && !log_path.is_empty() {
-        let log_file = std::fs::File::create(log_path)
+        let log_file = std::fs::File::create(&log_path)
             .map_err(|e| anyhow::anyhow!("无法创建日志文件 {}: {}", log_path, e))?;
         tracing_subscriber::fmt()
             .with_env_filter(filter)
