@@ -1,14 +1,23 @@
 {
-  "mineru": {
-    "type": "local",
-    "key": "key",
-    "max_tasks": 3,
-    "task_timeout": 300,
-    "url": "http://192.168.1.185:8002",
-    "model_version": "vlm"
-  },
+  "mineru": [
+    {
+      "key": "key",
+      "max_tasks": 3,
+      "model_version": "vlm",
+      "task_timeout": 300,
+      "type": "local",
+      "url": "http://192.168.1.185:8002"
+    },
+    {
+      "key": "sk-xxxxx",
+      "model_version": "vlm",
+      "task_timeout": 300,
+      "type": "official",
+      "url": "https://mineru.net"
+    }
+  ],
   "ollama": {
-    "key": "",
+    "key": "***",
     "model": "qwen3.5:9b",
     "url": "http://127.0.0.1:11434"
   },

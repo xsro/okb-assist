@@ -12,14 +12,16 @@ use std::sync::{Arc, RwLock};
 /// 默认服务配置
 pub fn default_config() -> serde_json::Value {
     serde_json::json!({
-        "mineru": {
-            "type": "local",
-            "url": "http://127.0.0.1:8002",
-            "key": "key",
-            "max_tasks": 3,
-            "task_timeout": 300,
-            "model_version": "vlm"
-        },
+        "mineru": [
+            {
+                "type": "local",
+                "url": "http://127.0.0.1:8002",
+                "key": "key",
+                "max_tasks": 3,
+                "task_timeout": 300,
+                "model_version": "vlm"
+            }
+        ],
         "ollama": {
             "url": "http://127.0.0.1:11434",
             "key": "",
@@ -263,14 +265,18 @@ impl ConfigManager {
     pub fn mask_sensitive(&self, config: &serde_json::Value) -> serde_json::Value {
         let mut masked = config.clone();
         if let Some(obj) = masked.as_object_mut() {
-            // MinerU key
+            // MinerU key（数组格式）
             if let Some(mineru) = obj.get_mut("mineru") {
-                if let Some(key) = mineru.get_mut("key") {
-                    if let Some(k) = key.as_str() {
-                        if k.len() > 4 {
-                            *key = serde_json::Value::String(format!("{}***", &k[..4]));
-                        } else {
-                            *key = serde_json::Value::String("***".to_string());
+                if let Some(arr) = mineru.as_array_mut() {
+                    for item in arr.iter_mut() {
+                        if let Some(key) = item.get_mut("key") {
+                            if let Some(k) = key.as_str() {
+                                if k.len() > 4 {
+                                    *key = serde_json::Value::String(format!("{}***", &k[..4]));
+                                } else {
+                                    *key = serde_json::Value::String("***".to_string());
+                                }
+                            }
                         }
                     }
                 }

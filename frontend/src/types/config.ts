@@ -14,14 +14,17 @@ export interface VectorDbConfig {
   }
 }
 
+export interface MinerUConfig {
+  type: string
+  url: string
+  key: string
+  task_timeout: number
+  model_version?: string
+  max_tasks?: number
+}
+
 export interface ServiceConfig {
-  mineru: {
-    type: string
-    url: string
-    key: string
-    task_timeout: number
-    model_version?: string
-  }
+  mineru: MinerUConfig[]
   ollama: {
     url: string
     key: string
@@ -45,7 +48,7 @@ export interface ServiceStatusItem {
 }
 
 export interface ServiceStatus {
-  mineru: ServiceStatusItem
+  mineru: ServiceStatusItem | ServiceStatusItem[]
   ollama: ServiceStatusItem
   fastembed: ServiceStatusItem
   vector_dbs: ServiceStatusItem[]

@@ -6,6 +6,16 @@ use std::sync::Arc;
 
 use crate::config_manager::ConfigManager;
 
+/// MinerU 配置项
+#[derive(Debug, Clone)]
+pub struct MinerUConfig {
+    pub url: String,
+    pub key: String,
+    pub mineru_type: String,
+    pub model_version: String,
+    pub task_timeout: u64,
+}
+
 #[derive(Clone)]
 pub struct Settings {
     manager: Arc<ConfigManager>,
@@ -25,45 +35,79 @@ impl Settings {
     }
 
     // ── MinerU ──
+
+    /// 获取所有 MinerU 配置（数组格式）
+    pub fn mineru_configs(&self) -> Vec<MinerUConfig> {
+        let arr = self.get_config()["mineru"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        arr.iter()
+            .map(|v| MinerUConfig {
+                url: v["url"]
+                    .as_str()
+                    .unwrap_or("http://127.0.0.1:8002")
+                    .trim_end_matches('/')
+                    .to_string(),
+                key: v["key"].as_str().unwrap_or("key").to_string(),
+                mineru_type: v["type"]
+                    .as_str()
+                    .unwrap_or("local")
+                    .to_string(),
+                model_version: v["model_version"].as_str().unwrap_or("vlm").to_string(),
+                task_timeout: v["task_timeout"].as_u64().unwrap_or(300),
+            })
+            .collect()
+    }
+
+    /// 兼容旧接口：返回第一个 MinerU 配置的 URL
     pub fn mineru_url(&self) -> String {
-        self.get_config()["mineru"]["url"]
-            .as_str()
-            .unwrap_or("http://127.0.0.1:8002")
-            .trim_end_matches('/')
-            .to_string()
+        self.mineru_configs()
+            .first()
+            .map(|c| c.url.clone())
+            .unwrap_or_else(|| "http://127.0.0.1:8002".to_string())
     }
 
+    /// 兼容旧接口：返回第一个 MinerU 配置的 key
     pub fn mineru_key(&self) -> String {
-        self.get_config()["mineru"]["key"]
-            .as_str()
-            .unwrap_or("key")
-            .to_string()
+        self.mineru_configs()
+            .first()
+            .map(|c| c.key.clone())
+            .unwrap_or_else(|| "key".to_string())
     }
 
+    /// 兼容旧接口：返回第一个 MinerU 配置的 type
     pub fn mineru_type(&self) -> String {
-        self.get_config()["mineru"]["type"]
-            .as_str()
-            .unwrap_or("local")
-            .to_string()
+        self.mineru_configs()
+            .first()
+            .map(|c| c.mineru_type.clone())
+            .unwrap_or_else(|| "local".to_string())
     }
 
     pub fn mineru_tasks(&self) -> usize {
-        self.get_config()["mineru"]["max_tasks"]
-            .as_u64()
+        self.get_config()["mineru"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.get("max_tasks"))
+            .and_then(|v| v.as_u64())
             .unwrap_or(3) as usize
     }
 
     pub fn mineru_task_timeout(&self) -> u64 {
-        self.get_config()["mineru"]["task_timeout"]
-            .as_u64()
+        self.get_config()["mineru"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.get("task_timeout"))
+            .and_then(|v| v.as_u64())
             .unwrap_or(300)
     }
 
+    /// 兼容旧接口：返回第一个 MinerU 配置的 model_version
     pub fn mineru_model_version(&self) -> String {
-        self.get_config()["mineru"]["model_version"]
-            .as_str()
-            .unwrap_or("vlm")
-            .to_string()
+        self.mineru_configs()
+            .first()
+            .map(|c| c.model_version.clone())
+            .unwrap_or_else(|| "vlm".to_string())
     }
 
     // ── Ollama ──

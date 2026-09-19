@@ -102,68 +102,70 @@ async fn status() -> Json<Value> {
     }))
 }
 
-/// 检查 MinerU 健康
+/// 检查 MinerU 健康（遍历所有配置）
 async fn check_mineru(settings: &Settings) -> Value {
-    let url = settings.mineru_url();
-    let key = settings.mineru_key();
-    let mineru_type = settings.mineru_type();
-    let mut item = json!({"status": "unknown", "url": url, "type": mineru_type});
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
+    let configs = settings.mineru_configs();
+    let mut items: Vec<Value> = Vec::new();
 
-    match MineruType::from_str(&mineru_type) {
-        MineruType::Local => {
-            let mut req = client.get(format!("{}/health", url));
-            if !key.is_empty() {
-                req = req.bearer_auth(key);
-            }
-            match req.send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(health) = resp.json::<Value>().await {
-                        item["status"] = json!("connected");
-                        item["version"] = health.get("version").cloned().unwrap_or(json!("unknown"));
-                        item["queued_tasks"] = health.get("queued_tasks").cloned().unwrap_or(json!(0));
-                        item["processing_tasks"] = health.get("processing_tasks").cloned().unwrap_or(json!(0));
-                        item["completed_tasks"] = health.get("completed_tasks").cloned().unwrap_or(json!(0));
-                        item["failed_tasks"] = health.get("failed_tasks").cloned().unwrap_or(json!(0));
-                        item["max_concurrent"] = health.get("max_concurrent_requests").cloned().unwrap_or(json!(0));
-                    } else {
-                        item["status"] = json!("connected");
+    for config in &configs {
+        let mut item = json!({"status": "unknown", "url": config.url, "type": config.mineru_type});
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap_or_default();
+
+        match MineruType::from_str(&config.mineru_type) {
+            MineruType::Local => {
+                let mut req = client.get(format!("{}/health", config.url));
+                if !config.key.is_empty() {
+                    req = req.bearer_auth(&config.key);
+                }
+                match req.send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(health) = resp.json::<Value>().await {
+                            item["status"] = json!("connected");
+                            item["version"] = health.get("version").cloned().unwrap_or(json!("unknown"));
+                            item["queued_tasks"] = health.get("queued_tasks").cloned().unwrap_or(json!(0));
+                            item["processing_tasks"] = health.get("processing_tasks").cloned().unwrap_or(json!(0));
+                            item["completed_tasks"] = health.get("completed_tasks").cloned().unwrap_or(json!(0));
+                            item["failed_tasks"] = health.get("failed_tasks").cloned().unwrap_or(json!(0));
+                            item["max_concurrent"] = health.get("max_concurrent_requests").cloned().unwrap_or(json!(0));
+                        } else {
+                            item["status"] = json!("connected");
+                        }
+                    }
+                    Ok(resp) => {
+                        item["status"] = json!("error");
+                        item["error"] = json!(format!("HTTP {}", resp.status()));
+                    }
+                    Err(e) => {
+                        item["status"] = json!("disconnected");
+                        item["error"] = json!(e.to_string());
                     }
                 }
-                Ok(resp) => {
-                    item["status"] = json!("error");
-                    item["error"] = json!(format!("HTTP {}", resp.status()));
-                }
-                Err(e) => {
-                    item["status"] = json!("disconnected");
-                    item["error"] = json!(e.to_string());
+            }
+            MineruType::Official => {
+                let resp = client.get(&config.url).bearer_auth(&config.key).send().await;
+                match resp {
+                    Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
+                        item["status"] = json!("connected");
+                        item["version"] = json!("v4");
+                    }
+                    Ok(resp) => {
+                        item["status"] = json!("error");
+                        item["error"] = json!(format!("HTTP {}", resp.status()));
+                    }
+                    Err(e) => {
+                        item["status"] = json!("disconnected");
+                        item["error"] = json!(e.to_string());
+                    }
                 }
             }
         }
-        MineruType::Official => {
-            let resp = client.get(&url).bearer_auth(&key).send().await;
-            match resp {
-                Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
-                    item["status"] = json!("connected");
-                    item["version"] = json!("v4");
-                    item["api_type"] = json!("精准解析 API");
-                }
-                Ok(resp) => {
-                    item["status"] = json!("error");
-                    item["error"] = json!(format!("HTTP {}", resp.status()));
-                }
-                Err(e) => {
-                    item["status"] = json!("disconnected");
-                    item["error"] = json!(e.to_string());
-                }
-            }
-        }
+        items.push(item);
     }
 
-    item
+    json!({"mineru": items})
 }
 
 /// 检查 Ollama 健康

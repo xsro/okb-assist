@@ -9,6 +9,8 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
+use crate::config::MinerUConfig;
+
 /// MinerU 模式类型
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MineruType {
@@ -36,14 +38,22 @@ pub struct MinerUClient {
 }
 
 impl MinerUClient {
-    pub fn new(base_url: &str, key: &str, mineru_type: &str, model_version: &str) -> Self {
+    pub fn new(config: &MinerUConfig) -> Self {
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            key: key.to_string(),
-            mineru_type: MineruType::from_str(mineru_type),
-            model_version: model_version.to_string(),
-            http: reqwest::Client::new(),
+            base_url: config.url.clone(),
+            key: config.key.clone(),
+            mineru_type: MineruType::from_str(&config.mineru_type),
+            model_version: config.model_version.clone(),
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
+    }
+
+    pub fn from_config(config: &MinerUConfig) -> Self {
+        Self::new(config)
     }
 
     // ── 提交解析任务 ──────────────────────────────────────
@@ -398,4 +408,30 @@ pub async fn parse_pdf(
     let task_id = client.submit_parse_task(file_path).await?;
     client.poll_task(&task_id, timeout_secs).await?;
     client.get_task_result(&task_id, output_dir, doc_id).await
+}
+
+/// 尝试多个 MinerU 配置，逐个解析直到成功
+/// 返回 (使用的配置索引, 结果路径)
+pub async fn parse_pdf_with_fallback(
+    configs: &[MinerUConfig],
+    file_path: &str,
+    output_dir: &str,
+    doc_id: Option<i64>,
+) -> anyhow::Result<(usize, String)> {
+    let mut last_error = String::new();
+    for (i, config) in configs.iter().enumerate() {
+        let client = MinerUClient::new(config);
+        let timeout = config.task_timeout;
+        match parse_pdf(&client, file_path, output_dir, doc_id, timeout).await {
+            Ok(path) => return Ok((i, path)),
+            Err(e) => {
+                last_error = e.to_string();
+                tracing::warn!(
+                    "MinerU 配置 #{} ({}) 解析失败: {}，尝试下一个",
+                    i, config.url, last_error
+                );
+            }
+        }
+    }
+    anyhow::bail!("所有 MinerU 配置均解析失败: {}", last_error)
 }

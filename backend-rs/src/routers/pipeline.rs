@@ -206,12 +206,14 @@ fn remove_dir_all_ignore(path: &std::path::Path) {
 // ── 后台任务实现 ──
 
 async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
-    let mineru = MinerUClient::new(
-        &settings.mineru_url(),
-        &settings.mineru_key(),
-        &settings.mineru_type(),
-        &settings.mineru_model_version(),
-    );
+    let configs = settings.mineru_configs();
+    if configs.is_empty() {
+        update_doc_status(&db, doc_id, DocStatus::Error, Some("没有可用的 MinerU 配置"), None).await;
+        return;
+    }
+
+    // 使用第一个配置创建客户端（用于检查已有任务）
+    let primary_client = MinerUClient::new(&configs[0]);
     let uploads_folder = settings.uploads_folder();
     let pdf_path = paths::get_pdf_path(&settings, doc_id);
     let abs_file_path = absolute_path(&pdf_path);
@@ -228,13 +230,13 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
 
     if let Some(ref task_id) = existing_task_id {
         update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在检查之前的解析任务..."), Some(15.0)).await;
-        let status_result = mineru.check_task_status(task_id).await;
+        let status_result = primary_client.check_task_status(task_id).await;
         let status = status_result["status"].as_str().unwrap_or("unknown").to_string();
 
         match status.as_str() {
             "completed" => {
                 update_doc_status(&db, doc_id, DocStatus::Parsing, Some("之前的任务已完成，正在获取结果..."), Some(50.0)).await;
-                if let Ok(md_path) = mineru.get_task_result(task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
+                if let Ok(md_path) = primary_client.get_task_result(task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
                     finish_parse_result(&db, &settings, doc_id, &md_path).await;
                 } else {
                     update_doc_status(&db, doc_id, DocStatus::Error, Some("解析失败: 获取之前任务结果失败"), None).await;
@@ -248,9 +250,9 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
             }
             "processing" | "pending" => {
                 update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在等待之前的解析任务完成..."), Some(20.0)).await;
-                match mineru.poll_task(task_id, settings.mineru_task_timeout()).await {
+                match primary_client.poll_task(task_id, settings.mineru_task_timeout()).await {
                     Ok(_) => {
-                        if let Ok(md_path) = mineru.get_task_result(task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
+                        if let Ok(md_path) = primary_client.get_task_result(task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
                             finish_parse_result(&db, &settings, doc_id, &md_path).await;
                         } else {
                             update_doc_status(&db, doc_id, DocStatus::Error, Some("解析失败: 获取结果失败"), None).await;
@@ -275,33 +277,47 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
         }
     }
 
-    // 提交新任务
-    let task_id = match mineru.submit_parse_task(&abs_file_path).await {
-        Ok(t) => t,
-        Err(e) => {
-            update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("解析失败: {}", e)), None).await;
-            return;
-        }
-    };
+    // 提交新任务：逐个尝试配置直到成功
+    update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在提交解析任务..."), Some(15.0)).await;
 
-    save_mineru_task_id(&db, doc_id, &task_id).await;
-    update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在解析 PDF，已提交任务..."), Some(20.0)).await;
+    let mut last_error = String::new();
+    for (i, config) in configs.iter().enumerate() {
+        let client = MinerUClient::new(config);
+        match client.submit_parse_task(&abs_file_path).await {
+            Ok(task_id) => {
+                save_mineru_task_id(&db, doc_id, &task_id).await;
+                update_doc_status(&db, doc_id, DocStatus::Parsing, Some(&format!("已提交任务 #{}，正在解析...", i)), Some(20.0)).await;
 
-    if let Err(e) = mineru.poll_task(&task_id, settings.mineru_task_timeout()).await {
-        let msg = e.to_string();
-        if msg.to_lowercase().contains("timed out") {
-            update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("解析失败: {}", msg)), None).await;
-            return;
+                match client.poll_task(&task_id, config.task_timeout).await {
+                    Ok(_) => {
+                        update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在获取解析结果..."), Some(80.0)).await;
+                        match client.get_task_result(&task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
+                            Ok(md_path) => {
+                                finish_parse_result(&db, &settings, doc_id, &md_path).await;
+                                return;
+                            }
+                            Err(e) => {
+                                last_error = format!("获取结果失败: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        last_error = e.to_string();
+                    }
+                }
+
+                // 当前配置失败，清理任务 ID 并尝试下一个
+                clear_mineru_task_id(&db, doc_id).await;
+                tracing::warn!("MinerU 配置 #{} ({}) 解析失败: {}", i, config.url, last_error);
+            }
+            Err(e) => {
+                last_error = e.to_string();
+                tracing::warn!("MinerU 配置 #{} ({}) 提交失败: {}", i, config.url, last_error);
+            }
         }
-        update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("解析失败: {}", msg)), None).await;
-        return;
     }
 
-    update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在获取解析结果..."), Some(80.0)).await;
-    match mineru.get_task_result(&task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
-        Ok(md_path) => finish_parse_result(&db, &settings, doc_id, &md_path).await,
-        Err(e) => update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("解析失败: {}", e)), None).await,
-    }
+    update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("解析失败: 所有配置均失败, 最后错误: {}", last_error)), None).await;
 }
 
 /// 完成解析：复制文件并更新状态（async 版本）
