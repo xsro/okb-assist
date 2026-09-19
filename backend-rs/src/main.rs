@@ -5,6 +5,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use clap::Parser;
 use axum::extract::ConnectInfo;
 use axum::Extension;
 use axum::middleware::{self, Next};
@@ -490,8 +491,8 @@ fn extract_client_ip<B>(req: &axum::extract::Request<B>) -> String {
 #[derive(Clone, Default)]
 struct IpMakeSpan;
 
-impl<B, S> MakeSpan<B, S> for IpMakeSpan {
-    fn make_span(&self, req: &axum::extract::Request<B>) -> tracing::Span {
+impl<B> MakeSpan<B> for IpMakeSpan {
+    fn make_span(&mut self, req: &axum::extract::Request<B>) -> tracing::Span {
         let client_ip = extract_client_ip(req);
         tracing::span!(
             tracing::Level::INFO,
