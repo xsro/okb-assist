@@ -38,13 +38,18 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { getSystemConfig } from '@/api/config'
+import { getSystemConfig, getServiceConfig } from '@/api/config'
 import { useToast } from '@/composables/useToast'
 
 const { showSuccess } = useToast()
 
-const mcpUrl = computed(() => `${window.location.origin}/assist/mcp/stream`)
+const baseUrl = ref('')
 const mcpToken = ref('change-me')
+
+const mcpUrl = computed(() => {
+  const origin = baseUrl.value || window.location.origin
+  return `${origin}/assist/mcp/stream`
+})
 
 const clients = [
   { key: 'codebuddy', label: 'CodeBuddy' },
@@ -126,6 +131,10 @@ async function load() {
   try {
     const sys = await getSystemConfig()
     mcpToken.value = sys.mcp_token || 'change-me'
+  } catch { /* ignore */ }
+  try {
+    const svc = await getServiceConfig()
+    baseUrl.value = svc.base_url || ''
   } catch { /* ignore */ }
 }
 

@@ -3,6 +3,16 @@
     <h2>服务配置</h2>
 
     <div v-if="config" class="config-form">
+      <!-- Base URL -->
+      <div class="section">
+        <h3>部署地址</h3>
+        <div class="form-group">
+          <label>Base URL</label>
+          <input v-model="config.base_url" type="text" placeholder="https://xsro20.xyz" />
+        </div>
+        <p class="hint">部署的基础地址，用于拼接文档链接（pdf_url / markdown_url / detail_url）。留空则使用相对路径。</p>
+      </div>
+
       <!-- MinerU 多配置 -->
       <div class="section">
         <div class="section-header">

@@ -24,6 +24,7 @@ export interface MinerUConfig {
 }
 
 export interface ServiceConfig {
+  base_url: string
   mineru: MinerUConfig[]
   ollama: {
     url: string
