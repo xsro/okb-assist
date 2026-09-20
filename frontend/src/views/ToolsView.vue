@@ -160,7 +160,7 @@ const { requireToken } = useRequireToken()
 
 const tabs = [
   { key: 'grep', label: '全文搜索' },
-  { key: 'semantic', label: '语义搜索' },
+  { key: 'semantic', label: '语义搜索（暂未实现）' },
   { key: 'mcp', label: 'MCP 配置' }
 ]
 const activeTab = ref('grep')
