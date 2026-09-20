@@ -903,6 +903,56 @@ async fn register_document_by_path(
     }
 }
 
+/// 归一化标题：转小写、非字母数字字符转为空格、合并连续空白、去首尾空白。
+fn normalize_title(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut prev_space = true;
+    for c in title.to_lowercase().chars() {
+        if c.is_alphanumeric() {
+            out.push(c);
+            prev_space = false;
+        } else if !prev_space {
+            out.push(' ');
+            prev_space = true;
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Levenshtein 编辑距离（滚动数组，空间 O(min(m, n))）。
+fn levenshtein_distance(s1: &str, s2: &str) -> usize {
+    let mut a: Vec<char> = s1.chars().collect();
+    let mut b: Vec<char> = s2.chars().collect();
+    // 保证 a 较长、b 较短，缩小滚动数组宽度
+    if a.len() < b.len() {
+        std::mem::swap(&mut a, &mut b);
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        curr[0] = i;
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
+}
+
+/// 归一化后的标题相似度 = 1 - 编辑距离 / 较长标题长度，范围 [0, 1]。
+fn title_similarity(a: &str, b: &str) -> f64 {
+    let max_len = a.chars().count().max(b.chars().count());
+    if max_len == 0 {
+        return 1.0;
+    }
+    let dist = levenshtein_distance(a, b);
+    1.0 - (dist as f64 / max_len as f64)
+}
+
+/// 相似标题判定阈值：归一化相似度 >= 该值视为重复。
+const SIMILARITY_THRESHOLD: f64 = 0.75;
+
 async fn find_similar_titles(
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
@@ -915,27 +965,78 @@ async fn find_similar_titles(
     .await
     .unwrap_or_default();
 
-    // 简单分组：按标题前 20 个字符（忽略大小写）分组
-    let mut groups: std::collections::HashMap<String, Vec<DocumentOut>> = std::collections::HashMap::new();
-    for doc in &docs {
+    // 1. 归一化标题并按首字符分桶，缩小候选对规模
+    let mut buckets: HashMap<char, Vec<(String, Document)>> = HashMap::new();
+    for doc in docs {
         if let Some(title) = &doc.title {
-            let key: String = title.chars().take(20).collect::<String>().to_lowercase();
-            let out = doc_to_out(doc, &settings, &db).await;
-            groups.entry(key).or_default().push(out);
+            let norm = normalize_title(title);
+            if norm.is_empty() {
+                continue;
+            }
+            if let Some(first) = norm.chars().next() {
+                buckets.entry(first).or_default().push((norm, doc));
+            }
         }
     }
 
-    let groups: Vec<Value> = groups
-        .into_iter()
-        .filter(|(_, v)| v.len() > 1)
-        .map(|(_, docs)| json!({"documents": docs}))
-        .collect();
+    // 2. 桶内贪心聚类：每组以第一个文档的归一化标题为代表
+    let mut groups: Vec<(String, Vec<Document>)> = Vec::new();
+    let mut reps: Vec<String> = Vec::new();
 
-    let total_documents: usize = groups.iter().map(|g| g["documents"].as_array().map(|a| a.len()).unwrap_or(0)).sum();
+    for (_, items) in buckets {
+        for (norm, doc) in items {
+            let mut matched = false;
+            for (gi, rep) in reps.iter().enumerate() {
+                // 长度差剪枝：编辑距离 >= 长度差，若按长度差已无法达到阈值则跳过
+                let a_len = norm.chars().count();
+                let b_len = rep.chars().count();
+                let max_len = a_len.max(b_len);
+                let len_diff = a_len.abs_diff(b_len);
+                if max_len == 0 || (len_diff as f64) / (max_len as f64) > 1.0 - SIMILARITY_THRESHOLD {
+                    continue;
+                }
+                if title_similarity(&norm, rep) >= SIMILARITY_THRESHOLD {
+                    groups[gi].1.push(doc);
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                reps.push(norm.clone());
+                groups.push((norm, vec![doc]));
+            }
+        }
+    }
+
+    // 3. 按每组最小 id 排序，保证输出顺序稳定
+    groups.sort_by_key(|(_, docs)| docs.iter().map(|d| d.id).min().unwrap_or(0));
+
+    // 4. 过滤单篇组并转为输出结构（异步生成 DocumentOut）
+    let mut out_groups: Vec<Value> = Vec::new();
+    for (norm, docs) in groups {
+        if docs.len() <= 1 {
+            continue;
+        }
+        let count = docs.len();
+        let mut out_docs: Vec<Value> = Vec::with_capacity(count);
+        for d in &docs {
+            out_docs.push(json!(doc_to_out(d, &settings, &db).await));
+        }
+        out_groups.push(json!({
+            "normalized_title": norm,
+            "count": count,
+            "documents": out_docs,
+        }));
+    }
+
+    let total_documents: usize = out_groups
+        .iter()
+        .map(|g| g["documents"].as_array().map(|a| a.len()).unwrap_or(0))
+        .sum();
 
     Json(json!({
-        "groups": groups,
-        "total_groups": groups.len(),
+        "groups": out_groups,
+        "total_groups": out_groups.len(),
         "total_documents": total_documents,
     }))
 }

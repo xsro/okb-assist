@@ -185,10 +185,7 @@ export function getDocTypes() {
   return apiGet<{ doc_types: string[] }>('/assist/api/documents/doc-types/')
 }
 
-/** 获取相似标题（去重用） */
-export function getSimilarTitles(title: string) {
-  return apiGet<SimilarTitleGroup>(
-    '/assist/api/documents/similar-titles/',
-    { title }
-  )
+/** 获取相似标题分组（去重用，后端按归一化标题 + 编辑距离聚类） */
+export function getSimilarTitles() {
+  return apiGet<SimilarTitleGroup>('/assist/api/documents/similar-titles/')
 }

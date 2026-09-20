@@ -1,23 +1,23 @@
 <template>
   <div class="duplicates-view">
     <h2>去重</h2>
-    <p class="hint">检测标题相似的文献组，确认后合并。</p>
+    <p class="hint">检测标题相似的文献组（归一化标题 + 编辑距离相似度），确认后合并。</p>
 
-    <div v-if="groups" class="groups-list">
+    <div v-if="groups && groups.length" class="groups-list">
       <div v-for="(group, idx) in groups" :key="idx" class="group-card">
-        <h4>组 {{ idx + 1 }} ({{ group.length }} 篇)</h4>
+        <h4>组 {{ idx + 1 }} · {{ group.count }} 篇 · 相似标题：{{ group.normalized_title }}</h4>
         <table class="doc-table">
           <thead>
             <tr><th>ID</th><th>标题</th><th>作者</th><th>年份</th><th>操作</th></tr>
           </thead>
           <tbody>
-            <tr v-for="doc in group" :key="doc.id">
+            <tr v-for="doc in group.documents" :key="doc.id">
               <td>{{ doc.id }}</td>
               <td>{{ doc.title }}</td>
               <td>{{ doc.authors || '-' }}</td>
               <td>{{ doc.year || '-' }}</td>
               <td>
-                <button class="btn btn-sm btn-danger" @click="merge(group, doc.id)">合并到此文档</button>
+                <button class="btn btn-sm btn-danger" @click="merge(group.documents, doc.id)">合并到此文档</button>
               </td>
             </tr>
           </tbody>
@@ -31,28 +31,20 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { listDocuments } from '@/api/documents'
+import { getSimilarTitles } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
-import type { Document } from '@/types/document'
+import type { Document, SimilarTitleGroup } from '@/types/document'
 
 const { showError, showInfo } = useToast()
 const { requireToken } = useRequireToken()
-const groups = ref<Document[][] | null>(null)
+const groups = ref<SimilarTitleGroup['groups'] | null>(null)
 
 async function load() {
   if (!requireToken()) return
   try {
-    // 获取所有文档，然后按标题相似度分组
-    const res = await listDocuments({ page_size: 1000 })
-    // 简单实现：按标题前缀分组
-    const map = new Map<string, Document[]>()
-    for (const doc of res.items) {
-      const key = doc.title.substring(0, 4).toLowerCase()
-      if (!map.has(key)) map.set(key, [])
-      map.get(key)!.push(doc)
-    }
-    groups.value = Array.from(map.values()).filter((g) => g.length > 1)
+    const res = await getSimilarTitles()
+    groups.value = res.groups
   } catch {
     showError('加载失败')
   }

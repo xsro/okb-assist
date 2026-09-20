@@ -74,6 +74,7 @@
         <button class="btn btn-outline" @click="batchParse">批量解析已上传</button>
         <button class="btn btn-outline" @click="recalcHashes">重新计算哈希</button>
         <button class="btn btn-outline" @click="dedup">文献去重</button>
+        <button class="btn btn-outline" @click="goDuplicates">手动去重</button>
       </div>
     </div>
   </div>
@@ -81,6 +82,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import {
   getStats,
   getServiceStatus,
@@ -92,6 +94,7 @@ import { useToast } from '@/composables/useToast'
 import type { SystemStats, ServiceStatus, ServiceStatusItem } from '@/types/config'
 
 const { showToast, showInfo, showError } = useToast()
+const router = useRouter()
 
 const stats = ref<SystemStats | null>(null)
 const serviceStatus = ref<ServiceStatus | null>(null)
@@ -179,6 +182,10 @@ async function dedup() {
   } catch {
     showError('文献去重失败')
   }
+}
+
+function goDuplicates() {
+  router.push('/assist/duplicates')
 }
 
 onMounted(load)
