@@ -14,9 +14,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: "Install Rust (target: aarch64-apple-darwin)"
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
-          target: aarch64-apple-darwin
+          targets: aarch64-apple-darwin
 
       - name: Build
         run: cargo build --release --target aarch64-apple-darwin
@@ -38,9 +38,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: "Install Rust (target: x86_64-pc-windows-msvc)"
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
-          target: x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-msvc
 
       - name: Build
         run: cargo build --release --target x86_64-pc-windows-msvc
@@ -66,9 +66,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
 
       - name: "Install Rust (target: x86_64-unknown-linux-gnu)"
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
-          target: x86_64-unknown-linux-gnu
+          targets: x86_64-unknown-linux-gnu
 
       - name: Build
         run: cargo build --release --target x86_64-unknown-linux-gnu
@@ -98,9 +98,9 @@ jobs:
           sudo apt-get install -y libsqlite3-dev:arm64
 
       - name: "Install Rust (target: aarch64-unknown-linux-gnu)"
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
-          target: aarch64-unknown-linux-gnu
+          targets: aarch64-unknown-linux-gnu
 
       - name: Build (cross-compile)
         env:
