@@ -92,23 +92,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install cross-compilation toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu pkg-config
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update
-          sudo apt-get install -y libsqlite3-dev:arm64
-
-      - name: "Install Rust (target: aarch64-unknown-linux-gnu)"
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
 
-      - name: Build (cross-compile)
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --target aarch64-unknown-linux-gnu
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Build with cross
+        run: cross build --release --target aarch64-unknown-linux-gnu
         working-directory: backend-rs
 
       - name: Prepare artifact
