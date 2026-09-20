@@ -30,11 +30,26 @@ export function getSystemConfig() {
 
 // ── 连接测试 ────────────────────────────────────────────
 
-/** 测试服务连接 */
+/** 测试服务连接（使用当前配置） */
 export function testConnection(service: 'mineru' | 'ollama' | 'qdrant') {
   return apiPost<ConnectionTestResult>(
     '/assist/api/config/test-connection',
     { service }
+  )
+}
+
+/** 测试服务连接（使用自定义参数，用于配置表单实时测试） */
+export function testService(params: {
+  service_type: string
+  url?: string
+  key?: string
+  model?: string
+  embed_model?: string
+  collection?: string
+}) {
+  return apiPost<ConnectionTestResult>(
+    '/assist/api/config/test',
+    params
   )
 }
 

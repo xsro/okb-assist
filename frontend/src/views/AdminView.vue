@@ -22,51 +22,6 @@
       </div>
     </div>
 
-    <!-- 服务状态 -->
-    <div class="section">
-      <h3>服务状态</h3>
-      <table class="doc-table">
-        <thead>
-          <tr><th>服务</th><th>状态</th><th>详情</th><th>操作</th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="name in serviceNames" :key="name">
-            <td>{{ serviceName(name) }}</td>
-            <td>
-              <span class="status-dot" :class="isOk(serviceStatus?.[name]) ? 'ok' : 'error'"></span>
-              {{ isOk(serviceStatus?.[name]) ? '正常' : '异常' }}
-            </td>
-            <td>{{ serviceDetail(serviceStatus?.[name]) }}</td>
-            <td>
-              <button class="btn btn-sm btn-outline" @click="testConnection(name)">测试</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- 向量库状态 -->
-    <div class="section">
-      <h3>向量库</h3>
-      <table class="doc-table">
-        <thead>
-          <tr><th>ID</th><th>名称</th><th>类型</th><th>状态</th><th>详情</th></tr>
-        </thead>
-        <tbody>
-          <tr v-for="db in serviceStatus?.vector_dbs || []" :key="db.id">
-            <td>{{ db.id }}</td>
-            <td>{{ db.name }}</td>
-            <td>{{ db.type }}</td>
-            <td>
-              <span class="status-dot" :class="isOk(db) ? 'ok' : 'error'"></span>
-              {{ isOk(db) ? '正常' : '异常' }}
-            </td>
-            <td>{{ serviceDetail(db) }}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
     <!-- 维护操作 -->
     <div class="section">
       <h3>维护操作</h3>
@@ -81,47 +36,21 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   getStats,
-  getServiceStatus,
   recalculateHashes,
   deduplicateDocuments
 } from '@/api/admin'
 import { startBatchParse } from '@/api/pipeline'
 import { useToast } from '@/composables/useToast'
-import type { SystemStats, ServiceStatus, ServiceStatusItem } from '@/types/config'
+import type { SystemStats } from '@/types/config'
 
 const { showToast, showInfo, showError } = useToast()
 const router = useRouter()
 
 const stats = ref<SystemStats | null>(null)
-const serviceStatus = ref<ServiceStatus | null>(null)
-
-const serviceNames = computed(() => ['mineru', 'ollama', 'fastembed', 'qdrant'])
-
-function serviceName(key: string) {
-  const map: Record<string, string> = {
-    mineru: 'MinerU',
-    ollama: 'Ollama',
-    fastembed: 'FastEmbed',
-    qdrant: 'Qdrant'
-  }
-  return map[key] || key
-}
-
-function isOk(item: ServiceStatusItem | ServiceStatusItem[] | undefined): boolean {
-  if (!item) return false
-  if (Array.isArray(item)) return item.every((i) => i.status === 'connected')
-  return item.status === 'connected'
-}
-
-function serviceDetail(item: ServiceStatusItem | ServiceStatusItem[] | undefined): string {
-  if (!item) return '-'
-  if (Array.isArray(item)) return `${item.length} 个`
-  return item.error || item.url || item.status || '-'
-}
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return bytes + ' B'
@@ -132,25 +61,10 @@ function formatSize(bytes: number): string {
 
 async function load() {
   try {
-    const [s, sv] = await Promise.all([getStats(), getServiceStatus()])
+    const s = await getStats()
     stats.value = s
-    serviceStatus.value = sv
   } catch (e) {
     showError('加载失败')
-  }
-}
-
-async function testConnection(service: string) {
-  try {
-    const sv = await getServiceStatus()
-    const item = sv[service as keyof ServiceStatus]
-    if (!item || Array.isArray(item)) {
-      showError(`未知服务: ${service}`)
-      return
-    }
-    showToast(`${service}: ${item.status}`, isOk(item) ? 'success' : 'error')
-  } catch {
-    showError('连接测试失败')
   }
 }
 
@@ -192,16 +106,6 @@ onMounted(load)
 </script>
 
 <style scoped>
-.status-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-right: 6px;
-}
-.status-dot.ok { background: var(--success); }
-.status-dot.error { background: var(--danger); }
-
 @media (max-width: 768px) {
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
@@ -227,16 +131,6 @@ onMounted(load)
     padding: 10px 14px;
     font-size: 13px;
   }
-
-  .doc-table th,
-  .doc-table td {
-    padding: 8px 10px;
-    font-size: 12px;
-  }
-
-  .doc-table th {
-    font-size: 11px;
-  }
 }
 
 @media (max-width: 480px) {
@@ -257,15 +151,6 @@ onMounted(load)
     min-width: 100px;
     font-size: 12px;
     padding: 8px 10px;
-  }
-
-  .doc-table {
-    font-size: 11px;
-  }
-
-  .doc-table th,
-  .doc-table td {
-    padding: 6px 8px;
   }
 }
 </style>

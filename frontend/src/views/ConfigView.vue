@@ -65,13 +65,22 @@
               <input v-model.number="mu.max_tasks" type="number" />
             </div>
           </div>
+          <div class="status-test-row">
+            <span class="status-dot" :class="mineruStatusClass(idx)"></span>
+            <span class="status-text">{{ mineruStatusText(idx) }}</span>
+            <button class="btn btn-sm btn-outline" @click="testMineru(idx)" :disabled="testingMineru[idx]">
+              {{ testingMineru[idx] ? '测试中...' : '测试' }}
+            </button>
+          </div>
         </div>
         <p class="hint">解析 PDF 时按顺序逐个尝试以上配置，直到成功。</p>
       </div>
 
       <!-- Ollama -->
       <div class="section">
-        <h3>Ollama</h3>
+        <div class="section-header">
+          <h3>Ollama</h3>
+        </div>
         <div class="form-group">
           <label>URL</label>
           <input v-model="config.ollama.url" type="text" />
@@ -83,6 +92,13 @@
         <div class="form-group">
           <label>模型</label>
           <input v-model="config.ollama.model" type="text" />
+        </div>
+        <div class="status-test-row">
+          <span class="status-dot" :class="ollamaStatusClass"></span>
+          <span class="status-text">{{ ollamaStatusText }}</span>
+          <button class="btn btn-sm btn-outline" @click="testOllama" :disabled="testingOllama">
+            {{ testingOllama ? '测试中...' : '测试' }}
+          </button>
         </div>
       </div>
 
@@ -143,6 +159,13 @@
               <input v-model="db.embedding.model" type="text" />
             </div>
           </div>
+          <div class="status-test-row">
+            <span class="status-dot" :class="vectorDbStatusClass(idx)"></span>
+            <span class="status-text">{{ vectorDbStatusText(idx) }}</span>
+            <button class="btn btn-sm btn-outline" @click="testVectorDb(idx)" :disabled="testingVectorDb[idx]">
+              {{ testingVectorDb[idx] ? '测试中...' : '测试' }}
+            </button>
+          </div>
           <button class="btn btn-sm btn-danger" @click="removeVectorDb(idx)">删除</button>
         </div>
       </div>
@@ -159,15 +182,26 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { getServiceConfig, updateServiceConfig, reloadConfig } from '@/api/config'
+import { ref, onMounted, reactive, computed } from 'vue'
+import { getServiceConfig, updateServiceConfig, reloadConfig, testService } from '@/api/config'
+import { getServiceStatus } from '@/api/admin'
 import { useToast } from '@/composables/useToast'
 import type { ServiceConfig, VectorDbConfig, MinerUConfig } from '@/types/config'
 
-const { showSuccess, showError } = useToast()
+const { showSuccess, showError, showToast } = useToast()
 
 const config = ref<ServiceConfig | null>(null)
-const originalConfig = ref<ServiceConfig | null>( null)
+const originalConfig = ref<ServiceConfig | null>(null)
+
+// 测试状态
+const testingMineru = ref<Record<number, boolean>>({})
+const testingOllama = ref(false)
+const testingVectorDb = ref<Record<number, boolean>>({})
+
+// 各服务状态
+const mineruStatus = ref<Record<number, { status: string; detail: string }>>({})
+const ollamaStatus = ref<{ status: string; detail: string } | null>(null)
+const vectorDbStatus = ref<Record<number, { status: string; detail: string }>>({})
 
 function defaultMineruConfig(): MinerUConfig {
   return {
@@ -208,8 +242,44 @@ async function load() {
       }
     }
     originalConfig.value = JSON.parse(JSON.stringify(config.value))
+
+    // 加载服务状态
+    await loadServiceStatus()
   } catch {
     showError('加载配置失败')
+  }
+}
+
+async function loadServiceStatus() {
+  try {
+    const sv = await getServiceStatus()
+    // MinerU 状态
+    const mineruItems = Array.isArray(sv.mineru) ? sv.mineru : [sv.mineru]
+    for (let i = 0; i < mineruItems.length; i++) {
+      const item = mineruItems[i]
+      mineruStatus.value[i] = {
+        status: item.status,
+        detail: item.error || item.url || item.status || '-'
+      }
+    }
+    // Ollama 状态
+    if (sv.ollama) {
+      ollamaStatus.value = {
+        status: sv.ollama.status,
+        detail: sv.ollama.error || sv.ollama.url || sv.ollama.status || '-'
+      }
+    }
+    // 向量库状态
+    const dbs = sv.vector_dbs || []
+    for (let i = 0; i < dbs.length; i++) {
+      const db = dbs[i]
+      vectorDbStatus.value[i] = {
+        status: db.status,
+        detail: db.error || db.url || db.status || '-'
+      }
+    }
+  } catch {
+    // 加载状态失败不影响配置编辑
   }
 }
 
@@ -218,6 +288,8 @@ async function save() {
     await updateServiceConfig(config.value!)
     originalConfig.value = JSON.parse(JSON.stringify(config.value))
     showSuccess('配置已保存')
+    // 保存后刷新状态
+    await loadServiceStatus()
   } catch {
     showError('保存失败')
   }
@@ -227,6 +299,7 @@ async function reload() {
   try {
     await reloadConfig()
     showSuccess('已重载配置')
+    await load()
   } catch {
     showError('重载失败')
   }
@@ -267,6 +340,126 @@ function addVectorDb() {
 
 function removeVectorDb(idx: number) {
   config.value?.vector_dbs.splice(idx, 1)
+}
+
+// ── 连接测试 ──
+
+async function testMineru(idx: number) {
+  const mu = config.value?.mineru[idx]
+  if (!mu) return
+  testingMineru.value[idx] = true
+  try {
+    const res = await testService({
+      service_type: 'mineru',
+      url: mu.url,
+      key: mu.type // 后端将 key 字段用作 mineru type
+    })
+    mineruStatus.value[idx] = { status: res.status, detail: res.detail }
+    showToast(res.detail, res.status === 'connected' ? 'success' : 'error')
+  } catch {
+    showError('连接测试失败')
+  } finally {
+    testingMineru.value[idx] = false
+  }
+}
+
+async function testOllama() {
+  if (!config.value) return
+  testingOllama.value = true
+  try {
+    const res = await testService({
+      service_type: 'ollama',
+      url: config.value.ollama.url,
+      model: config.value.ollama.model
+    })
+    ollamaStatus.value = { status: res.status, detail: res.detail }
+    showToast(res.detail, res.status === 'connected' ? 'success' : 'error')
+  } catch {
+    showError('连接测试失败')
+  } finally {
+    testingOllama.value = false
+  }
+}
+
+async function testVectorDb(idx: number) {
+  const db = config.value?.vector_dbs[idx]
+  if (!db) return
+  testingVectorDb.value[idx] = true
+  try {
+    const res = await testService({
+      service_type: db.type,
+      url: db.url,
+      collection: db.collection
+    })
+    vectorDbStatus.value[idx] = { status: res.status, detail: res.detail }
+    showToast(res.detail, res.status === 'connected' ? 'success' : 'error')
+  } catch {
+    showError('连接测试失败')
+  } finally {
+    testingVectorDb.value[idx] = false
+  }
+}
+
+// ── 状态显示辅助函数 ──
+
+function mineruStatusClass(idx: number): string {
+  const s = mineruStatus.value[idx]?.status
+  if (!s) return ''
+  if (s === 'connected') return 'ok'
+  if (s === 'disabled' || s === 'not_configured') return 'warning'
+  return 'error'
+}
+
+function mineruStatusText(idx: number): string {
+  const s = mineruStatus.value[idx]
+  if (!s) return '未测试'
+  if (s.status === 'connected') return '正常'
+  if (s.status === 'disabled') return '已禁用'
+  if (s.status === 'not_configured') return '未配置'
+  if (s.status === 'disconnected') return '无法连接'
+  if (s.status === 'error') return '连接错误'
+  return s.status
+}
+
+const ollamaStatusClass = computed(() => {
+  const s = ollamaStatus.value?.status
+  if (!s) return ''
+  if (s === 'connected') return 'ok'
+  if (s === 'disabled' || s === 'not_configured') return 'warning'
+  return 'error'
+})
+
+const ollamaStatusText = computed(() => {
+  const s = ollamaStatus.value
+  if (!s) return '未测试'
+  if (s.status === 'connected') return '正常'
+  if (s.status === 'disabled') return '已禁用'
+  if (s.status === 'not_configured') return '未配置'
+  if (s.status === 'disconnected') return '无法连接'
+  if (s.status === 'error') return '连接错误'
+  return s.status
+})
+
+function vectorDbStatusClass(idx: number): string {
+  const s = vectorDbStatus.value[idx]?.status
+  if (!s) return ''
+  if (s === 'connected') return 'ok'
+  if (s === 'disabled') return 'warning'
+  if (s === 'not_configured') return 'warning'
+  if (s === 'unsupported') return 'warning'
+  return 'error'
+}
+
+function vectorDbStatusText(idx: number): string {
+  const s = vectorDbStatus.value[idx]
+  if (!s) return '未测试'
+  if (s.status === 'connected') return '正常'
+  if (s.status === 'disabled') return '已禁用'
+  if (s.status === 'not_configured') return '未配置'
+  if (s.status === 'unsupported') return '暂不支持'
+  if (s.status === 'disconnected') return '无法连接'
+  if (s.status === 'error') return '连接错误'
+  return s.status
 }
 
 onMounted(load)
@@ -339,6 +532,35 @@ onMounted(load)
   width: auto;
 }
 
+/* 状态测试行 */
+.status-test-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot.ok { background: var(--success, #16a34a); }
+.status-dot.error { background: var(--danger, #dc2626); }
+.status-dot.warning { background: var(--warning, #f59e0b); }
+.status-dot.empty { background: var(--text-secondary, #999); }
+.status-text {
+  font-size: 12px;
+  color: var(--text-secondary, #666);
+  flex: 1;
+}
+.status-test-row .btn {
+  margin-left: auto;
+}
+
 @media (max-width: 768px) {
   .vector-db-card {
     padding: 12px;
@@ -367,18 +589,13 @@ onMounted(load)
     width: 100%;
   }
 
-  .config-output {
-    flex-direction: column;
-    gap: 12px;
+  .status-test-row {
+    flex-wrap: wrap;
+    gap: 6px;
   }
 
-  .config-output pre {
-    width: 100%;
-    font-size: 12px;
-    padding: 12px;
-  }
-
-  .config-output button {
+  .status-test-row .btn {
+    margin-left: 0;
     width: 100%;
   }
 }
@@ -392,7 +609,7 @@ onMounted(load)
     font-size: 12px;
   }
 
-  .config-output pre {
+  .status-text {
     font-size: 11px;
   }
 }
