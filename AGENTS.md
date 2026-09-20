@@ -95,8 +95,8 @@ cargo build --release
 
 程序启动时会 `chdir` 到 `cwd` 指定的目录，后续所有相对路径都相对于该目录解析。
 
-- `cwd` 的值支持 `{system_dir}` 和 `{system_path}` 变量替换（在 `ConfigManager::new()` 中解析）
-- `config_path` 也支持 `{system_dir}` 替换
+- `cwd` 的值支持 `{system_dir}` 变量替换（在 `ConfigManager::new()` 中解析）
+- `config_path` 不支持变量替换，为相对于 system.json 所在目录的路径
 - 其他路径属性均为相对于 `cwd` 的相对路径，仅支持 `{id}` 变量（文档 ID）
 - `env:VAR_NAME` 语法在所有路径属性中均支持
 

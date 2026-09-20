@@ -88,7 +88,9 @@ async fn main() -> anyhow::Result<()> {
     let cwd = config_manager.cwd();
     std::env::set_current_dir(&cwd)
         .map_err(|e| anyhow::anyhow!("无法切换到工作目录 {}: {}", cwd, e))?;
-    tracing::info!("工作目录: {}", cwd);
+    let abs_cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| cwd.clone());
     let system = config_manager.load_system_config();
     let log_path_raw = system
         .get("log_path")
@@ -108,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
+    tracing::info!("工作目录: {}", abs_cwd);
     let settings = Arc::new(Settings::new(config_manager.clone()));
     settings::init_settings(settings.clone());
 

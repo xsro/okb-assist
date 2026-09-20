@@ -79,7 +79,7 @@ impl ConfigManager {
     /// 从 system.json 路径创建配置管理器。
     /// config.json 的路径从 system.json 的 config_path 字段读取，
     /// 若为相对路径则相对于 system.json 所在目录解析。
-    /// cwd 和 config_path 支持 {system_dir} 变量替换。
+    /// cwd 支持 {system_dir} 变量替换，config_path 不支持变量替换。
     pub fn new(system_path: &str) -> Self {
         let system_path = PathBuf::from(system_path);
         let system = Self::load_json_file(&system_path, &default_system());
@@ -93,23 +93,20 @@ impl ConfigManager {
         } else {
             system_dir
         };
-        let system_path_str = system_path.to_string_lossy().to_string();
-
         // 解析 cwd（支持 {system_dir} 替换）
         let cwd = system
             .get("cwd")
             .and_then(|v| v.as_str())
             .unwrap_or("{system_dir}")
             .to_string();
-        let cwd = cwd.replace("{system_dir}", &system_dir).replace("{system_path}", &system_path_str);
+        let cwd = cwd.replace("{system_dir}", &system_dir);
 
-        // 解析 config_path（支持 {system_dir} 替换）
+        // 解析 config_path（无变量替换，为相对于 system.json 所在目录的路径）
         let config_path = system
             .get("config_path")
             .and_then(|v| v.as_str())
             .unwrap_or("config.json")
             .to_string();
-        let config_path = config_path.replace("{system_dir}", &system_dir).replace("{system_path}", &system_path_str);
         // 若 config_path 是相对路径，相对于 system.json 所在目录解析
         let config_file = if PathBuf::from(&config_path).is_absolute() {
             PathBuf::from(&config_path)
