@@ -189,3 +189,11 @@ export function getDocTypes() {
 export function getSimilarTitles() {
   return apiGet<SimilarTitleGroup>('/assist/api/documents/similar-titles/')
 }
+
+/** 将 sourceIds 合并进 targetId（去重合并，源文档将被删除） */
+export function mergeDocuments(targetId: number, sourceIds: number[]) {
+  return apiPost<{ status: string; target_id: number; merged_ids: number[]; detail: string }>(
+    '/assist/api/documents/merge/',
+    { target_id: targetId, source_ids: sourceIds }
+  )
+}

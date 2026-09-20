@@ -88,6 +88,11 @@ impl ConfigManager {
             .unwrap_or(&PathBuf::from("."))
             .to_string_lossy()
             .to_string();
+        let system_dir = if system_dir.is_empty() {
+            ".".to_string()
+        } else {
+            system_dir
+        };
         let system_path_str = system_path.to_string_lossy().to_string();
 
         // 解析 cwd（支持 {system_dir} 替换）

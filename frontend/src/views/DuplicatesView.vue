@@ -17,7 +17,9 @@
               <td>{{ doc.authors || '-' }}</td>
               <td>{{ doc.year || '-' }}</td>
               <td>
-                <button class="btn btn-sm btn-danger" @click="merge(group.documents, doc.id)">合并到此文档</button>
+                <button class="btn btn-sm btn-danger" :disabled="merging" @click="merge(group.documents, doc.id)">
+                  {{ merging ? '合并中…' : '合并到此文档' }}
+                </button>
               </td>
             </tr>
           </tbody>
@@ -31,14 +33,15 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { getSimilarTitles } from '@/api/documents'
+import { getSimilarTitles, mergeDocuments } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import type { Document, SimilarTitleGroup } from '@/types/document'
 
-const { showError, showInfo } = useToast()
+const { showSuccess, showError } = useToast()
 const { requireToken } = useRequireToken()
 const groups = ref<SimilarTitleGroup['groups'] | null>(null)
+const merging = ref(false)
 
 async function load() {
   if (!requireToken()) return
@@ -50,8 +53,28 @@ async function load() {
   }
 }
 
-function merge(group: Document[], targetId: number) {
-  showInfo('合并功能开发中')
+async function merge(group: Document[], targetId: number) {
+  if (merging.value) return
+  const sourceIds = group.filter((d) => d.id !== targetId).map((d) => d.id)
+  if (sourceIds.length === 0) return
+  const targetTitle = group.find((d) => d.id === targetId)?.title || targetId
+  if (
+    !confirm(
+      `确定将本组其余 ${sourceIds.length} 篇文献合并到「${targetTitle}」吗？\n其余文献将被永久删除（文件与记录），此操作不可逆！`
+    )
+  ) {
+    return
+  }
+  merging.value = true
+  try {
+    const res = await mergeDocuments(targetId, sourceIds)
+    showSuccess(res.detail || `已合并到文档 ${targetId}`)
+    await load()
+  } catch {
+    showError('合并失败')
+  } finally {
+    merging.value = false
+  }
 }
 
 onMounted(load)

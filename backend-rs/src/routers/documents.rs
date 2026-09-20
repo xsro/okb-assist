@@ -99,6 +99,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/register", post(register_document_by_path))
         .route("/assist/api/documents/similar-titles/", get(find_similar_titles))
         .route("/assist/api/documents/similar-titles", get(find_similar_titles))
+        .route("/assist/api/documents/merge/", post(merge_documents))
+        .route("/assist/api/documents/merge", post(merge_documents))
         .route("/assist/api/documents/vector-dbs/", get(list_vector_dbs))
         .route("/assist/api/documents/vector-dbs", get(list_vector_dbs))
         .route("/assist/api/documents/doc-types/", get(list_doc_types))
@@ -568,6 +570,147 @@ async fn delete_document(
     }
 }
 
+/// 合并请求体：将 source_ids 中的所有文档合并进 target_id。
+#[derive(Debug, Deserialize)]
+pub struct MergeDocumentsBody {
+    pub target_id: i64,
+    pub source_ids: Vec<i64>,
+}
+
+/// 将 source 的非空元数据填充到 target 的空字段中（去重合并时用）。
+fn merge_metadata_into(target: &mut Document, source: &Document) {
+    let fill = |t: &mut Option<String>, s: &Option<String>| {
+        if t.as_deref().map_or(true, |v| v.trim().is_empty()) {
+            *t = s.clone();
+        }
+    };
+    fill(&mut target.title, &source.title);
+    fill(&mut target.authors, &source.authors);
+    if target.year.is_none() {
+        target.year = source.year;
+    }
+    fill(&mut target.doi, &source.doi);
+    fill(&mut target.source, &source.source);
+    fill(&mut target.journal, &source.journal);
+    fill(&mut target.keywords, &source.keywords);
+    fill(&mut target.abstract_text, &source.abstract_text);
+    fill(&mut target.category, &source.category);
+    fill(&mut target.doc_type, &source.doc_type);
+    fill(&mut target.language, &source.language);
+    fill(&mut target.title_en, &source.title_en);
+    fill(&mut target.authors_en, &source.authors_en);
+    fill(&mut target.keywords_en, &source.keywords_en);
+    fill(&mut target.abstract_en, &source.abstract_en);
+    fill(&mut target.journal_en, &source.journal_en);
+}
+
+/// 将重复文献合并进目标文献：填充目标空字段，删除源文献（文件 + 向量 + 记录）。
+async fn merge_documents(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Json(body): Json<MergeDocumentsBody>,
+) -> Response {
+    // 去重并排除目标自身
+    let mut source_ids: Vec<i64> = body
+        .source_ids
+        .into_iter()
+        .filter(|id| *id != body.target_id)
+        .collect();
+    source_ids.sort_unstable();
+    source_ids.dedup();
+
+    let mut target = match fetch_doc(&db, body.target_id).await {
+        Ok(Some(doc)) => doc,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"detail": "目标文档不存在"}))).into_response();
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response();
+        }
+    };
+
+    // 逐个拉取源文档并合并元数据
+    let mut merged_sources: Vec<i64> = Vec::new();
+    for sid in &source_ids {
+        if let Ok(Some(src)) = fetch_doc(&db, *sid).await {
+            merge_metadata_into(&mut target, &src);
+            merged_sources.push(*sid);
+        }
+    }
+
+    if merged_sources.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "没有可合并的源文档"}))).into_response();
+    }
+
+    // 写回合并后的目标元数据
+    let update = sqlx::query(
+        "UPDATE documents SET title = ?, authors = ?, year = ?, doi = ?, source = ?, \
+         journal = ?, keywords = ?, abstract = ?, category = ?, doc_type = ?, language = ?, \
+         title_en = ?, authors_en = ?, keywords_en = ?, abstract_en = ?, journal_en = ?, \
+         updated_at = datetime('now') WHERE id = ?",
+    )
+    .bind(&target.title)
+    .bind(&target.authors)
+    .bind(target.year)
+    .bind(&target.doi)
+    .bind(&target.source)
+    .bind(&target.journal)
+    .bind(&target.keywords)
+    .bind(&target.abstract_text)
+    .bind(&target.category)
+    .bind(&target.doc_type)
+    .bind(&target.language)
+    .bind(&target.title_en)
+    .bind(&target.authors_en)
+    .bind(&target.keywords_en)
+    .bind(&target.abstract_en)
+    .bind(&target.journal_en)
+    .bind(target.id)
+    .execute(db.pool())
+    .await;
+
+    if let Err(e) = update {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
+    }
+
+    // 删除源文档：向量点 + 本地文件 + 索引记录 + 数据库记录
+    let mut deleted: Vec<i64> = Vec::new();
+    for sid in &merged_sources {
+        // 删除向量点（异步，失败不影响主流程）
+        if let Ok(adapter) = crate::services::vector_db::get_vector_db(None) {
+            let _ = adapter.delete_document(0, *sid).await;
+        }
+        // 删除本地文件（PDF、Markdown、元信息、资产包、Crossref 缓存）
+        let _ = std::fs::remove_file(paths::get_pdf_path(&settings, *sid));
+        let _ = std::fs::remove_file(paths::get_markdown_path(&settings, *sid));
+        let _ = std::fs::remove_file(paths::get_info_path(&settings, *sid));
+        let _ = std::fs::remove_file(paths::get_asset_path(&settings, *sid));
+        let _ = std::fs::remove_file(paths::get_crossref_path(&settings, *sid));
+        // 删除向量索引记录
+        let _ = sqlx::query("DELETE FROM document_vector_index WHERE document_id = ?")
+            .bind(sid)
+            .execute(db.pool())
+            .await;
+        // 删除数据库记录
+        if let Ok(r) = sqlx::query("DELETE FROM documents WHERE id = ?")
+            .bind(sid)
+            .execute(db.pool())
+            .await
+        {
+            if r.rows_affected() > 0 {
+                deleted.push(*sid);
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(json!({
+        "status": "ok",
+        "target_id": target.id,
+        "merged_ids": deleted,
+        "detail": format!("已合并 {} 篇文献到文档 {}", deleted.len(), target.id),
+    }))).into_response()
+}
+
 /// 从 PDF 元数据填充文档空字段
 fn fill_meta_fields(doc: &mut Document, meta: &Value) {
     if doc.title.is_none() {
@@ -985,7 +1128,7 @@ async fn find_similar_titles(
 
     for (_, items) in buckets {
         for (norm, doc) in items {
-            let mut matched = false;
+            let mut matched_group: Option<usize> = None;
             for (gi, rep) in reps.iter().enumerate() {
                 // 长度差剪枝：编辑距离 >= 长度差，若按长度差已无法达到阈值则跳过
                 let a_len = norm.chars().count();
@@ -996,14 +1139,16 @@ async fn find_similar_titles(
                     continue;
                 }
                 if title_similarity(&norm, rep) >= SIMILARITY_THRESHOLD {
-                    groups[gi].1.push(doc);
-                    matched = true;
+                    matched_group = Some(gi);
                     break;
                 }
             }
-            if !matched {
-                reps.push(norm.clone());
-                groups.push((norm, vec![doc]));
+            match matched_group {
+                Some(gi) => groups[gi].1.push(doc),
+                None => {
+                    reps.push(norm.clone());
+                    groups.push((norm, vec![doc]));
+                }
             }
         }
     }
