@@ -53,28 +53,62 @@ impl LogLevel {
 
 /// 命令行参数
 #[derive(Parser, Debug)]
-#[command(name = "okb_assist", version, about = "OKB-Assist 后端（Rust 版）")]
+#[command(name = "okb_assist", about = "OKB-Assist 后端（Rust 版）")]
 struct Args {
+    /// 显示版本与编译信息并退出
+    #[arg(long = "version", short = 'v')]
+    version: bool,
+
     /// 监听地址
-    #[arg(long, default_value = "0.0.0.0")]
+    #[arg(long, short = 'H', default_value = "0.0.0.0")]
     host: String,
 
     /// 监听端口
-    #[arg(long, default_value = "5001", value_parser = clap::value_parser!(u16))]
+    #[arg(long, short = 'p', default_value = "5001", value_parser = clap::value_parser!(u16))]
     port: u16,
 
     /// 日志级别
-    #[arg(long, value_enum, default_value = "info")]
+    #[arg(long, short = 'l', value_enum, default_value = "info")]
     log_level: LogLevel,
 
     /// system.json 文件路径（config.json 路径由此文件中的 config_path 字段确定）
-    #[arg(long, default_value = "system.json")]
+    #[arg(long, short = 's', default_value = "system.json")]
     system_path: String,
+}
+
+fn print_version() {
+    let build_time = env!("BUILD_TIME");
+    let build_time_str = chrono::DateTime::from_timestamp(build_time.parse::<i64>().unwrap_or(0), 0)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let git_commit = env!("GIT_COMMIT");
+    let git_commit = if git_commit.is_empty() { "N/A".to_string() } else { git_commit.to_string() };
+
+    println!("{}", format_version_info(build_time_str, git_commit));
+}
+
+fn format_version_info(build_time: String, git_commit: String) -> String {
+    format!(
+        "{} v{}\n\n  Build Time: {}\n  Build Profile: {}\n  Rust Compiler: {}\n  Build Target: {}\n  Git Commit: {}\n",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        build_time,
+        env!("BUILD_PROFILE"),
+        env!("RUSTC_VERSION"),
+        env!("BUILD_HOST"),
+        git_commit,
+    )
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    if args.version {
+        print_version();
+        return Ok(());
+    }
 
     // 初始化日志：RUST_LOG 环境变量优先，否则使用 --log-level 指定的级别。
     let level = args.log_level.as_str();
