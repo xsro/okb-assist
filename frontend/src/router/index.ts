@@ -36,12 +36,6 @@ const routes = [
     meta: { title: '管理后台' }
   },
   {
-    path: '/assist/monitor',
-    name: 'monitor',
-    component: () => import('@/views/MonitorView.vue'),
-    meta: { title: '流水线监控' }
-  },
-  {
     path: '/assist/config',
     name: 'config',
     component: () => import('@/views/ConfigView.vue'),

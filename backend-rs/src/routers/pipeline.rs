@@ -722,6 +722,92 @@ async fn run_crossref(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
     .await;
 }
 
+/// Crossref 覆盖式更新：以 Crossref 数据为准，覆盖已有字段（仅非空值覆盖）。
+/// 用于上传后自动获取权威元数据。
+pub(crate) async fn run_crossref_override(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
+    let doc = match fetch_doc(&db, doc_id).await {
+        Some(d) => d,
+        None => return,
+    };
+
+    // 仅在有 DOI 时查询（DOI 是最可靠的查询方式）
+    let doi = match doc.doi.as_deref() {
+        Some(d) if normalize_doi(d).is_some() => d,
+        _ => return,
+    };
+
+    let client = CrossrefClient::new(None, None);
+    let result = client.lookup_by_doi(doi).await;
+
+    let result = match result {
+        Some(r) => r,
+        None => return,
+    };
+
+    // 保存原始 Crossref 返回
+    let crossref_path = paths::get_crossref_path(&settings, doc_id);
+    if let Some(parent) = std::path::Path::new(&crossref_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(raw) = serde_json::to_string_pretty(&result["raw"]) {
+        let _ = std::fs::write(&crossref_path, raw);
+    }
+
+    let parsed = &result["parsed"];
+
+    let authors = parsed.get("authors").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+    let authors_json = if authors.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&authors).unwrap_or_else(|_| "[]".to_string()))
+    };
+    let keywords_json = value_list_json(parsed, "keywords");
+    let authors_en_json = value_list_json(parsed, "authors_en");
+    let keywords_en_json = value_list_json(parsed, "keywords_en");
+
+    let doi_norm = value_str(parsed, "doi").and_then(|d| normalize_doi(&d));
+
+    // 覆盖式更新：Crossref 非空值覆盖已有字段，空值保留原字段
+    let _ = sqlx::query(
+        "UPDATE documents SET \
+            title = COALESCE(?, title), \
+            authors = COALESCE(?, authors), \
+            year = COALESCE(?, year), \
+            doi = COALESCE(?, doi), \
+            source = COALESCE(?, source), \
+            journal = COALESCE(?, journal), \
+            keywords = COALESCE(?, keywords), \
+            abstract = COALESCE(?, abstract), \
+            doc_type = COALESCE(?, doc_type), \
+            language = COALESCE(?, language), \
+            title_en = COALESCE(?, title_en), \
+            authors_en = COALESCE(?, authors_en), \
+            journal_en = COALESCE(?, journal_en), \
+            keywords_en = COALESCE(?, keywords_en), \
+            abstract_en = COALESCE(?, abstract_en), \
+            updated_at = ? WHERE id = ?",
+    )
+    .bind(value_str(parsed, "title"))
+    .bind(authors_json)
+    .bind(value_i64(parsed, "year"))
+    .bind(doi_norm)
+    .bind(value_str(parsed, "source"))
+    .bind(value_str(parsed, "journal"))
+    .bind(keywords_json)
+    .bind(value_str(parsed, "abstract"))
+    .bind(value_str(parsed, "doc_type"))
+    .bind(value_str(parsed, "language"))
+    .bind(value_str(parsed, "title_en"))
+    .bind(authors_en_json)
+    .bind(value_str(parsed, "journal_en"))
+    .bind(keywords_en_json)
+    .bind(value_str(parsed, "abstract_en"))
+    .bind(now_iso())
+    .bind(doc_id)
+    .execute(db.pool())
+    .await;
+}
+
 async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
     let doc = match fetch_doc(&db, doc_id).await {
         Some(d) => d,

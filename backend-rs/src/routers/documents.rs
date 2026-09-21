@@ -18,6 +18,7 @@ use crate::database::Database;
 use crate::models::Document;
 use crate::paths;
 use crate::services::pdf_meta::{extract_pdf_metadata, normalize_doi};
+use crate::routers::pipeline::run_crossref_override;
 use crate::utils::{calculate_file_hash, now_datetime, now_iso, sha256_hex};
 
 /// 全局文件别名表（内存，重启即丢失，与 Python 版一致）
@@ -936,6 +937,13 @@ async fn upload_document(
     }
     if let Err(e) = std::fs::write(&pdf_path, &content) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": format!("保存文件失败: {}", e)}))).into_response();
+    }
+
+    // 如果有 DOI，自动触发 Crossref 获取权威元数据（以 Crossref 信息为准）
+    if doc.doi.is_some() {
+        let db = db.clone();
+        let settings = settings.clone();
+        tokio::spawn(run_crossref_override(db, settings, doc_id));
     }
 
     // 返回文档信息
