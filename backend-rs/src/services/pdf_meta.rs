@@ -318,7 +318,9 @@ fn extract_full_text(doc: &Document, doc_id: Option<i64>) -> Option<String> {
     } else {
         // 调试：保存提取的文本到临时文件
         let id_str = doc_id.map(|d| d.to_string()).unwrap_or_else(|| "unknown".to_string());
-        let debug_path = std::env::temp_dir().join(format!("okb_assist_mupdf_text_{}.txt", id_str));
+        let debug_dir = std::env::temp_dir().join("okb_assist");
+        let _ = std::fs::create_dir_all(&debug_dir);
+        let debug_path = debug_dir.join(format!("mupdf_text_{}.txt", id_str));
         if let Ok(mut f) = std::fs::File::create(&debug_path) {
             use std::io::Write;
             let _ = f.write_all(text.as_bytes());
@@ -358,7 +360,9 @@ fn extract_full_text_via_mutool(content: &[u8], doc_id: Option<i64>) -> Option<S
     } else {
         // 调试：保存提取的文本到临时文件
         let id_str = doc_id.map(|d| d.to_string()).unwrap_or_else(|| "unknown".to_string());
-        let debug_path = std::env::temp_dir().join(format!("okb_assist_mutool_text_{}.txt", id_str));
+        let debug_dir = std::env::temp_dir().join("okb_assist");
+        let _ = std::fs::create_dir_all(&debug_dir);
+        let debug_path = debug_dir.join(format!("mutool_text_{}.txt", id_str));
         if let Ok(mut f) = std::fs::File::create(&debug_path) {
             use std::io::Write;
             let _ = f.write_all(text.as_bytes());
