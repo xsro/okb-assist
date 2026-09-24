@@ -2,5 +2,5 @@
 pre-build = [
     "dpkg --add-architecture arm64",
     "apt-get update",
-    "apt-get install --assume-yes pkg-config libssl-dev:arm64 libsqlite3-dev:arm64"
+    "apt-get install --assume-yes pkg-config libssl-dev:arm64 libsqlite3-dev:arm64 libfontconfig1-dev pkg-config",
 ]
