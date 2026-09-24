@@ -40,7 +40,7 @@ pub fn normalize_doi(raw: &str) -> Option<String> {
 
 /// 从 PDF 字节内容中提取元数据
 #[cfg(feature = "mupdf")]
-pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>) -> serde_json::Value {
+pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>, doc_id: Option<i64>) -> serde_json::Value {
     let mut result = serde_json::Map::new();
 
     if let Ok(doc) = Document::from_bytes(content, "pdf") {
@@ -48,7 +48,7 @@ pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>) -> serde_jso
         extract_from_info_dict(&doc, filename, &mut result);
 
         // 2. 从页面文本提取（补充 Info 字典未覆盖的字段）
-        let full_text = extract_full_text(&doc);
+        let full_text = extract_full_text(&doc, doc_id);
         if let Some(ref text) = full_text {
             // 全宽字符归一化（中文 PDF 常见）
             let normalized = normalize_fullwidth(text);
@@ -62,7 +62,7 @@ pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>) -> serde_jso
 
 /// 从 PDF 字节内容中提取元数据（回退方案：调用外部 mutool）
 #[cfg(not(feature = "mupdf"))]
-pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>) -> serde_json::Value {
+pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>, doc_id: Option<i64>) -> serde_json::Value {
     let mut result = serde_json::Map::new();
 
     // 1. 通过 mutool 提取 Info 字典
@@ -71,7 +71,7 @@ pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>) -> serde_jso
     }
 
     // 2. 通过 mutool 提取页面文本
-    if let Some(text) = extract_full_text_via_mutool(content) {
+    if let Some(text) = extract_full_text_via_mutool(content, doc_id) {
         let normalized = normalize_fullwidth(&text);
         extract_from_text(&normalized, filename, &mut result);
     }
@@ -301,7 +301,7 @@ fn extract_from_info_dict_parsed(
 // ── 页面文本提取 ─────────────────────────────────────────
 
 #[cfg(feature = "mupdf")]
-fn extract_full_text(doc: &Document) -> Option<String> {
+fn extract_full_text(doc: &Document, doc_id: Option<i64>) -> Option<String> {
     let page_count = doc.page_count().ok()?;
     let opts = TextExtractOptions::default();
     let mut text = String::new();
@@ -317,7 +317,8 @@ fn extract_full_text(doc: &Document) -> Option<String> {
         None
     } else {
         // 调试：保存提取的文本到临时文件
-        let debug_path = std::env::temp_dir().join("okb_assist_mupdf_text.txt");
+        let id_str = doc_id.map(|d| d.to_string()).unwrap_or_else(|| "unknown".to_string());
+        let debug_path = std::env::temp_dir().join(format!("okb_assist_mupdf_text_{}.txt", id_str));
         if let Ok(mut f) = std::fs::File::create(&debug_path) {
             use std::io::Write;
             let _ = f.write_all(text.as_bytes());
@@ -329,7 +330,7 @@ fn extract_full_text(doc: &Document) -> Option<String> {
 }
 
 #[cfg(not(feature = "mupdf"))]
-fn extract_full_text_via_mutool(content: &[u8]) -> Option<String> {
+fn extract_full_text_via_mutool(content: &[u8], doc_id: Option<i64>) -> Option<String> {
     let temp_dir = TempDir::new().ok()?;
     let temp_path = temp_dir.path().join("extract_text.pdf");
     std::fs::write(&temp_path, content).ok()?;
@@ -356,7 +357,8 @@ fn extract_full_text_via_mutool(content: &[u8]) -> Option<String> {
         None
     } else {
         // 调试：保存提取的文本到临时文件
-        let debug_path = std::env::temp_dir().join("okb_assist_mutool_text.txt");
+        let id_str = doc_id.map(|d| d.to_string()).unwrap_or_else(|| "unknown".to_string());
+        let debug_path = std::env::temp_dir().join(format!("okb_assist_mutool_text_{}.txt", id_str));
         if let Ok(mut f) = std::fs::File::create(&debug_path) {
             use std::io::Write;
             let _ = f.write_all(text.as_bytes());

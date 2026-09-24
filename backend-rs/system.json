@@ -14,5 +14,5 @@
   "cwd": "{system_dir}",
   "grep_path": "grep",
   "mutool_path": "mutool",
-  "ui_path": "frontend/dist"
+  "ui_path": "../frontend/dist"
 }
