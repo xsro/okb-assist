@@ -97,18 +97,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install ARM64 cross-compilation toolchain
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
+            libstdc++-12-dev-arm64-cross
+
+      - name: "Install Rust (target: aarch64-unknown-linux-gnu)"
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
 
-      - name: Install cross
-        run: cargo install cross --locked
-
-      - name: Build with cross
-        env:
-          CXX: aarch64-linux-gnu-g++
-          CXXFLAGS: -std=c++17
-        run: cross build --release --target aarch64-unknown-linux-gnu
+      - name: Build
         working-directory: backend-rs
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CXXFLAGS_aarch64_unknown_linux_gnu: -std=c++17
+        run: cargo build --release --target aarch64-unknown-linux-gnu
 
       - name: Prepare artifact
         run: cp backend-rs/target/aarch64-unknown-linux-gnu/release/okb_assist okb-assist-linux-arm64
