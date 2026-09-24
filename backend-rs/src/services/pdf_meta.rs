@@ -365,50 +365,192 @@ fn extract_from_text(
         }
     }
 
+    // 策略1：优先从引用格式完整解析所有字段
+    let citation = parse_citation(text);
+
     // 年份
     if !result.contains_key("year") {
-        if let Some(year) = scan_year_from_text(text) {
+        if let Some(year) = citation.as_ref().and_then(|c| c.year) {
+            result.insert("year".to_string(), serde_json::Value::Number(year.into()));
+        } else if let Some(year) = scan_year_from_text(text) {
             result.insert("year".to_string(), serde_json::Value::Number(year.into()));
         }
     }
 
     // 期刊名
     if !result.contains_key("journal") {
-        if let Some(journal) = scan_journal(text) {
+        if let Some(journal) = citation.as_ref().and_then(|c| c.journal.clone()) {
+            result.insert("journal".to_string(), serde_json::Value::String(journal));
+        } else if let Some(journal) = scan_journal(text) {
             result.insert("journal".to_string(), serde_json::Value::String(journal));
         }
     }
 
-    // 标题（从引用格式或正文提取）
+    // 标题
     if !result.contains_key("title") {
-        if let Some(title) = extract_title_from_text(text, filename) {
+        if let Some(title) = citation.as_ref().and_then(|c| c.title.clone()) {
+            result.insert("title".to_string(), serde_json::Value::String(title));
+        } else if let Some(title) = extract_title_from_text(text, filename) {
             result.insert("title".to_string(), serde_json::Value::String(title));
         }
     }
 
     // 作者
     if !result.contains_key("authors") {
-        if let Some(authors) = extract_authors_from_text(text) {
+        if let Some(authors) = citation.as_ref().and_then(|c| c.authors.clone()) {
+            if !authors.is_empty() {
+                result.insert("authors".to_string(), serde_json::json!(authors));
+            }
+        } else if let Some(authors) = extract_authors_from_text(text) {
             result.insert("authors".to_string(), serde_json::json!(authors));
         }
     }
 
-    // 卷/期/页码
+    // 卷
     if !result.contains_key("volume") {
-        if let Some(vol) = scan_volume(text) {
+        if let Some(vol) = citation.as_ref().and_then(|c| c.volume.clone()) {
+            result.insert("volume".to_string(), serde_json::Value::String(vol));
+        } else if let Some(vol) = scan_volume(text) {
             result.insert("volume".to_string(), serde_json::Value::String(vol));
         }
     }
+
+    // 期
     if !result.contains_key("issue") {
-        if let Some(issue) = scan_issue(text) {
+        if let Some(issue) = citation.as_ref().and_then(|c| c.issue.clone()) {
+            result.insert("issue".to_string(), serde_json::Value::String(issue));
+        } else if let Some(issue) = scan_issue(text) {
             result.insert("issue".to_string(), serde_json::Value::String(issue));
         }
     }
+
+    // 页码
     if !result.contains_key("pages") {
-        if let Some(pages) = scan_pages(text) {
+        if let Some(pages) = citation.as_ref().and_then(|c| c.pages.clone()) {
+            result.insert("pages".to_string(), serde_json::Value::String(pages));
+        } else if let Some(pages) = scan_pages(text) {
             result.insert("pages".to_string(), serde_json::Value::String(pages));
         }
     }
+}
+
+// ── 引用格式完整解析 ────────────────────────────────────
+
+/// 从引用格式完整解析所有文献字段。
+///
+/// 中文格式：引用格式：作者，作者，等．标题［J］．期刊名，年，卷（期）：页码．
+/// 英文格式：Citation: Author, et al. Title [J]. Journal, Year, Vol(Issue): Pages.
+struct CitationInfo {
+    authors: Option<Vec<String>>,
+    title: Option<String>,
+    journal: Option<String>,
+    year: Option<i64>,
+    volume: Option<String>,
+    issue: Option<String>,
+    pages: Option<String>,
+}
+
+fn parse_citation(text: &str) -> Option<CitationInfo> {
+    // 中文学术期刊引用格式
+    // 格式：引用格式：作者，作者，等．标题［J］．期刊名，年，卷（期）：页码．
+    let re_cn = regex::Regex::new(
+        r"引用\s*格式\s*[：:]\s*(.+?)\s*［J］\s*([^,，]+?)\s*[，,]\s*(\d{4})\s*[，,]\s*(\d+)\s*（(\d+)）\s*[：:]\s*(\d+\s*[－\-]\s*\d+)"
+    ).unwrap();
+
+    if let Some(caps) = re_cn.captures(text) {
+        let author_part = caps.get(1)?.as_str().trim();
+        let title = caps.get(2)?.as_str().trim().to_string();
+        let journal = caps.get(3)?.as_str().trim().to_string();
+        let year: i64 = caps.get(4)?.as_str().parse().ok()?;
+        let volume = caps.get(5)?.as_str().to_string();
+        let issue = caps.get(6)?.as_str().to_string();
+        let pages = caps.get(7)?.as_str().to_string();
+
+        let authors = parse_authors_from_citation_part(author_part);
+
+        return Some(CitationInfo {
+            authors: Some(authors),
+            title: Some(clean_title(&title)),
+            journal: Some(journal),
+            year: Some(year),
+            volume: Some(volume),
+            issue: Some(issue),
+            pages: Some(pages),
+        });
+    }
+
+    // 英文学术期刊引用格式
+    // 格式：Citation: Author, et al. Title [J]. Journal, Year, Vol(Issue): Pages.
+    let re_en = regex::Regex::new(
+        r"(?i)Citation\s*:\s*(.+?)\s*\.\s*\[J\]\s*([^,]+?)\s*[，,]\s*(\d{4})\s*[，,]\s*(\d+)\s*\((\d+)\)\s*:\s*(\d+\s*[－\-]\s*\d+)"
+    ).unwrap();
+
+    if let Some(caps) = re_en.captures(text) {
+        let author_part = caps.get(1)?.as_str().trim();
+        let title = caps.get(2)?.as_str().trim().to_string();
+        let journal = caps.get(3)?.as_str().trim().to_string();
+        let year: i64 = caps.get(4)?.as_str().parse().ok()?;
+        let volume = caps.get(5)?.as_str().to_string();
+        let issue = caps.get(6)?.as_str().to_string();
+        let pages = caps.get(7)?.as_str().to_string();
+
+        let authors = parse_authors_from_citation_part_en(author_part);
+
+        return Some(CitationInfo {
+            authors: Some(authors),
+            title: Some(clean_title(&title)),
+            journal: Some(journal),
+            year: Some(year),
+            volume: Some(volume),
+            issue: Some(issue),
+            pages: Some(pages),
+        });
+    }
+
+    None
+}
+
+/// 从引用格式的作者部分解析作者列表（中文）
+fn parse_authors_from_citation_part(s: &str) -> Vec<String> {
+    let s = s.trim();
+    let s = if let Some(pos) = s.find("等") {
+        &s[..pos]
+    } else {
+        s
+    };
+    let s = if let Some(pos) = s.find("et al.") {
+        &s[..pos]
+    } else {
+        s
+    };
+
+    s.split(|c: char| c == '，' || c == ',' || c == '、')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// 从引用格式的作者部分解析作者列表（英文）
+fn parse_authors_from_citation_part_en(s: &str) -> Vec<String> {
+    let s = s.trim();
+    let s = if let Some(pos) = s.find("et al.") {
+        &s[..pos]
+    } else {
+        s
+    };
+
+    s.split(|c: char| c == ',' || c == '、')
+        .map(|s| {
+            s.trim()
+                .to_string()
+                .chars()
+                .filter(|c| c.is_alphabetic() || *c == ' ')
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 // ── 全宽字符归一化 ──────────────────────────────────────
