@@ -87,17 +87,17 @@ jobs:
           path: okb-assist-linux-x64
 
   build-raspberry-pi-arm64:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ARM64 cross-compilation toolchain
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu \
-            libc6-dev-arm64-cross
+            libsqlite3-dev \
+            libfontconfig1-dev \
+            pkg-config
 
       - name: "Install Rust (target: aarch64-unknown-linux-gnu)"
         uses: dtolnay/rust-toolchain@stable
@@ -105,14 +105,8 @@ jobs:
           targets: aarch64-unknown-linux-gnu
 
       - name: Build
-        working-directory: backend-rs
-        env:
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CXXFLAGS_aarch64_unknown_linux_gnu: -std=c++17
         run: cargo build --release --target aarch64-unknown-linux-gnu
+        working-directory: backend-rs
 
       - name: Prepare artifact
         run: cp backend-rs/target/aarch64-unknown-linux-gnu/release/okb_assist okb-assist-linux-arm64
