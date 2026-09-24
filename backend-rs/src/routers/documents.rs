@@ -824,7 +824,7 @@ async fn upload_document(
     }
 
     // 提取 PDF 元数据
-    let meta = extract_pdf_metadata(&content, Some(&filename), Some(&settings.pdfcpu_path()));
+    let meta = extract_pdf_metadata(&content, Some(&filename));
     let file_hash = {
         use sha2::{Digest, Sha256};
         format!("{:x}", Sha256::digest(&content))
@@ -976,7 +976,7 @@ async fn register_document_by_path(
         Ok(c) => c,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
     };
-    let meta = extract_pdf_metadata(&content, None, Some(&settings.pdfcpu_path()));
+    let meta = extract_pdf_metadata(&content, None);
     let file_hash = match calculate_file_hash(&data.file_path) {
         Ok(h) => h,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),

@@ -9,11 +9,9 @@
 | 工具 | 用途 | 配置方式 |
 |------|------|----------|
 | `grep` | 全文搜索（`/api/documents/grep-search/`） | `system.json` 的 `grep_path`（默认 `grep`） |
-| `pdfcpu` | PDF 元数据提取（上传/注册/元数据补全时） | `system.json` 的 `pdfcpu_path`（默认 `pdfcpu`） |
 
 > 安装方式：
 > - **grep**：Linux/macOS 系统通常自带；Windows 需安装 Git Bash 或 WSL
-> - **pdfcpu**：`brew install pdfcpu`（macOS）或从 [https://github.com/pdfcpu/pdfcpu](https://github.com/pdfcpu/pdfcpu) 下载二进制
 
 ## 后端（Rust）
 

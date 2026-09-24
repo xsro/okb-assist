@@ -828,7 +828,7 @@ async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id
         Err(_) => return,
     };
 
-    let meta = extract_pdf_metadata(&content, Some(&doc.filename), Some(&settings.pdfcpu_path()));
+    let meta = extract_pdf_metadata(&content, Some(&doc.filename));
 
     let authors = meta.get("authors").and_then(|a| a.as_array()).cloned().unwrap_or_default();
     let authors_json = serde_json::to_string(&authors).unwrap_or_else(|_| "[]".to_string());
