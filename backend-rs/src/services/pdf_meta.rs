@@ -189,11 +189,75 @@ fn parse_mutool_info(output: &str) -> Option<InfoDict> {
 fn parse_pdf_string(s: &str) -> Option<String> {
     let s = s.trim();
     if s.starts_with('(') && s.ends_with(')') {
+        // 字面量字符串
         let inner = &s[1..s.len() - 1];
-        Some(inner.to_string())
+        Some(unescape_pdf_string(inner))
+    } else if s.starts_with('<') && s.ends_with('>') {
+        // 十六进制字符串
+        let hex = &s[1..s.len() - 1];
+        decode_hex_string(hex)
     } else {
         None
     }
+}
+
+/// 解析 PDF 字面量字符串中的转义字符
+#[cfg(not(feature = "mupdf"))]
+fn unescape_pdf_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('r') => result.push('\r'),
+                Some('t') => result.push('\t'),
+                Some('b') => result.push('\u{08}'),
+                Some('f') => result.push('\u{0C}'),
+                Some('(') => result.push('('),
+                Some(')') => result.push(')'),
+                Some('\\') => result.push('\\'),
+                Some(d) if d.is_ascii_digit() => {
+                    // 八进制转义（最多 3 位数字）
+                    let mut octal = String::new();
+                    octal.push(d);
+                    for _ in 0..2 {
+                        if let Some(next) = chars.clone().next() {
+                            if next.is_ascii_digit() {
+                                octal.push(chars.next().unwrap());
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    if let Ok(code) = u32::from_str_radix(&octal, 8) {
+                        if let Some(uc) = char::from_u32(code) {
+                            result.push(uc);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// 解码 PDF 十六进制字符串
+#[cfg(not(feature = "mupdf"))]
+fn decode_hex_string(hex: &str) -> Option<String> {
+    let hex: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let bytes: Result<Vec<u8>, _> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+        .collect();
+    let bytes = bytes.ok()?;
+    String::from_utf8(bytes).ok()
 }
 
 #[cfg(not(feature = "mupdf"))]
@@ -264,7 +328,7 @@ fn extract_full_text_via_mutool(content: &[u8]) -> Option<String> {
 
     let mutool_path = crate::settings::get_settings().mutool_path();
     let output = Command::new(&mutool_path)
-        .args(["draw", "-F", "text", temp_path.to_str()?])
+        .args(["draw", "-q", "-F", "text", temp_path.to_str()?])
         .output()
         .ok()?;
 
@@ -273,10 +337,10 @@ fn extract_full_text_via_mutool(content: &[u8]) -> Option<String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // 去掉 mutool 输出的页面头信息（如 "page /path/file.pdf 1"）
+    // 过滤可能残留的错误信息行
     let text: String = stdout
         .lines()
-        .filter(|line| !line.starts_with("page ") && !line.starts_with("system error"))
+        .filter(|line| !line.starts_with("system error") && !line.starts_with("cannot "))
         .collect::<Vec<&str>>()
         .join("\n");
 
