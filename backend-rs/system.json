@@ -13,5 +13,6 @@
   "uploads_folder": "data/_uploads",
   "cwd": "{system_dir}",
   "grep_path": "grep",
-  "mutool_path": "mutool"
+  "mutool_path": "mutool",
+  "ui_path": "frontend/dist"
 }

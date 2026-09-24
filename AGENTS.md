@@ -120,6 +120,7 @@ cargo build --release
 | `log_path` | 日志路径 | `stdout` |
 | `grep_path` | grep 可执行文件路径 | `grep` |
 | `mutool_path` | mutool 可执行文件路径 | `mutool` |
+| `ui_path` | 前端 UI 构建产物路径 | `frontend/dist` |
 
 示例：
 

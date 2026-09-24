@@ -399,10 +399,9 @@ async fn token_middleware(req: axum::extract::Request, next: Next) -> Response {
 /// - 命中真实文件时按扩展名返回 MIME 与缓存策略；
 /// - 其余客户端路由回退到 index.html。
 async fn spa_fallback(uri: axum::http::Uri) -> Response {
-    let dist_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("frontend")
-        .join("dist");
+    let ui_rel = crate::settings::get_settings().ui_path();
+    let cwd = crate::settings::get_settings().cwd();
+    let dist_dir = std::path::PathBuf::from(&cwd).join(&ui_rel);
     let index = dist_dir.join("index.html");
 
     let path = uri.path();

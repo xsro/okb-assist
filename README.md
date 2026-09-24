@@ -55,6 +55,7 @@ cargo run -- --host 0.0.0.0 --port 5001
 | `uploads_folder` | 上传目录 | `"data/_uploads"` |
 | `grep_path` | grep 可执行文件路径 | `"grep"` |
 | `mutool_path` | mutool 可执行文件路径 | `"mutool"` |
+| `ui_path` | 前端 UI 构建产物路径 | `"frontend/dist"` |
 
 详见 [AGENTS.md](AGENTS.md) 的配置章节。
 
