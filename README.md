@@ -9,9 +9,11 @@
 | 工具 | 用途 | 配置方式 |
 |------|------|----------|
 | `grep` | 全文搜索（`/api/documents/grep-search/`） | `system.json` 的 `grep_path`（默认 `grep`） |
+| `mutool` | PDF 元数据提取（未启用 `mupdf` feature 时使用） | 系统 PATH 中需包含 `mutool` |
 
 > 安装方式：
 > - **grep**：Linux/macOS 系统通常自带；Windows 需安装 Git Bash 或 WSL
+> - **mutool**：来自 MuPDF 工具集，安装方式见 <https://mupdf.com/downloads/>
 
 ## 后端（Rust）
 
@@ -51,6 +53,8 @@ cargo run -- --host 0.0.0.0 --port 5001
 | `pdf_path` | PDF 文件路径 | `"data/pdfs/{id}/{id}.pdf"` |
 | `info_path` | 元信息 JSON 路径 | `"data/markdowns/{id}.json"` |
 | `uploads_folder` | 上传目录 | `"data/_uploads"` |
+| `grep_path` | grep 可执行文件路径 | `"grep"` |
+| `mutool_path` | mutool 可执行文件路径 | `"mutool"` |
 
 详见 [AGENTS.md](AGENTS.md) 的配置章节。
 

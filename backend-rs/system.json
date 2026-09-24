@@ -12,5 +12,6 @@
   "token": "change-me",
   "uploads_folder": "data/_uploads",
   "cwd": "{system_dir}",
-  "grep_path": "grep"
+  "grep_path": "grep",
+  "mutool_path": "mutool"
 }

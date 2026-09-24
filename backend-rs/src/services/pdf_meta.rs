@@ -1,9 +1,15 @@
 //! 轻量级 PDF 元数据（含 DOI）提取。
 //!
-//! 使用 `mupdf` 提取 Info 字典和页面文本。
-//! 当 Info 字典为空时，从页面文本中通过启发式规则提取标题、作者、期刊、年份等。
+//! 当启用 `mupdf` feature 时，使用内置的 `mupdf` 库提取 Info 字典和页面文本。
+//! 未启用时，回退为调用外部 `mutool` 工具完成相同功能。
 
+#[cfg(feature = "mupdf")]
 use mupdf::{Document, MetadataName, TextExtractOptions};
+
+use std::process::Command;
+use tempfile::TempDir;
+
+// ── 公共 API ──────────────────────────────────────────────
 
 /// 规范化 DOI
 pub fn normalize_doi(raw: &str) -> Option<String> {
@@ -33,6 +39,7 @@ pub fn normalize_doi(raw: &str) -> Option<String> {
 }
 
 /// 从 PDF 字节内容中提取元数据
+#[cfg(feature = "mupdf")]
 pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>) -> serde_json::Value {
     let mut result = serde_json::Map::new();
 
@@ -53,8 +60,28 @@ pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>) -> serde_jso
     serde_json::Value::Object(result)
 }
 
-// ── Info 字典提取 ────────────────────────────────────────
+/// 从 PDF 字节内容中提取元数据（回退方案：调用外部 mutool）
+#[cfg(not(feature = "mupdf"))]
+pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>) -> serde_json::Value {
+    let mut result = serde_json::Map::new();
 
+    // 1. 通过 mutool 提取 Info 字典
+    if let Some(info) = extract_info_dict_via_mutool(content) {
+        extract_from_info_dict_parsed(&info, filename, &mut result);
+    }
+
+    // 2. 通过 mutool 提取页面文本
+    if let Some(text) = extract_full_text_via_mutool(content) {
+        let normalized = normalize_fullwidth(&text);
+        extract_from_text(&normalized, filename, &mut result);
+    }
+
+    serde_json::Value::Object(result)
+}
+
+// ── mupdf 路径：Info 字典提取 ─────────────────────────────
+
+#[cfg(feature = "mupdf")]
 fn extract_from_info_dict(
     doc: &Document,
     filename: Option<&str>,
@@ -101,8 +128,115 @@ fn extract_from_info_dict(
     }
 }
 
+// ── mutool 路径：Info 字典提取 ────────────────────────────
+
+#[cfg(not(feature = "mupdf"))]
+struct InfoDict {
+    title: Option<String>,
+    author: Option<String>,
+    subject: Option<String>,
+    keywords: Option<String>,
+    creation_date: Option<String>,
+}
+
+#[cfg(not(feature = "mupdf"))]
+fn extract_info_dict_via_mutool(content: &[u8]) -> Option<InfoDict> {
+    let temp_dir = TempDir::new().ok()?;
+    let temp_path = temp_dir.path().join("extract_info.pdf");
+    std::fs::write(&temp_path, content).ok()?;
+
+    let mutool_path = crate::settings::get_settings().mutool_path();
+    let output = Command::new(&mutool_path)
+        .args(["show", temp_path.to_str()?, "trailer.Info"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_mutool_info(&stdout)
+}
+
+#[cfg(not(feature = "mupdf"))]
+fn parse_mutool_info(output: &str) -> Option<InfoDict> {
+    let mut title = None;
+    let mut author = None;
+    let mut subject = None;
+    let mut keywords = None;
+    let mut creation_date = None;
+
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(val) = line.strip_prefix("/Title") {
+            title = parse_pdf_string(val);
+        } else if let Some(val) = line.strip_prefix("/Author") {
+            author = parse_pdf_string(val);
+        } else if let Some(val) = line.strip_prefix("/Subject") {
+            subject = parse_pdf_string(val);
+        } else if let Some(val) = line.strip_prefix("/Keywords") {
+            keywords = parse_pdf_string(val);
+        } else if let Some(val) = line.strip_prefix("/CreationDate") {
+            creation_date = parse_pdf_string(val);
+        }
+    }
+
+    Some(InfoDict { title, author, subject, keywords, creation_date })
+}
+
+#[cfg(not(feature = "mupdf"))]
+fn parse_pdf_string(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.starts_with('(') && s.ends_with(')') {
+        let inner = &s[1..s.len() - 1];
+        Some(inner.to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(not(feature = "mupdf"))]
+fn extract_from_info_dict_parsed(
+    info: &InfoDict,
+    filename: Option<&str>,
+    result: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    if let Some(ref val) = info.title {
+        let val = val.trim().to_string();
+        if !val.is_empty() && !looks_like_filename(&val, filename) && !looks_like_placeholder(&val) {
+            result.insert("title".to_string(), serde_json::Value::String(val));
+        }
+    }
+    if let Some(ref val) = info.author {
+        let val = val.trim().to_string();
+        if !val.is_empty() {
+            let authors = split_authors(&val);
+            result.insert("authors".to_string(), serde_json::json!(authors));
+        }
+    }
+    if let Some(ref val) = info.keywords {
+        let val = val.trim().to_string();
+        if !val.is_empty() {
+            result.insert("keywords".to_string(), serde_json::json!(split_keywords(&val)));
+        }
+    }
+    if let Some(ref val) = info.subject {
+        let val = val.trim().to_string();
+        if !val.is_empty() && val.len() > 80 {
+            result.insert("abstract".to_string(), serde_json::Value::String(val));
+        }
+    }
+    if let Some(ref val) = info.creation_date {
+        if let Some(year) = parse_year_from_date(val) {
+            result.insert("year".to_string(), serde_json::Value::Number(year.into()));
+        }
+    }
+}
+
 // ── 页面文本提取 ─────────────────────────────────────────
 
+#[cfg(feature = "mupdf")]
 fn extract_full_text(doc: &Document) -> Option<String> {
     let page_count = doc.page_count().ok()?;
     let opts = TextExtractOptions::default();
@@ -116,6 +250,37 @@ fn extract_full_text(doc: &Document) -> Option<String> {
     }
 
     if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+#[cfg(not(feature = "mupdf"))]
+fn extract_full_text_via_mutool(content: &[u8]) -> Option<String> {
+    let temp_dir = TempDir::new().ok()?;
+    let temp_path = temp_dir.path().join("extract_text.pdf");
+    std::fs::write(&temp_path, content).ok()?;
+
+    let mutool_path = crate::settings::get_settings().mutool_path();
+    let output = Command::new(&mutool_path)
+        .args(["draw", "-F", "text", temp_path.to_str()?])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // 去掉 mutool 输出的页面头信息（如 "page /path/file.pdf 1"）
+    let text: String = stdout
+        .lines()
+        .filter(|line| !line.starts_with("page ") && !line.starts_with("system error"))
+        .collect::<Vec<&str>>()
+        .join("\n");
+
+    if text.trim().is_empty() {
         None
     } else {
         Some(text)

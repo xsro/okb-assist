@@ -17,7 +17,7 @@ OKB-Assist 是一个**本地学术文献库管理系统**（论文与专著）�
 - **前端**：TypeScript + Vue 3（Vite 构建），位于 `frontend/`
 - **数据**：SQLx + SQLite（`okb_assist.db`）
 - **向量库**：Qdrant（默认），适配器层同时支持 Milvus / Chroma
-- **外部服务**：MinerU（解析）、Ollama（LLM/嵌入）、Qdrant（向量）、Fastembed（嵌入服务）、OpenWebUI（可选前端）
+- **外部服务**：MinerU（解析）、Ollama（LLM/嵌入）、Qdrant（向量）、Fastembed（嵌入服务）、OpenWebUI（可选前端）、mutool（PDF 元数据提取，未启用 mupdf feature 时使用）
 - **客户端工具**：`client-rs/` — Zotero CSV 导入工具（Rust）
 
 ## 包管理与常用命令
@@ -28,13 +28,18 @@ OKB-Assist 是一个**本地学术文献库管理系统**（论文与专著）�
 
 ```bash
 cd backend-rs
-cargo build                  # 编译（debug）
-cargo build --release        # 编译（release）
+cargo build                  # 编译（debug，默认不启用 mupdf，使用外部 mutool）
+cargo build --features mupdf # 编译（debug，启用内置 mupdf）
+cargo build --release        # 编译（release，默认不启用 mupdf）
+cargo build --release --features mupdf # 编译（release，启用内置 mupdf）
 cargo run                    # 启动（默认 host 0.0.0.0、port 5001）
+cargo run --features mupdf   # 启用内置 mupdf 启动
 cargo run -- --host 0.0.0.0 --port 5001 --log-level debug   # 指定参数启动
 ```
 
 > `okb_assist` 支持 argparse 等价命令行参数：`--host`、`--port`（默认 5001）、`--log-level`（trace/debug/info/warn/error，默认 info）。
+>
+> **Feature `mupdf`**：默认不启用，使用外部 `mutool` 工具提取 PDF 元数据。启用后使用内置 `mupdf` 库，编译时间更长但无需外部依赖。
 
 ### 前端
 
@@ -113,6 +118,8 @@ cargo build --release
 | `uploads_folder` | 上传目录 | `data/_uploads` |
 | `config_path` | config.json 路径 | `config.json` |
 | `log_path` | 日志路径 | `stdout` |
+| `grep_path` | grep 可执行文件路径 | `grep` |
+| `mutool_path` | mutool 可执行文件路径 | `mutool` |
 
 示例：
 
