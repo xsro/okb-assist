@@ -316,6 +316,14 @@ fn extract_full_text(doc: &Document) -> Option<String> {
     if text.is_empty() {
         None
     } else {
+        // 调试：保存提取的文本到临时文件
+        let debug_path = std::env::temp_dir().join("okb_assist_mupdf_text.txt");
+        if let Ok(mut f) = std::fs::File::create(&debug_path) {
+            use std::io::Write;
+            let _ = f.write_all(text.as_bytes());
+            tracing::debug!("mupdf 提取文本已保存到: {:?}", debug_path);
+        }
+        tracing::debug!("mupdf 提取文本内容:\n{}", text);
         Some(text)
     }
 }
@@ -347,6 +355,14 @@ fn extract_full_text_via_mutool(content: &[u8]) -> Option<String> {
     if text.trim().is_empty() {
         None
     } else {
+        // 调试：保存提取的文本到临时文件
+        let debug_path = std::env::temp_dir().join("okb_assist_mutool_text.txt");
+        if let Ok(mut f) = std::fs::File::create(&debug_path) {
+            use std::io::Write;
+            let _ = f.write_all(text.as_bytes());
+            tracing::debug!("mutool 提取文本已保存到: {:?}", debug_path);
+        }
+        tracing::debug!("mutool 提取文本内容:\n{}", text);
         Some(text)
     }
 }
