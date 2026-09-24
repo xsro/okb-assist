@@ -2,6 +2,8 @@ name: Build Backend Binaries
 
 on:
   push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
