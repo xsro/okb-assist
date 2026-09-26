@@ -74,6 +74,10 @@
         <span class="action-label">文件管理</span>
         <div class="action-buttons">
           <button class="btn btn-outline" @click="selectReplacePdf">替换 PDF</button>
+          <button class="btn btn-outline" @click="rehash">重算哈希</button>
+          <span v-if="hashResult" class="hash-result">
+            {{ hashResult.old_file_hash === hashResult.file_hash ? '哈希一致' : '哈希已更新' }}
+          </span>
           <input
             ref="replacePdfInput"
             type="file"
@@ -142,7 +146,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getDocument, updateDocument, replacePdf, deleteDocument } from '@/api/documents'
+import { getDocument, updateDocument, replacePdf, deleteDocument, rehashDocument } from '@/api/documents'
 import { getServiceConfig } from '@/api/config'
 import {
   parseDocument,
@@ -170,6 +174,7 @@ const replacePdfInput = ref<HTMLInputElement>()
 const vectorDbs = ref<VectorDbConfig[]>([])
 const selectedIndexDb = ref('')
 const docIndexes = ref<DocumentIndexInfo[]>([])
+const hashResult = ref<{ file_hash: string; old_file_hash: string | null } | null>(null)
 
 const enabledVectorDbs = computed(() =>
   vectorDbs.value.filter((db) => db.enabled !== false)
@@ -318,6 +323,18 @@ async function enrichPdfMeta() {
   }
 }
 
+async function rehash() {
+  const id = parseInt(route.params.id as string)
+  try {
+    const res = await rehashDocument(id)
+    hashResult.value = res
+    showSuccess('哈希已重算')
+    load()
+  } catch {
+    showError('重算哈希失败')
+  }
+}
+
 watch(() => route.params.id, load)
 onMounted(() => {
   loadVectorDbs()
@@ -414,6 +431,14 @@ onMounted(() => {
 
 .action-group-danger .action-label {
   color: var(--danger);
+}
+
+.hash-result {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 4px 8px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
 }
 
 .form-row {

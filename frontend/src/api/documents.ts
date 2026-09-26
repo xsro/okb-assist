@@ -140,6 +140,14 @@ export function getFileAlias(id: number) {
   return apiGet<{ url: string }>(`/assist/api/documents/${id}/file-alias/`)
 }
 
+/** 重算文档哈希 */
+export function rehashDocument(id: number) {
+  return apiPost<{ id: number; file_hash: string; old_file_hash: string | null; updated_at: string }>(
+    `/assist/api/documents/${id}/rehash/`,
+    {}
+  )
+}
+
 /** 替换文档 PDF */
 export function replacePdf(id: number, file: File) {
   const fd = new FormData()
