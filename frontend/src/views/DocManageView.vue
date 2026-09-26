@@ -1,7 +1,7 @@
 <template>
   <div class="doc-manage-view" v-if="doc">
     <div class="detail-header">
-      <h2>文档管理: {{ doc.title }}</h2>
+      <h2>文档管理: {{ doc.title || doc.filename || '(无标题)' }}</h2>
       <router-link :to="{ name: 'detail', params: { id: doc.id } }" class="btn btn-sm btn-outline">
         返回详情
       </router-link>

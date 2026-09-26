@@ -67,7 +67,7 @@
           <td>{{ doc.id }}</td>
           <td>
             <router-link :to="{ name: 'detail', params: { id: doc.id } }">
-              {{ doc.title }}
+              {{ doc.title || doc.filename || '(无标题)' }}
             </router-link>
           </td>
           <td>{{ doc.authors || '-' }}</td>
@@ -103,7 +103,7 @@
           <StatusBadge :status="doc.status" />
         </div>
         <router-link :to="{ name: 'detail', params: { id: doc.id } }" class="doc-card-title">
-          {{ doc.title }}
+          {{ doc.title || doc.filename || '(无标题)' }}
         </router-link>
         <div class="doc-card-meta">
           <span v-if="doc.authors">👤 {{ doc.authors }}</span>

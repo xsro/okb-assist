@@ -21,6 +21,7 @@ export interface Document {
   status: DocStatus
   index_status: IndexStatus
   indexed_dbs?: string[]
+  filename: string
   file_hash: string | null
   file_size: number | null
   created_at: string

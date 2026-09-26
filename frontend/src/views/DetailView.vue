@@ -1,7 +1,7 @@
 <template>
   <div class="detail-view" v-if="doc">
     <div class="detail-header">
-      <h2>{{ doc.title }}</h2>
+      <h2>{{ doc.title || doc.filename || '(无标题)' }}</h2>
       <div class="detail-actions">
         <router-link :to="{ name: 'docManage', params: { id: doc.id } }" class="btn btn-sm btn-outline">
           管理
@@ -23,6 +23,7 @@
         <tr><th>文档类型</th><td>{{ doc.doc_type || '-' }}</td></tr>
         <tr><th>DOI</th><td>{{ doc.doi || '-' }}</td></tr>
         <tr><th>关键词</th><td>{{ doc.keywords || '-' }}</td></tr>
+        <tr><th>文件名</th><td>{{ doc.filename }}</td></tr>
         <tr><th>文件哈希</th><td>{{ doc.file_hash || '-' }}</td></tr>
         <tr><th>文件大小</th><td>{{ formatSize(doc.file_size) }}</td></tr>
         <tr><th>状态</th><td><StatusBadge :status="doc.status" /></td></tr>
@@ -51,7 +52,7 @@
         </div>
         <div class="info-row">
           <span class="info-label">标题</span>
-          <span class="info-value">{{ doc.title }}</span>
+          <span class="info-value">{{ doc.title || doc.filename || '(无标题)' }}</span>
         </div>
         <div class="info-row">
           <span class="info-label">作者</span>
