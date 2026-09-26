@@ -199,6 +199,8 @@ pub struct DocumentOut {
     pub abstract_en: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub journal_en: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mineru_task_id: Option<String>,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_message: Option<String>,
@@ -258,6 +260,7 @@ async fn doc_to_out(doc: &Document, settings: &Settings, db: &Database) -> Docum
         keywords_en: doc.keywords_en.clone(),
         abstract_en: doc.abstract_en.clone(),
         journal_en: doc.journal_en.clone(),
+        mineru_task_id: doc.mineru_task_id.clone(),
         status: doc.status.clone(),
         status_message: doc.status_message.clone(),
         progress: Some(doc.progress),
