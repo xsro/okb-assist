@@ -1,24 +1,46 @@
+//! OKB-Assist 客户端工具
+//!
+//! 子命令:
+//!   zotero <csv_file>   — 从 Zotero 导出的 CSV 导入文献
+//!   dir    <dir>        — 扫描目录中的 PDF，与服务器比对后交互上传
+
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use walkdir::WalkDir;
 
 // ==================== CLI 参数 ====================
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "import-zotero",
-    about = "读取 Zotero 导出的 CSV，逐条上传到 OKB-Assist 服务",
-    after_help = r"用法示例:
-    import-zotero zotero_export.csv
-    import-zotero zotero_export.csv --storage-root /path/to/storage
-    import-zotero data\我的文库.csv --base-url http://192.168.1.100:5001 --token change-me"
+    name = "okb-client",
+    about = "OKB-Assist 客户端工具",
+    version,
+    subcommand_required = true,
+    arg_required_else_help = true,
 )]
-struct Args {
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Parser, Debug)]
+enum Command {
+    /// 从 Zotero 导出的 CSV 导入文献
+    Zotero(ZoteroArgs),
+    /// 扫描目录中的 PDF，与服务器比对后交互上传
+    Dir(DirArgs),
+}
+
+/// Zotero CSV 导入参数
+#[derive(Parser, Debug)]
+struct ZoteroArgs {
     /// Zotero 导出的 CSV 文件路径
     csv_file: String,
 
@@ -49,6 +71,33 @@ struct Args {
     /// 显示解析出的元数据详情
     #[arg(long)]
     debug: bool,
+}
+
+/// 目录扫描参数
+#[derive(Parser, Debug)]
+struct DirArgs {
+    /// 要扫描的目录路径（包含 PDF 文件）
+    dir: String,
+
+    /// OKB-Assist 服务地址
+    #[arg(long, default_value = "http://192.168.1.122:5001")]
+    base_url: String,
+
+    /// 访问令牌
+    #[arg(long)]
+    token: Option<String>,
+
+    /// 试运行，不实际上传
+    #[arg(long)]
+    dry_run: bool,
+
+    /// 递归搜索子目录
+    #[arg(long, short)]
+    recursive: bool,
+
+    /// 上传后触发解析流水线（需要显式指定）
+    #[arg(long)]
+    process: bool,
 }
 
 // ==================== 数据类型 ====================
@@ -83,8 +132,17 @@ struct DocMetadata {
 
 /// diff-dois 接口返回
 #[derive(Debug, Deserialize)]
-struct DiffResult {
+struct DoiDiffResult {
     missing: Vec<String>,
+    #[serde(default)]
+    present_count: Option<usize>,
+}
+
+/// diff-hashes 接口返回
+#[derive(Debug, Deserialize)]
+struct HashDiffResult {
+    missing: Vec<String>,
+    invalid: Vec<String>,
     #[serde(default)]
     present_count: Option<usize>,
 }
@@ -95,7 +153,7 @@ struct UploadResult {
     id: u64,
 }
 
-/// 本地可上传文档
+/// 本地可上传文档（Zotero）
 struct LocalDoc {
     doi: String,
     file_path: String,
@@ -104,7 +162,493 @@ struct LocalDoc {
     info: HashMap<String, String>,
 }
 
-// ==================== 列名映射（兼容不同导出格式） ====================
+/// 本地 PDF 文件（Dir 子命令）
+struct LocalPdf {
+    path: PathBuf,
+    hash: String,
+}
+
+// ==================== Token 读取 ====================
+
+/// 按优先级读取 token: 参数 > 环境变量 > 文件
+fn read_token(arg_token: Option<&str>) -> Option<String> {
+    if let Some(t) = arg_token {
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    if let Ok(t) = std::env::var("OKB_ASSIST_TOKEN") {
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    let token_file = dirs::home_dir()?.join(".okb_assist_token");
+    let content = std::fs::read_to_string(&token_file).ok()?;
+    let t = content.trim().to_string();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t)
+    }
+}
+
+// ==================== HTTP 客户端 ====================
+
+/// 构造带超时（120s）且跟随重定向的 HTTP 客户端
+fn http_client() -> Result<Client> {
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::default())
+        .build()
+        .context("无法创建 HTTP 客户端")
+}
+
+fn auth_headers(token: &Option<String>) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        "application/json".parse().unwrap(),
+    );
+    if let Some(t) = token {
+        headers.insert("X-Token", t.parse().unwrap());
+    }
+    headers
+}
+
+// ==================== SHA256 哈希 ====================
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let data = std::fs::read(path).context(format!("无法读取文件: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&data);
+    let result = hasher.finalize();
+    Ok(hex::encode(result))
+}
+
+// ==================== API 调用 ====================
+
+/// 批量比对 DOI，返回服务器缺失的 DOI 列表
+async fn api_diff_dois(
+    client: &Client,
+    base_url: &str,
+    dois: &[String],
+    token: &Option<String>,
+) -> Option<DoiDiffResult> {
+    let url = format!("{}/assist/api/documents/diff-dois", base_url);
+    let body = serde_json::json!({ "dois": dois });
+    match client
+        .post(&url)
+        .headers(auth_headers(token))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status() == reqwest::StatusCode::OK => resp.json().await.ok(),
+        Ok(resp) => {
+            eprintln!("错误: diff-dois 请求失败: {}", resp.status());
+            None
+        }
+        Err(e) => {
+            eprintln!("错误: 无法连接服务器进行 diff-dois: {}", e);
+            None
+        }
+    }
+}
+
+/// 批量比对文件哈希，返回服务器缺失的哈希列表
+async fn api_diff_hashes(
+    client: &Client,
+    base_url: &str,
+    hashes: &[String],
+    token: &Option<String>,
+) -> Option<HashDiffResult> {
+    let url = format!("{}/assist/api/documents/diff-hashes", base_url);
+    let body = serde_json::json!({ "hashes": hashes });
+    match client
+        .post(&url)
+        .headers(auth_headers(token))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status() == reqwest::StatusCode::OK => resp.json().await.ok(),
+        Ok(resp) => {
+            eprintln!("错误: diff-hashes 请求失败: {}", resp.status());
+            None
+        }
+        Err(e) => {
+            eprintln!("错误: 无法连接服务器进行 diff-hashes: {}", e);
+            None
+        }
+    }
+}
+
+/// 上传 PDF 文件到服务器
+async fn api_upload(
+    client: &Client,
+    base_url: &str,
+    file_path: &Path,
+    token: &Option<String>,
+) -> Option<UploadResult> {
+    let filename = file_path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown.pdf".to_string());
+
+    let file_data = match tokio::fs::read(file_path).await {
+        Ok(data) => data,
+        Err(e) => {
+            eprintln!("  上传失败: 无法读取文件 {}: {}", file_path.display(), e);
+            return None;
+        }
+    };
+
+    let file_part = reqwest::multipart::Part::bytes(file_data)
+        .file_name(filename)
+        .mime_str("application/pdf")
+        .unwrap();
+
+    let form = reqwest::multipart::Form::new().part("file", file_part);
+
+    let url = format!("{}/assist/api/documents/upload", base_url);
+    let mut req = client.post(&url).multipart(form);
+    if let Some(t) = token {
+        req = req.header("X-Token", t.as_str());
+    }
+
+    match req.send().await {
+        Ok(resp) if resp.status() == reqwest::StatusCode::OK => resp.json().await.ok(),
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            eprintln!(
+                "  上传失败: {} - {}",
+                status,
+                &body[..body.len().min(200)]
+            );
+            None
+        }
+        Err(e) => {
+            eprintln!("  上传失败: {}", e);
+            None
+        }
+    }
+}
+
+/// 触发文档解析流水线
+async fn api_trigger_pipeline(
+    client: &Client,
+    base_url: &str,
+    doc_id: u64,
+    token: &Option<String>,
+) -> bool {
+    let url = format!("{}/assist/api/pipeline/process/{}", base_url, doc_id);
+    let mut req = client.post(&url).headers(auth_headers(token));
+    if let Some(t) = token {
+        req = req.header("X-Token", t.as_str());
+    }
+    match req.send().await {
+        Ok(resp) if resp.status() == reqwest::StatusCode::OK => true,
+        Ok(resp) => {
+            eprintln!("  触发流水线失败: {}", resp.status());
+            false
+        }
+        Err(e) => {
+            eprintln!("  触发流水线失败: {}", e);
+            false
+        }
+    }
+}
+
+/// 更新文档元数据
+async fn api_update_metadata(
+    client: &Client,
+    base_url: &str,
+    doc_id: u64,
+    metadata: &DocMetadata,
+    token: &Option<String>,
+) -> bool {
+    let url = format!("{}/assist/api/documents/{}", base_url, doc_id);
+    match client
+        .put(&url)
+        .headers(auth_headers(token))
+        .json(metadata)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status() == reqwest::StatusCode::OK => true,
+        Ok(resp) => {
+            eprintln!("  更新元数据失败: {}", resp.status());
+            false
+        }
+        Err(e) => {
+            eprintln!("  更新元数据失败: {}", e);
+            false
+        }
+    }
+}
+
+/// 将完整的原始 CSV 行 POST 到服务器（持久化到 markdowns/{doc_id}.json）
+async fn api_save_info(
+    client: &Client,
+    base_url: &str,
+    doc_id: u64,
+    info: &HashMap<String, String>,
+    token: &Option<String>,
+) -> bool {
+    let url = format!("{}/assist/api/documents/{}/info", base_url, doc_id);
+    let body = serde_json::json!({ "info": info });
+    match client
+        .post(&url)
+        .headers(auth_headers(token))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status() == reqwest::StatusCode::OK => true,
+        Ok(resp) => {
+            eprintln!("  保存文档信息失败: {}", resp.status());
+            false
+        }
+        Err(e) => {
+            eprintln!("  保存文档信息失败: {}", e);
+            false
+        }
+    }
+}
+
+// ==================== 子命令: dir ====================
+
+/// 扫描目录，收集 PDF 文件列表
+fn scan_pdfs(dir: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
+    let mut pdfs = Vec::new();
+
+    if !dir.is_dir() {
+        bail!("目录不存在: {}", dir.display());
+    }
+
+    let walker = if recursive {
+        WalkDir::new(dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_entry(|e| {
+                // 跳过隐藏目录和常见非文献目录
+                let name = e.file_name().to_string_lossy();
+                if e.depth() > 0 && e.file_type().is_dir() {
+                    return !name.starts_with('.')
+                        && name != "__pycache__"
+                        && name != "node_modules"
+                        && name != ".git";
+                }
+                true
+            })
+            .collect::<Vec<_>>()
+    } else {
+        // 非递归: 只读 dir 下直接文件
+        let entries = std::fs::read_dir(dir)
+            .with_context(|| format!("无法读取目录: {}", dir.display()))?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let ext = path
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                if ext == "pdf" {
+                    pdfs.push(path);
+                }
+            }
+        }
+        pdfs.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
+        return Ok(pdfs);
+    };
+
+    for entry in walker {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path().to_path_buf();
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if ext == "pdf" {
+            pdfs.push(path);
+        }
+    }
+
+    pdfs.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
+    Ok(pdfs)
+}
+
+async fn run_dir(args: &DirArgs) -> Result<()> {
+    let token = read_token(args.token.as_deref());
+    let process = args.process;
+
+    println!("扫描目录: {}", args.dir);
+    println!("递归搜索: {}", if args.recursive { "是" } else { "否" });
+    println!("服务地址: {}", args.base_url);
+    println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
+    println!();
+
+    // 1. 扫描 PDF
+    let all_pdfs = scan_pdfs(Path::new(&args.dir), args.recursive)?;
+    let total = all_pdfs.len();
+    if total == 0 {
+        println!("目录中没有找到 PDF 文件。");
+        return Ok(());
+    }
+    println!("找到 {} 个 PDF 文件。", total);
+    println!();
+
+    // 2. 计算 SHA256 哈希
+    let mut pdfs_with_hash: Vec<LocalPdf> = Vec::with_capacity(total);
+    for (i, path) in all_pdfs.iter().enumerate() {
+        print!("  [{}/{}] 计算哈希: {} ... ", i + 1, total, path.display());
+        io::stdout().flush().ok();
+        match sha256_file(path) {
+            Ok(hash) => {
+                pdfs_with_hash.push(LocalPdf {
+                    path: path.clone(),
+                    hash: hash.clone(),
+                });
+                println!("{}", &hash[..16]);
+            }
+            Err(e) => {
+                println!("失败: {}", e);
+            }
+        }
+    }
+    println!();
+
+    if pdfs_with_hash.is_empty() {
+        println!("没有可读取的 PDF 文件。");
+        return Ok(());
+    }
+
+    // 3. 与服务端比对
+    let client = http_client()?;
+    let hashes: Vec<String> = pdfs_with_hash.iter().map(|p| p.hash.clone()).collect();
+    println!("正在与服务器比对 {} 个文件哈希 ...", hashes.len());
+    let diff = match api_diff_hashes(&client, &args.base_url, &hashes, &token).await {
+        Some(d) => d,
+        None => {
+            println!("错误: diff-hashes 请求失败，无法继续。");
+            return Ok(());
+        }
+    };
+
+    let missing_hashes: HashSet<String> = diff.missing.into_iter().collect();
+    let to_upload: Vec<&LocalPdf> = pdfs_with_hash
+        .iter()
+        .filter(|p| missing_hashes.contains(&p.hash))
+        .collect();
+
+    let present_count = diff.present_count.unwrap_or(total - to_upload.len());
+    println!();
+    println!("本地 PDF:         {}", total);
+    println!("服务器已存在:     {}", present_count);
+    println!("待上传（新文件）: {}", to_upload.len());
+    if !diff.invalid.is_empty() {
+        println!("（警告: {} 个哈希格式无效，可能未被正确比对）", diff.invalid.len());
+    }
+    println!();
+
+    if to_upload.is_empty() {
+        println!("所有文件已存在于服务器，无需上传。");
+        return Ok(());
+    }
+
+    // 4. 列出待上传文件
+    for (i, p) in to_upload.iter().enumerate() {
+        println!("  [{:>3}] {}", i + 1, p.path.display());
+    }
+    println!();
+
+    // 5. 交互选择
+    print!("请选择 [a] 全部上传  [s] 逐个选择  [q] 退出: ");
+    io::stdout().flush().ok();
+    let mut choice = String::new();
+    io::stdin().read_line(&mut choice).ok();
+    let choice = choice.trim().to_lowercase();
+
+    let mut uploaded = 0usize;
+    let mut failed = 0usize;
+
+    if choice == "q" {
+        println!("已退出。");
+        return Ok(());
+    }
+
+    let selected: Vec<&&LocalPdf> = if choice == "a" {
+        to_upload.iter().collect()
+    } else if choice == "s" {
+        let mut sel = Vec::new();
+        for p in &to_upload {
+            print!("上传 {}？[y/N]: ", p.path.display());
+            io::stdout().flush().ok();
+            let mut ans = String::new();
+            io::stdin().read_line(&mut ans).ok();
+            if ans.trim().to_lowercase() == "y" {
+                sel.push(p);
+            } else {
+                println!("  跳过。");
+            }
+        }
+        sel
+    } else {
+        println!("无效选择，退出。");
+        return Ok(());
+    };
+
+    if selected.is_empty() {
+        println!("未选择任何文件。");
+        return Ok(());
+    }
+
+    // 6. 执行上传
+    println!();
+    println!("开始上传 {} 个文件 ...", selected.len());
+    for p in &selected {
+        print!("  上传 {} ... ", p.path.display());
+        io::stdout().flush().ok();
+        if args.dry_run {
+            println!("[dry-run] 跳过");
+            uploaded += 1;
+            continue;
+        }
+        match api_upload(&client, &args.base_url, &p.path, &token).await {
+            Some(result) => {
+                println!("成功 -> id={}", result.id);
+                uploaded += 1;
+                // 触发解析流水线
+                if process {
+                    if api_trigger_pipeline(&client, &args.base_url, result.id, &token).await {
+                        println!("    -> 已触发流水线");
+                    }
+                }
+            }
+            None => {
+                println!("失败");
+                failed += 1;
+            }
+        }
+    }
+
+    // 7. 最终统计
+    println!();
+    println!("==================================================");
+    println!("已上传: {}", uploaded);
+    println!("失败:   {}", failed);
+    println!("==================================================");
+
+    Ok(())
+}
+
+// ==================== 子命令: zotero ====================
+// 以下代码从旧版 main.rs 迁移而来，功能不变
 
 /// Zotero CSV 列名 → 内部 key（小写匹配）
 fn canonical_key(col: &str) -> String {
@@ -155,8 +699,6 @@ fn canonical_key(col: &str) -> String {
     mapped.to_string()
 }
 
-// ==================== 类型映射 ====================
-
 fn map_doc_type(zotero_type: &str) -> String {
     let t = zotero_type.trim().to_lowercase();
     let mapped = match t.as_str() {
@@ -176,12 +718,10 @@ fn map_doc_type(zotero_type: &str) -> String {
         "magazinearticle" | "magazine article" => "journalArticle",
         "preprint" => "preprint",
         "review" => "review",
-        _ => zotero_type, // 未知类型保留原始值
+        _ => zotero_type,
     };
     mapped.to_string()
 }
-
-// ==================== 语言映射 ====================
 
 fn lang_map(l: &str) -> Option<&'static str> {
     match l {
@@ -208,7 +748,6 @@ fn normalize_language(lang: &str) -> Option<String> {
     if let Some(m) = lang_map(&l) {
         return Some(m.to_string());
     }
-    // 尝试取前两位
     if l.chars().count() >= 2 {
         let prefix: String = l.chars().take(2).collect();
         if let Some(m) = lang_map(&prefix) {
@@ -218,34 +757,7 @@ fn normalize_language(lang: &str) -> Option<String> {
     None
 }
 
-// ==================== Token 读取 ====================
-
-/// 按优先级读取 token: 参数 > 环境变量 > 文件
-fn read_token(arg_token: Option<&str>) -> Option<String> {
-    if let Some(t) = arg_token {
-        if !t.is_empty() {
-            return Some(t.to_string());
-        }
-    }
-    if let Ok(t) = std::env::var("OKB_ASSIST_TOKEN") {
-        if !t.is_empty() {
-            return Some(t);
-        }
-    }
-    let token_file = dirs::home_dir()?.join(".okb_assist_token");
-    let content = std::fs::read_to_string(&token_file).ok()?;
-    let t = content.trim().to_string();
-    if t.is_empty() {
-        None
-    } else {
-        Some(t)
-    }
-}
-
-// ==================== 文件路径解析 ====================
-
-/// 去掉 Zotero 附加在路径后的 ":mime:size" 后缀。
-/// 路径本身最多只有一个 ':'（Windows 盘符），从第二个 ':' 起截断。
+/// 去掉 Zotero 附加在路径后的 ":mime:size" 后缀
 fn strip_zotero_suffix(p: &str) -> &str {
     if let Some(first) = p.find(':') {
         if let Some(second_rel) = p[first + 1..].find(':') {
@@ -255,26 +767,19 @@ fn strip_zotero_suffix(p: &str) -> &str {
     p
 }
 
-/// 将 Windows Zotero storage 路径映射到本地 storage_root。
-/// 例如 C:\Users\X\Zotero\storage\HASH\file.pdf -> {storage_root}/HASH/file.pdf
+/// 将 Windows Zotero storage 路径映射到本地 storage_root
 fn map_storage_path(path: &str, root: &str) -> Option<String> {
     let comps: Vec<&str> = path.split(['/', '\\']).collect();
     if comps.len() > 5 {
         let rel = comps[5..].join(std::path::MAIN_SEPARATOR_STR);
         let root = root.trim_end_matches(['/', '\\']);
-        Some(format!(
-            "{}{}{}",
-            root,
-            std::path::MAIN_SEPARATOR,
-            rel
-        ))
+        Some(format!("{}{}{}", root, std::path::MAIN_SEPARATOR, rel))
     } else {
         None
     }
 }
 
-/// 解析 Zotero file 字段，返回存在的 PDF 文件路径列表。
-/// 支持分号分隔的多个路径，以及可选的 storage_root 映射。
+/// 解析 Zotero file 字段，返回存在的 PDF 文件路径列表
 fn parse_file_paths(file_field: &str, storage_root: &Option<String>) -> Vec<String> {
     let mut paths = Vec::new();
     for part in file_field.split(';') {
@@ -313,7 +818,6 @@ fn parse_file_paths(file_field: &str, storage_root: &Option<String>) -> Vec<Stri
     paths
 }
 
-/// 返回修改时间最新的文件路径
 fn get_newest_file(paths: &[String]) -> Option<String> {
     paths
         .iter()
@@ -326,10 +830,6 @@ fn get_newest_file(paths: &[String]) -> Option<String> {
         .cloned()
 }
 
-// ==================== Zotero 元数据解析 ====================
-
-/// 解析 Zotero 作者字段，支持多种格式。
-/// "Last, First" → "First Last"
 fn parse_authors(author_field: &str) -> Vec<String> {
     if author_field.is_empty() {
         return vec![];
@@ -355,7 +855,6 @@ fn parse_authors(author_field: &str) -> Vec<String> {
     authors
 }
 
-/// 从日期字符串中提取第一个 4 位连续数字年份
 fn extract_year_from_date(date: &str) -> Option<i32> {
     let mut run = String::new();
     for c in date.chars() {
@@ -371,19 +870,15 @@ fn extract_year_from_date(date: &str) -> Option<i32> {
     None
 }
 
-/// 从归一化后的 Zotero 行提取尽可能完整的元数据。
 fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
-    // ── 基本信息 ──
     let title = row.get("title").filter(|s| !s.is_empty()).cloned();
 
-    // 作者
     let authors = row
         .get("author")
         .map(|s| parse_authors(s))
         .filter(|v| !v.is_empty())
         .map(|v| serde_json::to_string(&v).unwrap_or_default());
 
-    // 年份：优先 Publication Year，其次从 Date 提取
     let year = row
         .get("year")
         .and_then(|s| s.trim().parse::<i32>().ok())
@@ -391,9 +886,6 @@ fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
 
     let doi = row.get("doi").filter(|s| !s.is_empty()).cloned();
 
-    // ── 期刊 / 来源 ──
-    // Zotero CSV 中 "Item Type" 才是文献类型，"Type" 是另一字段（常为空或自定义），
-    // 因此优先取 "Item Type"，回退到 "Type"。
     let item_type = row
         .get("item_type")
         .map(|s| s.trim().to_lowercase())
@@ -415,7 +907,6 @@ fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
 
     let abstract_text = row.get("abstract").filter(|s| !s.is_empty()).cloned();
 
-    // ── 标签 → 关键词 ──
     let keywords = row
         .get("tags")
         .map(|s| {
@@ -427,17 +918,14 @@ fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
         .filter(|v| !v.is_empty())
         .map(|v| serde_json::to_string(&v).unwrap_or_default());
 
-    // ── 文档类型 ──
     let doc_type = if item_type.is_empty() {
         None
     } else {
         Some(map_doc_type(&item_type))
     };
 
-    // ── 语言 ──
     let language = row.get("language").and_then(|s| normalize_language(s));
 
-    // ── 来源/出版信息 ──
     let mut source_parts: Vec<String> = Vec::new();
     if let Some(p) = row.get("publisher").filter(|s| !s.is_empty()) {
         source_parts.push(p.clone());
@@ -461,7 +949,6 @@ fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
         Some(source_parts.join("; "))
     };
 
-    // ── 卷号/期号/页码 → 拼接到 journal 末尾 ──
     let mut vip: Vec<String> = Vec::new();
     if let Some(v) = row.get("volume").filter(|s| !s.is_empty()) {
         vip.push(format!("Vol.{}", v));
@@ -482,7 +969,6 @@ fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
         }
     };
 
-    // ── ISBN/ISSN → 存入 source 末尾 ──
     let mut id_parts: Vec<String> = Vec::new();
     if let Some(v) = row.get("isbn").filter(|s| !s.is_empty()) {
         id_parts.push(format!("ISBN:{}", v));
@@ -498,7 +984,6 @@ fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
         });
     }
 
-    // ── URL ──（无 DOI 时把 URL 存入 source）
     if let Some(url) = row.get("url").filter(|s| !s.is_empty()) {
         if doi.is_none() {
             source = Some(match source {
@@ -508,7 +993,6 @@ fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
         }
     }
 
-    // ── 编辑/译者 → 存入 source ──
     let mut contrib: Vec<String> = Vec::new();
     if let Some(ed) = row.get("editor").filter(|s| !s.is_empty()) {
         let eds: Vec<&str> = ed
@@ -544,156 +1028,6 @@ fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
         source,
     }
 }
-
-// ==================== API 调用 ====================
-
-fn auth_headers(token: &Option<String>) -> reqwest::header::HeaderMap {
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(
-        reqwest::header::CONTENT_TYPE,
-        "application/json".parse().unwrap(),
-    );
-    if let Some(t) = token {
-        headers.insert("X-Token", t.parse().unwrap());
-    }
-    headers
-}
-
-/// 批量比对 DOI，返回服务器缺失的 DOI 列表
-async fn diff_dois(
-    client: &Client,
-    base_url: &str,
-    dois: &[String],
-    token: &Option<String>,
-) -> Option<DiffResult> {
-    let url = format!("{}/assist/api/documents/diff-dois", base_url);
-    let body = serde_json::json!({ "dois": dois });
-    match client
-        .post(&url)
-        .headers(auth_headers(token))
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status() == reqwest::StatusCode::OK => resp.json().await.ok(),
-        Ok(resp) => {
-            eprintln!("错误: diff-dois 请求失败: {}", resp.status());
-            None
-        }
-        Err(e) => {
-            eprintln!("错误: 无法连接服务器进行 diff: {}", e);
-            None
-        }
-    }
-}
-
-/// 上传 PDF 文件到服务器
-async fn upload_document(
-    client: &Client,
-    base_url: &str,
-    file_path: &str,
-    token: &Option<String>,
-) -> Option<UploadResult> {
-    let path = Path::new(file_path);
-    let filename = path
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown.pdf".to_string());
-
-    let file_data = match tokio::fs::read(file_path).await {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("  上传失败: 无法读取文件 {}: {}", file_path, e);
-            return None;
-        }
-    };
-
-    let file_part = reqwest::multipart::Part::bytes(file_data)
-        .file_name(filename)
-        .mime_str("application/pdf")
-        .unwrap();
-
-    let form = reqwest::multipart::Form::new().part("file", file_part);
-
-    let url = format!("{}/assist/api/documents/upload", base_url);
-    let mut req = client.post(&url).multipart(form);
-    if let Some(t) = token {
-        req = req.header("X-Token", t.as_str());
-    }
-
-    match req.send().await {
-        Ok(resp) if resp.status() == reqwest::StatusCode::OK => resp.json().await.ok(),
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            eprintln!("  上传失败: {} - {}", status, &body[..body.len().min(200)]);
-            None
-        }
-        Err(e) => {
-            eprintln!("  上传失败: {}", e);
-            None
-        }
-    }
-}
-
-/// 更新文档元数据
-async fn update_document_metadata(
-    client: &Client,
-    base_url: &str,
-    doc_id: u64,
-    metadata: &DocMetadata,
-    token: &Option<String>,
-) -> bool {
-    let url = format!("{}/assist/api/documents/{}", base_url, doc_id);
-    match client
-        .put(&url)
-        .headers(auth_headers(token))
-        .json(metadata)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status() == reqwest::StatusCode::OK => true,
-        Ok(resp) => {
-            eprintln!("  更新元数据失败: {}", resp.status());
-            false
-        }
-        Err(e) => {
-            eprintln!("  更新元数据失败: {}", e);
-            false
-        }
-    }
-}
-
-/// 将完整的原始 CSV 行 POST 到服务器（持久化到 markdowns/{doc_id}.json）
-async fn save_document_info(
-    client: &Client,
-    base_url: &str,
-    doc_id: u64,
-    info: &HashMap<String, String>,
-    token: &Option<String>,
-) -> bool {
-    let url = format!("{}/assist/api/documents/{}/info", base_url, doc_id);
-    let body = serde_json::json!({ "info": info });
-    match client
-        .post(&url)
-        .headers(auth_headers(token))
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status() == reqwest::StatusCode::OK => true,
-        Ok(resp) => {
-            eprintln!("  保存文档信息失败: {}", resp.status());
-            false
-        }
-        Err(e) => {
-            eprintln!("  保存文档信息失败: {}", e);
-            false
-        }
-    }
-}
-
-// ==================== 展示 ====================
 
 fn print_doc_detail(d: &LocalDoc) {
     let meta = &d.meta;
@@ -732,8 +1066,7 @@ fn print_doc_detail(d: &LocalDoc) {
     println!("  文件: {}", d.file_path);
 }
 
-/// 上传单篇文献。返回是否成功。
-async fn upload_one(
+async fn upload_one_zotero(
     d: &LocalDoc,
     base_url: &str,
     update_meta: bool,
@@ -745,7 +1078,7 @@ async fn upload_one(
         println!("  [dry-run] 跳过上传: {} ({})", d.doi, d.file_path);
         return true;
     }
-    let res = match upload_document(client, base_url, &d.file_path, token).await {
+    let res = match api_upload(client, base_url, Path::new(&d.file_path), token).await {
         Some(r) => r,
         None => {
             println!("  上传失败 {}: 无返回结果", d.doi);
@@ -754,19 +1087,15 @@ async fn upload_one(
     };
     let doc_id = res.id;
     if update_meta {
-        update_document_metadata(client, base_url, doc_id, &d.meta, token).await;
-        save_document_info(client, base_url, doc_id, &d.info, token).await;
+        api_update_metadata(client, base_url, doc_id, &d.meta, token).await;
+        api_save_info(client, base_url, doc_id, &d.info, token).await;
         println!("  已保存信息到 json: id={}", doc_id);
     }
     println!("  已上传: {} -> id={}", d.doi, doc_id);
     true
 }
 
-// ==================== 主流程 ====================
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = Args::parse();
+async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     let token = read_token(args.token.as_deref());
     let update_meta = args.update_meta && !args.no_update_meta;
 
@@ -781,7 +1110,6 @@ async fn main() -> Result<()> {
         bail!("错误: CSV 文件不存在: {}", args.csv_file);
     }
 
-    // 读取 CSV（自动处理 UTF-8 BOM，列名归一化为 canonical key）
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(true)
         .from_path(csv_path)
@@ -794,7 +1122,6 @@ async fn main() -> Result<()> {
         .collect();
     let canon: Vec<String> = headers.iter().map(|h| canonical_key(h)).collect();
 
-    // 1. 读取 CSV，构建本地可上传文档列表
     let mut local_docs: Vec<LocalDoc> = Vec::new();
     for record in rdr.records() {
         let record = record?;
@@ -808,13 +1135,13 @@ async fn main() -> Result<()> {
 
         let doi = norm.get("doi").cloned().unwrap_or_default();
         if doi.is_empty() {
-            continue; // DOI-based flow; skip rows w/o DOI
+            continue;
         }
         let file_field = norm.get("file").cloned().unwrap_or_default();
         let paths = parse_file_paths(&file_field, &args.storage_root);
         let file_path = match get_newest_file(&paths) {
             Some(f) => f,
-            None => continue, // not locally uploadable
+            None => continue,
         };
         let meta = parse_zotero_row(&norm);
         let info: ZoteroRow = raw
@@ -848,10 +1175,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    // 2. 与服务器做 diff
-    let client = client()?;
+    let client = http_client()?;
     let dois: Vec<String> = local_docs.iter().map(|d| d.doi.clone()).collect();
-    let diff = match diff_dois(&client, &args.base_url, &dois, &token).await {
+    let diff = match api_diff_dois(&client, &args.base_url, &dois, &token).await {
         Some(d) => d,
         None => {
             println!("错误: diff 失败，无法继续。");
@@ -885,7 +1211,6 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // 3. 交互选择
     print!("请选择 [a] 全部上传  [s] 逐个上传  [q] 退出: ");
     io::stdout().flush().ok();
     let mut choice = String::new();
@@ -899,7 +1224,8 @@ async fn main() -> Result<()> {
         return Ok(());
     } else if choice == "a" {
         for d in &to_upload {
-            if upload_one(d, &args.base_url, update_meta, args.dry_run, &client, &token).await {
+            if upload_one_zotero(d, &args.base_url, update_meta, args.dry_run, &client, &token).await
+            {
                 uploaded += 1;
             } else {
                 failed += 1;
@@ -913,7 +1239,16 @@ async fn main() -> Result<()> {
             let mut ans = String::new();
             io::stdin().read_line(&mut ans).ok();
             if ans.trim().to_lowercase() == "y" {
-                if upload_one(d, &args.base_url, update_meta, args.dry_run, &client, &token).await {
+                if upload_one_zotero(
+                    d,
+                    &args.base_url,
+                    update_meta,
+                    args.dry_run,
+                    &client,
+                    &token,
+                )
+                .await
+                {
                     uploaded += 1;
                 } else {
                     failed += 1;
@@ -927,7 +1262,6 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // 4. 最终统计
     println!();
     println!("==================================================");
     println!("已上传: {}", uploaded);
@@ -936,11 +1270,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// 构造带超时（120s）且跟随重定向的 HTTP 客户端
-fn client() -> Result<Client> {
-    Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .redirect(reqwest::redirect::Policy::default())
-        .build()
-        .context("无法创建 HTTP 客户端")
+// ==================== 入口 ====================
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match &cli.command {
+        Command::Zotero(args) => run_zotero(args).await,
+        Command::Dir(args) => run_dir(args).await,
+    }
 }

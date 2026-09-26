@@ -118,6 +118,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/by-doi/:doi", get(by_doi))
         .route("/assist/api/documents/diff-dois/", post(diff_dois))
         .route("/assist/api/documents/diff-dois", post(diff_dois))
+        .route("/assist/api/documents/diff-hashes/", post(diff_hashes))
+        .route("/assist/api/documents/diff-hashes", post(diff_hashes))
         .route("/assist/api/documents/:id/", get(get_document).put(update_document).delete(delete_document))
         .route("/assist/api/documents/:id", get(get_document).put(update_document).delete(delete_document))
         .route("/assist/api/documents/:id/info/", get(get_document_info).post(save_document_info))
@@ -1730,6 +1732,51 @@ async fn file_alias(
 #[derive(Debug, Deserialize)]
 pub struct DiffDoisRequest {
     pub dois: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiffHashesRequest {
+    pub hashes: Vec<String>,
+}
+
+/// POST /assist/api/documents/diff-hashes/ —— 判断哪些文件哈希已在库中
+async fn diff_hashes(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    Json(payload): Json<DiffHashesRequest>,
+) -> Response {
+    let submitted = payload.hashes.iter().filter(|h| !h.trim().is_empty() && h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())).map(|h| h.trim().to_string()).collect::<Vec<_>>();
+
+    let mut present: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    let mut invalid: Vec<String> = Vec::new();
+    for hash in &payload.hashes {
+        let h = hash.trim();
+        if h.is_empty() || h.len() != 64 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+            invalid.push(hash.clone());
+            continue;
+        }
+        let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM documents WHERE file_hash = ? LIMIT 1")
+            .bind(h)
+            .fetch_optional(db.pool())
+            .await
+            .unwrap_or(None);
+        if exists.is_some() {
+            present.push(h.to_string());
+        } else {
+            missing.push(h.to_string());
+        }
+    }
+    present.sort();
+
+    Json(json!({
+        "submitted": submitted,
+        "present": present,
+        "missing": missing,
+        "invalid": invalid,
+        "present_count": present.len(),
+        "missing_count": missing.len(),
+        "invalid_count": invalid.len(),
+    })).into_response()
 }
 
 /// POST /assist/api/documents/diff-dois/ —— 判断哪些 DOI 已在库中
