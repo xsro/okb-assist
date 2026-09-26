@@ -134,6 +134,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/:id/pdf", get(get_pdf).post(replace_pdf).head(check_pdf_exists))
         .route("/assist/api/documents/:id/file-alias/", get(file_alias))
         .route("/assist/api/documents/:id/file-alias", get(file_alias))
+        .route("/assist/api/documents/:id/rehash/", post(rehash_document))
+        .route("/assist/api/documents/:id/rehash", post(rehash_document))
         .layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024))
 }
 
@@ -2048,4 +2050,45 @@ async fn check_pdf_exists(
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
+}
+
+/// POST /assist/api/documents/{id}/rehash/ —— 重算文献 PDF 的哈希值并更新数据库
+async fn rehash_document(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+) -> Response {
+    let doc = match fetch_doc(&db, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文档不存在"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    };
+
+    let pdf_path = std::path::PathBuf::from(paths::get_pdf_path(&settings, id));
+    if !pdf_path.exists() {
+        return (StatusCode::NOT_FOUND, Json(json!({"detail": "PDF 文件不存在"}))).into_response();
+    }
+
+    let file_hash = match calculate_file_hash(&pdf_path.to_string_lossy()) {
+        Ok(h) => h,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": format!("计算哈希失败: {}", e)}))).into_response(),
+    };
+
+    let now = now_iso();
+    if let Err(e) = sqlx::query("UPDATE documents SET file_hash = ?, updated_at = ? WHERE id = ?")
+        .bind(&file_hash)
+        .bind(&now)
+        .bind(id)
+        .execute(db.pool())
+        .await
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
+    }
+
+    (StatusCode::OK, Json(json!({
+        "id": id,
+        "file_hash": file_hash,
+        "old_file_hash": doc.file_hash,
+        "updated_at": now,
+    }))).into_response()
 }
