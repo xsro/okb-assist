@@ -830,6 +830,19 @@ async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id
 
     let meta = extract_pdf_metadata(&content, Some(&doc.filename), Some(doc_id));
 
+    // 调试：打印提取的元数据
+    tracing::debug!("PDF 元数据提取结果 (doc_id={}): title={:?}, authors={:?}, year={:?}, journal={:?}, doi={:?}, volume={:?}, issue={:?}, pages={:?}",
+        doc_id,
+        value_str(&meta, "title"),
+        meta.get("authors").and_then(|a| a.as_array()).map(|a| a.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>()),
+        value_i64(&meta, "year"),
+        value_str(&meta, "journal"),
+        value_str(&meta, "doi"),
+        value_str(&meta, "volume"),
+        value_str(&meta, "issue"),
+        value_str(&meta, "pages"),
+    );
+
     let authors = meta.get("authors").and_then(|a| a.as_array()).cloned().unwrap_or_default();
     let authors_json = serde_json::to_string(&authors).unwrap_or_else(|_| "[]".to_string());
     let keywords = meta.get("keywords").and_then(|a| a.as_array()).cloned();
