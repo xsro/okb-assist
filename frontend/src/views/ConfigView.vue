@@ -38,7 +38,7 @@
             </div>
             <div class="form-group">
               <label>URL</label>
-              <input v-model="mu.url" type="text" :placeholder="mu.type === 'official' ? 'https://mineru.net' : 'http://127.0.0.1:8002'" />
+              <input v-model="mu.url" type="text" :placeholder="mu.type === 'official' ? 'https://mineru.net' : 'http://127.0.0.1:8000'" />
             </div>
           </div>
           <div class="form-row">
@@ -47,11 +47,21 @@
               <input v-model="mu.key" type="password" :placeholder="mu.type === 'official' ? 'sk-...' : '本地服务无需填写'" />
             </div>
             <div class="form-group" v-if="mu.type === 'official'">
-              <label>模型版本</label>
-              <select v-model="mu.model_version">
-                <option value="vlm">vlm（推荐）</option>
-                <option value="pipeline">pipeline</option>
-                <option value="MinerU-HTML">MinerU-HTML</option>
+              <label>解析档位</label>
+              <select v-model="mu.tier">
+                <option value="standard">standard（VLM，推荐）</option>
+                <option value="advanced">advanced（VLM 进阶）</option>
+                <option value="basic">basic（基础小模型）</option>
+                <option value="flash">flash（快速模式）</option>
+              </select>
+            </div>
+            <div class="form-group" v-else>
+              <label>解析档位</label>
+              <select v-model="mu.tier">
+                <option value="standard">standard（VLM，推荐）</option>
+                <option value="advanced">advanced（VLM 进阶）</option>
+                <option value="basic">basic（基础小模型）</option>
+                <option value="flash">flash（快速模式）</option>
               </select>
             </div>
           </div>
@@ -206,10 +216,10 @@ const vectorDbStatus = ref<Record<number, { status: string; detail: string }>>({
 function defaultMineruConfig(): MinerUConfig {
   return {
     type: 'local',
-    url: 'http://127.0.0.1:8002',
+    url: 'http://127.0.0.1:8000',
     key: 'key',
     task_timeout: 300,
-    model_version: 'vlm',
+    tier: 'standard',
     max_tasks: 3
   }
 }

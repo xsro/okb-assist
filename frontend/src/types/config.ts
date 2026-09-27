@@ -19,8 +19,10 @@ export interface MinerUConfig {
   url: string
   key: string
   task_timeout: number
-  model_version?: string
+  tier?: string
   max_tasks?: number
+  /** @deprecated 改用 tier */
+  model_version?: string
 }
 
 export interface ServiceConfig {
