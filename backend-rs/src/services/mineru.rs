@@ -5,16 +5,17 @@
 //! - 官方云（type=official）：调用 MinerU 官方云 V1 API（https://mineru.net）
 //!
 //! V1 API 请求周期：
-//!   1. POST /v1/uploads        → 创建上传，获取上传 URL 与鉴权头
+//!   1. POST /v1/uploads        → 创建上传（需 filename, bytes, sha256sum, mime_type）
 //!   2. PUT <upload_url>         → 上传文件字节（携带 upload_headers）
-//!   3. POST /v1/uploads/{id}/complete → 完成上传，获得 file_id
-//!   4. POST /v1/parse/jobs      → 提交解析任务（指定 file_id、tier 等）
+//!   3. POST /v1/uploads/{id}/complete → 完成上传，获得 file.id
+//!   4. POST /v1/parse/jobs      → 提交解析任务（source.type + source.file_id）
 //!   5. GET  /v1/parse/jobs/{id} → 轮询任务状态
 //!   6. GET  /v1/files/{id}/content → 下载结果文件
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
+use sha2::Digest;
 
 use serde_json::{json, Value};
 
@@ -54,8 +55,8 @@ impl MinerUClient {
             mineru_type: MineruType::from_str(&config.mineru_type),
             tier: config.tier.clone(),
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(60))
-                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(120))
+                .connect_timeout(std::time::Duration::from_secs(15))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
@@ -78,13 +79,15 @@ impl MinerUClient {
             .unwrap_or_else(|| "document.pdf".to_string());
 
         // Step 1: 创建上传
-        let (upload_id, upload_method, upload_url, upload_headers) =
-            self.create_upload(&file_name).await?;
-
-        // Step 2: 上传文件字节
         let pdf_bytes = tokio::fs::read(file_path).await?;
-        self.upload_file(&upload_method, &upload_url, &upload_headers, pdf_bytes)
-            .await?;
+        let (upload_id, upload_method, upload_url, upload_headers) =
+            self.create_upload(&file_name, pdf_bytes.len() as u64, &pdf_bytes).await?;
+
+        // Step 2: 上传文件字节（秒传命中则跳过）
+        if upload_method != "SKIP" {
+            self.upload_file(&upload_method, &upload_url, &upload_headers, pdf_bytes)
+                .await?;
+        }
 
         // Step 3: 完成上传 → 获得 file_id
         let file_id = self.complete_upload(&upload_id).await?;
@@ -96,7 +99,7 @@ impl MinerUClient {
     }
 
     /// 检查任务状态
-    /// 返回标准化结构：{ "status", "raw_status", "files", "error" }
+    /// 返回标准化结构：{ "status", "raw_status", "output_files", "error" }
     pub async fn check_task_status(&self, job_id: &str) -> Value {
         let resp = self
             .http
@@ -108,21 +111,40 @@ impl MinerUClient {
         match resp {
             Ok(resp) if resp.status().is_success() => {
                 let data: Value = resp.json().await.unwrap_or(json!({}));
-                let status = data["data"]["status"].as_str().unwrap_or("unknown");
+                let status = data["status"].as_str().unwrap_or("unknown");
                 let normalized = match status {
                     "completed" => "completed",
                     "failed" => "failed",
                     "queued" => "pending",
+                    "running" => "processing",
                     "processing" => "processing",
                     "partial" => "partial",
                     "canceled" => "canceled",
                     _ => status,
                 };
+
+                // 提取 output_files 中的文件 ID
+                let files = data["files"].as_array().cloned().unwrap_or_default();
+                let mut output_files: Vec<Value> = Vec::new();
+                for file_entry in &files {
+                    if let Some(of) = file_entry.get("output_files").and_then(|v| v.as_object()) {
+                        for (fmt_name, fmt_val) in of {
+                            if let Some(fid) = fmt_val.get("file_id").and_then(|v| v.as_str()) {
+                                output_files.push(json!({
+                                    "file_id": fid,
+                                    "format": fmt_name,
+                                    "bytes": fmt_val.get("bytes"),
+                                }));
+                            }
+                        }
+                    }
+                }
+
                 json!({
                     "status": normalized,
                     "raw_status": status,
-                    "files": data["data"]["files"].clone(),
-                    "error": data["data"]["error"].clone(),
+                    "output_files": output_files,
+                    "error": data.get("last_error").or_else(|| data.get("error")).cloned().unwrap_or(json!(null)),
                 })
             }
             _ => json!({"status": "unknown"}),
@@ -166,18 +188,21 @@ impl MinerUClient {
         output_dir: &str,
         doc_id: Option<i64>,
     ) -> anyhow::Result<String> {
-        // 获取任务状态（含 files 列表）
+        // 获取任务状态（含 output_files）
         let status_result = self.check_task_status(job_id).await;
         let status = status_result["status"].as_str().unwrap_or("");
         if status != "completed" && status != "partial" {
             anyhow::bail!("Task not completed (status: {})", status);
         }
 
-        // 获取 output files
-        let files = status_result["files"]
+        let output_files = status_result["output_files"]
             .as_array()
-            .ok_or_else(|| anyhow::anyhow!("No files in job result"))?
-            .clone();
+            .cloned()
+            .unwrap_or_default();
+
+        if output_files.is_empty() {
+            anyhow::bail!("No output files in job result");
+        }
 
         // 准备输出目录
         std::fs::create_dir_all(output_dir)?;
@@ -185,61 +210,53 @@ impl MinerUClient {
         let mut markdown_content: Option<String> = None;
         let mut image_bytes: Vec<(String, Vec<u8>)> = Vec::new();
 
-        for file in &files {
-            let purpose = file["purpose"].as_str().unwrap_or("");
-            let filename = file["filename"].as_str().unwrap_or("");
-            let file_id = file["file_id"].as_str().unwrap_or("");
+        for file_entry in &output_files {
+            let format = file_entry["format"].as_str().unwrap_or("");
+            let file_id = file_entry["file_id"].as_str().unwrap_or("");
 
-            if purpose != "parse_output" || file_id.is_empty() {
+            if file_id.is_empty() {
                 continue;
             }
 
-            // 下载文件
             let content = match self.download_file(file_id).await {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::warn!("下载文件 {} ({}) 失败: {}", filename, file_id, e);
+                    tracing::warn!("下载文件 {} 失败: {}", file_id, e);
                     continue;
                 }
             };
 
-            let lower = filename.to_lowercase();
-
-            if lower.ends_with(".md") {
-                markdown_content = Some(String::from_utf8_lossy(&content).to_string());
-            } else if lower.ends_with(".zip") {
-                // 压缩包 → 提取图片
-                if let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(&content)) {
-                    for i in 0..archive.len() {
-                        if let Ok(mut entry) = archive.by_index(i) {
-                            let name = entry.name().to_string();
-                            let lower_name = name.to_lowercase();
-                            if lower_name.ends_with(".png")
-                                || lower_name.ends_with(".jpg")
-                                || lower_name.ends_with(".jpeg")
-                                || lower_name.ends_with(".gif")
-                                || lower_name.ends_with(".svg")
-                            {
-                                let mut buf = Vec::new();
-                                if entry.read_to_end(&mut buf).is_ok() {
-                                    let fname = Path::new(&name)
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| name.clone());
-                                    image_bytes.push((fname, buf));
+            match format {
+                "markdown" => {
+                    markdown_content = Some(String::from_utf8_lossy(&content).to_string());
+                }
+                "zip" => {
+                    // ZIP 压缩包 → 提取图片
+                    if let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(&content)) {
+                        for i in 0..archive.len() {
+                            if let Ok(mut entry) = archive.by_index(i) {
+                                let name = entry.name().to_string();
+                                let lower = name.to_lowercase();
+                                if lower.ends_with(".png")
+                                    || lower.ends_with(".jpg")
+                                    || lower.ends_with(".jpeg")
+                                    || lower.ends_with(".gif")
+                                    || lower.ends_with(".svg")
+                                {
+                                    let mut buf = Vec::new();
+                                    if entry.read_to_end(&mut buf).is_ok() {
+                                        let fname = Path::new(&name)
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| name.clone());
+                                        image_bytes.push((fname, buf));
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            } else if lower.ends_with(".png")
-                || lower.ends_with(".jpg")
-                || lower.ends_with(".jpeg")
-                || lower.ends_with(".gif")
-                || lower.ends_with(".svg")
-            {
-                // 单个图片文件
-                image_bytes.push((filename.to_string(), content));
+                _ => {}
             }
         }
 
@@ -287,8 +304,18 @@ impl MinerUClient {
     async fn create_upload(
         &self,
         filename: &str,
+        file_size: u64,
+        file_bytes: &[u8],
     ) -> anyhow::Result<(String, String, String, HashMap<String, String>)> {
-        let body = json!({ "filename": filename });
+        let sha256 = sha2::Sha256::digest(file_bytes);
+        let sha256_hex = hex::encode(sha256);
+
+        let body = json!({
+            "filename": filename,
+            "bytes": file_size,
+            "sha256sum": sha256_hex,
+            "mime_type": "application/pdf",
+        });
 
         let resp = self
             .http
@@ -310,32 +337,30 @@ impl MinerUClient {
 
         let data: Value = resp.json().await?;
 
-        // 检查是否命中已存在的文件（秒传）
-        let skip_upload = data["data"]["skip_upload"].as_bool().unwrap_or(false);
-        if skip_upload {
-            let file_id = data["data"]["file"]["file_id"]
+        // 检查秒传：file 字段非空表示文件已存在
+        if data.get("file").and_then(|v| v.as_object()).is_some() {
+            let file_id = data["file"]["id"]
                 .as_str()
-                .ok_or_else(|| anyhow::anyhow!("No file in skip_upload response"))?
+                .ok_or_else(|| anyhow::anyhow!("No file.id in dedup response"))?
                 .to_string();
-            // 使用pectial sentinel：upload_id = file_id, method = "SKIP"
             return Ok((file_id, "SKIP".to_string(), String::new(), HashMap::new()));
         }
 
-        let upload_id = data["data"]["upload_id"]
+        let upload_id = data["id"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("No upload_id in response"))?
+            .ok_or_else(|| anyhow::anyhow!("No id in response"))?
             .to_string();
-        let upload_method = data["data"]["upload_method"]
+        let upload_method = data["upload_method"]
             .as_str()
             .unwrap_or("PUT")
             .to_string();
-        let upload_url = data["data"]["upload_url"]
+        let upload_url = data["upload_url"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("No upload_url in response"))?
             .to_string();
 
         let mut upload_headers = HashMap::new();
-        if let Some(headers) = data["data"]["upload_headers"].as_object() {
+        if let Some(headers) = data["upload_headers"].as_object() {
             for (k, v) in headers {
                 if let Some(val) = v.as_str() {
                     upload_headers.insert(k.clone(), val.to_string());
@@ -355,11 +380,9 @@ impl MinerUClient {
         data: Vec<u8>,
     ) -> anyhow::Result<()> {
         if method == "SKIP" {
-            // 秒传命中，无需实际上传
             return Ok(());
         }
 
-        // 解析完整 URL（处理相对路径）
         let full_url = resolve_url(&self.base_url, url);
 
         let mut req = match method.to_uppercase().as_str() {
@@ -368,12 +391,10 @@ impl MinerUClient {
             _ => self.http.put(&full_url),
         };
 
-        // 设置服务返回的上传头（官方 API 为预签名头，自部署为空）
         for (k, v) in headers {
             req = req.header(k.as_str(), v.as_str());
         }
 
-        // 同源 URL（相对路径解析后为同一主机）且 API key 非空：附加鉴权
         if !self.key.is_empty() && is_same_origin(&full_url, &self.base_url) {
             req = req.bearer_auth(&self.key);
         }
@@ -413,9 +434,9 @@ impl MinerUClient {
         }
 
         let data: Value = resp.json().await?;
-        let file_id = data["data"]["file"]["file_id"]
+        let file_id = data["file"]["id"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("No file_id in complete response"))?
+            .ok_or_else(|| anyhow::anyhow!("No file.id in complete response"))?
             .to_string();
         Ok(file_id)
     }
@@ -423,10 +444,14 @@ impl MinerUClient {
     /// Step 4: 提交解析任务 → 获得 job_id
     async fn submit_job(&self, file_id: &str) -> anyhow::Result<String> {
         let body = json!({
-            "files": [{"file_id": file_id}],
+            "files": [{
+                "source": {
+                    "type": "file_id",
+                    "file_id": file_id,
+                }
+            }],
             "tier": self.tier,
             "output_formats": ["markdown"],
-            "include_images": true,
         });
 
         let resp = self
@@ -448,7 +473,7 @@ impl MinerUClient {
         }
 
         let data: Value = resp.json().await?;
-        let job_id = data["data"]["job_id"]
+        let job_id = data["job_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("No job_id in response"))?
             .to_string();
@@ -468,11 +493,7 @@ impl MinerUClient {
             return Ok(resp.bytes().await?.to_vec());
         }
 
-        // 处理重定向（官方 API 可能返回 302 到 OSS）
-        if matches!(
-            resp.status().as_u16(),
-            301 | 302 | 303 | 307 | 308
-        ) {
+        if matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
             if let Some(location) = resp
                 .headers()
                 .get("location")
@@ -545,8 +566,7 @@ fn resolve_url(base: &str, url: &str) -> String {
     if url.starts_with("http://") || url.starts_with("https://") {
         url.to_string()
     } else if url.starts_with('/') {
-        let base = base.trim_end_matches('/');
-        format!("{}{}", base, url)
+        format!("{}{}", base.trim_end_matches('/'), url)
     } else {
         format!("{}/{}", base.trim_end_matches('/'), url)
     }
@@ -558,6 +578,6 @@ fn is_same_origin(url_a: &str, url_b: &str) -> bool {
     let b_parsed = url::Url::parse(url_b);
     match (a_parsed, b_parsed) {
         (Ok(a), Ok(b)) => a.origin() == b.origin(),
-        _ => false, // 无法解析时保守处理
+        _ => false,
     }
 }
