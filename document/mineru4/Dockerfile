@@ -13,7 +13,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Install MinerU 4 with Torch; reuse vLLM from the base image.
-RUN python3 -m pip install -U 'mineru[torch]>=4.0,<5' -i https://mirrors.aliyun.com/pypi/simple --break-system-packages && \
+RUN python3 -m pip install -U 'mineru[torch]>=4.0' -i https://mirrors.aliyun.com/pypi/simple --break-system-packages && \
     python3 -m pip cache purge
 
 # Keep build-time model downloads and runtime selection aligned, including builds without a GPU.

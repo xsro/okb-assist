@@ -3,7 +3,7 @@
   "alias_expiration_hours": 1,
   "mineru": [
     {
-      "key": "key",
+      "key": "keyxxx",
       "max_tasks": 3,
       "tier": "standard",
       "task_timeout": 300,

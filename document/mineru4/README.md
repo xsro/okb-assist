@@ -7,42 +7,15 @@ build `https://github.com/opendatalab/MinerU/blob/master/docker/china/Dockerfile
 sudo docker build -t mineru4 -f Dockerfile .
 ```
 
-
-run
-
 ```
-# 启动mineru 服务 https://opendatalab.github.io/MinerU/quick_start/docker_deployment/#docker-description
-docker run --gpus all \
-  --shm-size 32g \
-  -d \
-  -p 30000:30000 -p 7860:7860 -p 8000:8000 -p 8002:8002 \
-  --ipc=host \
-  --name mineru4 \
-  -it mineru4 \
-  /bin/bash -c "CUDA_VISIBLE_DEVICES=1,2 mineru-router --host 0.0.0.0 --port 8002 --local-gpus auto"
+docker run --gpus all --shm-size 32g --ipc=host \  
+  -p 8000:8000 -d --name mineru-api \  
+  mineru4 mineru-kit api-server --host 0.0.0.0 --port 8000
 ```
 
 
-
-
-### 启动 mineru
-
-
-启动mineru 服务
-
-```bash
-# 启动mineru 服务 https://opendatalab.github.io/MinerU/quick_start/docker_deployment/#docker-description
-docker run --gpus all \
-  --shm-size 32g \
-  -d \
-  -p 30000:30000 -p 7860:7860 -p 8000:8000 -p 8002:8002 \
-  --ipc=host \
-  --name mineru \
-  -it mineru:latest2 \
-  /bin/bash -c "CUDA_VISIBLE_DEVICES=1,2 mineru-router --host 0.0.0.0 --port 8002 --local-gpus auto"
-```
-
-如果已经启动过，只是停止了，那么使用`sudo docker start mineru`，如果需要删除旧的那么运行 `docker rm mineru`
+如果已经启动过，只是停止了，那么使用`sudo docker start mineru-api`，如果需要删除旧的那么运行 `docker rm mineru-api`
+如果要删除image 就 `docker rmi mineru4`
 
 ```bash
 # 在上面的命令启动的终端里面输入 https://opendatalab.github.io/MinerU/usage/quick_usage/#quick-usage-via-command-line
@@ -52,7 +25,7 @@ docker run --gpus all \
   -p 30000:30000 -p 7860:7860 -p 8000:8000 -p 8002:8002 \
   --ipc=host \
   --name mineru-bash \
-  -it mineru:latest2 \
+  -it mineru4 \
   /bin/bash
 sudo docker ps
 sudo docker exec -it  mineru-bash /bin/bash
