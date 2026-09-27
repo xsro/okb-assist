@@ -451,7 +451,7 @@ impl MinerUClient {
                 }
             }],
             "tier": self.tier,
-            "output_formats": ["markdown"],
+            "output_formats": ["markdown", "zip"],
         });
 
         let resp = self
