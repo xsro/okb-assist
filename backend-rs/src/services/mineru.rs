@@ -1,9 +1,18 @@
-//! MinerU PDF 解析服务。
+//! MinerU PDF 解析服务（V1 API，MinerU >= 4.0）
 //!
-//! 支持两种模式：
-//! - 本地模式（type=local）：连接本地 MinerU 服务器（如 http://127.0.0.1:8002）
-//! - 官方精准解析 API（type=official）：调用 MinerU 官方 API（https://mineru.net）
+//! 支持两种部署方式，均使用 V1 API：
+//! - 自部署（type=local）：连接本地 V1 API 服务（如 http://127.0.0.1:8000）
+//! - 官方云（type=official）：调用 MinerU 官方云 V1 API（https://mineru.net）
+//!
+//! V1 API 请求周期：
+//!   1. POST /v1/uploads        → 创建上传，获取上传 URL 与鉴权头
+//!   2. PUT <upload_url>         → 上传文件字节（携带 upload_headers）
+//!   3. POST /v1/uploads/{id}/complete → 完成上传，获得 file_id
+//!   4. POST /v1/parse/jobs      → 提交解析任务（指定 file_id、tier 等）
+//!   5. GET  /v1/parse/jobs/{id} → 轮询任务状态
+//!   6. GET  /v1/files/{id}/content → 下载结果文件
 
+use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
@@ -14,9 +23,9 @@ use crate::config::MinerUConfig;
 /// MinerU 模式类型
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MineruType {
-    /// 本地 MinerU 服务器
+    /// 自部署 V1 API 服务
     Local,
-    /// 官方精准解析 API
+    /// 官方云 V1 API
     Official,
 }
 
@@ -33,20 +42,20 @@ pub struct MinerUClient {
     base_url: String,
     key: String,
     mineru_type: MineruType,
-    model_version: String,
+    tier: String,
     http: reqwest::Client,
 }
 
 impl MinerUClient {
     pub fn new(config: &MinerUConfig) -> Self {
         Self {
-            base_url: config.url.clone(),
+            base_url: config.url.trim_end_matches('/').to_string(),
             key: config.key.clone(),
             mineru_type: MineruType::from_str(&config.mineru_type),
-            model_version: config.model_version.clone(),
+            tier: config.tier.clone(),
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(60))
+                .connect_timeout(std::time::Duration::from_secs(10))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
@@ -56,134 +65,42 @@ impl MinerUClient {
         Self::new(config)
     }
 
-    // ── 提交解析任务 ──────────────────────────────────────
+    // ════════════════════════════════════════════════════════
+    //  公开接口（与旧版保持签名一致）
+    // ════════════════════════════════════════════════════════
 
+    /// 提交解析任务（完整 V1 流程：创建上传 → 上传 → 完成 → 提交任务）
+    /// 返回 job_id
     pub async fn submit_parse_task(&self, file_path: &str) -> anyhow::Result<String> {
-        match self.mineru_type {
-            MineruType::Local => self.submit_parse_task_local(file_path).await,
-            MineruType::Official => self.submit_parse_task_official(file_path).await,
-        }
-    }
-
-    /// 本地模式：提交 PDF 解析任务（multipart 上传文件）
-    async fn submit_parse_task_local(&self, file_path: &str) -> anyhow::Result<String> {
-        let pdf_bytes = tokio::fs::read(file_path).await?;
         let file_name = Path::new(file_path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "document.pdf".to_string());
 
-        let part = reqwest::multipart::Part::bytes(pdf_bytes)
-            .file_name(file_name)
-            .mime_str("application/pdf")?;
+        // Step 1: 创建上传
+        let (upload_id, upload_method, upload_url, upload_headers) =
+            self.create_upload(&file_name).await?;
 
-        let form = reqwest::multipart::Form::new()
-            .part("files", part)
-            .text("return_md", "true")
-            .text("backend", "pipeline")
-            .text("parse_method", "auto")
-            .text("formula_enable", "true")
-            .text("table_enable", "true")
-            .text("image_analysis", "false")
-            .text("response_format_zip", "true")
-            .text("return_images", "true");
-
-        let resp = self.http.post(format!("{}/tasks", self.base_url))
-            .bearer_auth(&self.key)
-            .multipart(form)
-            .send().await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("MinerU submit failed: HTTP {} - {}", status, text.chars().take(200).collect::<String>());
-        }
-
-        let data: Value = resp.json().await?;
-        let task_id = data["task_id"].as_str()
-            .ok_or_else(|| anyhow::anyhow!("No task_id in response"))?
-            .to_string();
-        Ok(task_id)
-    }
-
-    /// 官方精准解析 API：通过批量上传接口提交单个文件
-    async fn submit_parse_task_official(&self, file_path: &str) -> anyhow::Result<String> {
+        // Step 2: 上传文件字节
         let pdf_bytes = tokio::fs::read(file_path).await?;
-        let file_name = Path::new(file_path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "document.pdf".to_string());
+        self.upload_file(&upload_method, &upload_url, &upload_headers, pdf_bytes)
+            .await?;
 
-        // Step 1: 申请上传 URL
-        let body = json!({
-            "files": [{"name": file_name}],
-            "model_version": self.model_version,
-            "enable_formula": true,
-            "enable_table": true,
-        });
+        // Step 3: 完成上传 → 获得 file_id
+        let file_id = self.complete_upload(&upload_id).await?;
 
-        let resp = self.http.post(format!("{}/api/v4/file-urls/batch", self.base_url))
-            .bearer_auth(&self.key)
-            .json(&body)
-            .send().await?;
+        // Step 4: 提交解析任务 → 获得 job_id
+        let job_id = self.submit_job(&file_id).await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("MinerU official submit failed: HTTP {} - {}", status, text.chars().take(200).collect::<String>());
-        }
-
-        let data: Value = resp.json().await?;
-        if data["code"].as_i64() != Some(0) {
-            let msg = data["msg"].as_str().unwrap_or("unknown error");
-            anyhow::bail!("MinerU official submit failed: {}", msg);
-        }
-
-        let batch_id = data["data"]["batch_id"].as_str()
-            .ok_or_else(|| anyhow::anyhow!("No batch_id in response"))?
-            .to_string();
-
-        let upload_url = data["data"]["file_urls"][0].as_str()
-            .ok_or_else(|| anyhow::anyhow!("No upload URL in response"))?;
-
-        // Step 2: 上传文件到 OSS
-        let upload_resp = self.http.put(upload_url)
-            .body(pdf_bytes)
-            .send().await?;
-
-        if !upload_resp.status().is_success() {
-            let status = upload_resp.status();
-            anyhow::bail!("MinerU official file upload failed: HTTP {}", status);
-        }
-
-        Ok(batch_id)
+        Ok(job_id)
     }
 
-    // ── 检查任务状态 ──────────────────────────────────────
-
-    pub async fn check_task_status(&self, task_id: &str) -> Value {
-        match self.mineru_type {
-            MineruType::Local => self.check_task_status_local(task_id).await,
-            MineruType::Official => self.check_task_status_official(task_id).await,
-        }
-    }
-
-    async fn check_task_status_local(&self, task_id: &str) -> Value {
-        let resp = self.http.get(format!("{}/tasks/{}", self.base_url, task_id))
-            .bearer_auth(&self.key)
-            .send().await;
-
-        match resp {
-            Ok(resp) if resp.status().is_success() => {
-                resp.json().await.unwrap_or(json!({"status": "unknown"}))
-            }
-            _ => json!({"status": "unknown"}),
-        }
-    }
-
-    async fn check_task_status_official(&self, task_id: &str) -> Value {
-        let resp = self.http
-            .get(format!("{}/api/v4/extract-results/batch/{}", self.base_url, task_id))
+    /// 检查任务状态
+    /// 返回标准化结构：{ "status", "raw_status", "files", "error" }
+    pub async fn check_task_status(&self, job_id: &str) -> Value {
+        let resp = self
+            .http
+            .get(format!("{}/v1/parse/jobs/{}", self.base_url, job_id))
             .bearer_auth(&self.key)
             .send()
             .await;
@@ -191,49 +108,46 @@ impl MinerUClient {
         match resp {
             Ok(resp) if resp.status().is_success() => {
                 let data: Value = resp.json().await.unwrap_or(json!({}));
-                let results = data["data"]["extract_result"].as_array();
-                if let Some(results) = results {
-                    if let Some(first) = results.first() {
-                        let state = first["state"].as_str().unwrap_or("unknown");
-                        let normalized = match state {
-                            "done" => "completed",
-                            "failed" => "failed",
-                            "pending" => "pending",
-                            "running" => "processing",
-                            "converting" => "processing",
-                            "waiting-file" => "pending",
-                            _ => state,
-                        };
-                        return json!({
-                            "status": normalized,
-                            "state": state,
-                            "full_zip_url": first["full_zip_url"].clone(),
-                            "err_msg": first["err_msg"].clone(),
-                            "extract_progress": first["extract_progress"].clone(),
-                        });
-                    }
-                }
-                json!({"status": "unknown"})
+                let status = data["data"]["status"].as_str().unwrap_or("unknown");
+                let normalized = match status {
+                    "completed" => "completed",
+                    "failed" => "failed",
+                    "queued" => "pending",
+                    "processing" => "processing",
+                    "partial" => "partial",
+                    "canceled" => "canceled",
+                    _ => status,
+                };
+                json!({
+                    "status": normalized,
+                    "raw_status": status,
+                    "files": data["data"]["files"].clone(),
+                    "error": data["data"]["error"].clone(),
+                })
             }
             _ => json!({"status": "unknown"}),
         }
     }
 
-    // ── 轮询任务直到完成 ──────────────────────────────────
-
-    pub async fn poll_task(&self, task_id: &str, timeout_secs: u64) -> anyhow::Result<Value> {
+    /// 轮询任务直到完成
+    pub async fn poll_task(&self, job_id: &str, timeout_secs: u64) -> anyhow::Result<Value> {
         let poll_interval = 2u64;
         let max_polls = timeout_secs / poll_interval;
 
         for _ in 0..max_polls {
-            let status_result = self.check_task_status(task_id).await;
+            let status_result = self.check_task_status(job_id).await;
             let status = status_result["status"].as_str().unwrap_or("unknown");
 
             match status {
-                "completed" => return Ok(status_result),
+                "completed" | "partial" => return Ok(status_result),
                 "failed" => {
-                    let error = status_result["err_msg"].as_str().unwrap_or("Unknown error");
+                    let error = status_result["error"]
+                        .as_str()
+                        .unwrap_or("Unknown error");
                     anyhow::bail!("MinerU task failed: {}", error);
+                }
+                "canceled" => {
+                    anyhow::bail!("MinerU task was canceled");
                 }
                 _ => {
                     tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
@@ -241,163 +155,349 @@ impl MinerUClient {
             }
         }
 
-        anyhow::bail!("MinerU task timed out: {}", task_id);
+        anyhow::bail!("MinerU task timed out: {}", job_id);
     }
 
-    // ── 获取任务结果 ──────────────────────────────────────
-
+    /// 获取任务结果：下载产物文件并保存到 output_dir
+    /// 返回 markdown 文件路径
     pub async fn get_task_result(
         &self,
-        task_id: &str,
+        job_id: &str,
         output_dir: &str,
         doc_id: Option<i64>,
     ) -> anyhow::Result<String> {
-        match self.mineru_type {
-            MineruType::Local => self.get_task_result_local(task_id, output_dir, doc_id).await,
-            MineruType::Official => self.get_task_result_official(task_id, output_dir, doc_id).await,
+        // 获取任务状态（含 files 列表）
+        let status_result = self.check_task_status(job_id).await;
+        let status = status_result["status"].as_str().unwrap_or("");
+        if status != "completed" && status != "partial" {
+            anyhow::bail!("Task not completed (status: {})", status);
         }
+
+        // 获取 output files
+        let files = status_result["files"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("No files in job result"))?
+            .clone();
+
+        // 准备输出目录
+        std::fs::create_dir_all(output_dir)?;
+
+        let mut markdown_content: Option<String> = None;
+        let mut image_bytes: Vec<(String, Vec<u8>)> = Vec::new();
+
+        for file in &files {
+            let purpose = file["purpose"].as_str().unwrap_or("");
+            let filename = file["filename"].as_str().unwrap_or("");
+            let file_id = file["file_id"].as_str().unwrap_or("");
+
+            if purpose != "parse_output" || file_id.is_empty() {
+                continue;
+            }
+
+            // 下载文件
+            let content = match self.download_file(file_id).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("下载文件 {} ({}) 失败: {}", filename, file_id, e);
+                    continue;
+                }
+            };
+
+            let lower = filename.to_lowercase();
+
+            if lower.ends_with(".md") {
+                markdown_content = Some(String::from_utf8_lossy(&content).to_string());
+            } else if lower.ends_with(".zip") {
+                // 压缩包 → 提取图片
+                if let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(&content)) {
+                    for i in 0..archive.len() {
+                        if let Ok(mut entry) = archive.by_index(i) {
+                            let name = entry.name().to_string();
+                            let lower_name = name.to_lowercase();
+                            if lower_name.ends_with(".png")
+                                || lower_name.ends_with(".jpg")
+                                || lower_name.ends_with(".jpeg")
+                                || lower_name.ends_with(".gif")
+                                || lower_name.ends_with(".svg")
+                            {
+                                let mut buf = Vec::new();
+                                if entry.read_to_end(&mut buf).is_ok() {
+                                    let fname = Path::new(&name)
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| name.clone());
+                                    image_bytes.push((fname, buf));
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if lower.ends_with(".png")
+                || lower.ends_with(".jpg")
+                || lower.ends_with(".jpeg")
+                || lower.ends_with(".gif")
+                || lower.ends_with(".svg")
+            {
+                // 单个图片文件
+                image_bytes.push((filename.to_string(), content));
+            }
+        }
+
+        let md = markdown_content
+            .ok_or_else(|| anyhow::anyhow!("No markdown content found in MinerU result"))?;
+
+        // 保存图片到 images.zip
+        if !image_bytes.is_empty() {
+            let images_zip_path = Path::new(output_dir).join("images.zip");
+            match std::fs::File::create(&images_zip_path) {
+                Ok(zip_file) => {
+                    let mut zip_writer = zip::ZipWriter::new(zip_file);
+                    let options = zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored);
+                    for (filename, data) in &image_bytes {
+                        if zip_writer.start_file(filename, options).is_ok() {
+                            let _ = zip_writer.write_all(data);
+                        }
+                    }
+                    let _ = zip_writer.finish();
+                }
+                Err(e) => {
+                    tracing::warn!("无法创建 images.zip: {}", e);
+                }
+            }
+        }
+
+        // 保存 markdown
+        let md_filename = match doc_id {
+            Some(id) => format!("{}.md", id),
+            None => "output.md".to_string(),
+        };
+        let md_path = Path::new(output_dir).join(&md_filename);
+        std::fs::write(&md_path, &md)?;
+
+        Ok(md_path.to_string_lossy().to_string())
     }
 
-    async fn get_task_result_local(
+    // ════════════════════════════════════════════════════════
+    //  内部 V1 API 方法
+    // ════════════════════════════════════════════════════════
+
+    /// Step 1: 创建上传
+    /// 返回 (upload_id, upload_method, upload_url, upload_headers)
+    async fn create_upload(
         &self,
-        task_id: &str,
-        output_dir: &str,
-        doc_id: Option<i64>,
-    ) -> anyhow::Result<String> {
-        let resp = self.http.get(format!("{}/tasks/{}/result", self.base_url, task_id))
+        filename: &str,
+    ) -> anyhow::Result<(String, String, String, HashMap<String, String>)> {
+        let body = json!({ "filename": filename });
+
+        let resp = self
+            .http
+            .post(format!("{}/v1/uploads", self.base_url))
             .bearer_auth(&self.key)
-            .send().await?;
+            .json(&body)
+            .send()
+            .await?;
 
-        if resp.status() != 200 {
-            anyhow::bail!("MinerU result fetch failed: HTTP {}", resp.status());
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "MinerU create upload failed: HTTP {} - {}",
+                status,
+                text.chars().take(200).collect::<String>()
+            );
         }
 
-        let zip_bytes = resp.bytes().await?;
-        let output_dir = output_dir.to_string();
-        tokio::task::spawn_blocking(move || {
-            process_zip_result(&zip_bytes, &output_dir, doc_id)
-        })
-        .await?
+        let data: Value = resp.json().await?;
+
+        // 检查是否命中已存在的文件（秒传）
+        let skip_upload = data["data"]["skip_upload"].as_bool().unwrap_or(false);
+        if skip_upload {
+            let file_id = data["data"]["file"]["file_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("No file in skip_upload response"))?
+                .to_string();
+            // 使用pectial sentinel：upload_id = file_id, method = "SKIP"
+            return Ok((file_id, "SKIP".to_string(), String::new(), HashMap::new()));
+        }
+
+        let upload_id = data["data"]["upload_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("No upload_id in response"))?
+            .to_string();
+        let upload_method = data["data"]["upload_method"]
+            .as_str()
+            .unwrap_or("PUT")
+            .to_string();
+        let upload_url = data["data"]["upload_url"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("No upload_url in response"))?
+            .to_string();
+
+        let mut upload_headers = HashMap::new();
+        if let Some(headers) = data["data"]["upload_headers"].as_object() {
+            for (k, v) in headers {
+                if let Some(val) = v.as_str() {
+                    upload_headers.insert(k.clone(), val.to_string());
+                }
+            }
+        }
+
+        Ok((upload_id, upload_method, upload_url, upload_headers))
     }
 
-    async fn get_task_result_official(
+    /// Step 2: 上传文件字节
+    async fn upload_file(
         &self,
-        task_id: &str,
-        output_dir: &str,
-        doc_id: Option<i64>,
-    ) -> anyhow::Result<String> {
-        // 查询批量结果获取 full_zip_url
-        let resp = self.http
-            .get(format!("{}/api/v4/extract-results/batch/{}", self.base_url, task_id))
+        method: &str,
+        url: &str,
+        headers: &HashMap<String, String>,
+        data: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        if method == "SKIP" {
+            // 秒传命中，无需实际上传
+            return Ok(());
+        }
+
+        // 解析完整 URL（处理相对路径）
+        let full_url = resolve_url(&self.base_url, url);
+
+        let mut req = match method.to_uppercase().as_str() {
+            "PUT" => self.http.put(&full_url),
+            "POST" => self.http.post(&full_url),
+            _ => self.http.put(&full_url),
+        };
+
+        // 设置服务返回的上传头（官方 API 为预签名头，自部署为空）
+        for (k, v) in headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+
+        // 同源 URL（相对路径解析后为同一主机）且 API key 非空：附加鉴权
+        if !self.key.is_empty() && is_same_origin(&full_url, &self.base_url) {
+            req = req.bearer_auth(&self.key);
+        }
+
+        let resp = req.body(data).send().await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "MinerU file upload failed: HTTP {} - {}",
+                status,
+                text.chars().take(200).collect::<String>()
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Step 3: 完成上传 → 获得 file_id
+    async fn complete_upload(&self, upload_id: &str) -> anyhow::Result<String> {
+        let resp = self
+            .http
+            .post(format!("{}/v1/uploads/{}/complete", self.base_url, upload_id))
             .bearer_auth(&self.key)
             .send()
             .await?;
 
         if !resp.status().is_success() {
-            anyhow::bail!("MinerU official result fetch failed: HTTP {}", resp.status());
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "MinerU complete upload failed: HTTP {} - {}",
+                status,
+                text.chars().take(200).collect::<String>()
+            );
         }
 
         let data: Value = resp.json().await?;
-        let results = data["data"]["extract_result"].as_array()
-            .ok_or_else(|| anyhow::anyhow!("No results in batch response"))?;
-
-        let first = results.first()
-            .ok_or_else(|| anyhow::anyhow!("Empty results array"))?;
-
-        let state = first["state"].as_str().unwrap_or("");
-        if state != "done" {
-            let err = first["err_msg"].as_str().unwrap_or("Unknown error");
-            anyhow::bail!("MinerU task not completed: {} (state: {})", err, state);
-        }
-
-        let zip_url = first["full_zip_url"].as_str()
-            .ok_or_else(|| anyhow::anyhow!("No full_zip_url in result"))?;
-
-        // 下载 zip 压缩包
-        let zip_resp = self.http.get(zip_url).send().await?;
-        if !zip_resp.status().is_success() {
-            anyhow::bail!("MinerU official zip download failed: HTTP {}", zip_resp.status());
-        }
-
-        let zip_bytes = zip_resp.bytes().await?;
-        let output_dir = output_dir.to_string();
-        tokio::task::spawn_blocking(move || {
-            process_zip_result(&zip_bytes, &output_dir, doc_id)
-        })
-        .await?
+        let file_id = data["data"]["file"]["file_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("No file_id in complete response"))?
+            .to_string();
+        Ok(file_id)
     }
-}
 
-/// 处理 MinerU 返回的 zip 结果（同步函数，在 spawn_blocking 中运行）
-fn process_zip_result(
-    zip_bytes: &[u8],
-    output_dir: &str,
-    doc_id: Option<i64>,
-) -> anyhow::Result<String> {
-    std::fs::create_dir_all(output_dir)?;
+    /// Step 4: 提交解析任务 → 获得 job_id
+    async fn submit_job(&self, file_id: &str) -> anyhow::Result<String> {
+        let body = json!({
+            "files": [{"file_id": file_id}],
+            "tier": self.tier,
+            "output_formats": ["markdown"],
+            "include_images": true,
+        });
 
-    let cursor = Cursor::new(zip_bytes);
-    let mut archive = zip::ZipArchive::new(cursor)?;
+        let resp = self
+            .http
+            .post(format!("{}/v1/parse/jobs", self.base_url))
+            .bearer_auth(&self.key)
+            .json(&body)
+            .send()
+            .await?;
 
-    let mut markdown_content = String::new();
-    let mut image_entries: Vec<(String, Vec<u8>)> = Vec::new();
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "MinerU submit job failed: HTTP {} - {}",
+                status,
+                text.chars().take(200).collect::<String>()
+            );
+        }
 
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        let name = file.name().to_string();
+        let data: Value = resp.json().await?;
+        let job_id = data["data"]["job_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("No job_id in response"))?
+            .to_string();
+        Ok(job_id)
+    }
 
-        if name.ends_with(".md") {
-            let mut buf = Vec::new();
-            file.read_to_end(&mut buf)?;
-            markdown_content = String::from_utf8_lossy(&buf).to_string();
-        } else if name.contains('/') {
-            let filename = Path::new(&name)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if !filename.is_empty() && filename.len() > 3 {
-                let lower = filename.to_lowercase();
-                if lower.ends_with(".png") || lower.ends_with(".jpg")
-                    || lower.ends_with(".jpeg") || lower.ends_with(".gif")
-                    || lower.ends_with(".svg") {
-                    let mut buf = Vec::new();
-                    file.read_to_end(&mut buf)?;
-                    image_entries.push((filename, buf));
+    /// 下载结果文件（支持 302 跳转）
+    async fn download_file(&self, file_id: &str) -> anyhow::Result<Vec<u8>> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/files/{}/content", self.base_url, file_id))
+            .bearer_auth(&self.key)
+            .send()
+            .await?;
+
+        if resp.status().is_success() {
+            return Ok(resp.bytes().await?.to_vec());
+        }
+
+        // 处理重定向（官方 API 可能返回 302 到 OSS）
+        if matches!(
+            resp.status().as_u16(),
+            301 | 302 | 303 | 307 | 308
+        ) {
+            if let Some(location) = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+            {
+                let redirect_resp = self.http.get(location).send().await?;
+                if redirect_resp.status().is_success() {
+                    return Ok(redirect_resp.bytes().await?.to_vec());
                 }
+                anyhow::bail!(
+                    "MinerU file download redirect failed: HTTP {}",
+                    redirect_resp.status()
+                );
             }
         }
+
+        anyhow::bail!("MinerU file download failed: HTTP {}", resp.status());
     }
-
-    if markdown_content.is_empty() {
-        anyhow::bail!("No markdown content found in MinerU result");
-    }
-
-    // Save images to images.zip
-    if !image_entries.is_empty() {
-        let images_zip_path = Path::new(output_dir).join("images.zip");
-        let zip_file = std::fs::File::create(&images_zip_path)?;
-        let mut zip_writer = zip::ZipWriter::new(zip_file);
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
-        for (filename, data) in &image_entries {
-            zip_writer.start_file(filename, options)?;
-            zip_writer.write_all(data)?;
-        }
-        zip_writer.finish()?;
-    }
-
-    // Save markdown
-    let md_filename = match doc_id {
-        Some(id) => format!("{}.md", id),
-        None => "output.md".to_string(),
-    };
-    let md_path = Path::new(output_dir).join(&md_filename);
-    std::fs::write(&md_path, &markdown_content)?;
-
-    Ok(md_path.to_string_lossy().to_string())
 }
 
-/// 便捷函数：解析 PDF（提交 → 轮询 → 获取结果）
+// ════════════════════════════════════════════════════════
+//  便捷函数
+// ════════════════════════════════════════════════════════
+
+/// 解析 PDF（提交 → 轮询 → 获取结果）
 pub async fn parse_pdf(
     client: &MinerUClient,
     file_path: &str,
@@ -405,9 +505,9 @@ pub async fn parse_pdf(
     doc_id: Option<i64>,
     timeout_secs: u64,
 ) -> anyhow::Result<String> {
-    let task_id = client.submit_parse_task(file_path).await?;
-    client.poll_task(&task_id, timeout_secs).await?;
-    client.get_task_result(&task_id, output_dir, doc_id).await
+    let job_id = client.submit_parse_task(file_path).await?;
+    client.poll_task(&job_id, timeout_secs).await?;
+    client.get_task_result(&job_id, output_dir, doc_id).await
 }
 
 /// 尝试多个 MinerU 配置，逐个解析直到成功
@@ -434,4 +534,30 @@ pub async fn parse_pdf_with_fallback(
         }
     }
     anyhow::bail!("所有 MinerU 配置均解析失败: {}", last_error)
+}
+
+// ════════════════════════════════════════════════════════
+//  工具函数
+// ════════════════════════════════════════════════════════
+
+/// 解析 URL：将相对路径拼接到 base_url 上
+fn resolve_url(base: &str, url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else if url.starts_with('/') {
+        let base = base.trim_end_matches('/');
+        format!("{}{}", base, url)
+    } else {
+        format!("{}/{}", base.trim_end_matches('/'), url)
+    }
+}
+
+/// 判断两个 URL 是否同源（scheme + host 相同）
+fn is_same_origin(url_a: &str, url_b: &str) -> bool {
+    let a_parsed = url::Url::parse(url_a);
+    let b_parsed = url::Url::parse(url_b);
+    match (a_parsed, b_parsed) {
+        (Ok(a), Ok(b)) => a.origin() == b.origin(),
+        _ => false, // 无法解析时保守处理
+    }
 }

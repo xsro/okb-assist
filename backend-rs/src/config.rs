@@ -6,13 +6,16 @@ use std::sync::Arc;
 
 use crate::config_manager::ConfigManager;
 
-/// MinerU 配置项
+/// MinerU 配置项（V1 API）
+///
+/// - `tier`: 解析档位，可选 "flash" / "basic" / "standard" / "advanced"
+/// - 本地和官方云均使用相同的 V1 API 端点
 #[derive(Debug, Clone)]
 pub struct MinerUConfig {
     pub url: String,
     pub key: String,
     pub mineru_type: String,
-    pub model_version: String,
+    pub tier: String,
     pub task_timeout: u64,
 }
 
@@ -54,7 +57,7 @@ impl Settings {
                     .as_str()
                     .unwrap_or("local")
                     .to_string(),
-                model_version: v["model_version"].as_str().unwrap_or("vlm").to_string(),
+                tier: v["tier"].as_str().or_else(|| v["model_version"].as_str()).unwrap_or("standard").to_string(),
                 task_timeout: v["task_timeout"].as_u64().unwrap_or(300),
             })
             .collect()
@@ -102,12 +105,12 @@ impl Settings {
             .unwrap_or(300)
     }
 
-    /// 兼容旧接口：返回第一个 MinerU 配置的 model_version
-    pub fn mineru_model_version(&self) -> String {
+    /// 返回第一个 MinerU 配置的 tier
+    pub fn mineru_tier(&self) -> String {
         self.mineru_configs()
             .first()
-            .map(|c| c.model_version.clone())
-            .unwrap_or_else(|| "vlm".to_string())
+            .map(|c| c.tier.clone())
+            .unwrap_or_else(|| "standard".to_string())
     }
 
     // ── Ollama ──

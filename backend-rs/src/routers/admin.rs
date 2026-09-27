@@ -114,52 +114,35 @@ async fn check_mineru(settings: &Settings) -> Value {
             .build()
             .unwrap_or_default();
 
-        match MineruType::from_str(&config.mineru_type) {
-            MineruType::Local => {
-                let mut req = client.get(format!("{}/health", config.url));
-                if !config.key.is_empty() {
-                    req = req.bearer_auth(&config.key);
-                }
-                match req.send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        if let Ok(health) = resp.json::<Value>().await {
-                            item["status"] = json!("connected");
-                            item["version"] = health.get("version").cloned().unwrap_or(json!("unknown"));
-                            item["queued_tasks"] = health.get("queued_tasks").cloned().unwrap_or(json!(0));
-                            item["processing_tasks"] = health.get("processing_tasks").cloned().unwrap_or(json!(0));
-                            item["completed_tasks"] = health.get("completed_tasks").cloned().unwrap_or(json!(0));
-                            item["failed_tasks"] = health.get("failed_tasks").cloned().unwrap_or(json!(0));
-                            item["max_concurrent"] = health.get("max_concurrent_requests").cloned().unwrap_or(json!(0));
-                        } else {
-                            item["status"] = json!("connected");
-                        }
+        // V1 API 健康检查（本地和官方云均使用 /v1/health）
+        let health_url = format!("{}/v1/health", config.url);
+        let mut req = client.get(&health_url);
+        if !config.key.is_empty() {
+            req = req.bearer_auth(&config.key);
+        }
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                item["status"] = json!("connected");
+                item["api_version"] = json!("v1");
+                if let Ok(health) = resp.json::<Value>().await {
+                    if let Some(ver) = health.get("version") {
+                        item["version"] = ver.clone();
                     }
-                    Ok(resp) => {
-                        item["status"] = json!("error");
-                        item["error"] = json!(format!("HTTP {}", resp.status()));
+                    if let Some(features) = health.get("features") {
+                        item["features"] = features.clone();
                     }
-                    Err(e) => {
-                        item["status"] = json!("disconnected");
-                        item["error"] = json!(e.to_string());
+                    if let Some(tiers) = health.get("tiers") {
+                        item["tiers"] = tiers.clone();
                     }
                 }
             }
-            MineruType::Official => {
-                let resp = client.get(&config.url).bearer_auth(&config.key).send().await;
-                match resp {
-                    Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
-                        item["status"] = json!("connected");
-                        item["version"] = json!("v4");
-                    }
-                    Ok(resp) => {
-                        item["status"] = json!("error");
-                        item["error"] = json!(format!("HTTP {}", resp.status()));
-                    }
-                    Err(e) => {
-                        item["status"] = json!("disconnected");
-                        item["error"] = json!(e.to_string());
-                    }
-                }
+            Ok(resp) => {
+                item["status"] = json!("error");
+                item["error"] = json!(format!("HTTP {}", resp.status()));
+            }
+            Err(e) => {
+                item["status"] = json!("disconnected");
+                item["error"] = json!(e.to_string());
             }
         }
         items.push(item);
@@ -373,39 +356,30 @@ async fn stats(
 async fn mineru_tasks(Extension(settings): Extension<Arc<Settings>>) -> Json<Value> {
     let url = settings.mineru_url();
     let key = settings.mineru_key();
-    let mineru_type = settings.mineru_type();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap_or_default();
 
-    match MineruType::from_str(&mineru_type) {
-        MineruType::Local => {
-            let mut req = client.get(format!("{}/tasks", url));
-            if !key.is_empty() {
-                req = req.bearer_auth(key);
-            }
-            match req.send().await {
-                Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
-                    Ok(data) => Json(data),
-                    Err(e) => Json(json!({"error": e.to_string()})),
-                },
-                Ok(resp) => {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    Json(json!({"error": format!("HTTP {}", status), "detail": text}))
-                }
-                Err(e) => Json(json!({"error": e.to_string()})),
-            }
+    // V1 API：查询用量统计 /v1/usage
+    let mut req = client.get(format!("{}/v1/usage", url));
+    if !key.is_empty() {
+        req = req.bearer_auth(key);
+    }
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
+            Ok(data) => Json(json!({
+                "usage": data.get("data").or(Some(&data)).cloned().unwrap_or(json!({})),
+                "api_version": "v1"
+            })),
+            Err(e) => Json(json!({"error": e.to_string(), "api_version": "v1"})),
+        },
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            Json(json!({"error": format!("HTTP {}", status), "detail": text, "api_version": "v1"}))
         }
-        MineruType::Official => {
-            // 官方精准解析 API 不支持任务列表查询，返回空列表
-            Json(json!({
-                "tasks": [],
-                "message": "官方精准解析 API 不支持任务列表查询",
-                "api_type": "official"
-            }))
-        }
+        Err(e) => Json(json!({"error": e.to_string(), "api_version": "v1"})),
     }
 }
 

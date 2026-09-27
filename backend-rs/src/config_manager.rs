@@ -17,11 +17,11 @@ pub fn default_config() -> serde_json::Value {
         "mineru": [
             {
                 "type": "local",
-                "url": "http://127.0.0.1:8002",
+                "url": "http://127.0.0.1:8000",
                 "key": "key",
                 "max_tasks": 3,
                 "task_timeout": 300,
-                "model_version": "vlm"
+                "tier": "standard"
             }
         ],
         "ollama": {
