@@ -19,7 +19,7 @@ def main():
     parser.add_argument("csv_file", help="输入 CSV 文件路径（含 md_filename, zip_path 列）")
     parser.add_argument(
         "--template", type=str,
-        default="media/orangepi/CCSICC/okb-knowledge/pdfs/{id}/{id}.zip",
+        default="/media/orangepi/CCSICC/okb-knowledge/pdfs/{id}/{id}.zip",
         help="新路径模板，{id} 会被替换为文档 id（默认: %(default)s）"
     )
     parser.add_argument("--max", type=int, default=0, help="最大检查条目数（0 表示不限制）")
