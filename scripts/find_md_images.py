@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 扫描 Markdown 文件夹中的 .md 文件，提取第一个引用的图片文件名，
-然后在 PDF 资产文件夹的所有 zip 包中查找该图片，输出 CSV 报告。
+然后在 PDF 资产文件夹中对应的 {id}/ 子目录下的压缩包中查找该图片，输出 CSV 报告。
 
 用法:
     python scripts/find_md_images.py --md-folder <path> --pdf-folder <path> [--max-md <N>] [--output <path>]
@@ -35,36 +35,37 @@ def extract_first_image(md_path: Path) -> str | None:
     return None
 
 
-def build_zip_index(pdf_folder: Path, progress: bool = False) -> dict[str, list[tuple[str, str]]]:
+def scan_zip_for_image(md_id: str, pdf_folder: Path, image_name: str) -> tuple[str, str]:
     """
-    扫描 pdf_folder 下所有 .zip 文件，建立 {filename: [(zip_path, internal_path), ...]} 索引。
+    在 pdf_folder/{md_id}/ 下查找 .zip 文件，扫描其内容定位 image_name。
+    返回 (zip_abs_path, image_in_zip_path)，未找到时均为空字符串。
     """
-    index: dict[str, list[tuple[str, str]]] = {}
-    zip_files = sorted(pdf_folder.rglob('*.zip'))
-    print(f"发现 {len(zip_files)} 个 zip 文件，正在建立索引...")
+    md_dir = pdf_folder / md_id
+    if not md_dir.is_dir():
+        return '', ''
 
-    for i, zip_path in enumerate(zip_files, 1):
-        if progress:
-            print(f"  [进度] 索引 zip [{i}/{len(zip_files)}]: {zip_path}")
+    # 查找该目录下的所有 .zip 文件（通常是 {md_id}.zip）
+    zip_files = sorted(md_dir.glob('*.zip'))
+    if not zip_files:
+        return '', ''
+
+    for zip_path in zip_files:
         try:
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 for entry in zf.namelist():
-                    # 跳过目录项
                     if entry.endswith('/'):
                         continue
-                    basename = os.path.basename(entry)
-                    index.setdefault(basename, []).append(
-                        (str(zip_path.resolve()), entry)
-                    )
+                    if os.path.basename(entry) == image_name:
+                        return str(zip_path.resolve()), entry
         except Exception as e:
             print(f"  [WARN] 读取 {zip_path} 失败: {e}")
 
-    return index
+    return '', ''
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='扫描 md 文件中的第一张图片，在 zip 包中定位其位置，输出 CSV'
+        description='扫描 md 文件中的第一张图片，在对应的 {id}/ 子目录压缩包中定位其位置，输出 CSV'
     )
     parser.add_argument(
         '--md-folder', '-m',
@@ -104,18 +105,12 @@ def main():
         print(f"[ERROR] pdf 文件夹不存在: {pdf_folder}")
         return 1
 
-    # 1. 建立 zip 文件索引
-    zip_index = build_zip_index(pdf_folder, progress=args.progress)
-    print(f"索引构建完成，共 {len(zip_index)} 个不同文件名。")
-
-    # 2. 扫描 md 文件
+    # 扫描 md 文件
     md_files = sorted(md_folder.glob('*.md'))
     if args.max_md > 0:
         md_files = md_files[:args.max_md]
 
     print(f"待处理 md 文件数: {len(md_files)}")
-    if args.progress:
-        print()  # 空行分隔索引阶段和扫描阶段
 
     rows = []
     no_image_count = 0
@@ -124,8 +119,11 @@ def main():
 
     for idx, md_path in enumerate(md_files, 1):
         md_name = md_path.name
+        md_id = md_path.stem  # 去掉 .md 后缀，用于定位 pdf_folder 下的子目录
+
         if args.progress:
             print(f"[进度] 扫描 md [{idx}/{len(md_files)}]: {md_name}", end='', flush=True)
+
         first_image = extract_first_image(md_path)
 
         zip_path = ''
@@ -136,10 +134,8 @@ def main():
             if args.progress:
                 print(f" → 无图片")
         else:
-            # 在 zip 索引中查找
-            matches = zip_index.get(first_image, [])
-            if matches:
-                zip_path, image_in_zip = matches[0]
+            zip_path, image_in_zip = scan_zip_for_image(md_id, pdf_folder, first_image)
+            if zip_path:
                 found_count += 1
                 if args.progress:
                     print(f" → 找到图片: {first_image} @ {os.path.basename(zip_path)}")
@@ -151,7 +147,7 @@ def main():
         img_display = first_image if first_image else '无图片'
         rows.append([md_name, img_display, zip_path, image_in_zip])
 
-    # 3. 输出 CSV
+    # 输出 CSV
     output_path = Path(args.output)
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
