@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// 计算文件 SHA256 哈希
+/// 计算文件 SHA256 哈希（可能阻塞，请在 spawn_blocking 中调用）
 pub fn calculate_file_hash(file_path: &str) -> std::io::Result<String> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -10,6 +10,12 @@ pub fn calculate_file_hash(file_path: &str) -> std::io::Result<String> {
     let mut reader = std::io::BufReader::with_capacity(8192, file);
     std::io::copy(&mut reader, &mut hasher)?;
     Ok(hex::encode(hasher.finalize()))
+}
+
+/// 异步计算文件 SHA256 哈希（在后台线程执行，不阻塞 async 运行时）
+pub async fn calculate_file_hash_async(file_path: String) -> std::io::Result<String> {
+    tokio::task::spawn_blocking(move || calculate_file_hash(&file_path)).await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
 }
 
 /// 获取 uploads 文件夹绝对路径
@@ -68,6 +74,12 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+/// 异步计算字节数组的 SHA256 哈希（在后台线程执行，不阻塞 async 运行时）
+pub async fn sha256_hex_async(bytes: Vec<u8>) -> String {
+    tokio::task::spawn_blocking(move || sha256_hex(&bytes)).await
+        .unwrap_or_else(|_| String::new())
 }
 
 /// 返回当前 UTC 时间 ISO8601 字符串（秒级精度，带 Z 后缀）

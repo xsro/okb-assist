@@ -360,8 +360,14 @@ impl MinerUClient {
         file_size: u64,
         file_bytes: &[u8],
     ) -> anyhow::Result<(String, String, String, HashMap<String, String>)> {
-        let sha256 = sha2::Sha256::digest(file_bytes);
-        let sha256_hex = hex::encode(sha256);
+        // 在后台线程计算 SHA-256（不阻塞 async 运行时）
+        let file_bytes_vec = file_bytes.to_vec();
+        let sha256_hex = tokio::task::spawn_blocking(move || {
+            let sha256 = sha2::Sha256::digest(&file_bytes_vec);
+            hex::encode(sha256)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("SHA-256 计算失败: {}", e))?;
 
         let body = json!({
             "filename": filename,

@@ -17,9 +17,9 @@ use crate::config::Settings;
 use crate::database::Database;
 use crate::models::Document;
 use crate::paths;
-use crate::services::pdf_meta::{extract_pdf_metadata, normalize_doi};
+use crate::services::pdf_meta::{extract_pdf_metadata_async, normalize_doi};
 use crate::routers::pipeline::run_crossref_override;
-use crate::utils::{calculate_file_hash, now_datetime, now_iso, sha256_hex};
+use crate::utils::{calculate_file_hash_async, now_datetime, now_iso, sha256_hex_async};
 
 /// 全局文件别名表（内存，重启即丢失，与 Python 版一致）
 /// 存储格式：alias -> (doc_id, expires_at_unix_timestamp)
@@ -830,12 +830,10 @@ async fn upload_document(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "只支持 PDF 文件"}))).into_response();
     }
 
-    // 提取 PDF 元数据
-    let meta = extract_pdf_metadata(&content, Some(&filename), None);
-    let file_hash = {
-        use sha2::{Digest, Sha256};
-        format!("{:x}", Sha256::digest(&content))
-    };
+    // 提取 PDF 元数据（后台线程，不阻塞 async 运行时）
+    let meta = extract_pdf_metadata_async(content.clone(), Some(filename.clone()), None).await;
+    // 计算文件哈希（后台线程，不阻塞 async 运行时）
+    let file_hash = sha256_hex_async(content.clone()).await;
 
     // 检查重复（默认去重，force 可跳过）
     if !force {
@@ -937,12 +935,13 @@ async fn upload_document(
         },
     };
 
-    // 保存 PDF 文件
+    // 保存 PDF 文件（后台线程写磁盘，不阻塞 async 运行时）
     let pdf_path = paths::get_pdf_path(&settings, doc_id);
+    let pdf_path_clone = pdf_path.clone();
     if let Some(parent) = std::path::Path::new(&pdf_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(&pdf_path, &content) {
+    if let Err(e) = tokio::task::spawn_blocking(move || std::fs::write(&pdf_path_clone, &content)).await.unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking panicked"))) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": format!("保存文件失败: {}", e)}))).into_response();
     }
 
@@ -979,15 +978,15 @@ async fn register_document_by_path(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "只支持 PDF 文件"}))).into_response();
     }
 
-    let content = match std::fs::read(&data.file_path) {
+    let file_path_clone = data.file_path.clone();
+    let content = tokio::task::spawn_blocking(move || std::fs::read(&file_path_clone)).await
+        .unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking panicked")));
+    let content = match content {
         Ok(c) => c,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
     };
-    let meta = extract_pdf_metadata(&content, None, None);
-    let file_hash = match calculate_file_hash(&data.file_path) {
-        Ok(h) => h,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
-    };
+    let meta = extract_pdf_metadata_async(content.clone(), None, None).await;
+    let file_hash = sha256_hex_async(content.clone()).await;
 
     // 检查重复
     if !data.force {
@@ -2013,12 +2012,13 @@ async fn replace_pdf(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "只支持 PDF 文件"}))).into_response();
     }
 
-    let file_hash = sha256_hex(&content);
+    let file_hash = sha256_hex_async(content.clone()).await;
     let pdf_path = std::path::PathBuf::from(paths::get_pdf_path(&settings, id));
     if let Some(parent) = pdf_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(&pdf_path, &content) {
+    let pdf_path_clone = pdf_path.clone();
+    if let Err(e) = tokio::task::spawn_blocking(move || std::fs::write(&pdf_path_clone, &content)).await.unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking panicked"))) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
     }
 
@@ -2075,7 +2075,8 @@ async fn rehash_document(
         return (StatusCode::NOT_FOUND, Json(json!({"detail": "PDF 文件不存在"}))).into_response();
     }
 
-    let file_hash = match calculate_file_hash(&pdf_path.to_string_lossy()) {
+    let pdf_path_str = pdf_path.to_string_lossy().to_string();
+    let file_hash = match calculate_file_hash_async(pdf_path_str).await {
         Ok(h) => h,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": format!("计算哈希失败: {}", e)}))).into_response(),
     };

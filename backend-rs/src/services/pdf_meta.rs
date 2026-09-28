@@ -38,6 +38,15 @@ pub fn normalize_doi(raw: &str) -> Option<String> {
     }
 }
 
+/// 异步提取 PDF 元数据（在后台线程执行）
+pub async fn extract_pdf_metadata_async(content: Vec<u8>, filename: Option<String>, doc_id: Option<i64>) -> serde_json::Value {
+    tokio::task::spawn_blocking(move || {
+        extract_pdf_metadata(&content, filename.as_deref(), doc_id)
+    })
+    .await
+    .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
+}
+
 /// 从 PDF 字节内容中提取元数据
 #[cfg(feature = "mupdf")]
 pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>, doc_id: Option<i64>) -> serde_json::Value {
