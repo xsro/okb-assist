@@ -308,28 +308,44 @@ async fn api_upload(
     }
 }
 
-/// 通过 DOI 查询服务器上已有的文献
+/// 通过 DOI 查询服务器上已有的文献。
+/// 返回 `(found: bool, doc: Option<Value>)` 元组。
 async fn api_lookup_by_doi(
     client: &Client,
     base_url: &str,
     doi: &str,
     token: &Option<String>,
-) -> Option<serde_json::Value> {
+) -> (bool, Option<serde_json::Value>) {
     let url = format!("{}/assist/api/documents/by-doi/{}", base_url, urlencoding(doi));
     let mut req = client.get(&url);
     if let Some(t) = token {
         req = req.header("X-Token", t.as_str());
     }
     match req.send().await {
-        Ok(resp) if resp.status() == reqwest::StatusCode::OK => resp.json().await.ok(),
-        Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => None,
+        Ok(resp) if resp.status() == reqwest::StatusCode::OK => {
+            match resp.json::<serde_json::Value>().await {
+                Ok(body) => {
+                    let found = body.get("found").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if found {
+                        let doc = body.get("doc").cloned();
+                        (true, doc)
+                    } else {
+                        (false, None)
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  by-doi 解析响应失败: {}", e);
+                    (false, None)
+                }
+            }
+        }
         Ok(resp) => {
             eprintln!("  by-doi 查询失败: {}", resp.status());
-            None
+            (false, None)
         }
         Err(e) => {
             eprintln!("  by-doi 查询失败: {}", e);
-            None
+            (false, None)
         }
     }
 }
@@ -1228,20 +1244,21 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     for dw in &docs_with_hash {
         let server_doc = api_lookup_by_doi(&client, &args.base_url, &dw.doc.doi, &token).await;
 
-        match server_doc {
-            None => {
-                new_entries.push(dw);
-            }
-            Some(server) => {
-                let server_hash = server.get("file_hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let server_id = server["id"].as_u64().unwrap_or(0);
+        let (found, server_doc) = server_doc;
+        if !found {
+            new_entries.push(dw);
+        } else if let Some(server) = server_doc {
+            let server_hash = server.get("file_hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let server_id = server["id"].as_u64().unwrap_or(0);
 
-                if server_hash.is_empty() || server_hash != dw.local_hash {
-                    to_update_pdf.push((server_id, dw, server_hash));
-                } else {
-                    to_skip.push(dw);
-                }
+            if server_hash.is_empty() || server_hash != dw.local_hash {
+                to_update_pdf.push((server_id, dw, server_hash));
+            } else {
+                to_skip.push(dw);
             }
+        } else {
+            // 服务器返回 found=true 但无 doc 数据，安全起见视为新建
+            new_entries.push(dw);
         }
     }
 

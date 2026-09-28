@@ -1463,8 +1463,11 @@ async fn by_doi(
     .unwrap_or(None);
 
     match doc {
-        Some(d) => (StatusCode::OK, Json(json!(doc_to_out(&d, &settings, &db).await))).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(json!({"detail": "未找到匹配的文档"}))).into_response(),
+        Some(d) => Json(json!({
+            "found": true,
+            "doc": doc_to_out(&d, &settings, &db).await,
+        })).into_response(),
+        None => Json(json!({"found": false, "doi": doi})).into_response(),
     }
 }
 
