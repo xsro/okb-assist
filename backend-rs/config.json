@@ -8,7 +8,7 @@
       "tier": "standard",
       "task_timeout": 300,
       "type": "local",
-      "url": "http://192.168.1.185:8000"
+      "url": "http://192.168.1.185:8002"
     },
     {
       "key": "sk-xxxxx",

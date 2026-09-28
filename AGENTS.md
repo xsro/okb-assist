@@ -249,7 +249,9 @@ pnpm run build       # 构建到 frontend/dist/
 
 ## MinerU 解析与图片处理
 
-OKB-Assist 通过 MinerU V1 API 将 PDF 解析为 Markdown。`backend-rs/src/services/mineru.rs` 实现了完整的 API 客户端：
+OKB-Assist 通过 MinerU V1 API 将 PDF 解析为 Markdown。
+`document/mineru4/mineru-api-server-report.md` 包含了api从源代码库中获得的形式，必要时请直接访问代码库文件，获取更加详细的信息。
+`backend-rs/src/services/mineru.rs` 实现了完整的 API 客户端：
 
 ### 请求的输出格式
 
