@@ -60,13 +60,9 @@ struct ZoteroArgs {
     #[arg(long)]
     dry_run: bool,
 
-    /// 上传后自动更新元数据（默认开启）
-    #[arg(long, default_value_t = true)]
+    /// 上传后自动更新元数据（默认关闭，需显式指定）
+    #[arg(long, default_value_t = false)]
     update_meta: bool,
-
-    /// 不更新元数据，仅上传文件
-    #[arg(long = "no-update-meta")]
-    no_update_meta: bool,
 
     /// 显示解析出的元数据详情
     #[arg(long)]
@@ -256,7 +252,7 @@ async fn api_diff_hashes(
     }
 }
 
-/// 上传 PDF 文件到服务器（新建文献）
+/// 上传 PDF 文件到服务器（新建文献，默认不触发自动处理）
 async fn api_upload(
     client: &Client,
     base_url: &str,
@@ -281,7 +277,9 @@ async fn api_upload(
         .mime_str("application/pdf")
         .unwrap();
 
-    let form = reqwest::multipart::Form::new().part("file", file_part);
+    let form = reqwest::multipart::Form::new()
+        .part("file", file_part)
+        .text("auto_process", "false");
 
     let url = format!("{}/assist/api/documents/upload", base_url);
     let mut req = client.post(&url).multipart(form);
@@ -1142,12 +1140,13 @@ async fn upload_one_zotero(
 
 async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     let token = read_token(args.token.as_deref());
-    let update_meta = args.update_meta && !args.no_update_meta;
+    let update_meta = args.update_meta;
 
     println!("服务地址: {}", args.base_url);
     println!("CSV 文件: {}", args.csv_file);
     println!("Storage root: {}", args.storage_root.clone().unwrap_or_default());
     println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
+    println!("更新元数据: {}", if update_meta { "是" } else { "否 (默认)" });
     println!();
 
     let csv_path = Path::new(&args.csv_file);

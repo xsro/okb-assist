@@ -17,13 +17,14 @@ okb-client zotero <csv_file> [选项]
 - `--token <TOKEN>`          访问令牌
 - `--storage-root <PATH>`    Zotero storage 文件夹本地路径
 - `--dry-run`                试运行，不实际上传
-- `--no-update-meta`         不上传元数据，仅上传文件
+- `--update-meta`            同时更新元数据和原始 CSV 信息（默认仅替换 PDF）
 - `--debug`                  显示解析出的元数据详情
 
 示例：
 ```
 okb-client zotero data\我的文库.csv --base-url http://192.168.1.122:5001 --token xxx
 okb-client zotero data\我的文库.csv --storage-root D:\Zotero\storage
+okb-client zotero data\我的文库.csv --update-meta   # 更新 PDF 同时更新元数据
 ```
 
 ### `dir` — 目录 PDF 批量比对上传

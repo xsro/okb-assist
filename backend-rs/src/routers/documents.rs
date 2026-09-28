@@ -803,6 +803,7 @@ async fn upload_document(
     let mut filename: Option<String> = None;
     let mut content: Vec<u8> = Vec::new();
     let mut force = false;
+    let mut auto_process = true;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         if let Some(name) = field.name() {
@@ -817,6 +818,9 @@ async fn upload_document(
             } else if name == "force" {
                 let val = field.bytes().await.unwrap_or_default();
                 force = std::str::from_utf8(&val).unwrap_or("false") == "true";
+            } else if name == "auto_process" {
+                let val = field.bytes().await.unwrap_or_default();
+                auto_process = std::str::from_utf8(&val).unwrap_or("true") != "false";
             }
         }
     }
@@ -945,8 +949,8 @@ async fn upload_document(
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": format!("保存文件失败: {}", e)}))).into_response();
     }
 
-    // 如果有 DOI，自动触发 Crossref 获取权威元数据（以 Crossref 信息为准）
-    if doc.doi.is_some() {
+    // 如果有 DOI 且 auto_process 为 true，自动触发 Crossref 获取权威元数据
+    if auto_process && doc.doi.is_some() {
         let db = db.clone();
         let settings = settings.clone();
         tokio::spawn(run_crossref_override(db, settings, doc_id));
