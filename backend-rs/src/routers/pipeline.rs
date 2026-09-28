@@ -324,10 +324,32 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
 async fn finish_parse_result(db: &Database, settings: &Settings, doc_id: i64, md_path: &str) {
     let md_path_buf = std::path::PathBuf::from(md_path);
     let target_md = std::path::PathBuf::from(paths::get_markdown_path(settings, doc_id));
-    if let Some(parent) = target_md.parent() {
+    let target_md_dir = target_md.parent().map(|p| p.to_path_buf());
+    if let Some(parent) = &target_md_dir {
         let _ = std::fs::create_dir_all(parent);
     }
     let md_copied = std::fs::copy(&md_path_buf, &target_md).is_ok();
+
+    // 复制独立图片文件到目标 markdown 目录旁（与 markdown 中引用的相对路径一致）
+    if let Some(staging_dir) = md_path_buf.parent() {
+        if let Some(ref target_dir) = target_md_dir {
+            if let Ok(entries) = std::fs::read_dir(staging_dir) {
+                let image_extensions = ["png", "jpg", "jpeg", "gif", "svg"];
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                            if image_extensions.contains(&ext.to_lowercase().as_str()) {
+                                let fname = path.file_name().unwrap();
+                                let target = target_dir.join(fname);
+                                let _ = std::fs::copy(&path, &target);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     let images_zip = md_path_buf.parent().map(|p| p.join("images.zip"));
     let mut zip_copied = true;

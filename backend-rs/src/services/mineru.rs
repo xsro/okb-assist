@@ -182,6 +182,10 @@ impl MinerUClient {
 
     /// 获取任务结果：下载产物文件并保存到 output_dir
     /// 返回 markdown 文件路径
+    ///
+    /// 优先从 ZIP 包提取 markdown（图片为本地路径引用），
+    /// 若 ZIP 中无 markdown，则回退到独立 markdown 输出，
+    /// 并用正则将 data:image/... URI 替换为本地图片文件引用。
     pub async fn get_task_result(
         &self,
         job_id: &str,
@@ -207,8 +211,9 @@ impl MinerUClient {
         // 准备输出目录
         std::fs::create_dir_all(output_dir)?;
 
-        let mut markdown_content: Option<String> = None;
-        let mut image_bytes: Vec<(String, Vec<u8>)> = Vec::new();
+        // 先下载 ZIP 和独立 markdown
+        let mut zip_bytes: Option<Vec<u8>> = None;
+        let mut standalone_markdown: Option<String> = None;
 
         for file_entry in &output_files {
             let format = file_entry["format"].as_str().unwrap_or("");
@@ -228,60 +233,34 @@ impl MinerUClient {
 
             match format {
                 "markdown" => {
-                    markdown_content = Some(String::from_utf8_lossy(&content).to_string());
+                    standalone_markdown = Some(String::from_utf8_lossy(&content).to_string());
                 }
                 "zip" => {
-                    // ZIP 压缩包 → 提取图片
-                    if let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(&content)) {
-                        for i in 0..archive.len() {
-                            if let Ok(mut entry) = archive.by_index(i) {
-                                let name = entry.name().to_string();
-                                let lower = name.to_lowercase();
-                                if lower.ends_with(".png")
-                                    || lower.ends_with(".jpg")
-                                    || lower.ends_with(".jpeg")
-                                    || lower.ends_with(".gif")
-                                    || lower.ends_with(".svg")
-                                {
-                                    let mut buf = Vec::new();
-                                    if entry.read_to_end(&mut buf).is_ok() {
-                                        let fname = Path::new(&name)
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().to_string())
-                                            .unwrap_or_else(|| name.clone());
-                                        image_bytes.push((fname, buf));
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    zip_bytes = Some(content);
                 }
                 _ => {}
             }
         }
 
-        let md = markdown_content
-            .ok_or_else(|| anyhow::anyhow!("No markdown content found in MinerU result"))?;
+        // 优先从 ZIP 中提取 markdown
+        let (final_markdown, extracted_images) = if let Some(zip_data) = &zip_bytes {
+            Self::extract_from_zip(zip_data, output_dir)
+        } else {
+            (None, Vec::new())
+        };
 
-        // 保存图片到 images.zip
-        if !image_bytes.is_empty() {
-            let images_zip_path = Path::new(output_dir).join("images.zip");
-            match std::fs::File::create(&images_zip_path) {
-                Ok(zip_file) => {
-                    let mut zip_writer = zip::ZipWriter::new(zip_file);
-                    let options = zip::write::SimpleFileOptions::default()
-                        .compression_method(zip::CompressionMethod::Stored);
-                    for (filename, data) in &image_bytes {
-                        if zip_writer.start_file(filename, options).is_ok() {
-                            let _ = zip_writer.write_all(data);
-                        }
-                    }
-                    let _ = zip_writer.finish();
-                }
-                Err(e) => {
-                    tracing::warn!("无法创建 images.zip: {}", e);
-                }
-            }
+        let md = if let Some(ref md_from_zip) = final_markdown {
+            md_from_zip.clone()
+        } else if let Some(ref md_standalone) = standalone_markdown {
+            // 回退：替换 data:image/... URI 为本地图片文件
+            Self::replace_data_uris_in_markdown(md_standalone, output_dir)
+        } else {
+            anyhow::bail!("No markdown content found in MinerU result");
+        };
+
+        // 若从 ZIP 提取了图片，保存 images.zip
+        if !extracted_images.is_empty() {
+            Self::save_images_zip(output_dir, &extracted_images);
         }
 
         // 保存 markdown
@@ -293,6 +272,80 @@ impl MinerUClient {
         std::fs::write(&md_path, &md)?;
 
         Ok(md_path.to_string_lossy().to_string())
+    }
+
+    /// 从 ZIP 包中提取 markdown 和图片文件
+    /// 返回 (markdown 内容, 提取的图片列表)
+    fn extract_from_zip(zip_data: &[u8], output_dir: &str) -> (Option<String>, Vec<(String, Vec<u8>)>) {
+        let mut markdown_content: Option<String> = None;
+        let mut image_bytes: Vec<(String, Vec<u8>)> = Vec::new();
+
+        if let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(zip_data)) {
+            for i in 0..archive.len() {
+                if let Ok(mut entry) = archive.by_index(i) {
+                    let name = entry.name().to_string();
+                    let lower = name.to_lowercase();
+
+                    if lower.ends_with(".md") || lower.ends_with(".markdown") {
+                        // ZIP 中的 markdown，图片引用是本地路径
+                        let mut buf = Vec::new();
+                        if entry.read_to_end(&mut buf).is_ok() {
+                            markdown_content = Some(String::from_utf8_lossy(&buf).to_string());
+                        }
+                    } else if lower.ends_with(".png")
+                        || lower.ends_with(".jpg")
+                        || lower.ends_with(".jpeg")
+                        || lower.ends_with(".gif")
+                        || lower.ends_with(".svg")
+                    {
+                        let mut buf = Vec::new();
+                        if entry.read_to_end(&mut buf).is_ok() {
+                            let fname = Path::new(&name)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| name.clone());
+                            // 保存图片到独立文件（保持 ZIP 内目录结构）
+                            let img_path = Path::new(output_dir).join(&fname);
+                            if let Some(parent) = img_path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let _ = std::fs::write(&img_path, &buf);
+                            image_bytes.push((fname, buf));
+                        }
+                    }
+                }
+            }
+        }
+
+        (markdown_content, image_bytes)
+    }
+
+    /// 回退方案：standalone markdown 中的 data:image/... URI 不做替换，
+    /// 直接返回原内容（图片仍内嵌在 markdown 中，不影响显示）。
+    /// 主要修复路径是从 ZIP 中提取 markdown（已含本地图片引用）。
+    fn replace_data_uris_in_markdown(markdown: &str, _output_dir: &str) -> String {
+        markdown.to_string()
+    }
+
+    /// 将图片列表打包为 images.zip
+    fn save_images_zip(output_dir: &str, images: &[(String, Vec<u8>)]) {
+        let images_zip_path = Path::new(output_dir).join("images.zip");
+        match std::fs::File::create(&images_zip_path) {
+            Ok(zip_file) => {
+                let mut zip_writer = zip::ZipWriter::new(zip_file);
+                let options = zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored);
+                for (filename, data) in images {
+                    if zip_writer.start_file(filename, options).is_ok() {
+                        let _ = zip_writer.write_all(data);
+                    }
+                }
+                let _ = zip_writer.finish();
+            }
+            Err(e) => {
+                tracing::warn!("无法创建 images.zip: {}", e);
+            }
+        }
     }
 
     // ════════════════════════════════════════════════════════

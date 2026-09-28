@@ -86,7 +86,7 @@ cargo build --release
 | `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 构建，输出到 `frontend/dist/`，包管理器 `pnpm`） |
 | `frontend/dist/` | 前端构建产物（`index.html`、`assets/`），由后端 serving |
 | `data/` | 运行时数据（`okb_assist.db`、`_uploads/` 等），由 `system.json` 模板决定路径 |
-| `document/` | 参考文档（`mcp.md` 最完整，列出全部 MCP 工具） |
+| `document/` | 参考文档：`mcp.md`（MCP 工具列表）、`mineru-api-server-report.md`（MinerU V1 API 调研报告） |
 
 ## 配置（JSON 文件，非环境变量）
 
@@ -247,6 +247,32 @@ pnpm run build       # 构建到 frontend/dist/
 - `src/types/config.ts` — `ServiceConfig`、`SystemConfig`
 - `src/types/pipeline.ts` — `PipelineState`、`BatchProgress`
 
+## MinerU 解析与图片处理
+
+OKB-Assist 通过 MinerU V1 API 将 PDF 解析为 Markdown。`backend-rs/src/services/mineru.rs` 实现了完整的 API 客户端：
+
+### 请求的输出格式
+
+`submit_job()` 请求 `["markdown", "zip"]` 两种输出格式：
+- **`markdown`**：独立 Markdown，图片以 `data:image/...;base64,...` 内嵌
+- **`zip`**：自包含 ZIP 包，含独立图片文件 + 引用本地路径的 Markdown
+
+### 图片存储逻辑（`get_task_result()`）
+
+1. **优先从 ZIP 中提取 Markdown**（图片引用为本地路径如 `images/xxx.png`）
+2. ZIP 中的图片同时提取为独立文件
+3. 回退方案：若 ZIP 中无 Markdown，使用独立 Markdown 输出（保留 data URI）
+4. 图片同时打包为 `images.zip` 存入 asset 路径
+
+### `finish_parse_result()` 的职责
+
+完成解析后：
+1. 复制 `.md` 到 `data/markdowns/{id}.md`
+2. 复制目录中的独立图片文件到同一目录
+3. 复制 `images.zip` 到 `data/pdfs/{id}/{id}.zip`（asset 路径）
+
+> **注意**：ZIP 中的 Markdown 引用的是相对路径图片（如 `images/xxx.png`），因此独立图片文件必须与 Markdown 放在同一目录层级，否则前端无法渲染图片。
+
 ## 编码约定
 
 - **注释与 docstring 用中文**，与现有代码保持一致。
@@ -270,6 +296,8 @@ pnpm run build       # 构建到 frontend/dist/
 10. **移动端导航**：`MobileMenu` 通过 Vue 的 `provide/inject` 机制与 `AppHeader` 通信。`App.vue` 提供 `toggleMobileMenu` / `closeMobileMenu`，`AppHeader` 注入并控制汉堡菜单状态。
 11. **Rust 异步**：后台任务用 `tokio::spawn` 或 Axum `BackgroundTasks`，不要在 `async` 块中使用 `std::thread::sleep` 或阻塞 I/O。
 12. **SQLx 编译时检查**：`sqlx` 默认在 `debug` 模式下会校验 SQL 查询，如果迁移了数据库结构需运行 `cargo sqlx prepare`（需安装 `sqlx-cli`）。
+13. **MinerU Markdown 图片处理**（`backend-rs/src/services/mineru.rs`）：`get_task_result()` 必须优先从 ZIP 输出提取 Markdown（含本地图片引用），而非从独立 Markdown 输出（含 data URI）。`finish_parse_result()` 在 `pipeline.rs` 中还需**复制独立图片文件**到目标目录，否则 Markdown 中的相对路径引用会失效。
+14. **MinerU API 的 output_formats 顺序无关**：`submit_job()` 必须同时请求 `"markdown"` 和 `"zip"` 两个格式。`zip` 格式包含解析结果的完整输出（Markdown + 图片），而 `markdown` 格式是自包含的 data URI 版本。两套输出分别下载后合并处理。
 
 ## 入口与关键文件速查
 
