@@ -35,7 +35,7 @@ def extract_first_image(md_path: Path) -> str | None:
     return None
 
 
-def build_zip_index(pdf_folder: Path) -> dict[str, list[tuple[str, str]]]:
+def build_zip_index(pdf_folder: Path, progress: bool = False) -> dict[str, list[tuple[str, str]]]:
     """
     扫描 pdf_folder 下所有 .zip 文件，建立 {filename: [(zip_path, internal_path), ...]} 索引。
     """
@@ -43,7 +43,9 @@ def build_zip_index(pdf_folder: Path) -> dict[str, list[tuple[str, str]]]:
     zip_files = sorted(pdf_folder.rglob('*.zip'))
     print(f"发现 {len(zip_files)} 个 zip 文件，正在建立索引...")
 
-    for zip_path in zip_files:
+    for i, zip_path in enumerate(zip_files, 1):
+        if progress:
+            print(f"  [进度] 索引 zip [{i}/{len(zip_files)}]: {zip_path}")
         try:
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 for entry in zf.namelist():
@@ -85,6 +87,11 @@ def main():
         default='md_images_report.csv',
         help='输出 CSV 文件路径（默认: md_images_report.csv）'
     )
+    parser.add_argument(
+        '--progress', '-g',
+        action='store_true',
+        help='打印处理进度信息'
+    )
     args = parser.parse_args()
 
     md_folder = Path(args.md_folder)
@@ -98,7 +105,7 @@ def main():
         return 1
 
     # 1. 建立 zip 文件索引
-    zip_index = build_zip_index(pdf_folder)
+    zip_index = build_zip_index(pdf_folder, progress=args.progress)
     print(f"索引构建完成，共 {len(zip_index)} 个不同文件名。")
 
     # 2. 扫描 md 文件
@@ -107,14 +114,18 @@ def main():
         md_files = md_files[:args.max_md]
 
     print(f"待处理 md 文件数: {len(md_files)}")
+    if args.progress:
+        print()  # 空行分隔索引阶段和扫描阶段
 
     rows = []
     no_image_count = 0
     found_count = 0
     not_found_count = 0
 
-    for md_path in md_files:
+    for idx, md_path in enumerate(md_files, 1):
         md_name = md_path.name
+        if args.progress:
+            print(f"[进度] 扫描 md [{idx}/{len(md_files)}]: {md_name}", end='', flush=True)
         first_image = extract_first_image(md_path)
 
         zip_path = ''
@@ -122,15 +133,20 @@ def main():
 
         if first_image is None:
             no_image_count += 1
+            if args.progress:
+                print(f" → 无图片")
         else:
             # 在 zip 索引中查找
             matches = zip_index.get(first_image, [])
             if matches:
-                # 取第一个匹配
                 zip_path, image_in_zip = matches[0]
                 found_count += 1
+                if args.progress:
+                    print(f" → 找到图片: {first_image} @ {os.path.basename(zip_path)}")
             else:
                 not_found_count += 1
+                if args.progress:
+                    print(f" → 未找到图片: {first_image}")
 
         img_display = first_image if first_image else '无图片'
         rows.append([md_name, img_display, zip_path, image_in_zip])
