@@ -315,18 +315,23 @@ async fn stats(
     let indexed_count = status_counts.get("indexed").and_then(|v| v.as_i64()).unwrap_or(0);
     let error_count = status_counts.get("error").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    // 计算 PDF 总大小
-    let mut total_size: i64 = 0;
-    let docs: Vec<(i64,)> = sqlx::query_as("SELECT id FROM documents")
-        .fetch_all(db.pool())
-        .await
-        .unwrap_or_default();
-    for (id,) in docs {
-        let pdf_path = paths::get_pdf_path(&settings, id);
-        if let Ok(meta) = std::fs::metadata(&pdf_path) {
-            total_size += meta.len() as i64;
-        }
-    }
+    // 计算 PDF 总大小（后台线程，不阻塞 async 运行时）
+    let total_size: i64 = {
+        let docs: Vec<(i64,)> = sqlx::query_as("SELECT id FROM documents")
+            .fetch_all(db.pool())
+            .await
+            .unwrap_or_default();
+        let paths: Vec<String> = docs.iter().map(|(id,)| paths::get_pdf_path(&settings, *id)).collect();
+        tokio::task::spawn_blocking(move || {
+            let mut total: i64 = 0;
+            for p in &paths {
+                if let Ok(meta) = std::fs::metadata(p) {
+                    total += meta.len() as i64;
+                }
+            }
+            total
+        }).await.unwrap_or(0)
+    };
 
     // Qdrant 状态
     let mut qdrant_status = "connected".to_string();

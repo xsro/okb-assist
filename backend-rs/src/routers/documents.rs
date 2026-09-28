@@ -1838,17 +1838,25 @@ async fn save_document_info(
     }
 
     let info_path = std::path::PathBuf::from(paths::get_info_path(&settings, id));
+    let info_path_read = info_path.clone();
     if let Some(parent) = info_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
 
+    // 读取已有 info 文件（后台线程，不阻塞 async 运行时）
+    let existing_raw = tokio::task::spawn_blocking(move || {
+        if info_path_read.exists() {
+            std::fs::read_to_string(&info_path_read).ok()
+        } else {
+            None
+        }
+    }).await.unwrap_or(None);
+
     let mut existing: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-    if info_path.exists() {
-        if let Ok(raw) = std::fs::read_to_string(&info_path) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(obj) = v.as_object() {
-                    existing = obj.clone();
-                }
+    if let Some(raw) = existing_raw {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(obj) = v.as_object() {
+                existing = obj.clone();
             }
         }
     }
@@ -1865,7 +1873,8 @@ async fn save_document_info(
     }
 
     let written = serde_json::to_string_pretty(&serde_json::Value::Object(existing.clone())).unwrap_or_default();
-    if let Err(e) = std::fs::write(&info_path, written) {
+    let info_path_write = info_path.clone();
+    if let Err(e) = tokio::task::spawn_blocking(move || std::fs::write(&info_path_write, written)).await.unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking panicked"))) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
     }
 
@@ -1888,12 +1897,13 @@ async fn get_document_info(
     if !info_path.exists() {
         return (StatusCode::NOT_FOUND, Json(json!({"detail": "信息文件不存在"}))).into_response();
     }
-    match std::fs::read_to_string(&info_path) {
-        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+    let info_path_clone = info_path.clone();
+    match tokio::task::spawn_blocking(move || std::fs::read_to_string(&info_path_clone)).await {
+        Ok(Ok(raw)) => match serde_json::from_str::<serde_json::Value>(&raw) {
             Ok(v) => Json(json!({"id": id, "info": v})).into_response(),
             Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
         },
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "读取信息文件失败"}))).into_response(),
     }
 }
 
@@ -1929,9 +1939,10 @@ async fn get_image_from_zip(
         return (StatusCode::NOT_FOUND, Json(json!({"detail": "图片包不存在"}))).into_response();
     }
 
-    let raw = match std::fs::read(&zip_path) {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
+    let zip_path_read = zip_path.clone();
+    let raw = match tokio::task::spawn_blocking(move || std::fs::read(&zip_path_read)).await {
+        Ok(Ok(r)) => r,
+        _ => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "读取图片包失败"}))).into_response(),
     };
 
     let cursor = std::io::Cursor::new(raw);

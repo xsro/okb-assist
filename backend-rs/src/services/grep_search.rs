@@ -172,26 +172,33 @@ pub async fn grep_search(
     let fast_enabled = algorithm == "fast" && doc_ids_owned.is_none();
     let grep_bin = settings.grep_path();
 
+    let q = query.to_string();
+    let gb = grep_bin.clone();
+
     if fast_enabled {
-        let candidates = metadata_candidate_ids(db, query).await;
+        let candidates = metadata_candidate_ids(db, &q).await;
         let paths: Vec<String> = candidates
             .iter()
             .map(|did| crate::paths::get_markdown_path(settings, *did))
             .filter(|p| Path::new(p).exists())
             .collect();
         if paths.is_empty() {
-            // 无候选 → 回退全量目录扫描
+            // 无候选 → 回退全量目录扫描（后台线程执行 grep）
             match markdown_parent_dir(settings) {
-                Some(dir) => return run_grep_dir(query, context_lines, regex, &dir, limit, &grep_bin),
+                Some(dir) => return tokio::task::spawn_blocking(move || {
+                    run_grep_dir(&q, context_lines, regex, &dir, limit, &gb)
+                }).await.unwrap_or_default(),
                 None => return Vec::new(),
             }
         }
-        // 有候选 → 分批精确搜索
-        return run_grep_batched(query, context_lines, regex, &paths, limit, &grep_bin);
+        // 有候选 → 分批精确搜索（后台线程执行 grep）
+        return tokio::task::spawn_blocking(move || {
+            run_grep_batched(&q, context_lines, regex, &paths, limit, &gb)
+        }).await.unwrap_or_default();
     }
 
-    // 非 fast 模式
-    match &doc_ids_owned {
+    // 非 fast 模式（后台线程执行 grep）
+    let result = match &doc_ids_owned {
         Some(ids) if !ids.is_empty() => {
             let paths: Vec<String> = ids
                 .iter()
@@ -199,18 +206,24 @@ pub async fn grep_search(
                 .filter(|p| Path::new(p).exists())
                 .collect();
             if paths.is_empty() {
-                return Vec::new();
+                Vec::new()
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    run_grep_batched(&q, context_lines, regex, &paths, limit, &gb)
+                }).await.unwrap_or_default()
             }
-            run_grep_batched(query, context_lines, regex, &paths, limit, &grep_bin)
         }
         _ => {
             // 全量扫描 → 目录递归
             match markdown_parent_dir(settings) {
-                Some(dir) => run_grep_dir(query, context_lines, regex, &dir, limit, &grep_bin),
+                Some(dir) => tokio::task::spawn_blocking(move || {
+                    run_grep_dir(&q, context_lines, regex, &dir, limit, &gb)
+                }).await.unwrap_or_default(),
                 None => Vec::new(),
             }
         }
-    }
+    };
+    return result;
 }
 
 fn parse_grep_output(output: &str, limit: usize) -> Vec<serde_json::Value> {

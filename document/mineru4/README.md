@@ -8,9 +8,7 @@ sudo docker build -t mineru4 -f Dockerfile .
 ```
 
 ```
-docker run --gpus all --shm-size 32g --ipc=host \  
-  -p 8000:8000 -d --name mineru-api \  
-  mineru4 mineru-kit api-server --host 0.0.0.0 --port 8000
+docker run --gpus all --shm-size 32g --ipc=host  -p 8000:8000 -d --name mineru-api  mineru4 mineru-kit api-server --host 0.0.0.0 --port 8000
 ```
 
 
