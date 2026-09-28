@@ -130,14 +130,6 @@ struct DocMetadata {
     source: Option<String>,
 }
 
-/// diff-dois 接口返回
-#[derive(Debug, Deserialize)]
-struct DoiDiffResult {
-    missing: Vec<String>,
-    #[serde(default)]
-    present_count: Option<usize>,
-}
-
 /// diff-hashes 接口返回
 #[derive(Debug, Deserialize)]
 struct HashDiffResult {
@@ -227,34 +219,6 @@ fn sha256_file(path: &Path) -> Result<String> {
 
 // ==================== API 调用 ====================
 
-/// 批量比对 DOI，返回服务器缺失的 DOI 列表
-async fn api_diff_dois(
-    client: &Client,
-    base_url: &str,
-    dois: &[String],
-    token: &Option<String>,
-) -> Option<DoiDiffResult> {
-    let url = format!("{}/assist/api/documents/diff-dois", base_url);
-    let body = serde_json::json!({ "dois": dois });
-    match client
-        .post(&url)
-        .headers(auth_headers(token))
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status() == reqwest::StatusCode::OK => resp.json().await.ok(),
-        Ok(resp) => {
-            eprintln!("错误: diff-dois 请求失败: {}", resp.status());
-            None
-        }
-        Err(e) => {
-            eprintln!("错误: 无法连接服务器进行 diff-dois: {}", e);
-            None
-        }
-    }
-}
-
 /// 批量比对文件哈希，返回服务器缺失的哈希列表
 async fn api_diff_hashes(
     client: &Client,
@@ -283,7 +247,7 @@ async fn api_diff_hashes(
     }
 }
 
-/// 上传 PDF 文件到服务器
+/// 上传 PDF 文件到服务器（新建文献）
 async fn api_upload(
     client: &Client,
     base_url: &str,
@@ -333,6 +297,97 @@ async fn api_upload(
             None
         }
     }
+}
+
+/// 通过 DOI 查询服务器上已有的文献
+async fn api_lookup_by_doi(
+    client: &Client,
+    base_url: &str,
+    doi: &str,
+    token: &Option<String>,
+) -> Option<serde_json::Value> {
+    let url = format!("{}/assist/api/documents/by-doi/{}", base_url, urlencoding(doi));
+    let mut req = client.get(&url);
+    if let Some(t) = token {
+        req = req.header("X-Token", t.as_str());
+    }
+    match req.send().await {
+        Ok(resp) if resp.status() == reqwest::StatusCode::OK => resp.json().await.ok(),
+        Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => None,
+        Ok(resp) => {
+            eprintln!("  by-doi 查询失败: {}", resp.status());
+            None
+        }
+        Err(e) => {
+            eprintln!("  by-doi 查询失败: {}", e);
+            None
+        }
+    }
+}
+
+/// 为已有文档替换/上传 PDF 文件
+async fn api_replace_pdf(
+    client: &Client,
+    base_url: &str,
+    doc_id: u64,
+    file_path: &Path,
+    token: &Option<String>,
+) -> bool {
+    let filename = file_path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| "document.pdf".to_string());
+
+    let file_data = match tokio::fs::read(file_path).await {
+        Ok(data) => data,
+        Err(e) => {
+            eprintln!("  读取文件失败 {}: {}", file_path.display(), e);
+            return false;
+        }
+    };
+
+    let file_part = reqwest::multipart::Part::bytes(file_data)
+        .file_name(filename)
+        .mime_str("application/pdf")
+        .unwrap();
+    let form = reqwest::multipart::Form::new().part("file", file_part);
+
+    let url = format!("{}/assist/api/documents/{}/pdf", base_url, doc_id);
+    let mut req = client.post(&url).multipart(form);
+    if let Some(t) = token {
+        req = req.header("X-Token", t.as_str());
+    }
+
+    match req.send().await {
+        Ok(resp) if resp.status() == reqwest::StatusCode::OK => true,
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            eprintln!("  更新 PDF 失败: {} - {}", status, &body[..body.len().min(200)]);
+            false
+        }
+        Err(e) => {
+            eprintln!("  更新 PDF 失败: {}", e);
+            false
+        }
+    }
+}
+
+/// URL 编码（用于 DOI 中的特殊字符）
+fn urlencoding(s: &str) -> String {
+    // 简单实现：只编码 / 和 ? 等必要字符
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '/' => result.push_str("%2F"),
+            '?' => result.push_str("%3F"),
+            '#' => result.push_str("%23"),
+            '%' => result.push_str("%25"),
+            ' ' => result.push_str("%20"),
+            _ => result.push(c),
+        }
+    }
+    result
 }
 
 /// 触发文档解析流水线
@@ -1176,96 +1231,127 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     }
 
     let client = http_client()?;
-    let dois: Vec<String> = local_docs.iter().map(|d| d.doi.clone()).collect();
-    let diff = match api_diff_dois(&client, &args.base_url, &dois, &token).await {
-        Some(d) => d,
-        None => {
-            println!("错误: diff 失败，无法继续。");
-            return Ok(());
-        }
-    };
 
-    let missing: HashSet<String> = diff.missing.into_iter().collect();
-    let to_upload: Vec<&LocalDoc> =
-        local_docs.iter().filter(|d| missing.contains(&d.doi)).collect();
-
-    let total = local_docs.len();
-    let vacant_count = to_upload.len();
-    let present_count = diff.present_count.unwrap_or(total - vacant_count);
-
-    println!("本地可上传（含 DOI 且有文件）: {}", total);
-    println!("服务器已存在: {}", present_count);
-    println!("服务器空缺（待上传）: {}", vacant_count);
+    println!("本地待处理文献（含 DOI 且有文件）: {}", local_docs.len());
     println!();
-    for (i, d) in to_upload.iter().enumerate() {
-        println!(
-            "  [{}] {}  {}",
-            i + 1,
-            d.doi,
-            d.title.clone().unwrap_or_default()
-        );
-    }
-
-    if to_upload.is_empty() {
-        println!("无空缺文献，无需上传。");
-        return Ok(());
-    }
-
-    print!("请选择 [a] 全部上传  [s] 逐个上传  [q] 退出: ");
-    io::stdout().flush().ok();
-    let mut choice = String::new();
-    io::stdin().read_line(&mut choice).ok();
-    let choice = choice.trim().to_lowercase();
 
     let mut uploaded = 0usize;
+    let mut skipped = 0usize;
     let mut failed = 0usize;
+    let mut updated_pdf = 0usize;
 
-    if choice == "q" {
-        return Ok(());
-    } else if choice == "a" {
-        for d in &to_upload {
-            if upload_one_zotero(d, &args.base_url, update_meta, args.dry_run, &client, &token).await
-            {
-                uploaded += 1;
-            } else {
+    for (idx, d) in local_docs.iter().enumerate() {
+        println!("── [{}/{}] ──", idx + 1, local_docs.len());
+        print_doc_detail(d);
+        println!();
+
+        // 计算本地文件哈希
+        let local_hash = match sha256_file(Path::new(&d.file_path)) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("  无法计算文件哈希: {}", e);
                 failed += 1;
+                continue;
             }
-        }
-    } else if choice == "s" {
-        for d in &to_upload {
-            print_doc_detail(d);
-            print!("上传这篇？[y/N]: ");
-            io::stdout().flush().ok();
-            let mut ans = String::new();
-            io::stdin().read_line(&mut ans).ok();
-            if ans.trim().to_lowercase() == "y" {
-                if upload_one_zotero(
-                    d,
-                    &args.base_url,
-                    update_meta,
-                    args.dry_run,
-                    &client,
-                    &token,
-                )
-                .await
-                {
-                    uploaded += 1;
+        };
+
+        // 查询服务器是否存在该 DOI
+        let server_doc = api_lookup_by_doi(&client, &args.base_url, &d.doi, &token).await;
+
+        match server_doc {
+            None => {
+                // DOI 不存在 → 询问是否新建
+                println!("  → DOI 在服务器上不存在");
+                print!("  新建文献条目？[y/N]: ");
+                io::stdout().flush().ok();
+                let mut ans = String::new();
+                io::stdin().read_line(&mut ans).ok();
+                if ans.trim().to_lowercase() == "y" {
+                    if args.dry_run {
+                        println!("  [dry-run] 跳过上传");
+                        uploaded += 1;
+                    } else if upload_one_zotero(d, &args.base_url, update_meta, false, &client, &token).await {
+                        uploaded += 1;
+                    } else {
+                        failed += 1;
+                    }
                 } else {
-                    failed += 1;
+                    println!("  跳过。");
+                    skipped += 1;
                 }
-            } else {
-                println!("  跳过。");
+            }
+            Some(server) => {
+                // DOI 已存在 → 比较 hash
+                let server_hash = server.get("file_hash").and_then(|v| v.as_str()).unwrap_or("");
+                let server_id = server["id"].as_u64().unwrap_or(0);
+
+                if server_hash.is_empty() {
+                    // 服务器无 PDF 文件
+                    println!("  → 文献已存在（ID={}），但无 PDF 文件", server_id);
+                    print!("  上传 PDF？[y/N]: ");
+                    io::stdout().flush().ok();
+                    let mut ans = String::new();
+                    io::stdin().read_line(&mut ans).ok();
+                    if ans.trim().to_lowercase() == "y" {
+                        if args.dry_run {
+                            println!("  [dry-run] 跳过更新 PDF");
+                            updated_pdf += 1;
+                        } else if api_replace_pdf(&client, &args.base_url, server_id, Path::new(&d.file_path), &token).await {
+                            if update_meta {
+                                api_update_metadata(&client, &args.base_url, server_id, &d.meta, &token).await;
+                                api_save_info(&client, &args.base_url, server_id, &d.info, &token).await;
+                            }
+                            println!("  ✓ PDF 已更新（ID={}）", server_id);
+                            updated_pdf += 1;
+                        } else {
+                            failed += 1;
+                        }
+                    } else {
+                        println!("  跳过。");
+                        skipped += 1;
+                    }
+                } else if server_hash == local_hash {
+                    // hash 一致 → 跳过
+                    println!("  ✓ 文献已存在且 PDF 一致（ID={}），跳过", server_id);
+                    skipped += 1;
+                } else {
+                    // hash 不一致 → 询问是否更新
+                    println!("  → 文献已存在（ID={}），但 PDF 不同", server_id);
+                    println!("    服务器 hash: {}...", &server_hash[..16.min(server_hash.len())]);
+                    println!("    本地   hash: {}...", &local_hash[..16.min(local_hash.len())]);
+                    print!("  更新 PDF？[y/N]: ");
+                    io::stdout().flush().ok();
+                    let mut ans = String::new();
+                    io::stdin().read_line(&mut ans).ok();
+                    if ans.trim().to_lowercase() == "y" {
+                        if args.dry_run {
+                            println!("  [dry-run] 跳过更新 PDF");
+                            updated_pdf += 1;
+                        } else if api_replace_pdf(&client, &args.base_url, server_id, Path::new(&d.file_path), &token).await {
+                            if update_meta {
+                                api_update_metadata(&client, &args.base_url, server_id, &d.meta, &token).await;
+                                api_save_info(&client, &args.base_url, server_id, &d.info, &token).await;
+                            }
+                            println!("  ✓ PDF 已更新（ID={}）", server_id);
+                            updated_pdf += 1;
+                        } else {
+                            failed += 1;
+                        }
+                    } else {
+                        println!("  跳过。");
+                        skipped += 1;
+                    }
+                }
             }
         }
-    } else {
-        println!("无效选择，退出。");
-        return Ok(());
+        println!();
     }
 
-    println!();
     println!("==================================================");
-    println!("已上传: {}", uploaded);
-    println!("失败: {}", failed);
+    println!("新建上传: {}", uploaded);
+    println!("更新 PDF: {}", updated_pdf);
+    println!("跳过:     {}", skipped);
+    println!("失败:     {}", failed);
 
     Ok(())
 }
