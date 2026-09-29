@@ -49,10 +49,21 @@ pub struct MinerUClient {
 
 impl MinerUClient {
     pub fn new(config: &MinerUConfig) -> Self {
+        let mineru_type = MineruType::from_str(&config.mineru_type);
+        // 官方云 API 基础路径含 /api 前缀（https://mineru.net/api/v1/...）
+        // 自部署 API 基础路径直接为 /v1/...（http://127.0.0.1:8002/v1/...）
+        let base_url = {
+            let url = config.url.trim_end_matches('/').to_string();
+            if mineru_type == MineruType::Official && !url.ends_with("/api") {
+                format!("{}/api", url)
+            } else {
+                url
+            }
+        };
         Self {
-            base_url: config.url.trim_end_matches('/').to_string(),
+            base_url,
             key: config.key.clone(),
-            mineru_type: MineruType::from_str(&config.mineru_type),
+            mineru_type,
             tier: config.tier.clone(),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
@@ -369,12 +380,17 @@ impl MinerUClient {
         .await
         .map_err(|e| anyhow::anyhow!("SHA-256 计算失败: {}", e))?;
 
-        let body = json!({
+        let mut body = json!({
             "filename": filename,
             "bytes": file_size,
             "sha256sum": sha256_hex,
             "mime_type": "application/pdf",
         });
+
+        // 官方云 API 需要 purpose 字段
+        if self.mineru_type == MineruType::Official {
+            body["purpose"] = json!("parse");
+        }
 
         let resp = self
             .http
