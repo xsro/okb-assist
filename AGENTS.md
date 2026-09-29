@@ -65,13 +65,13 @@ cargo build --release
 | 路径 | 说明 |
 |------|------|
 | `backend-rs/src/main.rs` | **入口**：Axum app、路由/MCP/中间件 |
-| `backend-rs/src/routers/` | 路由组：`documents.py`、`pipeline.py`、`admin.py`、`config.py`、`openapi.py` |
+| `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`admin.rs`、`config.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/` | 后端适配器：`qdrant.rs`、`ollama.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`vector_db.rs`（抽象接口） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
 | `backend-rs/src/mcp_server.rs` | MCP 服务 |
-| `backend-rs/src/settings.rs`、`backend-rs/src/utils.rs` | 设置与工具函数 |
+| `backend-rs/src/settings.rs`、`backend-rs/src/utils.rs` | 全局 Settings 单例、工具函数 |
 | `backend-rs/config.json` | 服务配置（MinerU/Ollama/向量库），可由 UI 编辑 |
 | `backend-rs/system.json` | 系统配置（token、DB URL、上传路径、路径模板），需手动改 |
 | `client-rs/` | Zotero CSV 导入客户端（Rust） |
@@ -86,7 +86,7 @@ cargo build --release
 | `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 构建，输出到 `frontend/dist/`，包管理器 `pnpm`） |
 | `frontend/dist/` | 前端构建产物（`index.html`、`assets/`），由后端 serving |
 | `data/` | 运行时数据（`okb_assist.db`、`_uploads/` 等），由 `system.json` 模板决定路径 |
-| `document/` | 参考文档：`mcp.md`（MCP 工具列表）、`mineru-api-server-report.md`（MinerU V1 API 调研报告） |
+| `document/` | 参考文档：`mcp.md`（MCP 工具列表）、`build.md`（部署构建）、`mineru.md`（MinerU 部署）、`mineru-cloud-api.md`（官方云 API）、`mineru4/mineru-api-server-report.md`（V1 API 调研）、`openwebui.md`、`qdrant.md`、`rsync.md`、`udisks2-automount.md` |
 
 ## 配置（JSON 文件，非环境变量）
 
@@ -143,7 +143,7 @@ cargo build --release
    - parse（MinerU）→ `parsing` → `markdown_done`
    - extract（Ollama）→ `extracting` → `meta_done`
    - index（向量库）→ `indexing` → `indexed`
-   - 含批量控制器、暂停/恢复/重置、信号量并发限制（受 `max_concurrent_tasks` 约束）。
+   - 含批量控制器、暂停/恢复/重置、两级信号量并发限制：MinerU 解析使用独立 `Semaphore(max_tasks)`（按配置），extract/index 使用全局 `Semaphore(max_concurrent_tasks)`（`system.json`）。
    - **所有阶段均在后台执行**（见下方「后台任务」一节）—— 请求先返回，协程在事件循环继续；进度与状态机记录在 `Document` 上，可轮询查询。
 4. **文档管理**（`documents.rs`）：CRUD、上传、按路径登记、语义搜索 `/search`、全文搜索 `/grep-search`、`/assist/markdown` 读写、PDF/图片服务、去重。
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、迁移、索引重置。
@@ -250,8 +250,11 @@ pnpm run build       # 构建到 frontend/dist/
 
 ## MinerU 解析与图片处理
 
-OKB-Assist 通过 MinerU V1 API 将 PDF 解析为 Markdown。
-`document/mineru4/mineru-api-server-report.md` 包含了api从源代码库中获得的形式，必要时请直接访问代码库文件，获取更加详细的信息。
+OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类型：
+- **local**（自部署 V1 API）：通过 `mineru-kit api-server` 部署，`document/mineru4/mineru-api-server-report.md` 包含完整 API 参考。
+- **official**（官方云 V4 精准解析 API）：通过 Token 认证，`document/mineru-cloud-api.md`。
+- **official-lightweight**（官方云 V1 Agent 轻量 API）：无需 Token，IP 限频。
+`backend-rs/src/services/mineru.rs` 实现了完整的 API 客户端：
 `backend-rs/src/services/mineru.rs` 实现了完整的 API 客户端：
 
 ### 请求的输出格式
