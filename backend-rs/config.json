@@ -4,8 +4,7 @@
   "active_mineru_key": "no-password",
   "mineru": [
     {
-      "enabled": true,
-      "key": "",
+      "key": "no-password",
       "max_tasks": 3,
       "name": "local network",
       "task_timeout": 30000,
@@ -14,7 +13,6 @@
       "url": "http://192.168.1.185:8002"
     },
     {
-      "enabled": true,
       "key": "sk-N11mhN8170ZDJ8N0hs7Y23kGL2JKjgxSVJ5zkLinFkOBmObR",
       "max_tasks": 3,
       "name": "官方标准（需要token）",

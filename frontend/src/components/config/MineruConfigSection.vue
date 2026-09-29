@@ -13,9 +13,6 @@
           <span class="mineru-type-badge" :class="mu.type">{{ typeLabel(mu.type) }}</span>
           <span class="mineru-url-preview">{{ mu.url }}</span>
           <span class="status-dot-small" :class="getStatusClass(idx)" :title="getStatusText(idx)"></span>
-          <span class="enabled-badge" :class="mu.enabled !== false ? 'on' : 'off'">
-            {{ mu.enabled !== false ? '启用' : '禁用' }}
-          </span>
           <span
             class="active-radio"
             :class="{ active: isActive(mu) }"
@@ -79,13 +76,7 @@
             <label>最大并发任务数</label>
             <input v-model.number="mu.max_tasks" type="number" @input="emitUpdate" />
           </div>
-          <div class="form-group checkbox-group">
-            <label>
-              <input v-model="mu.enabled" type="checkbox" true-value="true" false-value="false" @change="emitUpdate" />
-              启用此配置
-            </label>
           </div>
-        </div>
         <div class="status-test-row">
           <span class="status-dot" :class="getStatusClass(idx)"></span>
           <span class="status-text">{{ getStatusText(idx) }}</span>
@@ -153,7 +144,6 @@ function defaultMineruConfig(): MinerUConfig {
     task_timeout: 300,
     tier: 'standard',
     max_tasks: 3,
-    enabled: true,
     name: ''
   }
 }
@@ -314,15 +304,6 @@ defineExpose({ syncStatus })
 .status-dot-small.ok { background: var(--success); }
 .status-dot-small.error { background: var(--danger); }
 .status-dot-small.warning { background: var(--warning); }
-.enabled-badge {
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  flex-shrink: 0;
-}
-.enabled-badge.on { background: #e8f5e9; color: #2e7d32; }
-.enabled-badge.off { background: #fbe9e7; color: #bf360c; }
-
 .active-radio {
   cursor: pointer;
   flex-shrink: 0;
@@ -378,10 +359,6 @@ defineExpose({ syncStatus })
 .form-group { flex: 1; }
 .form-group label { display: block; font-size: 12px; margin-bottom: 4px; color: var(--text-secondary); }
 .form-group input, .form-group select { width: 100%; box-sizing: border-box; }
-.checkbox-group { display: flex; align-items: center; padding-top: 18px; }
-.checkbox-group label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
-.checkbox-group input[type="checkbox"] { width: auto; }
-
 .status-test-row {
   display: flex;
   align-items: center;
