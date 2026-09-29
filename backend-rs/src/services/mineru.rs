@@ -503,26 +503,28 @@ impl MinerUClient {
     // ════════════════════════════════════════════════════════
 
     /// V4: 通过批量文件上传提交任务
-    /// 流程：获取预签名上传 URL → 上传文件 → 系统自动提交
-    /// 返回 task_id（通过 data_id 从上传响应中获取）
+    /// 流程：获取预签名上传 URL → 上传文件 → 提交解析任务 → 轮询 → 获取结果
+    /// 返回 submit_batch_id（用于后续轮询任务状态）
     async fn submit_parse_task_v4(&self, file_path: &str) -> anyhow::Result<String> {
         let file_name = Path::new(file_path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "document.pdf".to_string());
 
+        let data_id = format!("okb_{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs());
+
         let pdf_bytes = tokio::fs::read(file_path).await?;
 
         // Step 1: 获取预签名上传 URL
+        // 注意：model_version 参数已被官方 V4 API 移除，不再发送
         let body = json!({
             "files": [{
                 "name": file_name,
-                "data_id": format!("okb_{}", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs())
+                "data_id": data_id,
             }],
-            "model_version": self.tier,
         });
 
         tracing::debug!("V4 请求上传 URL: {}", body.to_string());
@@ -561,9 +563,11 @@ impl MinerUClient {
             .ok_or_else(|| anyhow::anyhow!("V4 file_urls[0] 不是字符串"))?;
 
         // Step 2: 上传文件到预签名 URL
+        // 阿里云 OSS 预签名 URL 的签名不含 Content-Type，需移除默认 Content-Type header
         let upload_resp = self
             .http
             .put(upload_url)
+            .header("Content-Type", "")
             .body(pdf_bytes)
             .send()
             .await?;
@@ -574,19 +578,56 @@ impl MinerUClient {
 
         tracing::info!("V4 文件上传成功, batch_id={}", batch_id);
 
-        // Step 3: 系统自动提交解析任务
-        // 上传完成后立即轮询任务状态
-        // 使用 batch_id 作为 task_id 前缀，等待系统创建任务后轮询
-        // 返回 batch_id，后续通过 query_v4_result 获取 task_id
-        Ok(batch_id)
+        // Step 3: 提交解析任务到官方 API
+        // POST /api/v4/extract/task/batch 提交批次文件进行解析
+        // 请求体包含 batch_id 和 files 列表（含 OSS 文件 URL）
+        let file_oss_url = upload_url.split('?').next().unwrap_or(upload_url);
+        let submit_body = json!({
+            "batch_id": batch_id,
+            "files": [{
+                "data_id": data_id,
+                "url": file_oss_url,
+                "name": file_name,
+            }],
+        });
+
+        tracing::debug!("V4 提交解析任务: {}", submit_body.to_string());
+
+        let submit_resp = self
+            .http
+            .post(format!("{}/v4/extract/task/batch", self.base_url))
+            .bearer_auth(&self.key)
+            .json(&submit_body)
+            .send()
+            .await?;
+
+        if !submit_resp.status().is_success() {
+            let status = submit_resp.status();
+            let text = submit_resp.text().await.unwrap_or_default();
+            anyhow::bail!("V4 提交解析任务失败: HTTP {} - {}", status, text.chars().take(300).collect::<String>());
+        }
+
+        let submit_data: Value = submit_resp.json().await?;
+        if submit_data["code"].as_i64().unwrap_or(-1) != 0 {
+            anyhow::bail!("V4 提交解析任务失败: {}", submit_data["msg"].as_str().unwrap_or("unknown error"));
+        }
+
+        let submit_batch_id = submit_data["data"]["batch_id"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("V4 提交响应缺少 batch_id"))?
+            .to_string();
+
+        tracing::info!("V4 解析任务已提交, batch_id={}, submit_batch_id={}", batch_id, submit_batch_id);
+
+        // 返回 submit_batch_id 用于轮询任务状态
+        Ok(submit_batch_id)
     }
 
     /// V4: 检查任务状态
     /// 使用 batch_id 查询 batch 中所有 task 的状态
     async fn check_task_status_v4(&self, batch_id: &str) -> Value {
-        // V4 batch 任务查询：GET /api/v4/extract/task/batch/{batch_id}
+        // V4 batch 任务查询：GET /api/v4/extract/task/batch?batch_id={batch_id}
         // 返回 batch 中所有 task 的状态
-        let batch_query_url = format!("{}/v4/extract/task/batch/{}", self.base_url, batch_id);
+        let batch_query_url = format!("{}/v4/extract/task/batch?batch_id={}", self.base_url, batch_id);
         let resp = self.http.get(&batch_query_url)
             .bearer_auth(&self.key)
             .send()

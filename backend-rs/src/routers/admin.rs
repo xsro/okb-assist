@@ -114,35 +114,76 @@ async fn check_mineru(settings: &Settings) -> Value {
             .build()
             .unwrap_or_default();
 
-        // V1 API 健康检查（本地和官方云均使用 /v1/health）
-        let health_url = format!("{}/v1/health", config.url);
-        let mut req = client.get(&health_url);
-        if !config.key.is_empty() {
-            req = req.bearer_auth(&config.key);
-        }
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                item["status"] = json!("connected");
-                item["api_version"] = json!("v1");
-                if let Ok(health) = resp.json::<Value>().await {
-                    if let Some(ver) = health.get("version") {
-                        item["version"] = ver.clone();
+        // 根据 MinerU 类型选择正确的健康检查方式
+        let mineru_type = MineruType::from_str(&config.mineru_type);
+        match mineru_type {
+            MineruType::Local => {
+                // 自部署 V1 API：使用 /v1/health
+                let mut req = client.get(format!("{}/v1/health", config.url));
+                if !config.key.is_empty() {
+                    req = req.bearer_auth(&config.key);
+                }
+                match req.send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        item["status"] = json!("connected");
+                        item["api_version"] = json!("v1");
+                        if let Ok(health) = resp.json::<Value>().await {
+                            if let Some(ver) = health.get("version") {
+                                item["version"] = ver.clone();
+                            }
+                            if let Some(features) = health.get("features") {
+                                item["features"] = features.clone();
+                            }
+                            if let Some(tiers) = health.get("tiers") {
+                                item["tiers"] = tiers.clone();
+                            }
+                        }
                     }
-                    if let Some(features) = health.get("features") {
-                        item["features"] = features.clone();
+                    Ok(resp) => {
+                        item["status"] = json!("error");
+                        item["error"] = json!(format!("HTTP {}", resp.status()));
                     }
-                    if let Some(tiers) = health.get("tiers") {
-                        item["tiers"] = tiers.clone();
+                    Err(e) => {
+                        item["status"] = json!("disconnected");
+                        item["error"] = json!(e.to_string());
                     }
                 }
             }
-            Ok(resp) => {
-                item["status"] = json!("error");
-                item["error"] = json!(format!("HTTP {}", resp.status()));
+            MineruType::Official => {
+                // 官方 V4 API：用 Bearer token 请求根路径（接受 200 或 404）
+                let resp = client.get(&config.url).bearer_auth(&config.key).send().await;
+                match resp {
+                    Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
+                        item["status"] = json!("connected");
+                        item["api_version"] = json!("v4");
+                    }
+                    Ok(resp) => {
+                        item["status"] = json!("error");
+                        item["error"] = json!(format!("HTTP {}", resp.status()));
+                    }
+                    Err(e) => {
+                        item["status"] = json!("disconnected");
+                        item["error"] = json!(e.to_string());
+                    }
+                }
             }
-            Err(e) => {
-                item["status"] = json!("disconnected");
-                item["error"] = json!(e.to_string());
+            MineruType::OfficialLightweight => {
+                // 轻量 API
+                let resp = client.get(format!("{}/v1/agent/parse/health", config.url)).send().await;
+                match resp {
+                    Ok(resp) if resp.status().is_success() => {
+                        item["status"] = json!("connected");
+                        item["api_version"] = json!("v1-lightweight");
+                    }
+                    Ok(resp) => {
+                        item["status"] = json!("error");
+                        item["error"] = json!(format!("HTTP {}", resp.status()));
+                    }
+                    Err(e) => {
+                        item["status"] = json!("disconnected");
+                        item["error"] = json!(e.to_string());
+                    }
+                }
             }
         }
         items.push(item);

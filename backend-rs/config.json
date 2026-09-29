@@ -3,17 +3,22 @@
   "alias_expiration_hours": 1,
   "mineru": [
     {
-      "key": "keyxxx",
+      "enabled": true,
+      "key": "",
       "max_tasks": 3,
+      "name": "local network",
+      "task_timeout": 30000,
       "tier": "standard",
-      "task_timeout": 300,
       "type": "local",
       "url": "http://192.168.1.185:8002"
     },
     {
-      "key": "sk-xxxxx",
-      "tier": "standard",
+      "enabled": true,
+      "key": "sk-N11mhN8170ZDJ8N0hs7Y23kGL2JKjgxSVJ5zkLinFkOBmObR",
+      "max_tasks": 3,
+      "name": "官方标准（需要token）",
       "task_timeout": 300,
+      "tier": "standard",
       "type": "official",
       "url": "https://mineru.net"
     }

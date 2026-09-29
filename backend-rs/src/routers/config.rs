@@ -217,7 +217,7 @@ async fn test_mineru(url: &str, key: &str, mineru_type: &str) -> Value {
 
     match MineruType::from_str(mineru_type) {
         MineruType::Local => {
-            let mut req = client.get(format!("{}/health", url));
+            let mut req = client.get(format!("{}/v1/health", url));
             if !key.is_empty() {
                 req = req.bearer_auth(key);
             }
