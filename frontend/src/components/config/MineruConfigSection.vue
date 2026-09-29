@@ -50,8 +50,8 @@
             <input v-model="mu.url" type="text" :placeholder="mu.type === 'local' ? 'http://127.0.0.1:8000' : 'https://mineru.net'" @input="emitUpdate" />
           </div>
           <div class="form-group">
-            <label>API Key</label>
-            <input v-model="mu.key" type="password" :placeholder="mu.type === 'official' ? 'sk-...' : '无需填写'" @input="emitUpdate" />
+            <label>Token</label>
+            <input v-model="mu.token" type="text" :placeholder="mu.type === 'official' ? 'sk-...' : '无需填写'" @input="emitUpdate" />
           </div>
         </div>
         <div class="form-row">
@@ -140,11 +140,11 @@ function defaultMineruConfig(): MinerUConfig {
   return {
     type: 'local',
     url: 'http://127.0.0.1:8000',
-    key: '',
+    token: '',
+    name: '',
     task_timeout: 300,
     tier: 'standard',
-    max_tasks: 3,
-    name: ''
+    max_tasks: 3
   }
 }
 
@@ -202,12 +202,12 @@ function getStatusClass(idx: number): string {
 }
 
 function isActive(mu: MinerUConfig): boolean {
-  return props.activeKey === mu.key
+  return props.activeKey === mu.name
 }
 
 function setActive(mu: MinerUConfig) {
-  if (mu.key) {
-    emit('update:activeKey', mu.key)
+  if (mu.name) {
+    emit('update:activeKey', mu.name)
   }
 }
 

@@ -8,7 +8,7 @@
       <MineruConfigSection
         ref="mineruSectionRef"
         :configs="config.mineru"
-        :active-key="config.active_mineru_key"
+        :active-key="config.active_mineru"
         @update="onConfigUpdate"
         @update:active-key="onActiveMineruKeyChange"
       />
@@ -62,7 +62,7 @@ function onConfigUpdate() {
 
 function onActiveMineruKeyChange(key: string) {
   if (config.value) {
-    config.value.active_mineru_key = key
+    config.value.active_mineru = key
   }
 }
 

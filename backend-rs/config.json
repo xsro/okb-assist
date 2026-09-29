@@ -1,10 +1,10 @@
 {
   "base_url": "http://127.0.0.1:5001/",
   "alias_expiration_hours": 1,
-  "active_mineru_key": "no-password",
+  "active_mineru": "local network",
   "mineru": [
     {
-      "key": "no-password",
+      "token": "",
       "max_tasks": 3,
       "name": "local network",
       "task_timeout": 30000,
@@ -13,7 +13,7 @@
       "url": "http://192.168.1.185:8002"
     },
     {
-      "key": "sk-N11mhN8170ZDJ8N0hs7Y23kGL2JKjgxSVJ5zkLinFkOBmObR",
+      "token": "sk-N11mhN8170ZDJ8N0hs7Y23kGL2JKjgxSVJ5zkLinFkOBmObR",
       "max_tasks": 3,
       "name": "官方标准（需要token）",
       "task_timeout": 300,

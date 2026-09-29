@@ -54,9 +54,9 @@ async fn update_config(
 ) -> Response {
     let mut config = cm.get_service_config();
 
-    // active_mineru_key：前端可以选择使用哪个 mineru 配置
-    if let Some(active_key) = body.get("active_mineru_key").and_then(|v| v.as_str()) {
-        config["active_mineru_key"] = json!(active_key);
+    // active_mineru：前端可以选择使用哪个 mineru 配置（按 name 匹配）
+    if let Some(active) = body.get("active_mineru").and_then(|v| v.as_str()) {
+        config["active_mineru"] = json!(active);
     }
 
     // mineru 是数组，直接替换（与前端提交的完整列表保持一致）

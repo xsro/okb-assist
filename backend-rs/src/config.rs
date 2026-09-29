@@ -14,7 +14,8 @@ use crate::config_manager::ConfigManager;
 #[derive(Debug, Clone)]
 pub struct MinerUConfig {
     pub url: String,
-    pub key: String,
+    pub token: String,
+    pub name: String,
     pub mineru_type: String,
     pub tier: String,
     pub task_timeout: u64,
@@ -54,7 +55,8 @@ impl Settings {
                     .unwrap_or("http://127.0.0.1:8002")
                     .trim_end_matches('/')
                     .to_string(),
-                key: v["key"].as_str().unwrap_or("key").to_string(),
+                token: v["token"].as_str().unwrap_or("").to_string(),
+                name: v["name"].as_str().unwrap_or("").to_string(),
                 mineru_type: v["type"]
                     .as_str()
                     .unwrap_or("local")
@@ -65,28 +67,28 @@ impl Settings {
             .collect()
     }
 
-    /// 返回 active_mineru_key 的值（空字符串表示使用第一个启用的配置）
-    pub fn active_mineru_key(&self) -> String {
-        self.get_config()["active_mineru_key"]
+    /// 返回 active_mineru 的值（空字符串表示使用第一个配置）
+    pub fn active_mineru(&self) -> String {
+        self.get_config()["active_mineru"]
             .as_str()
             .unwrap_or("")
             .to_string()
     }
 
-    /// 返回当前选中的 MinerU 配置（匹配 active_mineru_key），
-    /// 若未设置 active_mineru_key 则返回第一个启用的配置。
+    /// 返回当前选中的 MinerU 配置（匹配 active_mineru 中指定的 name），
+    /// 若未设置 active_mineru 则返回第一个配置。
     pub fn active_mineru_config(&self) -> Option<MinerUConfig> {
         let configs = self.mineru_configs();
-        let active_key = self.active_mineru_key();
+        let active_name = self.active_mineru();
 
-        if !active_key.is_empty() {
-            // 有 active_key，找匹配的配置
-            if let Some(cfg) = configs.iter().find(|c| c.key == active_key) {
+        if !active_name.is_empty() {
+            // 有 active_name，按 name 匹配
+            if let Some(cfg) = configs.iter().find(|c| c.name == active_name) {
                 return Some(cfg.clone());
             }
         }
 
-        // 无 active_key 或未匹配到，返回第一个启用的配置
+        // 无 active_name 或未匹配到，返回第一个配置
         configs.into_iter().next()
     }
 
@@ -98,12 +100,12 @@ impl Settings {
             .unwrap_or_else(|| "http://127.0.0.1:8002".to_string())
     }
 
-    /// 兼容旧接口：返回第一个 MinerU 配置的 key
+    /// 兼容旧接口：返回第一个 MinerU 配置的 token
     pub fn mineru_key(&self) -> String {
         self.mineru_configs()
             .first()
-            .map(|c| c.key.clone())
-            .unwrap_or_else(|| "key".to_string())
+            .map(|c| c.token.clone())
+            .unwrap_or_else(|| String::new())
     }
 
     /// 兼容旧接口：返回第一个 MinerU 配置的 type

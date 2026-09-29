@@ -206,7 +206,7 @@ fn remove_dir_all_ignore(path: &std::path::Path) {
 // ── 后台任务实现 ──
 
 async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
-    // 使用 active_mineru_key 选中的配置，未设置时使用第一个启用的配置
+    // 使用 active_mineru 选中的配置（按 name 匹配），未设置时使用第一个配置
     let active_config = settings.active_mineru_config();
     let active_config = match active_config {
         Some(c) => c,

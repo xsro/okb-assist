@@ -67,7 +67,7 @@ impl MinerUClient {
         let base_url = Self::build_base_url(&config.url, mineru_type);
         Self {
             base_url,
-            key: config.key.clone(),
+            key: config.token.clone(),
             mineru_type,
             tier: config.tier.clone(),
             http: reqwest::Client::builder()

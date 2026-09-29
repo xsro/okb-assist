@@ -14,7 +14,7 @@ pub fn default_config() -> serde_json::Value {
     serde_json::json!({
         "base_url": "",
         "alias_expiration_hours": 1,
-        "active_mineru_key": "",
+        "active_mineru": "",
         "mineru": [
             {
                 "type": "local",
@@ -353,16 +353,16 @@ impl ConfigManager {
     pub fn mask_sensitive(&self, config: &serde_json::Value) -> serde_json::Value {
         let mut masked = config.clone();
         if let Some(obj) = masked.as_object_mut() {
-            // MinerU key（数组格式）
+            // MinerU token（数组格式）
             if let Some(mineru) = obj.get_mut("mineru") {
                 if let Some(arr) = mineru.as_array_mut() {
                     for item in arr.iter_mut() {
-                        if let Some(key) = item.get_mut("key") {
-                            if let Some(k) = key.as_str() {
-                                if k.len() > 4 {
-                                    *key = serde_json::Value::String(format!("{}***", &k[..4]));
+                        if let Some(token) = item.get_mut("token") {
+                            if let Some(t) = token.as_str() {
+                                if t.len() > 4 {
+                                    *token = serde_json::Value::String(format!("{}***", &t[..4]));
                                 } else {
-                                    *key = serde_json::Value::String("***".to_string());
+                                    *token = serde_json::Value::String("***".to_string());
                                 }
                             }
                         }

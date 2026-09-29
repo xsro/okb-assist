@@ -17,7 +17,8 @@ export interface VectorDbConfig {
 export interface MinerUConfig {
   type: string
   url: string
-  key: string
+  token: string
+  name: string
   task_timeout: number
   tier?: string
   max_tasks?: number
@@ -27,7 +28,7 @@ export interface MinerUConfig {
 
 export interface ServiceConfig {
   base_url: string
-  active_mineru_key?: string
+  active_mineru?: string
   mineru: MinerUConfig[]
   ollama: {
     url: string

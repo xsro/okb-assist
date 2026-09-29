@@ -120,8 +120,8 @@ async fn check_mineru(settings: &Settings) -> Value {
             MineruType::Local => {
                 // 自部署 V1 API：使用 /v1/health
                 let mut req = client.get(format!("{}/v1/health", config.url));
-                if !config.key.is_empty() {
-                    req = req.bearer_auth(&config.key);
+                if !config.token.is_empty() {
+                    req = req.bearer_auth(&config.token);
                 }
                 match req.send().await {
                     Ok(resp) if resp.status().is_success() => {
@@ -151,7 +151,7 @@ async fn check_mineru(settings: &Settings) -> Value {
             }
             MineruType::Official => {
                 // 官方 V4 API：用 Bearer token 请求根路径（接受 200 或 404）
-                let resp = client.get(&config.url).bearer_auth(&config.key).send().await;
+                let resp = client.get(&config.url).bearer_auth(&config.token).send().await;
                 match resp {
                     Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
                         item["status"] = json!("connected");
