@@ -46,11 +46,21 @@
       </button>
     </div>
 
-    <!-- 加载提示 -->
-    <div v-if="loading" class="loading-hint">加载中...</div>
+    <!-- 加载状态 -->
+    <div v-if="loading" class="loading-skeleton">
+      <div v-for="n in 5" :key="n" class="skeleton-row">
+        <div class="sk sk-id"></div>
+        <div class="sk sk-title"></div>
+        <div class="sk sk-authors"></div>
+        <div class="sk sk-year"></div>
+        <div class="sk sk-type"></div>
+        <div class="sk sk-status"></div>
+        <div class="sk sk-action"></div>
+      </div>
+    </div>
 
     <!-- 桌面端表格 -->
-    <table v-if="!isMobile" class="doc-table">
+    <table v-if="!isMobile && !loading" class="doc-table">
       <thead>
         <tr>
           <th>ID</th>
@@ -63,7 +73,7 @@
         </tr>
       </thead>
       <tbody>
-        <tr v-for="doc in documents" :key="doc.id">
+        <tr v-for="doc in items" :key="doc.id">
           <td>{{ doc.id }}</td>
           <td>
             <router-link :to="{ name: 'detail', params: { id: doc.id } }">
@@ -96,8 +106,8 @@
     </table>
 
     <!-- 移动端卡片 -->
-    <div v-else class="doc-cards-container">
-      <div v-for="doc in documents" :key="doc.id" class="doc-card">
+    <div v-else-if="!loading" class="doc-cards-container">
+      <div v-for="doc in items" :key="doc.id" class="doc-card">
         <div class="doc-card-header">
           <span class="doc-card-id">#{{ doc.id }}</span>
           <StatusBadge :status="doc.status" />
@@ -129,46 +139,44 @@
     </div>
 
     <!-- 分页 -->
-    <div class="pagination">
-      <button :disabled="page <= 1" @click="page--; load()">上一页</button>
+    <div v-if="total > 0" class="pagination">
+      <button :disabled="page <= 1" @click="page--; doLoad()">上一页</button>
       <span>第 {{ page }} 页，共 {{ total }} 条</span>
-      <button :disabled="page >= totalPages" @click="page++; load()">下一页</button>
+      <button :disabled="page >= totalPages" @click="page++; doLoad()">下一页</button>
     </div>
 
     <!-- 空状态 -->
-    <div v-if="documents.length === 0 && !loading" class="empty">
-      暂无文献，<router-link :to="{ name: 'upload' }">立即上传</router-link>
+    <div v-if="items.length === 0 && !loading" class="empty">
+      <svg class="empty-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+        <polyline points="14 2 14 8 20 8"></polyline>
+        <line x1="12" y1="18" x2="12" y2="12"></line>
+        <line x1="9" y1="15" x2="15" y2="15"></line>
+      </svg>
+      <p>暂无文献</p>
+      <router-link :to="{ name: 'upload' }" class="btn">立即上传</router-link>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { listDocuments, getDocTypes } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
+import { useResponsive } from '@/composables/useResponsive'
+import { usePagination } from '@/composables/usePagination'
 import StatusBadge from '@/components/StatusBadge.vue'
 import type { Document } from '@/types/document'
 
 const { showError } = useToast()
 const { requireToken } = useRequireToken()
+const { isMobile } = useResponsive()
 
-const viewportWidth = ref(window.innerWidth)
-const isMobile = computed(() => viewportWidth.value <= 768)
+const { items, loading, page, total, totalPages, sortBy, sortOrder, sortOrderLabel, load, toggleSortOrder } = usePagination<Document>()
 
-function onResize() {
-  viewportWidth.value = window.innerWidth
-}
-
-const documents = ref<Document[]>([])
-const loading = ref(false)
 const searchQuery = ref('')
 const filterDocType = ref('')
-const sortBy = ref('created_at')
-const sortOrder = ref<'asc' | 'desc'>('desc')
-const page = ref(1)
-const pageSize = 20
-const total = ref(0)
 const docTypes = ref<string[]>([])
 
 const searchFieldOptions = [
@@ -193,8 +201,6 @@ const searchFields = ref<string[]>(['title'])
 const showScopePanel = ref(false)
 const scopePanelRef = ref<HTMLElement | null>(null)
 
-const sortOrderLabel = computed(() => (sortOrder.value === 'asc' ? '升序' : '降序'))
-const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 const searchPlaceholder = computed(() => {
   const selected = searchFieldOptions
     .filter((o) => searchFields.value.includes(o.value))
@@ -203,40 +209,21 @@ const searchPlaceholder = computed(() => {
   return `搜索${selected.slice(0, 3).join('、')}${selected.length > 3 ? '等' : ''}...`
 })
 
-function toggleSortOrder() {
-  sortOrder.value = sortOrder.value === 'asc' ? 'desc' : 'asc'
-  search()
-}
-
-async function load() {
+async function doLoad() {
   if (!requireToken()) return
-  loading.value = true
-  try {
-    const res = await listDocuments({
-      q: searchQuery.value,
-      doc_type_filter: filterDocType.value || undefined,
-      search_fields: searchFields.value.join(','),
-      sort_by: sortBy.value,
-      sort_order: sortOrder.value,
-      page: page.value,
-      page_size: pageSize
-    })
-    documents.value = res.items
-    total.value = res.total
-  } catch (e) {
-    showError('加载失败')
-  } finally {
-    loading.value = false
-  }
+  await load(listDocuments, {
+    q: searchQuery.value || undefined,
+    doc_type_filter: filterDocType.value || undefined,
+    search_fields: searchFields.value.join(',')
+  })
 }
 
 function search() {
   page.value = 1
-  load()
+  doLoad()
 }
 
 function onScopeChange() {
-  // 至少保留一个字段
   if (searchFields.value.length === 0) {
     searchFields.value = ['title']
   }
@@ -255,22 +242,19 @@ function closeScopePanelOnOutside(event: MouseEvent) {
 
 onMounted(async () => {
   document.addEventListener('click', closeScopePanelOnOutside)
-  window.addEventListener('resize', onResize)
   try {
     const res = await getDocTypes()
     docTypes.value = res.doc_types
   } catch { /* ignore */ }
-  load()
+  doLoad()
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', closeScopePanelOnOutside)
-  window.removeEventListener('resize', onResize)
 })
 </script>
 
 <style scoped>
-.ml-8 { margin-left: 8px; }
 .index-dbs {
   display: inline-flex;
   gap: 4px;
@@ -282,17 +266,63 @@ onUnmounted(() => {
   display: inline-block;
   padding: 1px 6px;
   border-radius: 4px;
-  background: var(--bg-secondary);
+  background: var(--bg);
   border: 1px solid var(--border);
   font-size: 11px;
   color: var(--text-secondary);
 }
-.empty,
-.loading-hint {
+.empty {
   text-align: center;
   padding: 60px 20px;
   color: var(--text-secondary);
 }
+.empty-icon {
+  margin-bottom: 16px;
+  color: var(--border);
+}
+.empty p {
+  margin-bottom: 16px;
+  font-size: 15px;
+}
+
+/* ── 骨架屏 ──────────────────────────────────────────── */
+.loading-skeleton {
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.skeleton-row {
+  display: grid;
+  grid-template-columns: 60px 1fr 180px 80px 80px 120px 80px;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+}
+.skeleton-row:last-child {
+  border-bottom: none;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200px 0; }
+  100% { background-position: calc(200px + 100%) 0; }
+}
+
+.sk {
+  height: 14px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--bg) 25%, var(--bg-muted) 50%, var(--bg) 75%);
+  background-size: 200px 100%;
+  animation: shimmer 1.5s infinite ease-in-out;
+}
+.sk-id { width: 40px; }
+.sk-title { width: 100%; }
+.sk-authors { width: 80%; }
+.sk-year { width: 60%; }
+.sk-type { width: 60%; }
+.sk-status { width: 70%; }
+.sk-action { width: 50px; }
 
 .scope-panel-wrapper {
   position: relative;
@@ -307,7 +337,7 @@ onUnmounted(() => {
   max-height: 360px;
   overflow-y: auto;
   padding: 12px;
-  background: #fff;
+  background: var(--bg-white);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
@@ -321,7 +351,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   font-size: 13px;
-  color: var(--text-primary);
+  color: var(--text);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -336,69 +366,22 @@ onUnmounted(() => {
   gap: 10px;
 }
 
-.doc-card {
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 14px 16px;
-  margin-bottom: 0;
-}
-
-.doc-card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
-.doc-card-id {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-family: monospace;
-}
-
-.doc-card-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--primary);
-  line-height: 1.4;
-  display: block;
-  margin-bottom: 10px;
-}
-
-.doc-card-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 8px;
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-
-.doc-card-meta span {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.doc-card-indexes {
-  margin-bottom: 10px;
-}
-
-.doc-card-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.doc-card-actions .btn {
-  flex: 1;
-}
-
 @media (max-width: 640px) {
   .scope-panel {
     grid-template-columns: 1fr;
     right: auto;
     left: 0;
   }
+  .skeleton-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .sk-id { width: 60px; }
+  .sk-title { width: 100%; }
+  .sk-authors { width: 70%; }
+  .sk-year { width: 40%; }
+  .sk-type { width: 40%; }
+  .sk-status { width: 50%; }
+  .sk-action { width: 60px; }
 }
 </style>

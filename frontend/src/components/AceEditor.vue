@@ -126,12 +126,9 @@ const visibleContent = computed(() => {
 function initEditor() {
   if (!editorEl.value) return
 
-  // basePath：开发模式用本地 node_modules；生产用 CDN 兜住 extension 的动态请求
-  // 不设 packaged，让 language_tools 的合法动态加载能走 basePath
-  ace.config.set('basePath', import.meta.env.DEV
-    ? '/@fs/node_modules/ace-builds/src-noconflict'
-    : 'https://cdn.jsdelivr.net/npm/ace-builds@1.44.0/src-noconflict'
-  )
+  // basePath：开发模式使用本地路径；生产模式下所有模块已通过 Vite 打包注入，无需 basePath
+  // 注意：worker 在生产模式已禁用 (useWorker: false)，因此无需 CDN 回退
+  ace.config.set('basePath', import.meta.env.DEV ? '/@fs/node_modules/ace-builds/src-noconflict' : '')
   if (import.meta.env.DEV) {
     ace.config.set('workerPath', '/@fs/node_modules/ace-builds/src-noconflict')
   }

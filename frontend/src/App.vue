@@ -4,7 +4,9 @@
     <MobileMenu v-if="showMobileMenu" @close="showMobileMenu = false" />
     <Toast />
     <main class="main-content">
-      <router-view />
+      <ErrorBoundary>
+        <router-view />
+      </ErrorBoundary>
     </main>
     <TokenModal />
     <footer class="app-footer">
@@ -14,12 +16,14 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, provide } from 'vue'
+import { onMounted, onUnmounted, ref, provide } from 'vue'
 import { useTokenStore } from '@/stores/token'
+import { useErrorStore } from '@/stores/error'
 import AppHeader from '@/components/AppHeader.vue'
 import Toast from '@/components/Toast.vue'
 import TokenModal from '@/components/TokenModal.vue'
 import MobileMenu from '@/components/MobileMenu.vue'
+import ErrorBoundary from '@/components/ErrorBoundary.vue'
 
 const tokenStore = useTokenStore()
 const showMobileMenu = ref(false)
@@ -36,6 +40,22 @@ onMounted(() => {
   window.addEventListener('auth:required', () => {
     tokenStore.promptForToken()
   })
+})
+
+// 处理全局的 Vue 运行时警告，记录到错误日志
+const errorStore = useErrorStore()
+const originalConsoleError = console.error
+console.error = (...args: unknown[]) => {
+  const msg = args.map(String).join(' ')
+  // 过滤掉 vue-tsc 等不相关的警告
+  if (msg.includes('[Vue warn]')) {
+    errorStore.add({ message: msg, source: 'vue' })
+  }
+  originalConsoleError.apply(console, args)
+}
+
+onUnmounted(() => {
+  console.error = originalConsoleError
 })
 </script>
 

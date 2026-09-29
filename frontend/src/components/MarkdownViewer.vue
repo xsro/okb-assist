@@ -11,6 +11,18 @@ import { marked, Renderer } from 'marked'
 import DOMPurify from 'dompurify'
 import { renderMath, loadMathJax, type MathMode } from '@/utils/mathRenderer'
 
+/** HTML 转义，防止 XSS */
+function escapeHtml(str: string): string {
+  const map: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }
+  return str.replace(/[&<>"']/g, (ch) => map[ch])
+}
+
 const props = defineProps<{
   content: string
   mathMode?: MathMode
@@ -27,16 +39,24 @@ const rendered = computed(() => {
   // 1. 先渲染数学公式（提取公式 → 渲染 markdown → 插回公式 HTML）
   const withMath = renderMath(props.content, mode)
 
-  // 2. 自定义图片渲染器：关闭时不加载图片，用占位符显示
+  // 2. 自定义图片渲染器
   const renderer=new Renderer();
   const old_image_renderer=renderer.image;
   renderer.image=e=>{
+      const {href, title, text}=e;
+
       if (loadImages) {
         return old_image_renderer.call(renderer, e)
       }
-      const {title, text}=e;
-      const label = text || title || '图片'
-      return `<span class="image-placeholder">[${label}]</span>`
+
+      // 不加载图片时，显示图片信息 + 链接路径
+      const url = href || ''
+      const alt = escapeHtml(text || title || '')
+      return `<span class="image-placeholder">`
+        + `<span class="ip-icon">🖼</span>`
+        + (alt ? `<span class="ip-alt">${alt}</span>` : '')
+        + `<span class="ip-url">${escapeHtml(url)}</span>`
+        + `</span>`
     }
 
   // 3. marked 解析 markdown
@@ -92,14 +112,53 @@ watch(
 
 <style scoped>
 .image-placeholder {
-  display: inline-block;
-  padding: 4px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
   background: var(--bg);
   border: 1px dashed var(--border);
   border-radius: 4px;
   color: var(--text-secondary);
   font-size: 13px;
-  line-height: 1.4;
+  line-height: 1.6;
+  cursor: help;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.ip-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.ip-alt {
+  flex-shrink: 0;
+  font-weight: 500;
+  color: var(--text);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ip-alt:empty {
+  display: none;
+}
+
+.ip-url {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 11px;
+  color: var(--primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.image-placeholder:hover .ip-url {
+  text-decoration: underline;
+  color: var(--primary-dark);
 }
 
 .math-codeblock {

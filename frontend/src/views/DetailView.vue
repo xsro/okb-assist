@@ -146,11 +146,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch, computed, onUnmounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { getDocument, getMarkdown, getFileAlias } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
+import { useResponsive } from '@/composables/useResponsive'
 import StatusBadge from '@/components/StatusBadge.vue'
 import MarkdownViewer from '@/components/MarkdownViewer.vue'
 import type { Document } from '@/types/document'
@@ -158,13 +159,7 @@ import type { Document } from '@/types/document'
 const route = useRoute()
 const { showError } = useToast()
 const { requireToken } = useRequireToken()
-
-const viewportWidth = ref(window.innerWidth)
-const isMobile = computed(() => viewportWidth.value <= 768)
-
-function onResize() {
-  viewportWidth.value = window.innerWidth
-}
+const { isMobile } = useResponsive()
 
 const doc = ref<Document | null>(null)
 const markdownContent = ref('')
@@ -219,11 +214,6 @@ async function loadMarkdown() {
 watch(() => route.params.id, load)
 onMounted(() => {
   load()
-  window.addEventListener('resize', onResize)
-})
-
-onUnmounted(() => {
-  window.removeEventListener('resize', onResize)
 })
 </script>
 

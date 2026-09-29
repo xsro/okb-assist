@@ -4,14 +4,28 @@
 :root {
   --primary: #1976d2;
   --primary-dark: #1565c0;
+  --primary-light: #e3f2fd;
   --success: #4caf50;
+  --success-bg: #e8f5e9;
+  --success-text: #2e7d32;
   --warning: #ff9800;
+  --warning-bg: #fff3e0;
+  --warning-text: #ef6c00;
   --danger: #f44336;
+  --danger-dark: #d32f2f;
+  --danger-bg: #ffebee;
+  --danger-text: #c62828;
   --gray: #757575;
   --bg: #f5f5f5;
+  --bg-hover: #f0f0f0;
+  --bg-muted: #eee;
+  --bg-white: #fff;
+  --bg-table-header: #f7f7f7;
+  --bg-footer: #fafafa;
   --border: #e0e0e0;
   --text: #333;
   --text-secondary: #666;
+  --text-muted: #999;
   --touch-min: 44px;
 }
 
@@ -101,11 +115,11 @@ input, textarea, select {
 
 .btn-danger {
   background: var(--danger);
-  color: #fff;
+  color: var(--bg-white);
 }
 
 .btn-danger:hover {
-  background: #d32f2f;
+  background: var(--danger-dark);
 }
 
 .btn-outline {
@@ -115,7 +129,7 @@ input, textarea, select {
 }
 
 .btn-outline:hover {
-  background: #f0f0f0;
+  background: var(--bg-hover);
 }
 
 /* ── 导航 ────────────────────────────────────────────── */
@@ -163,7 +177,7 @@ input, textarea, select {
 }
 
 .app-nav a.router-link-active {
-  background: #e3f2fd;
+  background: var(--primary-light);
   color: var(--primary);
 }
 
@@ -172,7 +186,7 @@ input, textarea, select {
 .doc-table {
   width: 100%;
   border-collapse: collapse;
-  background: #fff;
+  background: var(--bg-white);
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
@@ -187,7 +201,7 @@ input, textarea, select {
 }
 
 .doc-table th {
-  background: #f7f7f7;
+  background: var(--bg-table-header);
   font-weight: 600;
   color: var(--text-secondary);
   font-size: 13px;
@@ -200,7 +214,7 @@ input, textarea, select {
 }
 
 .doc-table tr:hover td {
-  background: #fafafa;
+  background: var(--bg-footer);
 }
 
 /* ── 状态徽章 ────────────────────────────────────────── */
@@ -214,11 +228,11 @@ input, textarea, select {
   white-space: nowrap;
 }
 
-.badge-gray { background: #f5f5f5; color: #757575; }
-.badge-info { background: #e3f2fd; color: #1565c0; }
-.badge-success { background: #e8f5e9; color: #2e7d32; }
-.badge-warning { background: #fff3e0; color: #ef6c00; }
-.badge-error { background: #ffebee; color: #c62828; }
+.badge-gray { background: var(--bg); color: var(--gray); }
+.badge-info { background: var(--primary-light); color: var(--primary-dark); }
+.badge-success { background: var(--success-bg); color: var(--success-text); }
+.badge-warning { background: var(--warning-bg); color: var(--warning-text); }
+.badge-error { background: var(--danger-bg); color: var(--danger-text); }
 
 .pulse {
   animation: pulse 1.5s infinite;
@@ -268,7 +282,7 @@ input, textarea, select {
   align-items: center;
   justify-content: space-between;
   padding: 16px 24px;
-  background: #fff;
+  background: var(--bg-white);
   border: 1px solid var(--border);
   border-radius: 8px;
   margin-top: 16px;
@@ -297,7 +311,7 @@ input, textarea, select {
 }
 
 .stat-card {
-  background: #fff;
+  background: var(--bg-white);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 20px;
@@ -320,7 +334,7 @@ input, textarea, select {
 /* ── 区块 ────────────────────────────────────────────── */
 
 .section {
-  background: #fff;
+  background: var(--bg-white);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 20px 24px;
@@ -446,7 +460,7 @@ input, textarea, select {
 }
 
 .markdown-viewer th {
-  background: #f7f7f7;
+  background: var(--bg-table-header);
   font-weight: 600;
 }
 
@@ -539,7 +553,7 @@ input, textarea, select {
 }
 
 .modal {
-  background: #fff;
+  background: var(--bg-white);
   border-radius: 8px;
   padding: 24px;
   width: 420px;
@@ -601,7 +615,7 @@ input, textarea, select {
 .progress-bar {
   flex: 1;
   height: 8px;
-  background: #eee;
+  background: var(--bg-muted);
   border-radius: 4px;
   overflow: hidden;
 }
@@ -685,7 +699,7 @@ input, textarea, select {
   padding: 14px 20px;
   font-size: 16px;
   color: var(--text);
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--border);
   transition: background 0.15s;
   min-height: var(--touch-min);
 }
@@ -695,7 +709,7 @@ input, textarea, select {
 }
 
 .mobile-menu-item.router-link-active {
-  background: #e3f2fd;
+  background: var(--primary-light);
   color: var(--primary);
   font-weight: 600;
 }
@@ -703,13 +717,13 @@ input, textarea, select {
 .mobile-menu-footer {
   padding: 16px 20px;
   border-top: 1px solid var(--border);
-  background: #fafafa;
+  background: var(--bg-footer);
 }
 
 /* ── 移动端文档卡片 ──────────────────────────────────── */
 
 .doc-card {
-  background: #fff;
+  background: var(--bg-white);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 16px;
