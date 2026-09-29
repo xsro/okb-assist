@@ -10,6 +10,7 @@ use crate::config_manager::ConfigManager;
 ///
 /// - `tier`: 解析档位，可选 "flash" / "basic" / "standard" / "advanced"
 /// - 本地和官方云均使用相同的 V1 API 端点
+/// - `enabled`: 是否启用此配置（false 表示跳过，默认 true）
 #[derive(Debug, Clone)]
 pub struct MinerUConfig {
     pub url: String,
@@ -17,6 +18,7 @@ pub struct MinerUConfig {
     pub mineru_type: String,
     pub tier: String,
     pub task_timeout: u64,
+    pub enabled: bool,
 }
 
 #[derive(Clone)]
@@ -40,12 +42,26 @@ impl Settings {
     // ── MinerU ──
 
     /// 获取所有 MinerU 配置（数组格式）
+    /// 获取所有启用（enabled=true）的 MinerU 配置
+    /// 若所有配置均未设置 enabled，则全部使用（向后兼容）
     pub fn mineru_configs(&self) -> Vec<MinerUConfig> {
         let arr = self.get_config()["mineru"]
             .as_array()
             .cloned()
             .unwrap_or_default();
+
+        let has_explicit_enabled = arr.iter().any(|v| v.get("enabled").is_some());
+
         arr.iter()
+            .filter(|v| {
+                // 如有显式 enabled 标记，只取 enabled=true 的配置
+                // 如无 enabled 标记，向后兼容：全部使用
+                if has_explicit_enabled {
+                    v.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false)
+                } else {
+                    true
+                }
+            })
             .map(|v| MinerUConfig {
                 url: v["url"]
                     .as_str()
@@ -59,6 +75,7 @@ impl Settings {
                     .to_string(),
                 tier: v["tier"].as_str().or_else(|| v["model_version"].as_str()).unwrap_or("standard").to_string(),
                 task_timeout: v["task_timeout"].as_u64().unwrap_or(300),
+                enabled: v.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true),
             })
             .collect()
     }

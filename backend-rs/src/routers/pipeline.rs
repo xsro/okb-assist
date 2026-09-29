@@ -277,47 +277,45 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
         }
     }
 
-    // 提交新任务：逐个尝试配置直到成功
+    // 使用第一个启用（enabled=true）的配置提交解析任务
+    // 不再逐个尝试所有配置，由 config.json 的 enabled 字段控制使用哪一个
     update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在提交解析任务..."), Some(15.0)).await;
 
-    let mut last_error = String::new();
-    for (i, config) in configs.iter().enumerate() {
-        let client = MinerUClient::new(config);
-        match client.submit_parse_task(&abs_file_path).await {
-            Ok(task_id) => {
-                save_mineru_task_id(&db, doc_id, &task_id).await;
-                update_doc_status(&db, doc_id, DocStatus::Parsing, Some(&format!("已提交任务 #{}，正在解析...", i)), Some(20.0)).await;
+    let config = &configs[0];
+    let client = MinerUClient::new(config);
+    match client.submit_parse_task(&abs_file_path).await {
+        Ok(task_id) => {
+            save_mineru_task_id(&db, doc_id, &task_id).await;
+            update_doc_status(&db, doc_id, DocStatus::Parsing, Some("已提交任务，正在解析..."), Some(20.0)).await;
 
-                match client.poll_task(&task_id, config.task_timeout).await {
-                    Ok(_) => {
-                        update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在获取解析结果..."), Some(80.0)).await;
-                        match client.get_task_result(&task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
-                            Ok(md_path) => {
-                                finish_parse_result(&db, &settings, doc_id, &md_path).await;
-                                return;
-                            }
-                            Err(e) => {
-                                last_error = format!("获取结果失败: {}", e);
-                            }
+            match client.poll_task(&task_id, config.task_timeout).await {
+                Ok(_) => {
+                    update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在获取解析结果..."), Some(80.0)).await;
+                    match client.get_task_result(&task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
+                        Ok(md_path) => {
+                            finish_parse_result(&db, &settings, doc_id, &md_path).await;
+                            return;
+                        }
+                        Err(e) => {
+                            let err_msg = format!("获取结果失败: {}", e);
+                            update_doc_status(&db, doc_id, DocStatus::Error, Some(&err_msg), None).await;
+                            return;
                         }
                     }
-                    Err(e) => {
-                        last_error = e.to_string();
-                    }
                 }
-
-                // 当前配置失败，清理任务 ID 并尝试下一个
-                clear_mineru_task_id(&db, doc_id).await;
-                tracing::warn!("MinerU 配置 #{} ({}) 解析失败: {}", i, config.url, last_error);
-            }
-            Err(e) => {
-                last_error = e.to_string();
-                tracing::warn!("MinerU 配置 #{} ({}) 提交失败: {}", i, config.url, last_error);
+                Err(e) => {
+                    let err_msg = format!("解析失败: {}", e);
+                    update_doc_status(&db, doc_id, DocStatus::Error, Some(&err_msg), None).await;
+                    return;
+                }
             }
         }
+        Err(e) => {
+            let err_msg = format!("提交解析任务失败: {}", e);
+            update_doc_status(&db, doc_id, DocStatus::Error, Some(&err_msg), None).await;
+            return;
+        }
     }
-
-    update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("解析失败: 所有配置均失败, 最后错误: {}", last_error)), None).await;
 }
 
 /// 完成解析：复制文件并更新状态（async 版本）

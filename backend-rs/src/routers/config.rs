@@ -54,17 +54,22 @@ async fn update_config(
 ) -> Response {
     let mut config = cm.get_service_config();
 
-    // 合并 mineru / ollama 字段
-    if let Some(mineru) = body.get("mineru").and_then(|v| v.as_object()) {
-        let base = config
-            .get("mineru")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
-        let mut merged = serde_json::Map::new();
-        merged.extend(base);
-        merged.extend(mineru.clone());
-        config["mineru"] = Value::Object(merged);
+    // mineru 是数组，直接替换（与前端提交的完整列表保持一致）
+    if let Some(mineru) = body.get("mineru").and_then(|v| v.as_array()) {
+        // 校验每个 mineru 配置必须有 type 和 url
+        for (i, mu) in mineru.iter().enumerate() {
+            let mu_type = mu.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let mu_url = mu.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            if mu_type.is_empty() {
+                return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("MinerU 配置 #{} 缺少 type 字段", i + 1)})))
+                    .into_response();
+            }
+            if mu_url.is_empty() {
+                return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("MinerU 配置 #{} 缺少 url 字段", i + 1)})))
+                    .into_response();
+            }
+        }
+        config["mineru"] = Value::Array(mineru.clone());
     }
 
     if let Some(ollama) = body.get("ollama").and_then(|v| v.as_object()) {
@@ -227,6 +232,20 @@ async fn test_mineru(url: &str, key: &str, mineru_type: &str) -> Value {
                 }
                 Ok(resp) => json!({"status": "error", "detail": format!("HTTP {}", resp.status())}),
                 Err(e) => json!({"status": "disconnected", "detail": format!("无法连接到 {}: {}", url, e)}),
+            }
+        }
+        MineruType::OfficialLightweight => {
+            // 轻量解析 API：不需要 Token，通过健康检查验证
+            let resp = client.get(format!("{}/v1/agent/parse/health", url)).send().await;
+            match resp {
+                Ok(resp) if resp.status().is_success() => {
+                    json!({
+                        "status": "connected",
+                        "detail": "MinerU Agent 轻量 API 连接成功",
+                    })
+                }
+                Ok(resp) => json!({"status": "error", "detail": format!("HTTP {}", resp.status())}),
+                Err(e) => json!({"status": "disconnected", "detail": format!("无法连接到轻量 API {}: {}", url, e)}),
             }
         }
         MineruType::Official => {

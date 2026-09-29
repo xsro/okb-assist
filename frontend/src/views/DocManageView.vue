@@ -206,9 +206,30 @@ async function load() {
     doc.value = await getDocument(id)
     form.value = { ...doc.value }
     await loadIndexes()
-  } catch {
-    showError('加载失败')
+  } catch (err) {
+    showError(getErrorMessage(err))
   }
+}
+
+function getErrorMessage(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const axiosErr = err as { response?: { data?: { detail?: string } }; message?: string }
+    // Axios 错误：优先取后端返回的 detail 字段
+    if (axiosErr.response?.data?.detail) {
+      return axiosErr.response.data.detail
+    }
+    // 网络错误（如连接被拒绝、超时）
+    if (axiosErr.message) {
+      if (axiosErr.message.includes('Network Error') || axiosErr.message.includes('connect')) {
+        return '无法连接到服务器，请检查后端是否运行'
+      }
+      if (axiosErr.message.includes('timeout')) {
+        return '请求超时，请稍后重试'
+      }
+      return axiosErr.message
+    }
+  }
+  return '操作失败'
 }
 
 async function runStage(stage: string) {
@@ -221,8 +242,8 @@ async function runStage(stage: string) {
     }
     showSuccess('已启动任务')
     setTimeout(load, 2000)
-  } catch {
-    showError('操作失败')
+  } catch (err) {
+    showError(getErrorMessage(err))
   }
 }
 
@@ -235,8 +256,8 @@ async function runIndex() {
     showSuccess(`已提交索引到 ${dbId}`)
     selectedIndexDb.value = ''
     setTimeout(load, 2000)
-  } catch {
-    showError('索引提交失败')
+  } catch (err) {
+    showError(getErrorMessage(err))
   }
 }
 
@@ -247,8 +268,8 @@ async function reset() {
     await resetDocument(id)
     showSuccess('已重置')
     load()
-  } catch {
-    showError('重置失败')
+  } catch (err) {
+    showError(getErrorMessage(err))
   }
 }
 
@@ -261,8 +282,8 @@ async function removeDocument() {
     await deleteDocument(id)
     showSuccess('文档已删除')
     router.push({ name: 'home' })
-  } catch {
-    showError('删除失败')
+  } catch (err) {
+    showError(getErrorMessage(err))
   }
 }
 
@@ -271,8 +292,8 @@ async function saveMetadata() {
   try {
     doc.value = await updateDocument(id, form.value)
     showSuccess('元数据已保存')
-  } catch {
-    showError('保存失败')
+  } catch (err) {
+    showError(getErrorMessage(err))
   }
 }
 
@@ -294,8 +315,8 @@ async function onReplacePdfSelected(e: Event) {
     doc.value = await replacePdf(id, file)
     showSuccess('PDF 已替换')
     load()
-  } catch {
-    showError('PDF 替换失败')
+  } catch (err) {
+    showError(getErrorMessage(err))
   } finally {
     input.value = ''
   }
@@ -307,8 +328,8 @@ async function enrichCrossref() {
     await crossrefDocument(id)
     showSuccess('Crossref 补充任务已提交')
     setTimeout(load, 2000)
-  } catch {
-    showError('Crossref 补充失败')
+  } catch (err) {
+    showError(getErrorMessage(err))
   }
 }
 
@@ -318,8 +339,8 @@ async function enrichPdfMeta() {
     await extractPdfMeta(id)
     showSuccess('PDF 元数据提取任务已提交')
     setTimeout(load, 2000)
-  } catch {
-    showError('PDF 元数据提取失败')
+  } catch (err) {
+    showError(getErrorMessage(err))
   }
 }
 
@@ -330,8 +351,8 @@ async function rehash() {
     hashResult.value = res
     showSuccess('哈希已重算')
     load()
-  } catch {
-    showError('重算哈希失败')
+  } catch (err) {
+    showError(getErrorMessage(err))
   }
 }
 
