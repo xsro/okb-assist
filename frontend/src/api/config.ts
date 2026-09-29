@@ -47,9 +47,11 @@ export function testService(params: {
   embed_model?: string
   collection?: string
 }) {
+  // 后端 TestServiceRequest 用 #[serde(rename = "type")]，需将 service_type 映射为 type
+  const { service_type: type, ...rest } = params
   return apiPost<ConnectionTestResult>(
     '/assist/api/config/test',
-    params
+    { type, ...rest }
   )
 }
 
