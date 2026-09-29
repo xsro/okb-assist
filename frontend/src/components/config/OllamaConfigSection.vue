@@ -57,7 +57,7 @@ function emitUpdate() {
   emit('update')
 }
 
-const expanded = ref(true)
+const expanded = ref(false)
 const testing = ref(false)
 const localStatus = ref<{ status: string; detail: string } | null>(null)
 

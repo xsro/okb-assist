@@ -1,23 +1,23 @@
 {
-  "base_url": "http://127.0.0.1:5001/",
-  "alias_expiration_hours": 1,
   "active_mineru": "local network",
+  "alias_expiration_hours": 1,
+  "base_url": "http://127.0.0.1:5001/",
   "mineru": [
     {
-      "token": "",
       "max_tasks": 3,
       "name": "local network",
       "task_timeout": 30000,
       "tier": "standard",
+      "token": "***",
       "type": "local",
       "url": "http://192.168.1.185:8002"
     },
     {
-      "token": "sk-N11mhN8170ZDJ8N0hs7Y23kGL2JKjgxSVJ5zkLinFkOBmObR",
       "max_tasks": 3,
       "name": "官方标准（需要token）",
       "task_timeout": 300,
       "tier": "standard",
+      "token": "sk-sssvsvsvs",
       "type": "official",
       "url": "https://mineru.net"
     }
