@@ -206,14 +206,18 @@ fn remove_dir_all_ignore(path: &std::path::Path) {
 // ── 后台任务实现 ──
 
 async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
-    let configs = settings.mineru_configs();
-    if configs.is_empty() {
-        update_doc_status(&db, doc_id, DocStatus::Error, Some("没有可用的 MinerU 配置"), None).await;
-        return;
-    }
+    // 使用 active_mineru_key 选中的配置，未设置时使用第一个启用的配置
+    let active_config = settings.active_mineru_config();
+    let active_config = match active_config {
+        Some(c) => c,
+        None => {
+            update_doc_status(&db, doc_id, DocStatus::Error, Some("没有可用的 MinerU 配置"), None).await;
+            return;
+        }
+    };
 
-    // 使用第一个配置创建客户端（用于检查已有任务）
-    let primary_client = MinerUClient::new(&configs[0]);
+    // 使用选中的配置创建客户端
+    let primary_client = MinerUClient::new(&active_config);
     let uploads_folder = settings.uploads_folder();
     let pdf_path = paths::get_pdf_path(&settings, doc_id);
     let abs_file_path = absolute_path(&pdf_path);
@@ -277,18 +281,16 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
         }
     }
 
-    // 使用第一个启用（enabled=true）的配置提交解析任务
-    // 不再逐个尝试所有配置，由 config.json 的 enabled 字段控制使用哪一个
+    // 使用选中的 MinerU 配置提交解析任务
     update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在提交解析任务..."), Some(15.0)).await;
 
-    let config = &configs[0];
-    let client = MinerUClient::new(config);
+    let client = MinerUClient::new(&active_config);
     match client.submit_parse_task(&abs_file_path).await {
         Ok(task_id) => {
             save_mineru_task_id(&db, doc_id, &task_id).await;
             update_doc_status(&db, doc_id, DocStatus::Parsing, Some("已提交任务，正在解析..."), Some(20.0)).await;
 
-            match client.poll_task(&task_id, config.task_timeout).await {
+            match client.poll_task(&task_id, active_config.task_timeout).await {
                 Ok(_) => {
                     update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在获取解析结果..."), Some(80.0)).await;
                     match client.get_task_result(&task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {

@@ -80,6 +80,31 @@ impl Settings {
             .collect()
     }
 
+    /// 返回 active_mineru_key 的值（空字符串表示使用第一个启用的配置）
+    pub fn active_mineru_key(&self) -> String {
+        self.get_config()["active_mineru_key"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// 返回当前选中的 MinerU 配置（匹配 active_mineru_key），
+    /// 若未设置 active_mineru_key 则返回第一个启用的配置。
+    pub fn active_mineru_config(&self) -> Option<MinerUConfig> {
+        let configs = self.mineru_configs();
+        let active_key = self.active_mineru_key();
+
+        if !active_key.is_empty() {
+            // 有 active_key，找匹配的配置
+            if let Some(cfg) = configs.iter().find(|c| c.key == active_key) {
+                return Some(cfg.clone());
+            }
+        }
+
+        // 无 active_key 或未匹配到，返回第一个启用的配置
+        configs.into_iter().next()
+    }
+
     /// 兼容旧接口：返回第一个 MinerU 配置的 URL
     pub fn mineru_url(&self) -> String {
         self.mineru_configs()

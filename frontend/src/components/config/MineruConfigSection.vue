@@ -16,6 +16,15 @@
           <span class="enabled-badge" :class="mu.enabled !== false ? 'on' : 'off'">
             {{ mu.enabled !== false ? '启用' : '禁用' }}
           </span>
+          <span
+            class="active-radio"
+            :class="{ active: isActive(mu) }"
+            :title="isActive(mu) ? '当前使用的配置' : '点击设为当前配置'"
+            @click.stop="setActive(mu)"
+          >
+            <span v-if="isActive(mu)" class="radio-dot active">●</span>
+            <span v-else class="radio-dot">○</span>
+          </span>
         </div>
         <button class="btn btn-sm btn-ghost" @click.stop="toggle(idx)">
           {{ expanded[idx] ? '收起' : '展开' }}
@@ -104,10 +113,12 @@ const { showError, showToast } = useToast()
 
 const props = defineProps<{
   configs: MinerUConfig[]
+  activeKey?: string
 }>()
 
 const emit = defineEmits<{
   (e: 'update'): void
+  (e: 'update:activeKey', key: string): void
 }>()
 
 function emitUpdate() {
@@ -198,6 +209,16 @@ function getStatusClass(idx: number): string {
   if (s === 'connected') return 'ok'
   if (s === 'disabled' || s === 'not_configured') return 'warning'
   return 'error'
+}
+
+function isActive(mu: MinerUConfig): boolean {
+  return props.activeKey === mu.key
+}
+
+function setActive(mu: MinerUConfig) {
+  if (mu.key) {
+    emit('update:activeKey', mu.key)
+  }
 }
 
 function getStatusText(idx: number): string {
@@ -301,6 +322,28 @@ defineExpose({ syncStatus })
 }
 .enabled-badge.on { background: #e8f5e9; color: #2e7d32; }
 .enabled-badge.off { background: #fbe9e7; color: #bf360c; }
+
+.active-radio {
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  line-height: 1;
+}
+.radio-dot {
+  font-size: 14px;
+  color: var(--text-secondary, #999);
+  transition: color 0.15s;
+}
+.radio-dot.active {
+  color: var(--primary, #1976d2);
+}
+.active-radio:hover .radio-dot {
+  color: var(--primary, #1976d2);
+}
+.active-radio.active {
+  cursor: default;
+}
 
 .btn-ghost {
   background: transparent;

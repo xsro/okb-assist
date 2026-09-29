@@ -1,6 +1,7 @@
 {
   "base_url": "http://127.0.0.1:5001/",
   "alias_expiration_hours": 1,
+  "active_mineru_key": "no-password",
   "mineru": [
     {
       "enabled": true,

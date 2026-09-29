@@ -8,7 +8,9 @@
       <MineruConfigSection
         ref="mineruSectionRef"
         :configs="config.mineru"
+        :active-key="config.active_mineru_key"
         @update="onConfigUpdate"
+        @update:active-key="onActiveMineruKeyChange"
       />
 
       <OllamaConfigSection
@@ -56,6 +58,12 @@ const vectorDbSectionRef = ref<InstanceType<typeof VectorDbConfigSection> | null
 
 function onConfigUpdate() {
   // 子组件已直接修改响应式对象，无需额外操作
+}
+
+function onActiveMineruKeyChange(key: string) {
+  if (config.value) {
+    config.value.active_mineru_key = key
+  }
 }
 
 async function load() {

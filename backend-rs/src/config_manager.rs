@@ -14,6 +14,7 @@ pub fn default_config() -> serde_json::Value {
     serde_json::json!({
         "base_url": "",
         "alias_expiration_hours": 1,
+        "active_mineru_key": "",
         "mineru": [
             {
                 "type": "local",
