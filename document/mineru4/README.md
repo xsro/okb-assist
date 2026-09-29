@@ -28,7 +28,7 @@ docker run --gpus all  --shm-size 32g \
   --ipc=host \
   --name mineru-router \
   -it mineru4 \
-  /bin/bash -c "CUDA_VISIBLE_DEVICES=0,1 mineru-kit router --host 0.0.0.0 --port 8002 --local-gpus 0,1  --preload-models"
+  /bin/bash -c "CUDA_VISIBLE_DEVICES=0,1,2 mineru-kit router --host 0.0.0.0 --port 8002 --local-gpus 0,1,2  --preload-models"
 ```
 
 ## 登录到 container
