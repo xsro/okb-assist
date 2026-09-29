@@ -94,6 +94,7 @@ cargo build --release
 - `backend-rs/system.json`：系统配置，改后**必须重启进程**才生效（进程内缓存）。
 - 配置读取层：`backend-rs/src/config_manager.rs`（带锁 + 进程内缓存）；`backend-rs/src/config.rs:Settings` 是单例代理，属性每次从 JSON 实时读取。
 - 添加新配置字段时：在 `config_manager.rs` 的默认值中加默认值；若是敏感字段，扩展脱敏函数。
+- `config.json` 中 MinerU 配置支持多配置数组，通过 `active_mineru` 按 `name` 选择当前使用的配置。每个配置的 `max_tasks` 控制该 MinerU 服务的并发解析数（对应 `pipeline.rs` 中独立的 `MINERU_SEMAPHORE`），`task_timeout` 控制单任务超时，`token` 为 API 认证凭据。
 - 文件路径来自 `system.json` 的路径模板（含 `{id}` 占位符），在 `backend-rs/src/paths.rs` 解析，**不要**在 `Document` 模型里加路径列。
 
 ### 工作目录与路径解析
@@ -154,7 +155,7 @@ cargo build --release
 后端大量耗时操作**不在请求内同步完成**，而是在后台运行，请求通常立即返回、由前端轮询状态。
 
 - **机制**：摄取阶段（parse / extract / crossref / extract-pdf-meta / index / process）及批量端点通过 Axum `BackgroundTasks` 提交 Tokio 协程。协程在 HTTP 响应发出后由同一个 Tokio 运行时调度，状态机流转记录在数据库中。
-- **并发限制**：受 `tokio::sync::Semaphore(max_concurrent_tasks)` 约束（`system.json` 默认 `3`）。
+- **并发限制**：两级信号量独立控制。**全局** `Semaphore(max_concurrent_tasks)`（`system.json` 默认 `3`）限制 extract（Ollama 元数据抽取）和 index（向量索引）的并发。**MinerU 专用** `Semaphore(max_tasks)`（每个配置独立，默认 `3`）限制 PDF 解析并发。两者互不抢占，避免 MinerU 慢解析阻塞其他文档的抽取/索引。
 - **批量进度 / 暂停状态存于进程内存**：模块级全局变量，**进程重启即丢失**。重启后需手动重新触发。
 - **真·fire-and-forget**：删除文档时，SQLite 记录与本地文件先同步删除，而 Qdrant 中对应向量点的删除通过 `tokio::spawn` 异步执行，**请求不等待、失败也不可见**。
 - **前台（非后台）操作**：连接测试、服务状态、语义/全文搜索、上传均在前端 `await` 内同步完成。MCP 端点是唯一的流式长连接通道，但工具函数内部检索仍是同步 await。
