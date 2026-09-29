@@ -69,6 +69,7 @@ fn normalize_doc_type(raw: &str) -> String {
 // ── 全局状态（进程内，重启即丢失，与 Python 模块级全局一致） ──
 
 static TASK_SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+static MINERU_SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
 static RUNNING_TASKS: AtomicUsize = AtomicUsize::new(0);
 static BATCH_PAUSED: AtomicBool = AtomicBool::new(false);
 
@@ -86,6 +87,20 @@ fn task_semaphore() -> Arc<tokio::sync::Semaphore> {
     TASK_SEMAPHORE
         .get_or_init(|| {
             let n = crate::settings::get_settings().max_concurrent_tasks().max(1);
+            Arc::new(tokio::sync::Semaphore::new(n))
+        })
+        .clone()
+}
+
+/// MinerU 专用信号量，使用当前选中配置的 max_tasks 控制并发。
+/// 与全局 task_semaphore() 独立，避免 MinerU 解析占用 extract/index 的槽位。
+fn mineru_task_semaphore() -> Arc<tokio::sync::Semaphore> {
+    MINERU_SEMAPHORE
+        .get_or_init(|| {
+            let n = crate::settings::get_settings()
+                .active_mineru_config()
+                .map(|c| c.max_tasks.max(1))
+                .unwrap_or(3);
             Arc::new(tokio::sync::Semaphore::new(n))
         })
         .clone()
@@ -890,6 +905,20 @@ where
     RUNNING_TASKS.fetch_sub(1, Ordering::SeqCst);
 }
 
+/// 用于 MinerU parse 阶段的跟踪包装器，使用独立的 mineru 信号量。
+async fn run_mineru_tracked<F>(doc_id: i64, task_type: &'static str, fut: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let sem = mineru_task_semaphore();
+    let _permit = sem.acquire().await.expect("mineru semaphore closed");
+    RUNNING_TASKS.fetch_add(1, Ordering::SeqCst);
+    track_task_start(doc_id, task_type);
+    fut.await;
+    track_task_end(doc_id);
+    RUNNING_TASKS.fetch_sub(1, Ordering::SeqCst);
+}
+
 // ── 批量处理 ──
 
 async fn process_stage_batch_parse(db: Arc<Database>, settings: Arc<Settings>) {
@@ -912,7 +941,7 @@ async fn process_stage_batch_parse(db: Arc<Database>, settings: Arc<Settings>) {
         }
         let db = db.clone();
         let settings = settings.clone();
-        handles.push(tokio::spawn(run_tracked(doc.id, "parse", do_parse_impl(db, settings, doc.id))));
+        handles.push(tokio::spawn(run_mineru_tracked(doc.id, "parse", do_parse_impl(db, settings, doc.id))));
     }
     for h in handles {
         let _ = h.await;
@@ -1453,7 +1482,7 @@ async fn parse(
     .execute(db.pool())
     .await;
 
-    tokio::spawn(run_tracked(id, "parse", do_parse_impl(db, settings, id)));
+    tokio::spawn(run_mineru_tracked(id, "parse", do_parse_impl(db, settings, id)));
 
     Json(json!({"detail": "解析任务已提交", "status": "parsing"})).into_response()
 }

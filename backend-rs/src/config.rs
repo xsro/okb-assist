@@ -19,6 +19,7 @@ pub struct MinerUConfig {
     pub mineru_type: String,
     pub tier: String,
     pub task_timeout: u64,
+    pub max_tasks: usize,
 }
 
 #[derive(Clone)]
@@ -63,6 +64,7 @@ impl Settings {
                     .to_string(),
                 tier: v["tier"].as_str().or_else(|| v["model_version"].as_str()).unwrap_or("standard").to_string(),
                 task_timeout: v["task_timeout"].as_u64().unwrap_or(300),
+                max_tasks: v["max_tasks"].as_u64().unwrap_or(3) as usize,
             })
             .collect()
     }
