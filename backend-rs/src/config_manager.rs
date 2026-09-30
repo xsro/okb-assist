@@ -62,7 +62,7 @@ pub fn default_system() -> serde_json::Value {
         "markdown_asset_path": "data/pdfs/{id}/{id}.zip",
         "pdf_path": "data/pdfs/{id}/{id}.pdf",
         "config_path": "config.json",
-        "log_path": "stdout"
+        "log_path": "okb-log.jsonl"
     })
 }
 

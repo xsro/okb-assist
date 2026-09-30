@@ -338,6 +338,13 @@ impl Settings {
             .to_string()
     }
 
+    pub fn log_path(&self) -> String {
+        self.get_system_config()["log_path"]
+            .as_str()
+            .unwrap_or("okb-log.jsonl")
+            .to_string()
+    }
+
     // ── system.json 路径信息（用于路径变量替换） ──
     /// 返回解析后的工作目录（绝对路径）。
     pub fn cwd(&self) -> String {

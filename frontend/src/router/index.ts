@@ -76,6 +76,12 @@ const routes = [
     name: 'mcpSetup',
     component: () => import('@/views/McpSetupView.vue'),
     meta: { title: 'MCP 配置' }
+  },
+  {
+    path: '/assist/logs',
+    name: 'logs',
+    component: () => import('@/views/LogViewer.vue'),
+    meta: { title: '日志' }
   }
 ]
 

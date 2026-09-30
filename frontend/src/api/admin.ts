@@ -48,3 +48,32 @@ export function getQdrantCollections() {
     '/assist/api/admin/qdrant/collections'
   )
 }
+
+// ── 日志查看 ────────────────────────────────────────────
+
+export interface LogEntry {
+  message: string
+  level: string
+  timestamp: string
+  target: string
+  file?: string
+  line?: number
+  [key: string]: unknown
+}
+
+export interface LogResponse {
+  entries: LogEntry[]
+  total: number
+  file: string
+  displayed: number
+  error?: string
+}
+
+/** 获取日志 */
+export function getLogs(params: {
+  lines?: number
+  level?: string
+  q?: string
+}) {
+  return apiGet<LogResponse>('/assist/api/admin/logs', params)
+}

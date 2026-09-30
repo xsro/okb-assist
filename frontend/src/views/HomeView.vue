@@ -178,8 +178,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { listDocuments, getDocTypes } from '@/api/documents'
+import { ref, computed, onMounted } from 'vue'
+import { listDocuments } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import { useResponsive } from '@/composables/useResponsive'
@@ -201,7 +201,6 @@ const { isMobile } = useResponsive()
 const { items, loading, page, total, totalPages, load } = usePagination<Document>()
 
 const searchQuery = ref('')
-const docTypes = ref<string[]>([])
 const showSyntaxHelp = ref(false)
 const searchWrapRef = ref<HTMLElement | null>(null)
 const searchInputRef = ref<HTMLInputElement | null>(null)
@@ -270,9 +269,7 @@ async function doLoad() {
 
   if (query === '') {
     // 无搜索词时正常加载全部
-    await load(listDocuments, {
-      doc_type_filter: filterDocType.value || undefined
-    })
+    await load(listDocuments, {})
     return
   }
 
@@ -320,10 +317,6 @@ function onSearchBlur() {
 }
 
 onMounted(async () => {
-  try {
-    const res = await getDocTypes()
-    docTypes.value = res.doc_types
-  } catch { /* ignore */ }
   doLoad()
 })
 </script>

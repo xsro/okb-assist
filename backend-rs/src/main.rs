@@ -12,7 +12,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use tower::ServiceBuilder;
-use tower_http::{cors::CorsLayer, trace::{MakeSpan, TraceLayer}};
+use tower_http::{cors::CorsLayer, trace::{MakeSpan, OnResponse, TraceLayer}};
 
 mod config_manager;
 mod config;
@@ -23,6 +23,7 @@ mod settings;
 mod utils;
 mod services;
 mod routers;
+mod logger;
 mod mcp_server;
 
 use config::Settings;
@@ -110,40 +111,27 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // 初始化日志：RUST_LOG 环境变量优先，否则使用 --log-level 指定的级别。
-    let level = args.log_level.as_str();
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new(format!("okb_assist={level},tower_http={level}"))
-    });
-
-    // 先加载 system.json 确定 log_path
+    // 加载 system.json 并切换到工作目录
     let config_manager = Arc::new(ConfigManager::new(&args.system_path));
-    // 切换到工作目录，这样所有相对路径自然解析
     let cwd = config_manager.cwd();
     std::env::set_current_dir(&cwd)
         .map_err(|e| anyhow::anyhow!("无法切换到工作目录 {}: {}", cwd, e))?;
     let abs_cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| cwd.clone());
+
+    // 初始化双输出日志
+    let level = args.log_level.as_str();
+    let filter_str = format!("okb_assist={level},tower_http={level}");
     let system = config_manager.load_system_config();
     let log_path_raw = system
         .get("log_path")
         .and_then(|v| v.as_str())
-        .unwrap_or("stdout")
+        .unwrap_or("okb-log.jsonl")
         .to_string();
-    // 应用变量替换（仅 {id} 和 {env:VAR}）
     let log_path = ConfigManager::substitute_path_variables(&log_path_raw, 0);
+    let (_log_abs_path, _log_guard) = logger::init_dual_logging(&log_path, &filter_str);
 
-    if log_path != "stdout" && !log_path.is_empty() {
-        let log_file = std::fs::File::create(&log_path)
-            .map_err(|e| anyhow::anyhow!("无法创建日志文件 {}: {}", log_path, e))?;
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(std::sync::Mutex::new(log_file))
-            .init();
-    } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
-    }
     tracing::info!("工作目录: {}", abs_cwd);
     let settings = Arc::new(Settings::new(config_manager.clone()));
     settings::init_settings(settings.clone());
@@ -194,9 +182,7 @@ fn create_app(
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(IpMakeSpan)
-                .on_response(
-                    tower_http::trace::DefaultOnResponse::new().level(tracing::Level::INFO),
-                ),
+                .on_response(ResponseLog),
         )
         .layer(cors)
         .layer(Extension(config_manager))
@@ -523,20 +509,88 @@ fn extract_client_ip<B>(req: &axum::extract::Request<B>) -> String {
     "unknown".to_string()
 }
 
-/// 自定义 MakeSpan：在每个请求的 span 中包含真实客户端 IP。
+/// 自定义 MakeSpan：在每个请求的 span 中包含真实客户端 IP 和请求头信息。
 #[derive(Clone, Default)]
 struct IpMakeSpan;
 
 impl<B> MakeSpan<B> for IpMakeSpan {
     fn make_span(&mut self, req: &axum::extract::Request<B>) -> tracing::Span {
         let client_ip = extract_client_ip(req);
+        let user_agent = req
+            .headers()
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let referer = req
+            .headers()
+            .get("referer")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let content_type = req
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let x_forwarded_for = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let x_real_ip = req
+            .headers()
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let origin = req
+            .headers()
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
         tracing::span!(
             tracing::Level::INFO,
             "request",
             client_ip = %client_ip,
             method = %req.method(),
             uri = %req.uri(),
+            user_agent = %user_agent,
+            referer = %referer,
+            content_type = %content_type,
+            x_forwarded_for = %x_forwarded_for,
+            x_real_ip = %x_real_ip,
+            origin = %origin,
+            // 以下字段由 OnResponse 回调填充
+            status = tracing::field::Empty,
+            resp_content_type = tracing::field::Empty,
+            resp_content_length = tracing::field::Empty,
         )
+    }
+}
+
+/// 自定义 OnResponse：记录响应状态码和响应头到 span。
+#[derive(Clone, Default)]
+struct ResponseLog;
+
+impl<B> OnResponse<B> for ResponseLog {
+    fn on_response(
+        self,
+        response: &http::Response<B>,
+        _latency: std::time::Duration,
+        span: &tracing::Span,
+    ) {
+        let status = response.status();
+        let resp_content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let resp_content_length = response
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        span.record("status", &tracing::field::display(status.as_u16()));
+        span.record("resp_content_type", &tracing::field::display(resp_content_type));
+        span.record("resp_content_length", &tracing::field::display(resp_content_length));
     }
 }
 

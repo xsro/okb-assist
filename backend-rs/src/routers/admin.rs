@@ -45,6 +45,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/admin/recalculate-hashes", post(recalculate_hashes))
         .route("/assist/api/admin/dedup/", post(dedup))
         .route("/assist/api/admin/dedup", post(dedup))
+        .route("/assist/api/admin/logs/", get(get_logs))
+        .route("/assist/api/admin/logs", get(get_logs))
 }
 
 async fn dedup(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
@@ -95,10 +97,23 @@ async fn dedup(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
 }
 
 async fn status() -> Json<Value> {
+    let build_time = std::time::UNIX_EPOCH
+        + std::time::Duration::from_secs(
+            env!("BUILD_TIME").parse::<u64>().unwrap_or(0),
+        );
+    let build_time_str = chrono::DateTime::<chrono::Utc>::from(build_time)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+
     Json(json!({
         "status": "running",
-        "version": "0.1.0-rust",
-        "backend": "rust"
+        "name": env!("CARGO_PKG_NAME"),
+        "version": env!("CARGO_PKG_VERSION"),
+        "build_time": build_time_str,
+        "build_profile": env!("BUILD_PROFILE"),
+        "rustc": env!("RUSTC_VERSION"),
+        "target": env!("BUILD_HOST"),
+        "backend": "rust",
     }))
 }
 
@@ -504,5 +519,105 @@ async fn recalculate_hashes(
         "skipped": skipped,
         "errors": errors,
     }))
+}
+
+// ── 日志查看 ────────────────────────────────────────────
+
+/// 日志查询参数
+#[derive(Debug, Deserialize)]
+pub struct LogQuery {
+    /// 返回最近多少行（默认 100）
+    pub lines: Option<usize>,
+    /// 按日志级别过滤（trace / debug / info / warn / error）
+    pub level: Option<String>,
+    /// 文本关键词过滤
+    pub q: Option<String>,
+}
+
+async fn get_logs(
+    Extension(settings): Extension<Arc<Settings>>,
+    Query(params): Query<LogQuery>,
+) -> Response {
+    let log_path_raw = settings.log_path();
+    let log_path = std::path::PathBuf::from(
+        crate::config_manager::ConfigManager::substitute_path_variables(&log_path_raw, 0)
+    );
+
+    if !log_path.exists() {
+        return (StatusCode::NOT_FOUND, Json(json!({
+            "entries": [],
+            "total": 0,
+            "file": log_path.to_string_lossy().to_string(),
+            "error": "日志文件不存在"
+        }))).into_response();
+    }
+
+    let max_lines = params.lines.unwrap_or(100).min(5000);
+    let level_filter = params.level.as_deref().unwrap_or("").to_lowercase();
+    let keyword = params.q.as_deref().unwrap_or("").to_lowercase();
+
+    // 读取日志文件
+    let content = match std::fs::read_to_string(&log_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "entries": [],
+                "total": 0,
+                "file": log_path.to_string_lossy().to_string(),
+                "error": format!("读取日志文件失败: {}", e)
+            }))).into_response();
+        }
+    };
+
+    let mut entries: Vec<Value> = Vec::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+
+        // 尝试解析 JSONL
+        let entry: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => {
+                // 非 JSONL 行（如进程启动时的消息），作为纯文本条目
+                entries.push(json!({
+                    "message": line,
+                    "level": "info",
+                    "timestamp": "",
+                    "target": ""
+                }));
+                continue;
+            }
+        };
+
+        // 按级别过滤
+        if !level_filter.is_empty() {
+            let lvl = entry["level"]
+                .as_str()
+                .unwrap_or("")
+                .to_lowercase();
+            if lvl != level_filter { continue; }
+        }
+
+        // 按关键词过滤
+        if !keyword.is_empty() {
+            let raw = serde_json::to_string(&entry).unwrap_or_default().to_lowercase();
+            if !raw.contains(&keyword) { continue; }
+        }
+
+        entries.push(entry);
+    }
+
+    // 取最近的 N 条
+    let total = entries.len();
+    let start = if entries.len() > max_lines { entries.len() - max_lines } else { 0 };
+    let slice: Vec<Value> = entries.drain(start..).collect();
+
+    Json(json!({
+        "entries": slice,
+        "total": total,
+        "file": log_path.to_string_lossy().to_string(),
+        "displayed": slice.len(),
+    })).into_response()
 }
 

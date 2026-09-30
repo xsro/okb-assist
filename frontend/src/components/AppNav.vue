@@ -17,6 +17,7 @@ const navItems = [
   { path: '/assist/upload', label: '上传' },
   { path: '/assist/tools', label: '工具' },
   { path: '/assist/admin', label: '管理' },
-  { path: '/assist/config', label: '配置' }
+  { path: '/assist/config', label: '配置' },
+  { path: '/assist/logs', label: '日志' },
 ]
 </script>

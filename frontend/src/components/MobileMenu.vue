@@ -43,7 +43,8 @@ const navItems = [
   { path: '/assist/config', label: '配置' },
   { path: '/assist/duplicates', label: '去重' },
   { path: '/assist/point', label: '向量库' },
-  { path: '/assist/mcp-setup', label: 'MCP 配置' }
+  { path: '/assist/mcp-setup', label: 'MCP 配置' },
+  { path: '/assist/logs', label: '日志' }
 ]
 
 function promptToken() {
