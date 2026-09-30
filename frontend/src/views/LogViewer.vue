@@ -58,7 +58,7 @@
         :key="i"
         class="log-entry"
         :class="'level-' + (entry.level || 'info').toLowerCase()"
-        @click="toggleExpand(i)"
+        @click="openDetail(entry)"
       >
         <span class="log-level-badge">{{ (entry.level || 'INFO').toUpperCase() }}</span>
         <span class="log-timestamp">{{ formatTimestamp(entry.timestamp) }}</span>
@@ -116,6 +116,27 @@
         </div>
       </div>
     </div>
+    <!-- JSON 详情模态框 -->
+    <div v-if="detailEntry" class="json-modal-overlay" @click.self="closeDetail">
+      <div class="json-modal">
+        <div class="json-modal-header">
+          <span class="json-modal-title">
+            {{ detailEntry.level?.toUpperCase() || 'INFO' }} -
+            {{ detailEntry.message?.slice(0, 80) }}
+          </span>
+          <div class="json-modal-actions">
+            <button class="btn-copy" @click="copyJson" :title="copied ? '已复制' : '复制 JSON'">
+              {{ copied ? '✓' : '📋' }}
+            </button>
+            <button class="json-modal-close" @click="closeDetail">×</button>
+          </div>
+        </div>
+        <pre class="json-modal-body">{{ formatJson(detailEntry) }}</pre>
+        <div class="json-modal-footer">
+          <button class="btn btn-sm" @click="closeDetail">关闭</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -149,15 +170,28 @@ const logFile = ref('')
 const autoRefresh = ref(false)
 const logListRef = ref<HTMLElement | null>(null)
 const versionInfo = ref<VersionInfo | null>(null)
-const expandedIndex = ref<number | null>(null)
+const detailEntry = ref<LogEntry | null>(null)
+const copied = ref(false)
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 
-function toggleExpand(i: number) {
-  expandedIndex.value = expandedIndex.value === i ? null : i
+function openDetail(entry: LogEntry) {
+  detailEntry.value = entry
 }
 
-function hasRequestFields(entry: LogEntry): boolean {
-  return !!(entry.client_ip || entry.method || entry.uri || entry.user_agent)
+function closeDetail() {
+  detailEntry.value = null
+  copied.value = false
+}
+
+function formatJson(obj: Record<string, unknown>): string {
+  return JSON.stringify(obj, null, 2)
+}
+
+function copyJson() {
+  if (!detailEntry.value) return
+  navigator.clipboard.writeText(formatJson(detailEntry.value))
+  copied.value = true
+  setTimeout(() => { copied.value = false }, 1500)
 }
 
 function formatTimestamp(ts: string): string {
@@ -356,36 +390,109 @@ onUnmounted(() => {
   background: #2a2a2a;
 }
 
-/* 展开详情面板 */
-.log-detail {
-  width: 100%;
-  padding: 6px 0 2px 56px;
-  font-size: 11px;
+/* ── JSON 详情模态框 ──────────────────────────────────── */
+.json-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.json-modal {
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 12px;
+  width: 90vw;
+  max-width: 800px;
+  max-height: 80vh;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
 }
 
-.detail-row {
+.json-modal-header {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #333;
+  gap: 12px;
+}
+
+.json-modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #d4d4d4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.json-modal-actions {
+  display: flex;
+  align-items: center;
   gap: 8px;
-  line-height: 1.6;
-}
-
-.detail-label {
-  color: #569cd6;
   flex-shrink: 0;
-  min-width: 100px;
 }
 
-.detail-value {
+.btn-copy {
+  background: none;
+  border: 1px solid #444;
+  color: #888;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  line-height: 1;
+  min-width: 36px;
+  min-height: 32px;
+}
+.btn-copy:hover {
+  background: #333;
+  color: #fff;
+  border-color: #666;
+}
+
+.json-modal-close {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 22px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  border-radius: 4px;
+  min-width: 36px;
+  min-height: 36px;
+}
+.json-modal-close:hover {
+  background: #333;
+  color: #fff;
+}
+
+.json-modal-body {
+  flex: 1;
+  overflow: auto;
+  padding: 16px;
+  margin: 0;
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.6;
   color: #ce9178;
-  word-break: break-all;
+  white-space: pre;
+  tab-size: 2;
 }
 
-.detail-user-agent {
-  color: #6a9955;
-  font-size: 10px;
+.json-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 16px;
+  border-top: 1px solid #333;
 }
 
 /* 级别着色 */
