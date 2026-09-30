@@ -25,6 +25,9 @@ export interface Document {
   filename: string
   file_hash: string | null
   file_size: number | null
+  pdf_size: number | null
+  md_size: number | null
+  zip_size: number | null
   created_at: string
   updated_at: string
   has_markdown: boolean

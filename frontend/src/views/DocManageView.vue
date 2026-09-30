@@ -101,6 +101,25 @@
         </div>
       </div>
 
+      <!-- 文件大小 -->
+      <div class="action-group">
+        <span class="action-label">文件大小</span>
+        <div class="action-buttons file-sizes-list">
+          <span class="file-size-item">
+            <span class="file-label">PDF</span>
+            <span class="file-value">{{ formatFile(doc.pdf_size) }}</span>
+          </span>
+          <span class="file-size-item">
+            <span class="file-label">Markdown</span>
+            <span class="file-value">{{ formatFile(doc.md_size) }}</span>
+          </span>
+          <span class="file-size-item">
+            <span class="file-label">资源包 ZIP</span>
+            <span class="file-value">{{ formatFile(doc.zip_size) }}</span>
+          </span>
+        </div>
+      </div>
+
       <!-- 危险操作 -->
       <div class="action-group action-group-danger">
         <span class="action-label">危险操作</span>
@@ -374,6 +393,18 @@ onMounted(() => {
   loadVectorDbs()
   load()
 })
+
+function formatSize(bytes: number | null): string {
+  if (!bytes) return '-'
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+function formatFile(size: number | null): string {
+  if (size == null) return '不存在'
+  return formatSize(size)
+}
 </script>
 
 <style scoped>
@@ -478,6 +509,26 @@ onMounted(() => {
   padding: 4px 8px;
   background: var(--bg-secondary);
   border-radius: 4px;
+}
+
+.file-sizes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.file-size-item {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+.file-label {
+  font-weight: 600;
+  color: var(--text-secondary);
+  min-width: 80px;
+}
+.file-value {
+  color: var(--text);
 }
 
 .doc-error-banner {

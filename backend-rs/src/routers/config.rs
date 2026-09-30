@@ -40,12 +40,12 @@ pub fn router() -> axum::Router<()> {
 
 async fn get_config(Extension(cm): Extension<Arc<ConfigManager>>) -> Json<Value> {
     let config = cm.get_config();
-    Json(cm.mask_sensitive(&config))
+    Json(config)
 }
 
 async fn get_system_config(Extension(cm): Extension<Arc<ConfigManager>>) -> Json<Value> {
     let config = cm.get_system_config();
-    Json(cm.mask_system_config(&config))
+    Json(config)
 }
 
 async fn update_config(
@@ -119,12 +119,12 @@ async fn update_config(
     }
 
     let saved = cm.get_config();
-    Json(json!({"detail": "配置已保存", "config": cm.mask_sensitive(&saved)})).into_response()
+    Json(json!({"detail": "配置已保存", "config": saved})).into_response()
 }
 
 async fn reload_config(Extension(cm): Extension<Arc<ConfigManager>>) -> Json<Value> {
     let config = cm.reload_config();
-    Json(json!({"detail": "配置已重新加载", "config": cm.mask_sensitive(&config)}))
+    Json(json!({"detail": "配置已重新加载", "config": config}))
 }
 
 async fn update_system_config(

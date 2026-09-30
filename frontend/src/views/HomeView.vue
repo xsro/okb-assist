@@ -138,6 +138,11 @@
           <span v-if="doc.year">📅 {{ doc.year }}</span>
           <span v-if="doc.doc_type">📋 {{ doc.doc_type }}</span>
         </div>
+        <div class="doc-card-files">
+          <span>PDF: {{ formatFile(doc.pdf_size) }}</span>
+          <span>MD: {{ formatFile(doc.md_size) }}</span>
+          <span>ZIP: {{ formatFile(doc.zip_size) }}</span>
+        </div>
         <div v-if="doc.indexed_dbs && doc.indexed_dbs.length" class="doc-card-indexes">
           <span
             v-for="dbId in doc.indexed_dbs"
@@ -319,6 +324,18 @@ function onSearchBlur() {
 onMounted(async () => {
   doLoad()
 })
+
+function formatSize(bytes: number | null): string {
+  if (!bytes) return '-'
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+function formatFile(size: number | null): string {
+  if (size == null) return '不存在'
+  return formatSize(size)
+}
 </script>
 
 <style scoped>
@@ -350,6 +367,40 @@ onMounted(async () => {
 .empty p {
   margin-bottom: 16px;
   font-size: 15px;
+}
+
+/* ── 文件列 ──────────────────────────────────────────── */
+.col-files {
+  min-width: 130px;
+}
+.file-sizes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.file-size-item {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.file-label {
+  color: var(--text-secondary);
+  font-weight: 600;
+  min-width: 26px;
+}
+.file-value {
+  color: var(--text);
+}
+
+.doc-card-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 2px 14px 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
 }
 
 /* ── 骨架屏 ──────────────────────────────────────────── */

@@ -25,7 +25,9 @@
         <tr><th>关键词</th><td>{{ doc.keywords || '-' }}</td></tr>
         <tr><th>文件名</th><td>{{ doc.filename }}</td></tr>
         <tr><th>文件哈希</th><td>{{ doc.file_hash || '-' }}</td></tr>
-        <tr><th>文件大小</th><td>{{ formatSize(doc.file_size) }}</td></tr>
+        <tr><th>PDF 文件</th><td>{{ formatFile(doc.pdf_size) }}</td></tr>
+        <tr><th>Markdown 文件</th><td>{{ formatFile(doc.md_size) }}</td></tr>
+        <tr><th>资源包 ZIP</th><td>{{ formatFile(doc.zip_size) }}</td></tr>
         <tr><th>状态</th><td><StatusBadge :status="doc.status" :status_message="doc.status_message" /></td></tr>
         <tr v-if="doc.status === 'error' && doc.status_message">
           <th>错误详情</th>
@@ -87,8 +89,16 @@
           <span class="info-value">{{ doc.file_hash || '-' }}</span>
         </div>
         <div class="info-row">
-          <span class="info-label">文件大小</span>
-          <span class="info-value">{{ formatSize(doc.file_size) }}</span>
+          <span class="info-label">PDF 文件</span>
+          <span class="info-value">{{ formatFile(doc.pdf_size) }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Markdown</span>
+          <span class="info-value">{{ formatFile(doc.md_size) }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">资源包 ZIP</span>
+          <span class="info-value">{{ formatFile(doc.zip_size) }}</span>
         </div>
         <div class="info-row">
           <span class="info-label">状态</span>
@@ -180,6 +190,11 @@ function formatSize(bytes: number | null): string {
   if (bytes < 1024) return bytes + ' B'
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+function formatFile(size: number | null): string {
+  if (size == null) return '❌ 不存在'
+  return formatSize(size)
 }
 
 async function openPdf() {

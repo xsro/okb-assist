@@ -212,6 +212,9 @@ pub struct DocumentOut {
     pub progress: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexed_dbs: Option<Vec<String>>,
+    pub pdf_size: Option<i64>,
+    pub md_size: Option<i64>,
+    pub zip_size: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -241,7 +244,15 @@ async fn indexed_dbs(db: &Database, doc_id: i64) -> Option<Vec<String>> {
     }
 }
 
+fn file_size(path: &str) -> Option<i64> {
+    std::fs::metadata(path).ok().map(|m| m.len() as i64)
+}
+
 async fn doc_to_out(doc: &Document, settings: &Settings, db: &Database) -> DocumentOut {
+    let pdf_path = paths::get_pdf_path(settings, doc.id);
+    let md_path = paths::get_markdown_path(settings, doc.id);
+    let zip_path = paths::get_asset_path(settings, doc.id);
+
     DocumentOut {
         id: doc.id,
         filename: doc.filename.clone(),
@@ -269,6 +280,9 @@ async fn doc_to_out(doc: &Document, settings: &Settings, db: &Database) -> Docum
         status_message: doc.status_message.clone(),
         progress: Some(doc.progress),
         indexed_dbs: indexed_dbs(db, doc.id).await,
+        pdf_size: file_size(&pdf_path),
+        md_size: file_size(&md_path),
+        zip_size: file_size(&zip_path),
         created_at: doc.created_at.clone(),
         updated_at: doc.updated_at.clone(),
     }
