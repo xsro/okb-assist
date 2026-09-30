@@ -1259,45 +1259,89 @@ async fn list_doc_types(
 #[derive(Debug, Deserialize)]
 pub struct SearchInfoQuery {
     pub q: Option<String>,
-    pub limit: Option<i64>,
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
 }
 
+/// 高级搜索端点。
+///
+/// 接收前端发来的 query string（如 `transformer title:attention year:>2020`），
+/// 在后端解析并构建 SQL 查询，支持字段过滤、范围、OR、排除等高级语法。
 async fn search_info(
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Query(params): Query<SearchInfoQuery>,
 ) -> Json<Value> {
     let q = params.q.unwrap_or_default();
+    let page = params.page.unwrap_or(1).max(1);
+    let page_size = params.page_size.unwrap_or(20).clamp(1, 100);
+
     if q.trim().is_empty() {
-        return Json(json!({"results": [], "query": q, "total": 0}));
+        return Json(json!({"items": [], "query": q, "total": 0, "page": page, "page_size": page_size, "total_pages": 0}));
     }
 
-    let like = format!("%{}%", q.trim());
-    let sql = format!(
-        "SELECT {} FROM documents WHERE title LIKE ? OR title_en LIKE ? OR authors LIKE ? \
-         OR authors_en LIKE ? OR journal LIKE ? OR journal_en LIKE ? OR keywords LIKE ? \
-         OR keywords_en LIKE ? OR abstract LIKE ? OR abstract_en LIKE ? OR doi LIKE ? \
-         OR category LIKE ? OR source LIKE ? ORDER BY updated_at DESC LIMIT ?",
-        DOC_COLUMNS
-    );
+    // 解析查询字符串
+    let pq = crate::services::query_parser::parse_query(&q);
 
-    let limit = params.limit.unwrap_or(10).clamp(1, 100);
-    let docs: Vec<Document> = sqlx::query_as::<_, Document>(&sql)
-        .bind(&like).bind(&like).bind(&like).bind(&like)
-        .bind(&like).bind(&like).bind(&like).bind(&like)
-        .bind(&like).bind(&like).bind(&like).bind(&like)
-        .bind(&like)
-        .bind(limit)
+    // 生成 WHERE 子句和绑定值
+    let (where_clause, binds) = crate::services::query_parser::build_where_clause(&pq, true);
+
+    // 计数
+    let count_sql = format!("SELECT COUNT(*) FROM documents WHERE {}", where_clause);
+    let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
+    for b in &binds {
+        count_query = count_query.bind(b.clone());
+    }
+    let total: i64 = count_query.fetch_one(db.pool()).await.unwrap_or(0);
+
+    // 排序
+    let sort_col = match pq.sort_by.as_deref() {
+        Some("title") => "title",
+        Some("authors") => "authors",
+        Some("year") => "year",
+        Some("id") => "id",
+        Some("journal") => "journal",
+        Some("status") => "status",
+        Some("doc_type") => "doc_type",
+        Some("updated_at") => "updated_at",
+        Some("created_at") => "created_at",
+        _ => "updated_at",
+    };
+    let sort_dir = match pq.sort_order.as_deref() {
+        Some("asc") => "ASC",
+        _ => "DESC",
+    };
+    let offset = (page - 1) * page_size;
+    let search_sql = format!(
+        "SELECT {} FROM documents WHERE {} ORDER BY {} {} LIMIT ? OFFSET ?",
+        DOC_COLUMNS, where_clause, sort_col, sort_dir
+    );
+    let mut doc_query = sqlx::query_as::<_, Document>(&search_sql);
+    for b in &binds {
+        doc_query = doc_query.bind(b.clone());
+    }
+    doc_query = doc_query.bind(page_size).bind(offset);
+
+    let docs: Vec<Document> = doc_query
         .fetch_all(db.pool())
         .await
         .unwrap_or_default();
 
-    let mut results: Vec<DocumentOut> = Vec::with_capacity(docs.len());
+    let mut items: Vec<DocumentOut> = Vec::with_capacity(docs.len());
     for d in &docs {
-        results.push(doc_to_out(d, &settings, &db).await);
+        items.push(doc_to_out(d, &settings, &db).await);
     }
-    let total = results.len();
-    Json(json!({"results": results, "query": q, "total": total}))
+
+    let total_pages = if total == 0 { 0 } else { (total + page_size - 1) / page_size };
+
+    Json(json!({
+        "items": items,
+        "query": q,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages
+    }))
 }
 
 /// 语义搜索

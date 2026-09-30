@@ -20,9 +20,6 @@
             autocomplete="off"
             spellcheck="false"
             @keyup.enter="search"
-            @focus="showSyntaxHelp = true"
-            @blur="onSearchBlur"
-            @input="onSearchInput"
           />
         </div>
         <button class="btn btn-search" @click="search" :disabled="loading">
@@ -31,20 +28,20 @@
             <line x1="21" y1="21" x2="16.65" y2="16.65"/>
           </svg>
         </button>
+        <button class="btn btn-builder" @click="openQueryBuilder" title="高级搜索构建器">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="4" y1="21" x2="4" y2="14"/>
+            <line x1="4" y1="10" x2="4" y2="3"/>
+            <line x1="12" y1="21" x2="12" y2="12"/>
+            <line x1="12" y1="8" x2="12" y2="3"/>
+            <line x1="20" y1="21" x2="20" y2="16"/>
+            <line x1="20" y1="12" x2="20" y2="3"/>
+            <line x1="1" y1="14" x2="7" y2="14"/>
+            <line x1="9" y1="8" x2="15" y2="8"/>
+            <line x1="17" y1="16" x2="23" y2="16"/>
+          </svg>
+        </button>
       </div>
-
-      <!-- 语法帮助面板 -->
-      <Transition name="fade">
-        <div v-if="showSyntaxHelp && searchQuery.trim() === ''" class="syntax-help" ref="syntaxHelpRef">
-          <div class="syntax-help-header">高级搜索语法</div>
-          <div class="syntax-help-grid">
-            <div v-for="item in syntaxHelpItems" :key="item.syntax" class="syntax-help-item">
-              <code>{{ item.syntax }}</code>
-              <span>{{ item.description }}</span>
-            </div>
-          </div>
-        </div>
-      </Transition>
 
       <!-- 活跃筛选条件（chips） -->
       <div v-if="activeFilterChips.length > 0" class="active-filters">
@@ -179,26 +176,31 @@
       <p>暂无文献</p>
       <router-link :to="{ name: 'upload' }" class="btn">立即上传</router-link>
     </div>
+
+    <!-- 高级搜索构建器 -->
+    <QueryBuilder ref="queryBuilderRef" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import { listDocuments } from '@/api/documents'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import { listDocuments, searchInfo } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import { useResponsive } from '@/composables/useResponsive'
 import { usePagination } from '@/composables/usePagination'
 import StatusBadge from '@/components/StatusBadge.vue'
+import QueryBuilder from '@/components/QueryBuilder.vue'
 import type { Document } from '@/types/document'
 import {
   parseSearchQuery,
   parsedQueryToParams,
-  buildSearchParams,
-  SYNTAX_HELP_ITEMS,
   SEARCH_FIELD_DEFS
 } from '@/utils/searchParser'
 
+const router = useRouter()
+const route = useRoute()
 const { showError } = useToast()
 const { requireToken } = useRequireToken()
 const { isMobile } = useResponsive()
@@ -206,12 +208,11 @@ const { isMobile } = useResponsive()
 const { items, loading, page, total, totalPages, load } = usePagination<Document>()
 
 const searchQuery = ref('')
-const showSyntaxHelp = ref(false)
+// 标志位：避免路由变化触发重复搜索
+const updatingUrl = ref(false)
 const searchWrapRef = ref<HTMLElement | null>(null)
 const searchInputRef = ref<HTMLInputElement | null>(null)
-const syntaxHelpRef = ref<HTMLElement | null>(null)
-
-const syntaxHelpItems = SYNTAX_HELP_ITEMS
+const queryBuilderRef = ref<{ show: (q?: string) => Promise<string | null> } | null>(null)
 
 // 排序字段中文名映射
 const SORT_LABELS: Record<string, string> = {
@@ -268,9 +269,24 @@ const highlightedQuery = computed(() => {
   return result
 })
 
+/** 从 URL 读取初始查询参数 */
+function restoreQueryFromUrl() {
+  const q = route.query.q as string | undefined
+  if (q) {
+    searchQuery.value = q
+  }
+}
+
 async function doLoad() {
   if (!requireToken()) return
   const query = searchQuery.value.trim()
+
+  // 更新地址栏（不重复 push 同样的值）
+  const currentQ = (route.query.q as string) || ''
+  if (currentQ !== query) {
+    updatingUrl.value = true
+    router.replace({ query: query ? { q: query } : {} })
+  }
 
   if (query === '') {
     // 无搜索词时正常加载全部
@@ -278,23 +294,17 @@ async function doLoad() {
     return
   }
 
-  // 解析高级搜索语法
-  const pq = parseSearchQuery(query)
-  const p = parsedQueryToParams(pq)
-
-  await load(listDocuments, {
-    q: p.q || undefined,
-    search_fields: p.search_fields || undefined,
-    status_filter: p.status_filter || undefined,
-    doc_type_filter: p.doc_type_filter || undefined,
-    year: p.year,
-    year_min: p.year_min,
-    year_max: p.year_max,
-    journal: p.journal || undefined,
-    authors: p.authors || undefined,
-    sort_by: p.sort_by || undefined,
-    sort_order: p.sort_order || undefined,
-  })
+  // 将原始 query string 发送给后端，由后端解析和执行搜索
+  await load(
+    async (params) => {
+      const res = await searchInfo(query, {
+        page: params.page as number | undefined,
+        page_size: params.page_size as number | undefined,
+      })
+      return { items: res.items, total: res.total }
+    },
+    { page: page.value, page_size: 20 }
+  )
 }
 
 function search() {
@@ -307,21 +317,39 @@ function clearSearch() {
   search()
 }
 
-function onSearchInput() {
-  // 输入时关闭语法帮助
-  if (searchQuery.value.trim()) {
-    showSyntaxHelp.value = false
+/** 监控路由变化（浏览器前进/后退），恢复搜索状态 */
+watch(
+  () => route.query.q,
+  (newQ) => {
+    if (updatingUrl.value) {
+      // 本次 URL 更新由搜索触发，不重复加载
+      updatingUrl.value = false
+      return
+    }
+    const q = (newQ as string) || ''
+    if (q !== searchQuery.value) {
+      searchQuery.value = q
+      if (q === '' && items.value.length === 0) {
+        // 首次加载或清除搜索
+        doLoad()
+      } else if (q !== '') {
+        doLoad()
+      }
+    }
+  }
+)
+
+async function openQueryBuilder() {
+  const result = await queryBuilderRef.value?.show(searchQuery.value)
+  if (result !== null && result !== undefined) {
+    searchQuery.value = result
+    search()
   }
 }
 
-function onSearchBlur() {
-  // 延迟关闭语法帮助，允许点击帮助面板
-  setTimeout(() => {
-    showSyntaxHelp.value = false
-  }, 200)
-}
-
 onMounted(async () => {
+  // 从 URL 恢复搜索状态
+  restoreQueryFromUrl()
   doLoad()
 })
 
@@ -532,7 +560,8 @@ function formatFile(size: number | null): string {
   background: var(--primary);
   color: #fff;
   border: 1px solid var(--primary);
-  border-radius: 0 8px 8px 0;
+  border-right: none;
+  border-radius: 0;
   cursor: pointer;
   transition: background 0.2s;
   min-height: 38px;
@@ -545,71 +574,33 @@ function formatFile(size: number | null): string {
   cursor: not-allowed;
 }
 
-/* 语法帮助面板 */
-.syntax-help {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  z-index: 100;
-  background: var(--bg-white);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-  padding: 12px 16px;
-  max-height: 320px;
-  overflow-y: auto;
-}
-
-.syntax-help-header {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
-}
-
-.syntax-help-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px 16px;
-}
-
-.syntax-help-item {
+/* 搜索构建器按钮 */
+.btn-builder {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  padding: 4px 0;
-}
-
-.syntax-help-item code {
-  background: var(--bg);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 12px;
-  color: var(--primary);
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.syntax-help-item span {
+  justify-content: center;
+  padding: 0 10px;
+  background: var(--bg-white);
   color: var(--text-secondary);
-  line-height: 1.4;
+  border: 1px solid var(--border);
+  border-left: none;
+  border-radius: 0 8px 8px 0;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  min-height: 38px;
+}
+.btn-builder:hover {
+  background: var(--bg);
+  color: var(--primary);
+}
+.btn-builder svg {
+  opacity: 0.7;
+}
+.btn-builder:hover svg {
+  opacity: 1;
 }
 
-/* 过渡动画 */
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.15s ease;
-}
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-}
+
 
 /* 活跃筛选 chips */
 .active-filters {
@@ -698,8 +689,5 @@ function formatFile(size: number | null): string {
   .sk-type { width: 40%; }
   .sk-status { width: 50%; }
   .sk-action { width: 60px; }
-  .syntax-help-grid {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

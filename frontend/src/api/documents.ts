@@ -125,11 +125,19 @@ export async function grepSearch(
   return res
 }
 
-/** 元数据搜索 */
-export function searchInfo(query: string, limit = 10) {
-  return apiGet<{ results: Document[]; query: string; total: number }>(
+/** 元数据搜索（高级搜索）
+ *
+ * 支持 field:value、year:>2020、OR 等语法，解析在后端完成。
+ * 返回格式与 listDocuments 兼容，可直接用于 usePagination。
+ */
+export function searchInfo(
+  query: string,
+  options: { page?: number; page_size?: number } = {}
+) {
+  const { page = 1, page_size = 20 } = options
+  return apiGet<SearchResultList>(
     '/assist/api/documents/search-info/',
-    { q: query, limit }
+    { q: query, page, page_size }
   )
 }
 

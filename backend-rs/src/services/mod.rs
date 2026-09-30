@@ -6,4 +6,5 @@ pub mod mineru;
 pub mod ollama;
 pub mod pdf_meta;
 pub mod qdrant;
+pub mod query_parser;
 pub mod vector_db;
