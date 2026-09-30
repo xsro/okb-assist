@@ -7,6 +7,12 @@
       </router-link>
     </div>
 
+    <!-- 文档错误横幅 -->
+    <div v-if="doc.status === 'error' && doc.status_message" class="doc-error-banner">
+      <span class="error-icon">⚠</span>
+      <span>{{ doc.status_message }}</span>
+    </div>
+
     <!-- 文献操作 -->
     <div class="section">
       <h3>文献操作</h3>
@@ -46,15 +52,22 @@
             尚未索引到任何数据库
           </div>
           <div v-else class="index-list">
-            <span
+            <div
               v-for="idx in docIndexes"
               :key="idx.vector_db_id"
-              class="index-tag"
+              class="index-item"
               :class="`status-${idx.status}`"
             >
-              {{ idx.vector_db_id }}
-              <small>({{ idx.status }})</small>
-            </span>
+              <span class="index-tag-text">
+                {{ idx.vector_db_id }}
+                <small>({{ idx.status }})</small>
+              </span>
+              <span
+                v-if="idx.status === 'error' && idx.error_message"
+                class="index-error"
+                :title="idx.error_message"
+              >⚠ {{ idx.error_message }}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -410,39 +423,44 @@ onMounted(() => {
 
 .index-list {
   display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  align-items: center;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.index-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  border-radius: 4px;
+.index-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px;
+  border-radius: 6px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   font-size: 13px;
 }
 
-.index-tag small {
+.index-item.status-indexed {
+  border-color: var(--success);
+}
+
+.index-item.status-indexing {
+  border-color: var(--warning);
+}
+
+.index-item.status-error {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.index-tag-text small {
   color: var(--text-secondary);
 }
 
-.index-tag.status-indexed {
-  border-color: var(--success);
-  color: var(--success);
-}
-
-.index-tag.status-indexing {
-  border-color: var(--warning);
-  color: var(--warning);
-}
-
-.index-tag.status-error {
-  border-color: var(--danger);
-  color: var(--danger);
+.index-error {
+  font-size: 12px;
+  color: var(--danger-text);
+  line-height: 1.5;
+  word-break: break-word;
+  cursor: help;
 }
 
 .empty-hint {
@@ -460,6 +478,24 @@ onMounted(() => {
   padding: 4px 8px;
   background: var(--bg-secondary);
   border-radius: 4px;
+}
+
+.doc-error-banner {
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  color: var(--danger-text);
+  font-size: 13px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.doc-error-banner .error-icon {
+  flex-shrink: 0;
+  font-size: 16px;
 }
 
 .form-row {

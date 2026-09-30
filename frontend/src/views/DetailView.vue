@@ -26,7 +26,11 @@
         <tr><th>文件名</th><td>{{ doc.filename }}</td></tr>
         <tr><th>文件哈希</th><td>{{ doc.file_hash || '-' }}</td></tr>
         <tr><th>文件大小</th><td>{{ formatSize(doc.file_size) }}</td></tr>
-        <tr><th>状态</th><td><StatusBadge :status="doc.status" /></td></tr>
+        <tr><th>状态</th><td><StatusBadge :status="doc.status" :status_message="doc.status_message" /></td></tr>
+        <tr v-if="doc.status === 'error' && doc.status_message">
+          <th>错误详情</th>
+          <td class="error-message">{{ doc.status_message }}</td>
+        </tr>
         <tr>
           <th>已索引库</th>
           <td>
@@ -88,7 +92,11 @@
         </div>
         <div class="info-row">
           <span class="info-label">状态</span>
-          <span class="info-value"><StatusBadge :status="doc.status" /></span>
+          <span class="info-value"><StatusBadge :status="doc.status" :status_message="doc.status_message" /></span>
+        </div>
+        <div v-if="doc.status === 'error' && doc.status_message" class="info-row error-row">
+          <span class="info-label">错误详情</span>
+          <span class="info-value error-message">{{ doc.status_message }}</span>
         </div>
         <div class="info-row">
           <span class="info-label">已索引库</span>
@@ -315,6 +323,21 @@ onMounted(() => {
   font-size: 12px;
   color: var(--text-secondary);
 }
+.error-message {
+  color: var(--danger-text);
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.error-row {
+  background: var(--danger-bg);
+}
+
+.error-row .info-label {
+  color: var(--danger-text);
+}
+
 .loading {
   text-align: center;
   padding: 60px;

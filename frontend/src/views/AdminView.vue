@@ -9,8 +9,16 @@
         <span class="stat-label">总文档数</span>
       </div>
       <div class="stat-card">
-        <span class="stat-value">{{ stats?.indexed_count || 0 }}</span>
-        <span class="stat-label">已索引</span>
+        <span class="stat-value">{{ stats?.status_counts?.uploaded || 0 }}</span>
+        <span class="stat-label">已上传</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">{{ stats?.status_counts?.parsing || 0 }}</span>
+        <span class="stat-label">解析中</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">{{ stats?.status_counts?.markdown_done || 0 }}</span>
+        <span class="stat-label">解析完成</span>
       </div>
       <div class="stat-card">
         <span class="stat-value">{{ stats?.error_count || 0 }}</span>

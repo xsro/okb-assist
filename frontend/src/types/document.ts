@@ -19,6 +19,7 @@ export interface Document {
   abstract: string | null
   keywords: string | null
   status: DocStatus
+  status_message: string | null
   index_status: IndexStatus
   indexed_dbs?: string[]
   filename: string

@@ -2,48 +2,66 @@
   <div class="home-view">
     <!-- 搜索栏 -->
     <div class="search-bar">
-      <input
-        v-model="searchQuery"
-        type="text"
-        :placeholder="searchPlaceholder"
-        @keyup.enter="search"
-      />
-      <div ref="scopePanelRef" class="scope-panel-wrapper">
-        <button class="btn btn-outline" @click="showScopePanel = !showScopePanel">
-          搜索范围
-        </button>
-        <div v-if="showScopePanel" class="scope-panel">
-          <label v-for="opt in searchFieldOptions" :key="opt.value" class="scope-option">
-            <input
-              v-model="searchFields"
-              type="checkbox"
-              :value="opt.value"
-              @change="onScopeChange"
-            />
-            <span>{{ opt.label }}</span>
-          </label>
+      <div class="search-input-wrap" ref="searchWrapRef">
+        <div class="search-input-inner">
+          <!-- 语法高亮背景层 -->
+          <div
+            v-if="searchQuery"
+            class="search-highlight"
+            aria-hidden="true"
+            v-html="highlightedQuery"
+          ></div>
+          <input
+            ref="searchInputRef"
+            v-model="searchQuery"
+            type="text"
+            class="search-input"
+            placeholder='搜索文献（例：transformer title:attention year:>2020）'
+            autocomplete="off"
+            spellcheck="false"
+            @keyup.enter="search"
+            @focus="showSyntaxHelp = true"
+            @blur="onSearchBlur"
+            @input="onSearchInput"
+          />
         </div>
+        <button class="btn btn-search" @click="search" :disabled="loading">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+        </button>
       </div>
-      <button class="btn" @click="search">搜索</button>
-      <select v-model="filterDocType" @change="search">
-        <option value="">全部类型</option>
-        <option v-for="t in docTypes" :key="t" :value="t">{{ t }}</option>
-      </select>
-      <select v-model="sortBy" @change="search">
-        <option value="created_at">按登记时间</option>
-        <option value="updated_at">按更新时间</option>
-        <option value="id">按 ID</option>
-        <option value="title">按标题</option>
-        <option value="authors">按作者</option>
-        <option value="year">按年份</option>
-        <option value="doc_type">按类型</option>
-        <option value="status">按状态</option>
-        <option value="journal">按期刊</option>
-        <option value="doi">按 DOI</option>
-      </select>
-      <button class="btn btn-outline" @click="toggleSortOrder">
-        {{ sortOrderLabel }}
-      </button>
+
+      <!-- 语法帮助面板 -->
+      <Transition name="fade">
+        <div v-if="showSyntaxHelp && searchQuery.trim() === ''" class="syntax-help" ref="syntaxHelpRef">
+          <div class="syntax-help-header">高级搜索语法</div>
+          <div class="syntax-help-grid">
+            <div v-for="item in syntaxHelpItems" :key="item.syntax" class="syntax-help-item">
+              <code>{{ item.syntax }}</code>
+              <span>{{ item.description }}</span>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- 活跃筛选条件（chips） -->
+      <div v-if="activeFilterChips.length > 0" class="active-filters">
+        <span
+          v-for="(chip, i) in activeFilterChips"
+          :key="i"
+          class="filter-chip"
+        >
+          <span class="chip-label">{{ chip }}</span>
+          <button class="chip-remove" @click="clearSearch" title="清除筛选">×</button>
+        </span>
+        <button class="btn btn-xs btn-ghost" @click="clearSearch">清除全部</button>
+      </div>
+
+      <!-- 排序控制（由 sort:/order: 语法控制） -->
+      <div class="search-controls">
+      </div>
     </div>
 
     <!-- 加载状态 -->
@@ -84,7 +102,7 @@
           <td>{{ doc.year || '-' }}</td>
           <td>{{ doc.doc_type || '-' }}</td>
           <td>
-            <StatusBadge :status="doc.status" />
+            <StatusBadge :status="doc.status" :status_message="doc.status_message" />
             <span v-if="doc.indexed_dbs && doc.indexed_dbs.length" class="index-dbs">
               <span
                 v-for="dbId in doc.indexed_dbs"
@@ -110,7 +128,7 @@
       <div v-for="doc in items" :key="doc.id" class="doc-card">
         <div class="doc-card-header">
           <span class="doc-card-id">#{{ doc.id }}</span>
-          <StatusBadge :status="doc.status" />
+          <StatusBadge :status="doc.status" :status_message="doc.status_message" />
         </div>
         <router-link :to="{ name: 'detail', params: { id: doc.id } }" class="doc-card-title">
           {{ doc.title || doc.filename || '(无标题)' }}
@@ -168,53 +186,112 @@ import { useResponsive } from '@/composables/useResponsive'
 import { usePagination } from '@/composables/usePagination'
 import StatusBadge from '@/components/StatusBadge.vue'
 import type { Document } from '@/types/document'
+import {
+  parseSearchQuery,
+  parsedQueryToParams,
+  buildSearchParams,
+  SYNTAX_HELP_ITEMS,
+  SEARCH_FIELD_DEFS
+} from '@/utils/searchParser'
 
 const { showError } = useToast()
 const { requireToken } = useRequireToken()
 const { isMobile } = useResponsive()
 
-const { items, loading, page, total, totalPages, sortBy, sortOrder, sortOrderLabel, load, toggleSortOrder } = usePagination<Document>()
+const { items, loading, page, total, totalPages, load } = usePagination<Document>()
 
 const searchQuery = ref('')
-const filterDocType = ref('')
 const docTypes = ref<string[]>([])
+const showSyntaxHelp = ref(false)
+const searchWrapRef = ref<HTMLElement | null>(null)
+const searchInputRef = ref<HTMLInputElement | null>(null)
+const syntaxHelpRef = ref<HTMLElement | null>(null)
 
-const searchFieldOptions = [
-  { value: 'title', label: '标题' },
-  { value: 'title_en', label: '标题（英文）' },
-  { value: 'authors', label: '作者' },
-  { value: 'authors_en', label: '作者（英文）' },
-  { value: 'keywords', label: '关键词' },
-  { value: 'keywords_en', label: '关键词（英文）' },
-  { value: 'abstract', label: '摘要' },
-  { value: 'abstract_en', label: '摘要（英文）' },
-  { value: 'journal', label: '期刊' },
-  { value: 'journal_en', label: '期刊（英文）' },
-  { value: 'doi', label: 'DOI' },
-  { value: 'source', label: '来源' },
-  { value: 'filename', label: '文件名' },
-  { value: 'category', label: '分类' },
-  { value: 'doc_type', label: '文献类型' },
-  { value: 'language', label: '语言' }
-]
-const searchFields = ref<string[]>(['title'])
-const showScopePanel = ref(false)
-const scopePanelRef = ref<HTMLElement | null>(null)
+const syntaxHelpItems = SYNTAX_HELP_ITEMS
 
-const searchPlaceholder = computed(() => {
-  const selected = searchFieldOptions
-    .filter((o) => searchFields.value.includes(o.value))
-    .map((o) => o.label)
-  if (selected.length === searchFieldOptions.length) return '搜索全部字段...'
-  return `搜索${selected.slice(0, 3).join('、')}${selected.length > 3 ? '等' : ''}...`
+// 排序字段中文名映射
+const SORT_LABELS: Record<string, string> = {
+  created_at: '登记时间',
+  updated_at: '更新时间',
+  title: '标题',
+  authors: '作者',
+  year: '年份',
+  doc_type: '类型',
+  status: '状态',
+  journal: '期刊',
+  doi: 'DOI',
+  id: 'ID',
+}
+
+// 活跃筛选条件 chips
+const activeFilterChips = computed(() => {
+  const chips: string[] = []
+  if (!searchQuery.value) return chips
+  const pq = parseSearchQuery(searchQuery.value)
+  const p = parsedQueryToParams(pq)
+  if (p.status_filter) chips.push(`状态: ${p.status_filter}`)
+  if (p.doc_type_filter) chips.push(`类型: ${p.doc_type_filter}`)
+  if (p.year) chips.push(`年份: ${p.year}`)
+  if (p.year_min !== undefined && p.year_max !== undefined && p.year_min === p.year_max) {
+    // 已在 year 字段处理
+  } else {
+    if (p.year_min !== undefined) chips.push(`年份 ≥ ${p.year_min}`)
+    if (p.year_max !== undefined) chips.push(`年份 ≤ ${p.year_max}`)
+  }
+  if (p.journal) chips.push(`期刊: ${p.journal}`)
+  if (p.authors) chips.push(`作者: ${p.authors}`)
+  if (p.sort_by) chips.push(`排序: ${SORT_LABELS[p.sort_by] || p.sort_by}`)
+  if (p.sort_order) chips.push(`方向: ${p.sort_order === 'asc' ? '升序' : '降序'}`)
+  return chips
+})
+
+// 语法高亮：给 field: 前缀上色
+const highlightedQuery = computed(() => {
+  const q = searchQuery.value
+  if (!q) return ''
+  // 给 field:value 的 field: 部分着色
+  let result = q
+  for (const def of SEARCH_FIELD_DEFS) {
+    const re = new RegExp(`(\\b${def.prefix}:)`, 'gi')
+    result = result.replace(re, `<span class="hl-field">$1</span>`)
+  }
+  // 给否定前缀着色
+  result = result.replace(/(\b-\w+:)/g, '<span class="hl-negate">$1</span>')
+  // 给 OR 着色
+  result = result.replace(/\bOR\b/g, '<span class="hl-or">OR</span>')
+  // 给引号着色
+  result = result.replace(/("[^"]*")/g, '<span class="hl-quote">$1</span>')
+  return result
 })
 
 async function doLoad() {
   if (!requireToken()) return
+  const query = searchQuery.value.trim()
+
+  if (query === '') {
+    // 无搜索词时正常加载全部
+    await load(listDocuments, {
+      doc_type_filter: filterDocType.value || undefined
+    })
+    return
+  }
+
+  // 解析高级搜索语法
+  const pq = parseSearchQuery(query)
+  const p = parsedQueryToParams(pq)
+
   await load(listDocuments, {
-    q: searchQuery.value || undefined,
-    doc_type_filter: filterDocType.value || undefined,
-    search_fields: searchFields.value.join(',')
+    q: p.q || undefined,
+    search_fields: p.search_fields || undefined,
+    status_filter: p.status_filter || undefined,
+    doc_type_filter: p.doc_type_filter || undefined,
+    year: p.year,
+    year_min: p.year_min,
+    year_max: p.year_max,
+    journal: p.journal || undefined,
+    authors: p.authors || undefined,
+    sort_by: p.sort_by || undefined,
+    sort_order: p.sort_order || undefined,
   })
 }
 
@@ -223,34 +300,31 @@ function search() {
   doLoad()
 }
 
-function onScopeChange() {
-  if (searchFields.value.length === 0) {
-    searchFields.value = ['title']
-  }
+function clearSearch() {
+  searchQuery.value = ''
   search()
 }
 
-function closeScopePanelOnOutside(event: MouseEvent) {
-  if (
-    showScopePanel.value &&
-    scopePanelRef.value &&
-    !scopePanelRef.value.contains(event.target as Node)
-  ) {
-    showScopePanel.value = false
+function onSearchInput() {
+  // 输入时关闭语法帮助
+  if (searchQuery.value.trim()) {
+    showSyntaxHelp.value = false
   }
 }
 
+function onSearchBlur() {
+  // 延迟关闭语法帮助，允许点击帮助面板
+  setTimeout(() => {
+    showSyntaxHelp.value = false
+  }, 200)
+}
+
 onMounted(async () => {
-  document.addEventListener('click', closeScopePanelOnOutside)
   try {
     const res = await getDocTypes()
     docTypes.value = res.doc_types
   } catch { /* ignore */ }
   doLoad()
-})
-
-onUnmounted(() => {
-  document.removeEventListener('click', closeScopePanelOnOutside)
 })
 </script>
 
@@ -324,42 +398,244 @@ onUnmounted(() => {
 .sk-status { width: 70%; }
 .sk-action { width: 50px; }
 
-.scope-panel-wrapper {
+/* ── 搜索栏 ──────────────────────────────────────────── */
+.search-bar {
   position: relative;
 }
 
-.scope-panel {
+.search-input-wrap {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  flex: 1;
+  min-width: 200px;
+  position: relative;
+}
+
+.search-input-inner {
+  position: relative;
+  flex: 1;
+  min-height: 38px;
+}
+
+.search-input {
+  width: 100%;
+  height: 100%;
+  padding: 8px 40px 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px 0 0 8px;
+  font-size: 14px;
+  background: var(--bg-white);
+  color: var(--text);
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  position: relative;
+  z-index: 2;
+  font-family: inherit;
+  caret-color: var(--primary);
+  min-height: 38px;
+}
+
+.search-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(25, 118, 210, 0.12);
+}
+
+.search-input::placeholder {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* 语法高亮背景层 */
+.search-highlight {
   position: absolute;
-  top: calc(100% + 8px);
+  top: 0;
+  left: 0;
   right: 0;
-  z-index: 50;
-  min-width: 220px;
-  max-height: 360px;
-  overflow-y: auto;
-  padding: 12px;
+  bottom: 0;
+  padding: 8px 40px 8px 14px;
+  font-size: 14px;
+  font-family: inherit;
+  white-space: pre;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 1;
+  color: transparent;
+  line-height: 1.6;
+}
+
+.search-highlight :deep(.hl-field) {
+  color: #1976d2;
+  font-weight: 600;
+}
+.search-highlight :deep(.hl-negate) {
+  color: #d32f2f;
+  font-weight: 600;
+}
+.search-highlight :deep(.hl-or) {
+  color: #e65100;
+  font-weight: 700;
+}
+.search-highlight :deep(.hl-quote) {
+  color: #2e7d32;
+}
+
+.btn-search {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  background: var(--primary);
+  color: #fff;
+  border: 1px solid var(--primary);
+  border-radius: 0 8px 8px 0;
+  cursor: pointer;
+  transition: background 0.2s;
+  min-height: 38px;
+}
+.btn-search:hover {
+  background: var(--primary-dark);
+}
+.btn-search:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 语法帮助面板 */
+.syntax-help {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 100;
   background: var(--bg-white);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px 16px;
+  padding: 12px 16px;
+  max-height: 320px;
+  overflow-y: auto;
 }
 
-.scope-option {
+.syntax-help-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.syntax-help-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 16px;
+}
+
+.syntax-help-item {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 13px;
-  color: var(--text);
-  cursor: pointer;
+  padding: 4px 0;
+}
+
+.syntax-help-item code {
+  background: var(--bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--primary);
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
-.scope-option input[type='checkbox'] {
+.syntax-help-item span {
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+/* 过渡动画 */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.15s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* 活跃筛选 chips */
+.active-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: var(--primary-light);
+  border: 1px solid var(--primary);
+  border-radius: 12px;
+  font-size: 12px;
+  color: var(--primary);
+}
+
+.chip-remove {
+  background: none;
+  border: none;
+  color: var(--primary);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  border-radius: 50%;
+}
+.chip-remove:hover {
+  background: rgba(25, 118, 210, 0.15);
+}
+
+.btn-ghost {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 2px 6px;
   cursor: pointer;
 }
+.btn-ghost:hover {
+  color: var(--danger);
+}
 
+.search-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ctrl-select {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--bg-white);
+  color: var(--text);
+  outline: none;
+  cursor: pointer;
+  min-height: 34px;
+}
+.ctrl-select:focus {
+  border-color: var(--primary);
+}
+
+/* ── 其它 ────────────────────────────────────────────── */
 .doc-cards-container {
   display: flex;
   flex-direction: column;
@@ -367,11 +643,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 640px) {
-  .scope-panel {
-    grid-template-columns: 1fr;
-    right: auto;
-    left: 0;
-  }
   .skeleton-row {
     grid-template-columns: 1fr;
     gap: 8px;
@@ -383,5 +654,8 @@ onUnmounted(() => {
   .sk-type { width: 40%; }
   .sk-status { width: 50%; }
   .sk-action { width: 60px; }
+  .syntax-help-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

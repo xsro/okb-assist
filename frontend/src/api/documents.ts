@@ -18,6 +18,11 @@ export function listDocuments(params: {
   sort_order?: 'asc' | 'desc'
   page?: number
   page_size?: number
+  year?: number
+  year_min?: number
+  year_max?: number
+  journal?: string
+  authors?: string
 }) {
   return apiGet<SearchResultList>('/assist/api/documents/', params)
 }

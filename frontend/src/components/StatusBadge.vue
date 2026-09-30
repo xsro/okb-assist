@@ -1,13 +1,21 @@
 <template>
-  <span class="badge" :class="statusClass">
+  <span
+    class="badge"
+    :class="[statusClass, { 'has-error': props.status === 'error' && props.status_message }]"
+    :title="props.status === 'error' && props.status_message ? props.status_message : undefined"
+  >
     {{ statusLabel }}
+    <span v-if="props.status === 'error' && props.status_message" class="error-icon" title="">⚠</span>
   </span>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
 
-const props = defineProps<{ status: string }>()
+const props = defineProps<{
+  status: string
+  status_message?: string | null
+}>()
 
 const statusMap: Record<string, { label: string; class: string }> = {
   // 文档状态
@@ -34,3 +42,60 @@ const statusClass = computed(
   () => statusMap[props.status]?.class || 'badge-gray'
 )
 </script>
+
+<style scoped>
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.6;
+}
+
+.badge-gray {
+  background: var(--bg-muted);
+  color: var(--text-secondary);
+}
+
+.badge-info {
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.badge-warning {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.badge-error {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.badge-success {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+
+.error-icon {
+  font-size: 13px;
+  cursor: help;
+}
+
+.has-error {
+  cursor: help;
+  position: relative;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.pulse {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+</style>

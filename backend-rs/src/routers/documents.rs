@@ -153,7 +153,11 @@ pub struct ListQuery {
     // 向后兼容旧参数（Python 版无这些，仅作扩展）
     pub category: Option<String>,
     pub year: Option<i64>,
+    pub year_min: Option<i64>,
+    pub year_max: Option<i64>,
     pub journal: Option<String>,
+    /// 单一作者精确筛选（用于 author:xxx 语法）
+    pub authors: Option<String>,
 }
 
 /// 文档输出格式
@@ -399,10 +403,24 @@ async fn list_documents(
         conditions.push("year = ?".to_string());
         binds.push(year.to_string());
     }
+    if let Some(year_min) = params.year_min {
+        conditions.push("year >= ?".to_string());
+        binds.push(year_min.to_string());
+    }
+    if let Some(year_max) = params.year_max {
+        conditions.push("year <= ?".to_string());
+        binds.push(year_max.to_string());
+    }
     if let Some(journal) = &params.journal {
         if !journal.trim().is_empty() {
             conditions.push("journal LIKE ?".to_string());
             binds.push(format!("%{}%", journal.trim()));
+        }
+    }
+    if let Some(authors) = &params.authors {
+        if !authors.trim().is_empty() {
+            conditions.push("authors LIKE ?".to_string());
+            binds.push(format!("%{}%", authors.trim()));
         }
     }
 
