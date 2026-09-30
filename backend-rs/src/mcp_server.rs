@@ -73,7 +73,9 @@ impl McpServer {
                         "year_from": {"type": "integer", "default": 0, "description": "Filter: minimum publication year"},
                         "year_to": {"type": "integer", "default": 0, "description": "Filter: maximum publication year"},
                         "doc_type": {"type": "string", "default": "", "description": "Filter: document type (comma-separated for multiple)"},
-                        "fields": {"type": "array", "items": {"type": "string"}, "description": "Optional list of fields to return (e.g. ['id','title','year'])"}
+                        "fields": {"type": "array", "items": {"type": "string"}, "description": "Optional list of fields to return (e.g. ['id','title','year'])"},
+                        "sort_by": {"type": "string", "default": "updated_at", "description": "Sort field: title, authors, year, id, journal, status, doc_type, created_at, updated_at"},
+                        "sort_order": {"type": "string", "default": "desc", "description": "Sort direction: asc or desc"}
                     },
                     "required": ["query"]
                 }
@@ -114,7 +116,9 @@ impl McpServer {
                         "page": {"type": "integer", "default": 1},
                         "page_size": {"type": "integer", "default": 20, "description": "Results per page (1-100, alias: limit)"},
                         "limit": {"type": "integer", "default": 20, "description": "Results per page (alias for page_size)"},
-                        "fields": {"type": "array", "items": {"type": "string"}, "description": "Optional list of fields to return (e.g. ['id','title','year'])"}
+                        "fields": {"type": "array", "items": {"type": "string"}, "description": "Optional list of fields to return (e.g. ['id','title','year'])"},
+                        "sort_by": {"type": "string", "default": "created_at", "description": "Sort field: title, authors, year, id, journal, status, doc_type, created_at, updated_at"},
+                        "sort_order": {"type": "string", "default": "desc", "description": "Sort direction: asc or desc"}
                     }
                 }
             }),
@@ -259,6 +263,37 @@ impl McpServer {
         }
     }
 
+    /// 排序字段白名单
+    const SORTABLE_COLUMNS: &[(&str, &str)] = &[
+        ("title", "title"),
+        ("authors", "authors"),
+        ("year", "year"),
+        ("id", "id"),
+        ("journal", "journal"),
+        ("status", "status"),
+        ("doc_type", "doc_type"),
+        ("created_at", "created_at"),
+        ("updated_at", "updated_at"),
+    ];
+
+    /// 拼接 ORDER BY 子句（防 SQL 注入：仅允许白名单字段）。
+    fn append_order_clause<'a>(
+        qb: &mut sqlx::QueryBuilder<'a, sqlx::Sqlite>,
+        sort_by: &str,
+        sort_order: &str,
+    ) {
+        let col = Self::SORTABLE_COLUMNS
+            .iter()
+            .find(|(k, _)| *k == sort_by)
+            .map(|(_, v)| *v)
+            .unwrap_or("updated_at");
+        let dir = match sort_order {
+            "asc" => "ASC",
+            _ => "DESC",
+        };
+        qb.push(" ORDER BY ").push(col).push(" ").push(dir);
+    }
+
     async fn tool_grep_search(&self, args: &Value) -> String {
         let query = args["query"].as_str().unwrap_or("").to_string();
         let context = args["context"].as_i64().unwrap_or(2).max(0) as usize;
@@ -341,6 +376,8 @@ impl McpServer {
         let year_to = args["year_to"].as_i64().unwrap_or(0);
         let doc_type = args["doc_type"].as_str().unwrap_or("").to_string();
         let fields = Self::parse_fields(args);
+        let sort_by = args["sort_by"].as_str().unwrap_or("updated_at").to_string();
+        let sort_order = args["sort_order"].as_str().unwrap_or("desc").to_string();
 
         if query.trim().is_empty() {
             return Self::err("invalid_argument", "查询不能为空");
@@ -362,7 +399,8 @@ impl McpServer {
         // 查询
         let mut qb = sqlx::QueryBuilder::new(format!("SELECT {} FROM documents WHERE ", DOC_COLUMNS));
         append_search_info_filters(&mut qb, &like, year_from, year_to, &doc_type);
-        qb.push(" ORDER BY updated_at DESC LIMIT ").push_bind(limit)
+        Self::append_order_clause(&mut qb, &sort_by, &sort_order);
+        qb.push(" LIMIT ").push_bind(limit)
             .push(" OFFSET ").push_bind(offset);
         let docs: Vec<Document> = qb
             .build_query_as::<Document>()
@@ -508,6 +546,8 @@ impl McpServer {
             .unwrap_or(20)
             .clamp(1, 100) as i64;
         let fields = Self::parse_fields(args);
+        let sort_by = args["sort_by"].as_str().unwrap_or("created_at").to_string();
+        let sort_order = args["sort_order"].as_str().unwrap_or("desc").to_string();
 
         // 计数
         let mut cqb = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM documents WHERE 1=1");
@@ -522,7 +562,8 @@ impl McpServer {
         // 分页查询
         let mut qb = sqlx::QueryBuilder::new(format!("SELECT {} FROM documents WHERE 1=1", DOC_COLUMNS));
         append_list_filters(&mut qb, &query, &status, &doc_type);
-        qb.push(" ORDER BY created_at DESC LIMIT ").push_bind(page_size)
+        Self::append_order_clause(&mut qb, &sort_by, &sort_order);
+        qb.push(" LIMIT ").push_bind(page_size)
             .push(" OFFSET ").push_bind((page - 1).saturating_mul(page_size));
 
         let docs: Vec<Document> = qb
