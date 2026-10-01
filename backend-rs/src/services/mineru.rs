@@ -19,6 +19,7 @@ use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
 use serde_json::{json, Value};
+use tracing::{debug, error, info, warn};
 
 use crate::config::MinerUConfig;
 
@@ -129,11 +130,21 @@ impl MinerUClient {
             MineruType::OfficialLightweight => 3u64,
         };
         let max_polls = timeout_secs / poll_interval;
+        let task_type = match self.mineru_type {
+            MineruType::Local => "V1",
+            MineruType::Official => "V4",
+            MineruType::OfficialLightweight => "轻量",
+        };
 
-        for _ in 0..max_polls {
+        info!("开始轮询 MinerU {} 任务 task_id={}, timeout={}s, poll_interval={}s",
+              task_type, task_id, timeout_secs, poll_interval);
+
+        for i in 0..max_polls {
             let status_result = self.check_task_status(task_id).await;
             if let Some(done) = status_result.get("_done").and_then(|v| v.as_bool()) {
                 if done {
+                    let status = status_result["status"].as_str().unwrap_or("completed");
+                    info!("MinerU {} 任务 task_id={} 完成, status={}", task_type, task_id, status);
                     return Ok(status_result);
                 }
             }
@@ -144,17 +155,25 @@ impl MinerUClient {
                     let error = status_result["error"]
                         .as_str()
                         .unwrap_or("Unknown error");
+                    error!("MinerU {} 任务 task_id={} 失败: {}", task_type, task_id, error);
                     anyhow::bail!("MinerU task failed: {}", error);
                 }
                 "canceled" => {
+                    warn!("MinerU {} 任务 task_id={} 被取消", task_type, task_id);
                     anyhow::bail!("MinerU task was canceled");
                 }
                 _ => {
+                    // 每 10 次轮询输出一次进度日志，避免日志过多
+                    if i > 0 && i % 10 == 0 {
+                        debug!("MinerU {} 任务 task_id={} 轮询中 [{}/{}], status={}",
+                               task_type, task_id, i + 1, max_polls, status);
+                    }
                     tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
                 }
             }
         }
 
+        warn!("MinerU {} 任务 task_id={} 超时 ({}s)", task_type, task_id, timeout_secs);
         anyhow::bail!("MinerU task timed out: {}", task_id);
     }
 
@@ -474,27 +493,48 @@ impl MinerUClient {
 
     /// V1: 下载文件（支持 302 跳转）
     async fn v1_download_file(&self, file_id: &str) -> anyhow::Result<Vec<u8>> {
+        let url = format!("{}/v1/files/{}/content", self.base_url, file_id);
         let resp = self
             .http
-            .get(format!("{}/v1/files/{}/content", self.base_url, file_id))
+            .get(&url)
             .bearer_auth(&self.key)
             .send()
-            .await?;
+            .await
+            .map_err(|e| {
+                error!("V1 下载文件连接失败 (file_id={}): {}", file_id, e);
+                anyhow::anyhow!("MinerU 下载文件连接失败: {}", e)
+            })?;
 
         if resp.status().is_success() {
-            return Ok(resp.bytes().await?.to_vec());
+            let bytes = resp.bytes().await.map_err(|e| {
+                error!("V1 读取文件内容失败 (file_id={}): {}", file_id, e);
+                anyhow::anyhow!("读取文件内容失败: {}", e)
+            })?.to_vec();
+            info!("V1 文件下载成功, file_id={}, {} 字节", file_id, bytes.len());
+            return Ok(bytes);
         }
 
         if matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
             if let Some(location) = resp.headers().get("location").and_then(|v| v.to_str().ok()) {
-                let redirect_resp = self.http.get(location).send().await?;
+                info!("V1 文件下载重定向: {} -> {}", url, location);
+                let redirect_resp = self.http.get(location).send().await.map_err(|e| {
+                    error!("V1 下载文件重定向连接失败: {}", e);
+                    anyhow::anyhow!("下载重定向连接失败: {}", e)
+                })?;
                 if redirect_resp.status().is_success() {
-                    return Ok(redirect_resp.bytes().await?.to_vec());
+                    let bytes = redirect_resp.bytes().await.map_err(|e| {
+                        error!("V1 读取重定向文件内容失败: {}", e);
+                        anyhow::anyhow!("读取重定向文件内容失败: {}", e)
+                    })?.to_vec();
+                    info!("V1 文件下载成功 (重定向), file_id={}, {} 字节", file_id, bytes.len());
+                    return Ok(bytes);
                 }
+                warn!("V1 文件下载重定向失败: HTTP {}", redirect_resp.status());
                 anyhow::bail!("MinerU file download redirect failed: HTTP {}", redirect_resp.status());
             }
         }
 
+        error!("V1 文件下载失败 (file_id={}): HTTP {}", file_id, resp.status());
         anyhow::bail!("MinerU file download failed: HTTP {}", resp.status());
     }
 
@@ -527,7 +567,7 @@ impl MinerUClient {
             }],
         });
 
-        tracing::debug!("V4 请求上传 URL: {}", body.to_string());
+        debug!("V4 请求上传 URL: {}", body.to_string());
 
         let resp = self
             .http
@@ -535,16 +575,26 @@ impl MinerUClient {
             .bearer_auth(&self.key)
             .json(&body)
             .send()
-            .await?;
+            .await;
+
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                error!("V4 连接 MinerU 官方 API 失败 (url={}): {}", self.base_url, e);
+                anyhow::bail!("V4 连接失败: {}", e);
+            }
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            error!("V4 获取上传 URL 失败: HTTP {} - {}", status, text.chars().take(300).collect::<String>());
             anyhow::bail!("V4 获取上传 URL 失败: HTTP {} - {}", status, text.chars().take(300).collect::<String>());
         }
 
-        let data: Value = resp.json().await?;
+        let data: Value = resp.json().await.unwrap_or_default();
         if data["code"].as_i64().unwrap_or(-1) != 0 {
+            error!("V4 获取上传 URL 失败 (code={}): {}", data["code"], data["msg"].as_str().unwrap_or("unknown error"));
             anyhow::bail!("V4 获取上传 URL 失败: {}", data["msg"].as_str().unwrap_or("unknown error"));
         }
 
@@ -570,137 +620,140 @@ impl MinerUClient {
             .header("Content-Type", "")
             .body(pdf_bytes)
             .send()
-            .await?;
+            .await;
 
-        if !upload_resp.status().is_success() {
-            anyhow::bail!("V4 文件上传失败: HTTP {}", upload_resp.status());
+        match &upload_resp {
+            Ok(r) if r.status().is_success() => {
+                info!("V4 文件上传成功, batch_id={}, file={}", batch_id, file_name);
+            }
+            Ok(r) => {
+                error!("V4 文件上传失败: HTTP {}, batch_id={}, file={}", r.status(), batch_id, file_name);
+                anyhow::bail!("V4 文件上传失败: HTTP {}", r.status());
+            }
+            Err(e) => {
+                error!("V4 文件上传失败 (连接错误), batch_id={}, file={}: {}", batch_id, file_name, e);
+                anyhow::bail!("V4 文件上传失败 (连接错误): {}", e);
+            }
         }
 
-        tracing::info!("V4 文件上传成功, batch_id={}", batch_id);
+        let _ = upload_resp; // 消掉 unused 警告
 
-        // Step 3: 提交解析任务到官方 API
-        // POST /api/v4/extract/task/batch 提交批次文件进行解析
-        // 请求体包含 batch_id 和 files 列表（含 OSS 文件 URL）
-        let file_oss_url = upload_url.split('?').next().unwrap_or(upload_url);
-        let submit_body = json!({
-            "batch_id": batch_id,
-            "files": [{
-                "data_id": data_id,
-                "url": file_oss_url,
-                "name": file_name,
-            }],
-        });
+        // 说明：MinerU 官方 V4 API 上传文件后，系统会自动提交解析任务，
+        // 无需额外调用提交接口。使用 upload batch_id 通过新的 extract-results 端点查询状态。
+        // 参考：https://mineru.net/apiManage/docs
 
-        tracing::debug!("V4 提交解析任务: {}", submit_body.to_string());
+        info!("V4 解析任务已自动提交, batch_id={}, file={}", batch_id, file_name);
 
-        let submit_resp = self
-            .http
-            .post(format!("{}/v4/extract/task/batch", self.base_url))
-            .bearer_auth(&self.key)
-            .json(&submit_body)
-            .send()
-            .await?;
-
-        if !submit_resp.status().is_success() {
-            let status = submit_resp.status();
-            let text = submit_resp.text().await.unwrap_or_default();
-            anyhow::bail!("V4 提交解析任务失败: HTTP {} - {}", status, text.chars().take(300).collect::<String>());
-        }
-
-        let submit_data: Value = submit_resp.json().await?;
-        if submit_data["code"].as_i64().unwrap_or(-1) != 0 {
-            anyhow::bail!("V4 提交解析任务失败: {}", submit_data["msg"].as_str().unwrap_or("unknown error"));
-        }
-
-        let submit_batch_id = submit_data["data"]["batch_id"].as_str()
-            .ok_or_else(|| anyhow::anyhow!("V4 提交响应缺少 batch_id"))?
-            .to_string();
-
-        tracing::info!("V4 解析任务已提交, batch_id={}, submit_batch_id={}", batch_id, submit_batch_id);
-
-        // 返回 submit_batch_id 用于轮询任务状态
-        Ok(submit_batch_id)
+        // 返回 upload batch_id 用于轮询任务状态（使用 /v4/extract-results/batch/{batch_id}）
+        Ok(batch_id)
     }
 
     /// V4: 检查任务状态
     /// 使用 batch_id 查询 batch 中所有 task 的状态
+    /// 注意：MinerU 官方已将端点从 /v4/extract/task/batch?batch_id= 改为 /v4/extract-results/batch/{batch_id}（路径参数）
     async fn check_task_status_v4(&self, batch_id: &str) -> Value {
-        // V4 batch 任务查询：GET /api/v4/extract/task/batch?batch_id={batch_id}
+        // V4 batch 任务查询：GET /api/v4/extract-results/batch/{batch_id}
         // 返回 batch 中所有 task 的状态
-        let batch_query_url = format!("{}/v4/extract/task/batch?batch_id={}", self.base_url, batch_id);
+        let batch_query_url = format!("{}/v4/extract-results/batch/{}", self.base_url, batch_id);
         let resp = self.http.get(&batch_query_url)
             .bearer_auth(&self.key)
             .send()
             .await;
 
-        if let Ok(resp) = resp {
-            if resp.status().is_success() {
-                let data: Value = resp.json().await.unwrap_or_default();
-                if data["code"].as_i64().unwrap_or(-1) == 0 {
-                    if let Some(tasks) = data["data"]["tasks"].as_array() {
-                        if tasks.is_empty() {
-                            return json!({"_done": false, "status": "pending", "batch_id": batch_id});
-                        }
+        match resp {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    warn!("V4 查询任务状态失败 (batch_id={}): HTTP {}", batch_id, resp.status());
+                    return json!({"_done": false, "status": "pending", "batch_id": batch_id});
+                }
 
-                        // 检查所有 task 的状态
-                        let all_done = tasks.iter().all(|t| {
-                            t["state"].as_str() == Some("done") || t["state"].as_str() == Some("failed")
-                        });
-                        let any_failed = tasks.iter().any(|t| t["state"].as_str() == Some("failed"));
-                        let any_running = tasks.iter().any(|t| {
-                            matches!(t["state"].as_str(), Some("running") | Some("extract") | Some("converting"))
-                        });
-
-                        if all_done && !any_failed {
-                            // 全部完成且无失败
-                            let first_done = tasks.iter().find(|t| t["state"].as_str() == Some("done"));
-                            let zip_url = first_done.and_then(|t| t["full_zip_url"].as_str());
-                            return json!({
-                                "_done": true,
-                                "status": "completed",
-                                "batch_id": batch_id,
-                                "full_zip_url": zip_url,
-                            });
-                        } else if all_done && any_failed {
-                            // 全部结束但有失败
-                            let errors: Vec<String> = tasks.iter()
-                                .filter_map(|t| t["err_msg"].as_str().map(|s| s.to_string()))
-                                .collect();
-                            return json!({
-                                "_done": true,
-                                "status": "failed",
-                                "error": errors.join("; "),
-                                "batch_id": batch_id,
-                            });
-                        } else if any_running {
-                            return json!({
-                                "_done": false,
-                                "status": "processing",
-                                "batch_id": batch_id,
-                                "task_count": tasks.len(),
-                            });
-                        } else {
-                            // 没有运行中的任务，也没有完成的，可能还在排队
-                            return json!({
-                                "_done": false,
-                                "status": "pending",
-                                "batch_id": batch_id,
-                            });
-                        }
-                    } else {
-                        // response 有 data 但无 tasks 字段，可能 batch 还在处理中
+                let data: Value = match resp.json().await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!("V4 查询任务状态响应解析失败 (batch_id={}): {}", batch_id, e);
                         return json!({"_done": false, "status": "pending", "batch_id": batch_id});
                     }
+                };
+
+                let code = data["code"].as_i64().unwrap_or(-1);
+                if code != 0 {
+                    debug!("V4 查询任务状态返回非零 code (batch_id={}): code={}, msg={}",
+                           batch_id, code, data["msg"].as_str().unwrap_or(""));
+                    return json!({"_done": false, "status": "pending", "batch_id": batch_id});
+                }
+
+                // 新 API 响应使用 extract_result 数组（MinerU 官方已更新）
+                if let Some(tasks) = data["data"]["extract_result"].as_array() {
+                    if tasks.is_empty() {
+                        debug!("V4 任务状态查询 (batch_id={}): extract_result 为空，继续等待", batch_id);
+                        return json!({"_done": false, "status": "pending", "batch_id": batch_id});
+                    }
+
+                    // 检查所有 task 的状态
+                    let all_done = tasks.iter().all(|t| {
+                        t["state"].as_str() == Some("done") || t["state"].as_str() == Some("failed")
+                    });
+                    let any_failed = tasks.iter().any(|t| t["state"].as_str() == Some("failed"));
+                    let any_running = tasks.iter().any(|t| {
+                        matches!(t["state"].as_str(), Some("running") | Some("extract") | Some("converting"))
+                    });
+
+                    if all_done && !any_failed {
+                        // 全部完成且无失败
+                        let first_done = tasks.iter().find(|t| t["state"].as_str() == Some("done"));
+                        let zip_url = first_done.and_then(|t| t["full_zip_url"].as_str());
+                        info!("V4 任务 (batch_id={}) 解析完成, zip_url 可用: {}",
+                              batch_id, zip_url.map(|u| "yes").unwrap_or("no"));
+                        return json!({
+                            "_done": true,
+                            "status": "completed",
+                            "batch_id": batch_id,
+                            "full_zip_url": zip_url,
+                        });
+                    } else if all_done && any_failed {
+                        // 全部结束但有失败
+                        let errors: Vec<String> = tasks.iter()
+                            .filter_map(|t| t["err_msg"].as_str().map(|s| s.to_string()))
+                            .collect();
+                        warn!("V4 任务 (batch_id={}) 解析失败: {}", batch_id, errors.join("; "));
+                        return json!({
+                            "_done": true,
+                            "status": "failed",
+                            "error": errors.join("; "),
+                            "batch_id": batch_id,
+                        });
+                    } else if any_running {
+                        debug!("V4 任务 (batch_id={}) 正在解析中, task_count={}", batch_id, tasks.len());
+                        return json!({
+                            "_done": false,
+                            "status": "processing",
+                            "batch_id": batch_id,
+                            "task_count": tasks.len(),
+                        });
+                    } else {
+                        // 没有运行中的任务，也没有完成的，可能还在排队
+                        debug!("V4 任务 (batch_id={}) 排队中...", batch_id);
+                        return json!({
+                            "_done": false,
+                            "status": "pending",
+                            "batch_id": batch_id,
+                        });
+                    }
+                } else {
+                    // response 有 data 但无 extract_result 字段，可能 batch 还在处理中
+                    debug!("V4 任务状态查询 (batch_id={}): data 中无 extract_result 字段", batch_id);
+                    return json!({"_done": false, "status": "pending", "batch_id": batch_id});
                 }
             }
+            Err(e) => {
+                warn!("V4 连接 MinerU API 查询任务状态失败 (batch_id={}): {}", batch_id, e);
+                json!({
+                    "_done": false,
+                    "status": "pending",
+                    "batch_id": batch_id,
+                })
+            }
         }
-
-        // batch 查询失败，返回等待状态
-        json!({
-            "_done": false,
-            "status": "pending",
-            "batch_id": batch_id,
-        })
     }
 
     /// V4: 获取任务结果
@@ -718,15 +771,18 @@ impl MinerUClient {
 
         // 如果有 full_zip_url 则直接下载
         if let Some(zip_url) = status["full_zip_url"].as_str() {
+            info!("V4 正在下载解析结果 ZIP: batch_id={}", batch_id);
             return self.v4_download_and_extract_zip(zip_url, output_dir, doc_id).await;
         }
 
         if status["status"].as_str() == Some("failed") {
             let err = status["error"].as_str().unwrap_or("未知错误");
+            error!("V4 解析失败 (batch_id={}): {}", batch_id, err);
             anyhow::bail!("V4 解析失败: {}", err);
         }
 
         // 仍然没有结果
+        warn!("V4 任务尚未完成 (batch_id={}), status={:?}", batch_id, status["status"].as_str());
         anyhow::bail!("V4 任务尚未完成 (batch_id={})", batch_id);
     }
 
@@ -738,19 +794,42 @@ impl MinerUClient {
         output_dir: &str,
         doc_id: Option<i64>,
     ) -> anyhow::Result<String> {
+        info!("正在从 {} 下载解析结果 ZIP", zip_url.chars().take(80).collect::<String>());
+
         // 从 CDN 下载 ZIP
-        let resp = self.http.get(zip_url).send().await?;
+        let resp = self.http.get(zip_url).send().await.map_err(|e| {
+            error!("下载 ZIP 连接失败: {}", e);
+            anyhow::anyhow!("下载 ZIP 连接失败: {}", e)
+        })?;
+
         if !resp.status().is_success() {
+            error!("下载 ZIP 失败: HTTP {}, url={}", resp.status(), zip_url.chars().take(80).collect::<String>());
             anyhow::bail!("下载 ZIP 失败: HTTP {}", resp.status());
         }
-        let zip_bytes = resp.bytes().await?.to_vec();
+
+        let zip_bytes = resp.bytes().await.map_err(|e| {
+            error!("读取 ZIP 响应体失败: {}", e);
+            anyhow::anyhow!("读取 ZIP 响应体失败: {}", e)
+        })?.to_vec();
+
+        info!("ZIP 下载成功, 大小: {} 字节", zip_bytes.len());
 
         // 从 ZIP 提取 markdown 和图片
         let (final_markdown, extracted_images) = extract_from_zip(&zip_bytes, output_dir);
 
-        let md = final_markdown.ok_or_else(|| anyhow::anyhow!("ZIP 中未找到 markdown 文件"))?;
+        let md = match final_markdown {
+            Some(m) => {
+                info!("成功从 ZIP 提取 Markdown, {} 字节", m.len());
+                m
+            }
+            None => {
+                error!("ZIP 中未找到 markdown 文件");
+                anyhow::bail!("ZIP 中未找到 markdown 文件");
+            }
+        };
 
         if !extracted_images.is_empty() {
+            info!("从 ZIP 提取了 {} 张图片", extracted_images.len());
             save_images_zip(output_dir, &extracted_images);
         }
 
@@ -760,22 +839,37 @@ impl MinerUClient {
         };
         let md_path = Path::new(output_dir).join(&md_filename);
         std::fs::write(&md_path, &md)?;
+
+        info!("Markdown 已保存到: {:?}", md_path);
         Ok(md_path.to_string_lossy().to_string())
     }
 
     /// V4: 直接通过 task_id 查询任务状态（用于轮询找到 task_id 后的查询）
     pub async fn v4_query_task(&self, task_id: &str) -> Value {
+        let url = format!("{}/v4/extract/task/{}", self.base_url, task_id);
         let resp = self
             .http
-            .get(format!("{}/v4/extract/task/{}", self.base_url, task_id))
+            .get(&url)
             .bearer_auth(&self.key)
             .send()
             .await;
 
         match resp {
-            Ok(resp) if resp.status().is_success() => {
-                let data: Value = resp.json().await.unwrap_or_default();
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    warn!("V4 查询单任务状态失败 (task_id={}): HTTP {}", task_id, resp.status());
+                    return json!({"_done": false, "status": "unknown"});
+                }
+                let data: Value = match resp.json().await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!("V4 查询单任务状态响应解析失败 (task_id={}): {}", task_id, e);
+                        return json!({"_done": false, "status": "unknown"});
+                    }
+                };
                 if data["code"].as_i64().unwrap_or(-1) != 0 {
+                    warn!("V4 查询单任务状态返回非零 code (task_id={}): code={}, msg={}",
+                          task_id, data["code"].as_i64().unwrap_or(-1), data["msg"].as_str().unwrap_or(""));
                     return json!({"_done": false, "status": "unknown"});
                 }
                 let state = data["data"]["state"].as_str().unwrap_or("unknown");
@@ -787,6 +881,10 @@ impl MinerUClient {
                     _ => state,
                 };
                 let is_done = state == "done" || state == "failed";
+                if state == "failed" {
+                    let err = data["data"]["err_msg"].as_str().unwrap_or("");
+                    warn!("V4 单个任务 (task_id={}) 解析失败: {}", task_id, err);
+                }
                 json!({
                     "_done": is_done,
                     "status": normalized,
@@ -795,7 +893,10 @@ impl MinerUClient {
                     "task_id": task_id,
                 })
             }
-            _ => json!({"_done": false, "status": "unknown"}),
+            Err(e) => {
+                warn!("V4 连接 MinerU API 查询单任务状态失败 (task_id={}): {}", task_id, e);
+                json!({"_done": false, "status": "unknown"})
+            }
         }
     }
 
@@ -818,15 +919,21 @@ impl MinerUClient {
 
     /// 轻量 API: 上传文件并提交解析
     async fn submit_parse_task_lightweight(&self, file_path: &str) -> anyhow::Result<String> {
-        let pdf_bytes = tokio::fs::read(file_path).await?;
         let file_name = Path::new(file_path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "document.pdf".to_string());
 
+        info!("轻量 API 开始提交解析任务: file={}", file_name);
+
+        let pdf_bytes = tokio::fs::read(file_path).await.map_err(|e| {
+            error!("轻量 API 读取 PDF 文件失败 ({}): {}", file_path, e);
+            anyhow::anyhow!("读取 PDF 文件失败: {}", e)
+        })?;
+
         // 使用 multipart 上传文件
         let part = reqwest::multipart::Part::bytes(pdf_bytes)
-            .file_name(file_name)
+            .file_name(file_name.clone())
             .mime_str("application/pdf")
             .map_err(|e| anyhow::anyhow!("创建 multipart 失败: {}", e))?;
 
@@ -838,16 +945,26 @@ impl MinerUClient {
             .post(format!("{}/v1/agent/parse/file", self.base_url))
             .multipart(form)
             .send()
-            .await?;
+            .await;
+
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                error!("轻量 API 连接 MinerU 服务失败: {}", e);
+                anyhow::bail!("轻量 API 连接失败: {}", e);
+            }
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            error!("轻量 API 上传失败: HTTP {} - {}", status, text.chars().take(300).collect::<String>());
             anyhow::bail!("轻量 API 上传失败: HTTP {} - {}", status, text.chars().take(300).collect::<String>());
         }
 
-        let data: Value = resp.json().await?;
+        let data: Value = resp.json().await.unwrap_or_default();
         if data["code"].as_i64().unwrap_or(-1) != 0 {
+            error!("轻量 API 提交失败: code={}, msg={}", data["code"].as_i64().unwrap_or(-1), data["msg"].as_str().unwrap_or(""));
             anyhow::bail!("轻量 API 提交失败: {}", data["msg"].as_str().unwrap_or("unknown error"));
         }
 
@@ -855,22 +972,35 @@ impl MinerUClient {
             .ok_or_else(|| anyhow::anyhow!("轻量 API 响应缺少 task_id"))?
             .to_string();
 
-        tracing::info!("轻量 API 任务已提交: task_id={}", task_id);
+        info!("轻量 API 任务已提交: task_id={}", task_id);
         Ok(task_id)
     }
 
     /// 轻量 API: 检查任务状态
     async fn check_task_status_lightweight(&self, task_id: &str) -> Value {
+        let url = format!("{}/v1/agent/parse/{}", self.base_url, task_id);
         let resp = self
             .http
-            .get(format!("{}/v1/agent/parse/{}", self.base_url, task_id))
+            .get(&url)
             .send()
             .await;
 
         match resp {
-            Ok(resp) if resp.status().is_success() => {
-                let data: Value = resp.json().await.unwrap_or_default();
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    warn!("轻量 API 查询任务状态失败 (task_id={}): HTTP {}", task_id, resp.status());
+                    return json!({"_done": false, "status": "unknown"});
+                }
+                let data: Value = match resp.json().await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!("轻量 API 查询任务状态响应解析失败 (task_id={}): {}", task_id, e);
+                        return json!({"_done": false, "status": "unknown"});
+                    }
+                };
                 if data["code"].as_i64().unwrap_or(-1) != 0 {
+                    warn!("轻量 API 查询任务状态返回非零 code (task_id={}): code={}, msg={}",
+                          task_id, data["code"].as_i64().unwrap_or(-1), data["msg"].as_str().unwrap_or(""));
                     return json!({"_done": false, "status": "unknown"});
                 }
                 let state = data["data"]["state"].as_str().unwrap_or("unknown");
@@ -881,6 +1011,10 @@ impl MinerUClient {
                     "running" | "extracting" => "processing",
                     _ => state,
                 };
+                if state == "failed" {
+                    let err = data["data"]["err_msg"].as_str().unwrap_or("");
+                    warn!("轻量 API 任务 (task_id={}) 解析失败: {}", task_id, err);
+                }
                 json!({
                     "_done": state == "done" || state == "failed",
                     "status": normalized,
@@ -889,7 +1023,10 @@ impl MinerUClient {
                     "task_id": task_id,
                 })
             }
-            _ => json!({"_done": false, "status": "unknown"}),
+            Err(e) => {
+                warn!("轻量 API 连接 MinerU 服务失败 (task_id={}, url={}): {}", task_id, url, e);
+                json!({"_done": false, "status": "unknown"})
+            }
         }
     }
 
@@ -902,7 +1039,9 @@ impl MinerUClient {
     ) -> anyhow::Result<String> {
         let status = self.check_task_status_lightweight(task_id).await;
         if status["status"].as_str() != Some("completed") {
-            anyhow::bail!("轻量 API 任务未完成 (status: {})", status["status"].as_str().unwrap_or("unknown"));
+            let st = status["status"].as_str().unwrap_or("unknown");
+            error!("轻量 API 任务未完成 (task_id={}): status={}", task_id, st);
+            anyhow::bail!("轻量 API 任务未完成 (status: {})", st);
         }
 
         // 获取 markdown URL
@@ -913,14 +1052,30 @@ impl MinerUClient {
                     .and_then(|d| d.get("url"))
                     .and_then(|v| v.as_str())
             })
-            .ok_or_else(|| anyhow::anyhow!("轻量 API 结果缺少 markdown_url"))?;
+            .ok_or_else(|| {
+                error!("轻量 API 结果缺少 markdown_url (task_id={})", task_id);
+                anyhow::anyhow!("轻量 API 结果缺少 markdown_url")
+            })?;
+
+        info!("轻量 API 正在下载解析结果: task_id={}", task_id);
 
         // 下载 markdown
-        let resp = self.http.get(md_url).send().await?;
+        let resp = self.http.get(md_url).send().await.map_err(|e| {
+            error!("轻量 API 下载 markdown 连接失败: {}", e);
+            anyhow::anyhow!("下载 markdown 连接失败: {}", e)
+        })?;
+
         if !resp.status().is_success() {
+            error!("轻量 API 下载 markdown 失败: HTTP {}", resp.status());
             anyhow::bail!("下载 markdown 失败: HTTP {}", resp.status());
         }
-        let md_content = resp.text().await?;
+
+        let md_content = resp.text().await.map_err(|e| {
+            error!("轻量 API 读取 markdown 响应体失败: {}", e);
+            anyhow::anyhow!("读取 markdown 响应体失败: {}", e)
+        })?;
+
+        info!("轻量 API Markdown 下载成功, {} 字节", md_content.len());
 
         std::fs::create_dir_all(output_dir)?;
 
@@ -931,6 +1086,7 @@ impl MinerUClient {
         let md_path = Path::new(output_dir).join(&md_filename);
         std::fs::write(&md_path, &md_content)?;
 
+        info!("轻量 API Markdown 已保存到: {:?}", md_path);
         Ok(md_path.to_string_lossy().to_string())
     }
 }
@@ -947,9 +1103,25 @@ pub async fn parse_pdf(
     doc_id: Option<i64>,
     timeout_secs: u64,
 ) -> anyhow::Result<String> {
-    let task_id = client.submit_parse_task(file_path).await?;
-    client.poll_task(&task_id, timeout_secs).await?;
-    client.get_task_result(&task_id, output_dir, doc_id).await
+    info!("parse_pdf: 开始解析 PDF, file_path={}", file_path);
+    let task_id = client.submit_parse_task(file_path).await.map_err(|e| {
+        error!("parse_pdf: 提交解析任务失败: {}", e);
+        e
+    })?;
+    info!("parse_pdf: 任务已提交, task_id={}", task_id);
+
+    client.poll_task(&task_id, timeout_secs).await.map_err(|e| {
+        error!("parse_pdf: 轮询任务失败 (task_id={}): {}", task_id, e);
+        e
+    })?;
+    info!("parse_pdf: 任务完成, 正在获取结果");
+
+    let result = client.get_task_result(&task_id, output_dir, doc_id).await.map_err(|e| {
+        error!("parse_pdf: 获取结果失败 (task_id={}): {}", task_id, e);
+        e
+    })?;
+    info!("parse_pdf: 解析完成, markdown_path={:?}", result);
+    Ok(result)
 }
 
 /// 使用第一个启用的 MinerU 配置解析 PDF

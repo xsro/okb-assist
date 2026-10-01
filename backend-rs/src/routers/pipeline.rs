@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use axum::extract::{Path, Query};
+use tracing::{error, info, warn};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -226,10 +227,13 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
     let active_config = match active_config {
         Some(c) => c,
         None => {
+            error!("没有可用的 MinerU 配置 (doc_id={})", doc_id);
             update_doc_status(&db, doc_id, DocStatus::Error, Some("没有可用的 MinerU 配置"), None).await;
             return;
         }
     };
+
+    info!("开始解析文档 {}: 使用 MinerU 配置 '{}' ({})", doc_id, active_config.name, active_config.mineru_type);
 
     // 使用选中的配置创建客户端
     let primary_client = MinerUClient::new(&active_config);
@@ -251,36 +255,45 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
         update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在检查之前的解析任务..."), Some(15.0)).await;
         let status_result = primary_client.check_task_status(task_id).await;
         let status = status_result["status"].as_str().unwrap_or("unknown").to_string();
+        info!("文档 {} 存在之前的 MinerU 任务: id={}, status={}", doc_id, task_id, status);
 
         match status.as_str() {
             "completed" => {
+                info!("文档 {} 之前的任务已完成, 正在获取结果", doc_id);
                 update_doc_status(&db, doc_id, DocStatus::Parsing, Some("之前的任务已完成，正在获取结果..."), Some(50.0)).await;
                 if let Ok(md_path) = primary_client.get_task_result(task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
                     finish_parse_result(&db, &settings, doc_id, &md_path).await;
                 } else {
+                    error!("文档 {} 获取之前任务结果失败", doc_id);
                     update_doc_status(&db, doc_id, DocStatus::Error, Some("解析失败: 获取之前任务结果失败"), None).await;
                 }
                 return;
             }
             "failed" => {
+                warn!("文档 {} 之前的任务失败, 重新提交", doc_id);
                 update_doc_status(&db, doc_id, DocStatus::Parsing, Some("之前的任务失败，重新提交..."), Some(10.0)).await;
                 clear_mineru_task_id(&db, doc_id).await;
                 existing_task_id = None;
             }
             "processing" | "pending" => {
+                info!("文档 {} 之前的任务仍在处理中, 等待完成", doc_id);
                 update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在等待之前的解析任务完成..."), Some(20.0)).await;
                 match primary_client.poll_task(task_id, settings.mineru_task_timeout()).await {
                     Ok(_) => {
+                        info!("文档 {} 之前的任务轮询完成, 正在获取结果", doc_id);
                         if let Ok(md_path) = primary_client.get_task_result(task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
                             finish_parse_result(&db, &settings, doc_id, &md_path).await;
                         } else {
+                            error!("文档 {} 获取轮询结果失败", doc_id);
                             update_doc_status(&db, doc_id, DocStatus::Error, Some("解析失败: 获取结果失败"), None).await;
                         }
                         return;
                     }
                     Err(e) => {
                         let msg = e.to_string();
+                        warn!("文档 {} 之前的任务轮询失败: {}", doc_id, msg);
                         if msg.to_lowercase().contains("timed out") {
+                            error!("文档 {} 之前的任务超时", doc_id);
                             update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("解析失败: {}", msg)), None).await;
                             return;
                         }
@@ -290,6 +303,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
                 }
             }
             _ => {
+                warn!("文档 {} 之前的任务状态未知 ({}), 清除并重新提交", doc_id, status);
                 clear_mineru_task_id(&db, doc_id).await;
                 existing_task_id = None;
             }
@@ -298,22 +312,28 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
 
     // 使用选中的 MinerU 配置提交解析任务
     update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在提交解析任务..."), Some(15.0)).await;
+    info!("文档 {} 提交解析任务: MinerU='{}', pdf={}", doc_id, active_config.name, abs_file_path);
 
     let client = MinerUClient::new(&active_config);
     match client.submit_parse_task(&abs_file_path).await {
         Ok(task_id) => {
+            info!("文档 {} 提交解析成功, task_id={}", doc_id, task_id);
             save_mineru_task_id(&db, doc_id, &task_id).await;
             update_doc_status(&db, doc_id, DocStatus::Parsing, Some("已提交任务，正在解析..."), Some(20.0)).await;
 
+            info!("文档 {} 开始轮询解析任务 (timeout={}s)", doc_id, active_config.task_timeout);
             match client.poll_task(&task_id, active_config.task_timeout).await {
                 Ok(_) => {
+                    info!("文档 {} 解析任务完成, 获取结果中", doc_id);
                     update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在获取解析结果..."), Some(80.0)).await;
                     match client.get_task_result(&task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
                         Ok(md_path) => {
+                            info!("文档 {} 解析结果获取成功, markdown_path={}", doc_id, md_path);
                             finish_parse_result(&db, &settings, doc_id, &md_path).await;
                             return;
                         }
                         Err(e) => {
+                            error!("文档 {} 获取解析结果失败: {}", doc_id, e);
                             let err_msg = format!("获取结果失败: {}", e);
                             update_doc_status(&db, doc_id, DocStatus::Error, Some(&err_msg), None).await;
                             return;
@@ -321,6 +341,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
                     }
                 }
                 Err(e) => {
+                    error!("文档 {} 解析失败: {}", doc_id, e);
                     let err_msg = format!("解析失败: {}", e);
                     update_doc_status(&db, doc_id, DocStatus::Error, Some(&err_msg), None).await;
                     return;
@@ -328,6 +349,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
             }
         }
         Err(e) => {
+            error!("文档 {} 提交解析任务失败: {}", doc_id, e);
             let err_msg = format!("提交解析任务失败: {}", e);
             update_doc_status(&db, doc_id, DocStatus::Error, Some(&err_msg), None).await;
             return;

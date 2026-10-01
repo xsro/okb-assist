@@ -1,5 +1,5 @@
 {
-  "active_mineru": "local network",
+  "active_mineru": "官方标准（需要token）",
   "alias_expiration_hours": 1,
   "base_url": "http://127.0.0.1:5001/",
   "mineru": [
@@ -8,16 +8,16 @@
       "name": "local network",
       "task_timeout": 30000,
       "tier": "standard",
-      "token": "***",
+      "token": "",
       "type": "local",
       "url": "http://192.168.1.185:8002"
     },
     {
       "max_tasks": 3,
       "name": "官方标准（需要token）",
-      "task_timeout": 300,
+      "task_timeout": 900,
       "tier": "standard",
-      "token": "sk-sssvsvsvs",
+      "token": "sk-use-your-token",
       "type": "official",
       "url": "https://mineru.net"
     }
