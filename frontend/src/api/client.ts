@@ -14,6 +14,38 @@ export const tokenStorage = {
   }
 }
 
+export interface TokenHistoryItem {
+  token: string
+  role: string
+  timestamp: number
+}
+
+const HISTORY_KEY = 'okb_token_history'
+const MAX_HISTORY = 10
+
+export const tokenHistoryStorage = {
+  get(): TokenHistoryItem[] {
+    try {
+      return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]')
+    } catch {
+      return []
+    }
+  },
+  add(token: string, role: string) {
+    const history = this.get().filter(h => h.token !== token)
+    history.unshift({ token, role, timestamp: Date.now() })
+    if (history.length > MAX_HISTORY) history.length = MAX_HISTORY
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history))
+  },
+  remove(token: string) {
+    const history = this.get().filter(h => h.token !== token)
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history))
+  },
+  clear() {
+    localStorage.removeItem(HISTORY_KEY)
+  }
+}
+
 // ── Axios 实例 ──────────────────────────────────────────
 
 const client: AxiosInstance = axios.create({

@@ -43,7 +43,8 @@ pub fn default_config() -> serde_json::Value {
                     "model": "nomic-embed-text"
                 }
             }
-        ]
+        ],
+        "permissions": {}
     })
 }
 

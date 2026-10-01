@@ -1741,6 +1741,7 @@ dependencies = [
  "clap",
  "hex",
  "http 1.5.0",
+ "memchr",
  "mupdf",
  "rand",
  "regex",
@@ -1758,6 +1759,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "walkdir",
  "zip",
 ]
 

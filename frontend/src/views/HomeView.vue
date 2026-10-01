@@ -174,7 +174,7 @@
         <line x1="9" y1="15" x2="15" y2="15"></line>
       </svg>
       <p>暂无文献</p>
-      <router-link :to="{ name: 'upload' }" class="btn">立即上传</router-link>
+      <router-link v-if="tokenStore.role === 'admin' || tokenStore.role === 'view-upload'" :to="{ name: 'upload' }" class="btn">立即上传</router-link>
     </div>
 
     <!-- 高级搜索构建器 -->
@@ -190,6 +190,7 @@ import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import { useResponsive } from '@/composables/useResponsive'
 import { usePagination } from '@/composables/usePagination'
+import { useTokenStore } from '@/stores/token'
 import StatusBadge from '@/components/StatusBadge.vue'
 import QueryBuilder from '@/components/QueryBuilder.vue'
 import type { Document } from '@/types/document'
@@ -203,6 +204,7 @@ const router = useRouter()
 const route = useRoute()
 const { showError } = useToast()
 const { requireToken } = useRequireToken()
+const tokenStore = useTokenStore()
 const { isMobile } = useResponsive()
 
 const { items, loading, page, total, totalPages, load } = usePagination<Document>()

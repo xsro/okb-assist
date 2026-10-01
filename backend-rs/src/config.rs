@@ -2,6 +2,7 @@
 //!
 //! 使用 axum Extension 注入，支持运行时配置热更新。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::config_manager::ConfigManager;
@@ -224,6 +225,21 @@ impl Settings {
             }
         }
         "documents".to_string()
+    }
+
+    // ── 权限 ──
+
+    /// 从 config.json 读取权限配置 { token: role } 映射
+    pub fn permission_tokens(&self) -> HashMap<String, String> {
+        let mut result = HashMap::new();
+        if let Some(perms) = self.get_config()["permissions"].as_object() {
+            for (token, role_val) in perms {
+                if let Some(role) = role_val.as_str() {
+                    result.insert(token.clone(), role.to_string());
+                }
+            }
+        }
+        result
     }
 
     // ── 系统配置 ──

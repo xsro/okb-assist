@@ -18,6 +18,7 @@ use axum::Extension;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::auth;
 use crate::config::Settings;
 use crate::database::Database;
 use crate::models::{Document, DocStatus, DocumentVectorIndex};
@@ -1193,7 +1194,12 @@ pub struct StartIndexQuery {
 
 // ── 状态端点 ──
 
-async fn queue_status() -> Json<Value> {
+async fn queue_status(
+    Extension(role): Extension<auth::Role>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     let running = RUNNING_TASKS.load(Ordering::SeqCst) as i64;
     let max = max_concurrent_tasks() as i64;
     Json(json!({
@@ -1203,7 +1209,13 @@ async fn queue_status() -> Json<Value> {
     }))
 }
 
-async fn active_tasks(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
+async fn active_tasks(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     let snapshot: Vec<(i64, ActiveTask)> = {
         let map = active_tasks_map().read().unwrap();
         map.iter().map(|(k, v)| (*k, v.clone())).collect()
@@ -1225,7 +1237,13 @@ async fn active_tasks(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
     Json(json!({"tasks": tasks, "count": tasks.len()}))
 }
 
-async fn batch_status(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
+async fn batch_status(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     let pending = count_status(&db, "uploaded").await + count_status(&db, "error").await;
     let processing = count_status(&db, "parsing").await;
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents")
@@ -1271,13 +1289,25 @@ async fn batch_status(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
     }))
 }
 
-async fn batch_progress() -> Json<Value> {
+async fn batch_progress(
+    Extension(role): Extension<auth::Role>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     Json(batch_progress_map().read().unwrap().clone())
 }
 
 // ── 批量控制端点 ──
 
-async fn batch_start(Extension(db): Extension<Arc<Database>>, Extension(settings): Extension<Arc<Settings>>) -> Response {
+async fn batch_start(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+    Extension(settings): Extension<Arc<Settings>>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let pending = count_status(&db, "uploaded").await + count_status(&db, "error").await;
     if pending == 0 {
         return Json(json!({"detail": "没有待解析的文档", "pending": 0})).into_response();
@@ -1287,22 +1317,46 @@ async fn batch_start(Extension(db): Extension<Arc<Database>>, Extension(settings
     Json(json!({"detail": format!("批量解析已开始，共 {} 个文档待处理", pending), "pending": pending})).into_response()
 }
 
-async fn batch_pause() -> Json<Value> {
+async fn batch_pause(
+    Extension(role): Extension<auth::Role>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     BATCH_PAUSED.store(true, Ordering::SeqCst);
     Json(json!({"detail": "批量处理将在当前任务完成后暂停"}))
 }
 
-async fn batch_resume(Extension(db): Extension<Arc<Database>>, Extension(settings): Extension<Arc<Settings>>) -> Json<Value> {
+async fn batch_resume(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+    Extension(settings): Extension<Arc<Settings>>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     BATCH_PAUSED.store(false, Ordering::SeqCst);
     tokio::spawn(process_stage_batch_parse(db, settings));
     Json(json!({"detail": "批量解析已恢复"}))
 }
 
-async fn batch_reset() -> Json<Value> {
+async fn batch_reset(
+    Extension(role): Extension<auth::Role>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     Json(json!({"status": "ok"}))
 }
 
-async fn batch_start_parse(Extension(db): Extension<Arc<Database>>, Extension(settings): Extension<Arc<Settings>>) -> Response {
+async fn batch_start_parse(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+    Extension(settings): Extension<Arc<Settings>>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let count = count_status(&db, "uploaded").await + count_status(&db, "error").await;
     if count == 0 {
         return Json(json!({"detail": "没有待解析的文档", "pending": 0})).into_response();
@@ -1312,7 +1366,14 @@ async fn batch_start_parse(Extension(db): Extension<Arc<Database>>, Extension(se
     Json(json!({"detail": format!("批量解析已开始，共 {} 个文档", count), "pending": count})).into_response()
 }
 
-async fn batch_start_extract(Extension(db): Extension<Arc<Database>>, Extension(settings): Extension<Arc<Settings>>) -> Response {
+async fn batch_start_extract(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+    Extension(settings): Extension<Arc<Settings>>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let count = count_status(&db, "markdown_done").await;
     if count == 0 {
         return Json(json!({"detail": "没有待提取元数据的文档", "pending": 0})).into_response();
@@ -1323,10 +1384,14 @@ async fn batch_start_extract(Extension(db): Extension<Arc<Database>>, Extension(
 }
 
 async fn batch_start_index(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
     Query(query): Query<StartIndexQuery>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let vector_db_id = query.vector_db_id.unwrap_or_else(|| "default".to_string());
 
     let manager = crate::config_manager::ConfigManager::new("system.json");
@@ -1371,17 +1436,26 @@ async fn batch_start_index(
     })).into_response()
 }
 
-async fn batch_start_full() -> Json<Value> {
+async fn batch_start_full(
+    Extension(role): Extension<auth::Role>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     Json(json!({"status": "ok", "message": "请使用 batch/start-index 或单文档 full 端点"}))
 }
 
 // ── 批量错误重置端点 ──
 
 async fn batch_reset_errors(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
     Query(query): Query<ResetQuery>,
 ) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     let docs: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
         "SELECT {} FROM documents WHERE status = 'error'", DOC_COLUMNS
     ))
@@ -1420,10 +1494,14 @@ async fn batch_reset_errors(
 }
 
 async fn batch_reset_timeout_errors(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
     Query(query): Query<ResetQuery>,
 ) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     let docs: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
         "SELECT {} FROM documents WHERE status = 'error' AND status_message LIKE '%timed out%'", DOC_COLUMNS
     ))
@@ -1461,7 +1539,13 @@ async fn batch_reset_timeout_errors(
     Json(json!({"detail": format!("已重置 {} 个超时失败的文档", reset_count), "reset_count": reset_count}))
 }
 
-async fn batch_promote_ready(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
+async fn batch_promote_ready(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     let docs: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
         "SELECT {} FROM documents WHERE status = 'markdown_done' \
          AND title IS NOT NULL AND title != '' AND authors IS NOT NULL AND authors != ''", DOC_COLUMNS
@@ -1482,10 +1566,14 @@ async fn batch_promote_ready(Extension(db): Extension<Arc<Database>>) -> Json<Va
 // ── 单文档端点 ──
 
 async fn parse(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
     Path(id): Path<i64>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let doc = match fetch_doc(&db, id).await {
         Some(d) => d,
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
@@ -1510,10 +1598,14 @@ async fn parse(
 }
 
 async fn extract(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
     Path(id): Path<i64>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let doc = match fetch_doc(&db, id).await {
         Some(d) => d,
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
@@ -1529,10 +1621,14 @@ async fn extract(
 }
 
 async fn crossref(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
     Path(id): Path<i64>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     if fetch_doc(&db, id).await.is_none() {
         return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response();
     }
@@ -1541,10 +1637,14 @@ async fn crossref(
 }
 
 async fn extract_pdf_meta(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
     Path(id): Path<i64>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     if fetch_doc(&db, id).await.is_none() {
         return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response();
     }
@@ -1553,11 +1653,15 @@ async fn extract_pdf_meta(
 }
 
 async fn index(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
     Path(id): Path<i64>,
     Query(query): Query<IndexQuery>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let vector_db_id = query.vector_db_id.unwrap_or_else(|| "default".to_string());
 
     let doc = match fetch_doc(&db, id).await {
@@ -1585,9 +1689,13 @@ async fn index(
 }
 
 async fn indexes(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Path(id): Path<i64>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return resp;
+    }
     if fetch_doc(&db, id).await.is_none() {
         return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response();
     }
@@ -1615,10 +1723,14 @@ async fn indexes(
 }
 
 async fn doc_status(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
     Path(id): Path<i64>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return resp;
+    }
     let doc = match fetch_doc(&db, id).await {
         Some(d) => d,
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
@@ -1650,11 +1762,15 @@ async fn doc_status(
 }
 
 async fn reset(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
     Path(id): Path<i64>,
     Query(query): Query<ResetQuery>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let doc = match fetch_doc(&db, id).await {
         Some(d) => d,
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
@@ -1700,10 +1816,14 @@ async fn reset(
 }
 
 async fn full(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
     Path(id): Path<i64>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     // 非 Python 端点：顺序触发 parse → extract → index。
     let doc = match fetch_doc(&db, id).await {
         Some(d) => d,
@@ -1738,9 +1858,13 @@ async fn full(
 }
 
 async fn stop(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Path(id): Path<i64>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     // 非 Python 端点：将运行中的文档标记为 error（暂停其后台进度）。
     let doc = match fetch_doc(&db, id).await {
         Some(d) => d,

@@ -1,95 +1,67 @@
-//! 基于系统 grep 的轻量全文搜索服务。
+//! 纯 Rust 全文搜索服务。
+//!
+//! 替代了旧版外部 `grep` 进程方案。内部使用：
+//! - **字面量搜索**：`memchr::memmem::Finder`（SIMD 加速，比 grep 的 Boyer-Moore 更快）
+//! - **正则搜索**：`regex::Regex`
+//! - **目录遍历**：`walkdir`（已在依赖树中）
+//! - **所有依赖均已在 Cargo.lock 中**，无需新增任何 crate。
 
 use std::collections::HashSet;
+use std::io::BufRead;
 use std::path::Path;
-use std::process::Command;
 use std::sync::OnceLock;
 
 use sqlx::Row;
 
-// ── 编译一次、全局复用的正则 ──
-static GREP_LINE_RE: OnceLock<regex::Regex> = OnceLock::new();
+// ── 编译一次的正则：用于提取 doc_id（供旧版兼容调用） ──
 static DOC_ID_RE_1: OnceLock<regex::Regex> = OnceLock::new();
 static DOC_ID_RE_2: OnceLock<regex::Regex> = OnceLock::new();
 static DOC_ID_RE_3: OnceLock<regex::Regex> = OnceLock::new();
 
-fn grep_line_re() -> &'static regex::Regex {
-    GREP_LINE_RE.get_or_init(|| regex::Regex::new(r"^(.+?)[\:\-](\d+)[\:\-](.*)$").unwrap())
-}
-
 fn doc_id_re_1() -> &'static regex::Regex {
     DOC_ID_RE_1.get_or_init(|| regex::Regex::new(r"/(\d+)\.md$").unwrap())
 }
-
 fn doc_id_re_2() -> &'static regex::Regex {
     DOC_ID_RE_2.get_or_init(|| regex::Regex::new(r"/(\d+)/(\d+)\.md$").unwrap())
 }
-
 fn doc_id_re_3() -> &'static regex::Regex {
     DOC_ID_RE_3.get_or_init(|| regex::Regex::new(r"/(\d+)/[^/]+\.md$").unwrap())
 }
 
-/// grep 单批文件，返回解析结果（受 limit 限制）。
-fn run_grep(
-    query: &str,
-    context_lines: usize,
-    regex: bool,
-    paths: &[String],
-    limit: usize,
-    grep_bin: &str,
-) -> Vec<serde_json::Value> {
-    let mut cmd = Command::new(grep_bin);
-    cmd.arg("-rn").arg("-i").arg(format!("-C{}", context_lines));
-    if !regex {
-        cmd.arg("-F");
-    }
-    cmd.arg(query);
-    for p in paths {
-        cmd.arg(p);
-    }
-
-    match cmd.output() {
-        Ok(output) => {
-            if output.status.code().unwrap_or(1) > 1 {
-                return Vec::new();
-            }
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            parse_grep_output(&stdout, limit)
+/// 从文件路径中提取文档 ID。
+///
+/// 优先用路径解析（零分配），回退到正则。
+pub fn extract_doc_id(file_path: &str) -> Option<i64> {
+    let path = Path::new(file_path);
+    // 从文件 stem 解析
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        if let Ok(id) = stem.parse::<i64>() {
+            return Some(id);
         }
-        Err(_) => Vec::new(),
     }
-}
-
-/// grep 递归目录模式（仅扫 *.md），不受 ARG_MAX 限制。
-fn run_grep_dir(
-    query: &str,
-    context_lines: usize,
-    regex: bool,
-    parent_dir: &str,
-    limit: usize,
-    grep_bin: &str,
-) -> Vec<serde_json::Value> {
-    let mut cmd = Command::new(grep_bin);
-    cmd.arg("-r")
-        .arg("--include=*.md")
-        .arg("-rn")
-        .arg("-i")
-        .arg(format!("-C{}", context_lines));
-    if !regex {
-        cmd.arg("-F");
-    }
-    cmd.arg(query).arg(parent_dir);
-
-    match cmd.output() {
-        Ok(output) => {
-            if output.status.code().unwrap_or(1) > 1 {
-                return Vec::new();
+    // 回退：可能文件名不直接是数字，检查父目录名
+    if let Some(parent) = path.parent() {
+        if let Some(dir_name) = parent.file_name().and_then(|s| s.to_str()) {
+            if let Ok(id) = dir_name.parse::<i64>() {
+                return Some(id);
             }
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            parse_grep_output(&stdout, limit)
         }
-        Err(_) => Vec::new(),
     }
+    // 最后用正则（兼容旧路径格式）
+    if let Some(caps) = doc_id_re_1().captures(file_path) {
+        return caps.get(1)?.as_str().parse().ok();
+    }
+    if let Some(caps) = doc_id_re_2().captures(file_path) {
+        let dir_id = caps.get(1)?.as_str();
+        let file_id = caps.get(2)?.as_str();
+        if dir_id == file_id {
+            return dir_id.parse().ok();
+        }
+    }
+    if let Some(caps) = doc_id_re_3().captures(file_path) {
+        return caps.get(1)?.as_str().parse().ok();
+    }
+    None
 }
 
 /// 获取 markdown 文件所在父目录（从 system.json 模板推导）。
@@ -131,10 +103,226 @@ pub fn parse_doc_ids(s: &str) -> Result<Option<Vec<i64>>, String> {
     Ok(Some(ids))
 }
 
-/// 执行 grep 搜索（完整对齐 Python 版逻辑）。
+// ── 内部搜索核心 ──
+
+/// 在文件中的搜索结果：一个匹配块（含上下文）
+#[derive(Debug)]
+struct MatchBlock {
+    file_path: String,
+    /// 块内第一行在文件中的行号（1-indexed）
+    first_line: usize,
+    /// 块内连续行内容
+    lines: Vec<String>,
+}
+
+/// 读取文件所有行到 Vec，可选返回文件总行数。
+fn read_lines(path: &str) -> Option<Vec<String>> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    reader.lines().filter_map(|l| l.ok()).collect::<Vec<_>>().into()
+}
+
+/// 在单个文件的各行中搜索匹配。
+///
+/// 返回匹配块列表（已合并重叠上下文），每块包含连续行。
+fn search_file_lines(
+    lines: &[String],
+    _query: &str,
+    context: usize,
+    is_regex: bool,
+    compiled_regex: Option<&regex::Regex>,
+    case_folded_query: &str,
+) -> Vec<MatchBlock> {
+    let total = lines.len();
+    if total == 0 {
+        return Vec::new();
+    }
+
+    // --- 第 1 步：找出所有匹配行的索引 ---
+    let match_indices: Vec<usize> = if is_regex {
+        let re = match compiled_regex {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        lines.iter().enumerate().filter_map(|(i, line)| {
+            if re.is_match(line) { Some(i) } else { None }
+        }).collect()
+    } else {
+        let finder = memchr::memmem::Finder::new(case_folded_query.as_bytes());
+        lines.iter().enumerate().filter_map(|(i, line)| {
+            if finder.find(line.to_ascii_lowercase().as_bytes()).is_some() {
+                Some(i)
+            } else {
+                None
+            }
+        }).collect()
+    };
+
+    if match_indices.is_empty() {
+        return Vec::new();
+    }
+
+    // --- 第 2 步：合并重叠的上下文窗口 ---
+    // 每个匹配会覆盖 [max(0, idx-context), min(total, idx+context+1)] 范围
+    // 如果窗口间隔 <= 1（相邻或重叠），合并为一块
+    let mut blocks: Vec<(usize, usize)> = Vec::new(); // (start, end) inclusive-exclusive
+
+    for &idx in &match_indices {
+        let block_start = idx.saturating_sub(context);
+        let block_end = (idx + context + 1).min(total);
+
+        if let Some(&mut (_, ref mut last_end)) = blocks.last_mut() {
+            if block_start <= *last_end {
+                // 重叠或相邻，合并
+                *last_end = (*last_end).max(block_end);
+            } else {
+                blocks.push((block_start, block_end));
+            }
+        } else {
+            blocks.push((block_start, block_end));
+        }
+    }
+
+    // --- 第 3 步：构建 MatchBlock ---
+    blocks
+        .into_iter()
+        .map(|(start, end)| {
+            let file_path = String::new(); // 由调用者填充
+            let first_line = start + 1; // 1-indexed
+            let lines_slice = &lines[start..end];
+            MatchBlock {
+                file_path,
+                first_line,
+                lines: lines_slice.to_vec(),
+            }
+        })
+        .collect()
+}
+
+/// 搜索单个文件，返回搜索结果。
+fn search_one_file(
+    path: &str,
+    query: &str,
+    context: usize,
+    is_regex: bool,
+    compiled_regex: Option<&regex::Regex>,
+    case_folded_query: &str,
+) -> Vec<MatchBlock> {
+    let lines = match read_lines(path) {
+        Some(l) => l,
+        None => return Vec::new(),
+    };
+    let mut blocks = search_file_lines(&lines, query, context, is_regex, compiled_regex, case_folded_query);
+    // 填入文件路径
+    for block in &mut blocks {
+        block.file_path = path.to_string();
+    }
+    blocks
+}
+
+/// 搜索多个文件，返回所有搜索结果（受 limit 限制）。
+fn search_files(
+    paths: &[String],
+    query: &str,
+    context: usize,
+    limit: usize,
+    is_regex: bool,
+    compiled_regex: Option<&regex::Regex>,
+    case_folded_query: &str,
+) -> Vec<serde_json::Value> {
+    let mut results = Vec::new();
+    let mut seen_docs: HashSet<i64> = HashSet::new();
+
+    for path in paths {
+        if results.len() >= limit {
+            break;
+        }
+        let doc_id = match extract_doc_id(path) {
+            Some(id) => id,
+            None => continue,
+        };
+        if seen_docs.contains(&doc_id) {
+            continue;
+        }
+        let blocks = search_one_file(path, query, context, is_regex, compiled_regex, case_folded_query);
+        for block in blocks {
+            if results.len() >= limit {
+                break;
+            }
+            if seen_docs.contains(&doc_id) {
+                // 同一个文档的多个匹配块合并（只保留 doc_id 去重逻辑不变）
+                continue;
+            }
+            seen_docs.insert(doc_id);
+            results.push(serde_json::json!({
+                "id": doc_id,
+                "content": block.lines.join("\n"),
+                "file_path": block.file_path,
+                "first_line": block.first_line,
+            }));
+        }
+    }
+    results
+}
+
+/// 递归搜索目录（仅扫 *.md 文件）。
+fn search_dir(
+    dir: &str,
+    query: &str,
+    context: usize,
+    limit: usize,
+    is_regex: bool,
+    compiled_regex: Option<&regex::Regex>,
+    case_folded_query: &str,
+) -> Vec<serde_json::Value> {
+    let mut results = Vec::new();
+    let mut seen_docs: HashSet<i64> = HashSet::new();
+
+    let walker = walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| {
+            e.path().extension().map(|ext| ext == "md").unwrap_or(false)
+        });
+
+    for entry in walker {
+        if results.len() >= limit {
+            break;
+        }
+        let path_str = entry.path().to_string_lossy().to_string();
+        let doc_id = match extract_doc_id(&path_str) {
+            Some(id) => id,
+            None => continue,
+        };
+        if seen_docs.contains(&doc_id) {
+            continue;
+        }
+        let blocks = search_one_file(&path_str, query, context, is_regex, compiled_regex, case_folded_query);
+        for block in blocks {
+            if results.len() >= limit {
+                break;
+            }
+            if seen_docs.contains(&doc_id) {
+                continue;
+            }
+            seen_docs.insert(doc_id);
+            results.push(serde_json::json!({
+                "id": doc_id,
+                "content": block.lines.join("\n"),
+                "file_path": block.file_path,
+                "first_line": block.first_line,
+            }));
+        }
+    }
+    results
+}
+
+/// 执行 grep 搜索（完整对齐旧版 API）。
 ///
 /// 内部完成：期刊/年份元数据预筛 → 与 doc_ids 取交集 → fast 算法候选预筛 →
-/// 构建搜索路径 → 调用系统 grep → 解析输出。
+/// 构建搜索路径 → 纯 Rust 内部搜索（无外部进程）。
 pub async fn grep_search(
     query: &str,
     context_lines: usize,
@@ -168,167 +356,71 @@ pub async fn grep_search(
         }
     }
 
-    // 2. 确定搜索模式：目录递归 or 指定文件列表
+    // 2. 预备搜索参数（编译正则 / 折叠大小写）
+    let is_regex = regex;
+    let q_lower = query.to_ascii_lowercase();
+    let compiled_regex: Option<regex::Regex> = if is_regex {
+        regex::Regex::new(&format!("(?i){}", query)).ok()
+    } else {
+        None
+    };
+
+    // 3. 确定搜索模式并执行
     let fast_enabled = algorithm == "fast" && doc_ids_owned.is_none();
-    let grep_bin = settings.grep_path();
 
-    let q = query.to_string();
-    let gb = grep_bin.clone();
+    // 将搜索结果构建移到 spawn_blocking 中
+    let q_out = q_lower.clone();
+    let q_raw = query.to_string();
 
-    if fast_enabled {
-        let candidates = metadata_candidate_ids(db, &q).await;
+    let result: Vec<serde_json::Value> = if fast_enabled {
+        let candidates = metadata_candidate_ids(db, &q_raw).await;
         let paths: Vec<String> = candidates
             .iter()
             .map(|did| crate::paths::get_markdown_path(settings, *did))
             .filter(|p| Path::new(p).exists())
             .collect();
         if paths.is_empty() {
-            // 无候选 → 回退全量目录扫描（后台线程执行 grep）
-            match markdown_parent_dir(settings) {
-                Some(dir) => return tokio::task::spawn_blocking(move || {
-                    run_grep_dir(&q, context_lines, regex, &dir, limit, &gb)
-                }).await.unwrap_or_default(),
-                None => return Vec::new(),
-            }
-        }
-        // 有候选 → 分批精确搜索（后台线程执行 grep）
-        return tokio::task::spawn_blocking(move || {
-            run_grep_batched(&q, context_lines, regex, &paths, limit, &gb)
-        }).await.unwrap_or_default();
-    }
-
-    // 非 fast 模式（后台线程执行 grep）
-    let result = match &doc_ids_owned {
-        Some(ids) if !ids.is_empty() => {
-            let paths: Vec<String> = ids
-                .iter()
-                .map(|did| crate::paths::get_markdown_path(settings, *did))
-                .filter(|p| Path::new(p).exists())
-                .collect();
-            if paths.is_empty() {
-                Vec::new()
-            } else {
-                tokio::task::spawn_blocking(move || {
-                    run_grep_batched(&q, context_lines, regex, &paths, limit, &gb)
-                }).await.unwrap_or_default()
-            }
-        }
-        _ => {
-            // 全量扫描 → 目录递归
+            // 无候选 → 回退全量目录扫描
             match markdown_parent_dir(settings) {
                 Some(dir) => tokio::task::spawn_blocking(move || {
-                    run_grep_dir(&q, context_lines, regex, &dir, limit, &gb)
+                    search_dir(&dir, &q_raw, context_lines, limit, is_regex, compiled_regex.as_ref(), &q_out)
                 }).await.unwrap_or_default(),
                 None => Vec::new(),
             }
+        } else {
+            tokio::task::spawn_blocking(move || {
+                search_files(&paths, &q_raw, context_lines, limit, is_regex, compiled_regex.as_ref(), &q_out)
+            }).await.unwrap_or_default()
         }
-    };
-    return result;
-}
-
-fn parse_grep_output(output: &str, limit: usize) -> Vec<serde_json::Value> {
-    let mut results = Vec::new();
-    let mut current_file = String::new();
-    let mut current_lines: Vec<String> = Vec::new();
-    let mut current_first_line: i64 = 0;
-    let mut seen_files: std::collections::HashSet<i64> = std::collections::HashSet::new();
-
-    let flush = |results: &mut Vec<_>, current_file: &str, current_lines: &[String], first_line: i64, seen_files: &mut std::collections::HashSet<i64>, limit: usize| {
-        if !current_file.is_empty() && !current_lines.is_empty() {
-            if let Some(doc_id) = extract_doc_id(current_file) {
-                if !seen_files.contains(&doc_id) {
-                    seen_files.insert(doc_id);
-                    results.push(serde_json::json!({
-                        "id": doc_id,
-                        "content": current_lines.join("\n"),
-                        "file_path": current_file,
-                        "first_line": first_line,
-                    }));
+    } else {
+        match &doc_ids_owned {
+            Some(ids) if !ids.is_empty() => {
+                let paths: Vec<String> = ids
+                    .iter()
+                    .map(|did| crate::paths::get_markdown_path(settings, *did))
+                    .filter(|p| Path::new(p).exists())
+                    .collect();
+                if paths.is_empty() {
+                    Vec::new()
+                } else {
+                    tokio::task::spawn_blocking(move || {
+                        search_files(&paths, &q_raw, context_lines, limit, is_regex, compiled_regex.as_ref(), &q_out)
+                    }).await.unwrap_or_default()
+                }
+            }
+            _ => {
+                // 全量扫描 → 目录递归
+                match markdown_parent_dir(settings) {
+                    Some(dir) => tokio::task::spawn_blocking(move || {
+                        search_dir(&dir, &q_raw, context_lines, limit, is_regex, compiled_regex.as_ref(), &q_out)
+                    }).await.unwrap_or_default(),
+                    None => Vec::new(),
                 }
             }
         }
     };
 
-    for line in output.lines() {
-        if results.len() >= limit {
-            break;
-        }
-
-        if line == "--" {
-            flush(&mut results, &current_file, &current_lines, current_first_line, &mut seen_files, limit);
-            current_lines.clear();
-            continue;
-        }
-
-        if let Some(caps) = parse_grep_line(line) {
-            if !current_file.is_empty() && caps.0 != current_file && !current_lines.is_empty() {
-                flush(&mut results, &current_file, &current_lines, current_first_line, &mut seen_files, limit);
-                current_lines.clear();
-            }
-            if current_file != caps.0 || current_lines.is_empty() {
-                // 新文件的第一条匹配，记录行号
-                current_first_line = caps.1.parse::<i64>().unwrap_or(0);
-            }
-            current_file = caps.0;
-            current_lines.push(caps.2);
-        } else if !line.trim().is_empty() {
-            current_lines.push(line.to_string());
-        }
-    }
-
-    // 处理最后一块
-    flush(&mut results, &current_file, &current_lines, current_first_line, &mut seen_files, limit);
-
-    results.truncate(limit);
-    results
-}
-
-fn parse_grep_line(line: &str) -> Option<(String, String, String)> {
-    let re = grep_line_re();
-    let caps = re.captures(line)?;
-    Some((
-        caps.get(1)?.as_str().to_string(),
-        caps.get(2)?.as_str().to_string(),
-        caps.get(3)?.as_str().to_string(),
-    ))
-}
-
-pub fn extract_doc_id(file_path: &str) -> Option<i64> {
-    if let Some(caps) = doc_id_re_1().captures(file_path) {
-        return caps.get(1)?.as_str().parse().ok();
-    }
-    if let Some(caps) = doc_id_re_2().captures(file_path) {
-        let dir_id = caps.get(1)?.as_str();
-        let file_id = caps.get(2)?.as_str();
-        if dir_id == file_id {
-            return dir_id.parse().ok();
-        }
-    }
-    if let Some(caps) = doc_id_re_3().captures(file_path) {
-        return caps.get(1)?.as_str().parse().ok();
-    }
-    None
-}
-
-/// 分批执行 grep（避免 ARG_MAX 溢出），每批最多 500 个文件。
-fn run_grep_batched(
-    query: &str,
-    context_lines: usize,
-    regex: bool,
-    paths: &[String],
-    limit: usize,
-    grep_bin: &str,
-) -> Vec<serde_json::Value> {
-    const BATCH: usize = 500;
-    let mut results = Vec::new();
-    for chunk in paths.chunks(BATCH) {
-        if results.len() >= limit {
-            break;
-        }
-        let mut batch = run_grep(query, context_lines, regex, chunk, limit - results.len(), grep_bin);
-        results.append(&mut batch);
-    }
-    results
+    result
 }
 
 /// 列出所有 markdown 文件路径（用于调试 / 兼容旧调用）

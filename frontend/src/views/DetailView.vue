@@ -2,13 +2,17 @@
   <div class="detail-view" v-if="doc">
     <div class="detail-header">
       <h2>{{ doc.title || doc.filename || '(无标题)' }}</h2>
-      <div class="detail-actions">
-        <router-link :to="{ name: 'docManage', params: { id: doc.id } }" class="btn btn-sm btn-outline">
+      <div class="detail-actions-row">
+        <router-link v-if="tokenStore.role === 'admin'" :to="{ name: 'docManage', params: { id: doc.id } }" class="btn btn-sm btn-outline">
           管理
         </router-link>
-        <router-link :to="{ name: 'markdownEdit', params: { id: doc.id } }" class="btn btn-sm">
+        <router-link v-if="tokenStore.role === 'admin'" :to="{ name: 'markdownEdit', params: { id: doc.id } }" class="btn btn-sm">
           编辑 Markdown
         </router-link>
+        <button v-if="tokenStore.role === 'admin' || tokenStore.role === 'view-only'" class="btn btn-sm btn-outline" :disabled="openingPdf" @click="openPdf">
+          {{ openingPdf ? '准备中...' : '查看 PDF' }}
+        </button>
+        <router-link v-if="tokenStore.role === 'admin' || tokenStore.role === 'view-only'" :to="{ name: 'markdown', params: { id: doc.id } }" class="btn btn-sm btn-outline">全屏阅读</router-link>
       </div>
     </div>
 
@@ -138,38 +142,20 @@
       <p class="abstract-text">{{ doc.abstract }}</p>
     </div>
 
-    <!-- Markdown 渲染 -->
-    <div v-if="hasMarkdown" class="section">
-      <div class="section-header">
-        <h3>全文</h3>
-        <div class="page-nav">
-          <button :disabled="currentPage <= 1" @click="currentPage--; loadMarkdown()">上一页</button>
-          <span>第 {{ currentPage }} 页</span>
-          <button :disabled="currentPage >= totalPages" @click="currentPage++; loadMarkdown()">下一页</button>
-        </div>
-      </div>
-      <MarkdownViewer :content="markdownContent" trusted />
-    </div>
 
-    <!-- 操作按钮 -->
-    <div class="detail-actions-bottom">
-      <button class="btn btn-outline" :disabled="openingPdf" @click="openPdf">
-        {{ openingPdf ? '准备中...' : '查看 PDF' }}
-      </button>
-      <router-link :to="{ name: 'markdown', params: { id: doc.id } }" class="btn btn-outline">全屏阅读</router-link>
-    </div>
   </div>
 
   <div v-else class="loading">加载中...</div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { getDocument, getFileAlias } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import { useResponsive } from '@/composables/useResponsive'
+import { useTokenStore } from '@/stores/token'
 import StatusBadge from '@/components/StatusBadge.vue'
 import type { Document } from '@/types/document'
 
@@ -178,12 +164,9 @@ const { showError } = useToast()
 const { requireToken } = useRequireToken()
 // isMobile 注入（仅响应式需要）
 const { isMobile } = useResponsive()
+const tokenStore = useTokenStore()
 
 const doc = ref<Document | null>(null)
-
-const hasMarkdown = computed(() => {
-  return !!(doc.value?.md_size && doc.value.md_size > 0)
-})
 
 const openingPdf = ref(false)
 
@@ -232,20 +215,15 @@ onMounted(() => {
 
 <style scoped>
 .detail-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
   margin-bottom: 20px;
-  gap: 16px;
 }
-.detail-actions, .detail-actions-bottom {
+.detail-header h2 {
+  margin-bottom: 12px;
+}
+.detail-actions-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-}
-.detail-actions-bottom {
-  margin-top: 24px;
-  padding-top: 16px;
-  border-top: 1px solid var(--border);
 }
 .info-table {
   width: 100%;
@@ -303,17 +281,7 @@ onMounted(() => {
   line-height: 1.8;
   color: var(--text-secondary);
 }
-.section-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-}
-.page-nav {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
+
 .index-dbs {
   display: inline-flex;
   gap: 6px;

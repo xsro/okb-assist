@@ -25,6 +25,7 @@ mod services;
 mod routers;
 mod logger;
 mod mcp_server;
+mod auth;
 
 use config::Settings;
 use config_manager::ConfigManager;
@@ -199,6 +200,7 @@ fn create_app(
         .merge(routers::openapi::router())
         .route("/assist/mcp/stream", post(mcp_server::mcp_stream_handler))
         .route("/assist/file/:filename", get(serve_file_alias))
+        .route("/assist/api/auth/check", get(auth_check_handler))
         .route("/", get(root_redirect))
         .nest_service("/assist/uploads", tower_http::services::ServeDir::new(settings.uploads_folder()))
         .layer(middleware);
@@ -306,12 +308,13 @@ async fn error_log_middleware(req: axum::extract::Request, next: Next) -> Respon
 
 /// Token 鉴权中间件。
 ///
-/// 仅保护 `/assist/api/*`，与 Python `TokenMiddleware` 行为一致：
-/// - token 为 `change-me` 或未设置时跳过校验；
+/// 仅保护 `/assist/api/*`。
 /// - 来自 192.168.1.0/24 局域网的请求免校验；
 /// - 通过 `X-Token` 头或 `token` 查询参数校验；
-/// - `/assist/api/documents/` 下含 `/image/` 的图片 URL 放行。
-async fn token_middleware(req: axum::extract::Request, next: Next) -> Response {
+/// - `/assist/api/documents/` 下含 `/image/` 的图片 URL 放行；
+/// - 匹配角色：admin(system.json) → view-only/view-upload(config.json)
+/// - 将匹配的角色注入 Request extensions
+async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
 
     // 仅保护 API 路径
@@ -324,14 +327,14 @@ async fn token_middleware(req: axum::extract::Request, next: Next) -> Response {
         return next.run(req).await;
     }
 
+    // auth/check 放行（无需 token 即可获取角色信息）
+    if path == "/assist/api/auth/check" || path == "/assist/api/auth/check/" {
+        return next.run(req).await;
+    }
+
     let settings = req.extensions().get::<Arc<Settings>>().cloned();
     if let Some(settings) = settings {
-        let token = settings.token();
-
-        // token 未设置或为 change-me 时跳过校验
-        if token.is_empty() || token == "change-me" {
-            return next.run(req).await;
-        }
+        let admin_token = settings.token();
 
         // 局域网 192.168.1.0/24 免校验
         let client_ip = req
@@ -341,11 +344,12 @@ async fn token_middleware(req: axum::extract::Request, next: Next) -> Response {
             .map(|s| s.split(',').next().unwrap_or("").trim().to_string());
         if let Some(ip) = client_ip {
             if ip.starts_with("192.168.1.") {
+                req.extensions_mut().insert(auth::Role::Admin);
                 return next.run(req).await;
             }
         }
 
-        // 校验 X-Token 头或 token 查询参数
+        // 读取请求 token
         let provided = req
             .headers()
             .get("x-token")
@@ -364,8 +368,13 @@ async fn token_middleware(req: axum::extract::Request, next: Next) -> Response {
                 })
             });
 
-        if provided.as_deref() == Some(token.as_str()) {
-            return next.run(req).await;
+        if let Some(provided) = provided {
+            // 匹配角色：admin → view-only → restricted-view
+            let perm_tokens = settings.permission_tokens();
+            if let Some(role) = auth::match_role(&provided, &admin_token, &perm_tokens) {
+                req.extensions_mut().insert(role);
+                return next.run(req).await;
+            }
         }
 
         return (
@@ -376,6 +385,79 @@ async fn token_middleware(req: axum::extract::Request, next: Next) -> Response {
     }
 
     next.run(req).await
+}
+
+/// 认证探测端点：接收 X-Token，返回角色和权限信息。
+/// 此端点在 token_middleware 之前注册，handler 内手动校验。
+async fn auth_check_handler(
+    axum::extract::Extension(settings): axum::extract::Extension<Arc<Settings>>,
+    req: axum::extract::Request,
+) -> impl axum::response::IntoResponse {
+    let provided = req
+        .headers()
+        .get("x-token")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            req.uri().query().and_then(|q| {
+                q.split('&').find_map(|kv| {
+                    let (k, v) = kv.split_once('=')?;
+                    if k == "token" {
+                        Some(v.to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+        });
+
+    let (role, is_valid) = match &provided {
+        Some(token) => {
+            let admin_token = settings.token();
+            let perm_tokens = settings.permission_tokens();
+            match auth::match_role(token, &admin_token, &perm_tokens) {
+                Some(auth::Role::Admin) => ("admin".to_string(), true),
+                Some(auth::Role::ViewOnly) => ("view-only".to_string(), true),
+                Some(auth::Role::ViewUpload) => ("view-upload".to_string(), true),
+                None => ("".to_string(), false),
+            }
+        }
+        None => ("".to_string(), false),
+    };
+
+    if !is_valid {
+        return (
+            http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({
+                "role": null,
+                "valid": false,
+                "detail": "无效的 token"
+            })),
+        )
+            .into_response();
+    }
+
+    let permissions = serde_json::json!({
+        "view_document": true,
+        "view_pdf": role == "admin" || role == "view-only",
+        "view_markdown": role == "admin" || role == "view-only" || role == "view-upload",
+        "edit": role == "admin",
+        "delete": role == "admin",
+        "admin": role == "admin",
+        "config": role == "admin",
+        "upload": role == "admin" || role == "view-upload",
+        "pipeline": role == "admin",
+    });
+
+    (
+        http::StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "role": role,
+            "valid": true,
+            "permissions": permissions
+        })),
+    )
+        .into_response()
 }
 
 /// SPA fallback：命中 frontend/dist 真实文件则返回文件，否则返回 index.html。

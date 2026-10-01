@@ -10,9 +10,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Extension;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::auth;
 use crate::config::Settings;
 use crate::database::Database;
 use crate::models::{DocStatus, Document};
@@ -47,9 +48,21 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/admin/dedup", post(dedup))
         .route("/assist/api/admin/logs/", get(get_logs))
         .route("/assist/api/admin/logs", get(get_logs))
+        .route("/assist/api/admin/permissions/", get(get_permissions))
+        .route("/assist/api/admin/permissions", get(get_permissions))
+        .route("/assist/api/admin/permissions/", post(add_permission_token))
+        .route("/assist/api/admin/permissions", post(add_permission_token))
+        .route("/assist/api/admin/permissions/delete/", post(delete_permission_token))
+        .route("/assist/api/admin/permissions/delete", post(delete_permission_token))
 }
 
-async fn dedup(Extension(db): Extension<Arc<Database>>) -> Json<Value> {
+async fn dedup(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     // 查找所有有 file_hash 的文档，按 hash 分组
     let rows: Vec<(String, i64, String)> = sqlx::query_as(
         "SELECT file_hash, id, filename FROM documents WHERE file_hash IS NOT NULL ORDER BY file_hash, id",
@@ -267,8 +280,12 @@ async fn check_fastembed(settings: &Settings) -> Value {
 }
 
 async fn services_status(
+    Extension(role): Extension<auth::Role>,
     Extension(settings): Extension<Arc<Settings>>,
 ) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     let cm = crate::config_manager::ConfigManager::new("system.json");
     let cfg = cm.get_config();
 
@@ -336,8 +353,12 @@ async fn services_status(
 }
 
 async fn reconnect_services(
+    Extension(role): Extension<auth::Role>,
     Extension(cm): Extension<Arc<ConfigManager>>,
 ) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     cm.reload_config();
     Json(json!({"status": "ok", "detail": "配置已重新加载"}))
 }
@@ -345,9 +366,13 @@ async fn reconnect_services(
 use crate::config_manager::ConfigManager;
 
 async fn stats(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
 ) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     let doc_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents")
         .fetch_one(db.pool())
         .await
@@ -414,7 +439,13 @@ async fn stats(
     }))
 }
 
-async fn mineru_tasks(Extension(settings): Extension<Arc<Settings>>) -> Json<Value> {
+async fn mineru_tasks(
+    Extension(role): Extension<auth::Role>,
+    Extension(settings): Extension<Arc<Settings>>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     let url = settings.mineru_url();
     let key = settings.mineru_key();
     let client = reqwest::Client::builder()
@@ -444,7 +475,12 @@ async fn mineru_tasks(Extension(settings): Extension<Arc<Settings>>) -> Json<Val
     }
 }
 
-async fn qdrant_collections() -> Json<Value> {
+async fn qdrant_collections(
+    Extension(role): Extension<auth::Role>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     let collections = match get_vector_db(None) {
         Ok(adapter) => adapter.list_collections().await.unwrap_or_default(),
         Err(_) => Vec::new(),
@@ -458,9 +494,13 @@ pub struct PointQuery {
 }
 
 async fn qdrant_point(
+    Extension(role): Extension<auth::Role>,
     Path(point_id): Path<String>,
     Query(query): Query<PointQuery>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let adapter = match get_vector_db(None) {
         Ok(a) => a,
         Err(e) => {
@@ -476,9 +516,13 @@ async fn qdrant_point(
 }
 
 async fn recalculate_hashes(
+    Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
 ) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     let docs: Vec<Document> = sqlx::query_as::<_, Document>(
         "SELECT id, filename, file_hash, title, authors, CAST(NULLIF(year, '') AS INTEGER) AS year, doi, source, journal, \
          keywords, abstract, category, doc_type, language, title_en, authors_en, \
@@ -535,9 +579,13 @@ pub struct LogQuery {
 }
 
 async fn get_logs(
+    Extension(role): Extension<auth::Role>,
     Extension(settings): Extension<Arc<Settings>>,
     Query(params): Query<LogQuery>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let log_path_raw = settings.log_path();
     let log_path = std::path::PathBuf::from(
         crate::config_manager::ConfigManager::substitute_path_variables(&log_path_raw, 0)
@@ -619,5 +667,84 @@ async fn get_logs(
         "file": log_path.to_string_lossy().to_string(),
         "displayed": slice.len(),
     })).into_response()
+}
+
+// ── 权限 Token 管理 ────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct PermissionTokenBody {
+    role: String,
+    token: String,
+}
+
+/// 获取所有角色的权限 token 列表
+async fn get_permissions(
+    Extension(role): Extension<auth::Role>,
+    Extension(cm): Extension<Arc<crate::config_manager::ConfigManager>>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
+    let config = cm.get_service_config();
+    let perms = config.get("permissions").cloned().unwrap_or(json!({}));
+    Json(json!({"permissions": perms}))
+}
+
+/// 添加一个 token 到指定角色
+async fn add_permission_token(
+    Extension(role): Extension<auth::Role>,
+    Extension(cm): Extension<Arc<crate::config_manager::ConfigManager>>,
+    Json(body): Json<PermissionTokenBody>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
+
+    if body.role != "view-only" && body.role != "view-upload" {
+        return Json(json!({"detail": "角色无效，仅支持 view-only 和 view-upload"}));
+    }
+    if body.token.is_empty() {
+        return Json(json!({"detail": "token 不能为空"}));
+    }
+
+    let mut config = cm.get_service_config();
+    let perms = config.get_mut("permissions").and_then(|p| p.as_object_mut());
+    if let Some(perms) = perms {
+        // 新格式: { token: role }
+        if perms.contains_key(&body.token) {
+            return Json(json!({"detail": "token 已存在"}));
+        }
+        perms.insert(body.token.clone(), json!(body.role));
+    }
+
+    cm.save_config(&config);
+    cm.reload_config();
+
+    let perms = config.get("permissions").cloned().unwrap_or(json!({}));
+    Json(json!({"permissions": perms}))
+}
+
+/// 删除一个 token
+async fn delete_permission_token(
+    Extension(role): Extension<auth::Role>,
+    Extension(cm): Extension<Arc<crate::config_manager::ConfigManager>>,
+    Json(body): Json<PermissionTokenBody>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
+
+    let mut config = cm.get_service_config();
+    let perms = config.get_mut("permissions").and_then(|p| p.as_object_mut());
+    if let Some(perms) = perms {
+        // 新格式: { token: role }
+        perms.remove(&body.token);
+    }
+
+    cm.save_config(&config);
+    cm.reload_config();
+
+    let perms = config.get("permissions").cloned().unwrap_or(json!({}));
+    Json(json!({"permissions": perms}))
 }
 

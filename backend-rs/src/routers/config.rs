@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::config::Settings;
+use crate::auth;
 use crate::config_manager::ConfigManager;
 use crate::services::mineru::MineruType;
 
@@ -38,20 +39,36 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/config/vector-dbs", get(list_vector_dbs))
 }
 
-async fn get_config(Extension(cm): Extension<Arc<ConfigManager>>) -> Json<Value> {
+async fn get_config(
+    Extension(role): Extension<auth::Role>,
+    Extension(cm): Extension<Arc<ConfigManager>>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let config = cm.get_config();
-    Json(config)
+    Json(config).into_response()
 }
 
-async fn get_system_config(Extension(cm): Extension<Arc<ConfigManager>>) -> Json<Value> {
+async fn get_system_config(
+    Extension(role): Extension<auth::Role>,
+    Extension(cm): Extension<Arc<ConfigManager>>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let config = cm.get_system_config();
-    Json(config)
+    Json(config).into_response()
 }
 
 async fn update_config(
+    Extension(role): Extension<auth::Role>,
     Extension(cm): Extension<Arc<ConfigManager>>,
     Json(body): Json<Value>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let mut config = cm.get_service_config();
 
     // active_mineru：前端可以选择使用哪个 mineru 配置（按 name 匹配）
@@ -122,15 +139,25 @@ async fn update_config(
     Json(json!({"detail": "配置已保存", "config": saved})).into_response()
 }
 
-async fn reload_config(Extension(cm): Extension<Arc<ConfigManager>>) -> Json<Value> {
+async fn reload_config(
+    Extension(role): Extension<auth::Role>,
+    Extension(cm): Extension<Arc<ConfigManager>>,
+) -> Json<Value> {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     let config = cm.reload_config();
     Json(json!({"detail": "配置已重新加载", "config": config}))
 }
 
 async fn update_system_config(
+    Extension(role): Extension<auth::Role>,
     Extension(cm): Extension<Arc<ConfigManager>>,
     Json(body): Json<Value>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     if let Err(e) = cm.update_system_config(&body) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
             .into_response();
@@ -138,7 +165,13 @@ async fn update_system_config(
     Json(json!({"status": "ok"})).into_response()
 }
 
-async fn list_vector_dbs(Extension(cm): Extension<Arc<ConfigManager>>) -> Json<Value> {
+async fn list_vector_dbs(
+    Extension(role): Extension<auth::Role>,
+    Extension(cm): Extension<Arc<ConfigManager>>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
     let dbs = cm.list_vector_dbs();
     Json(json!({"vector_dbs": dbs}))
 }
@@ -162,7 +195,14 @@ pub struct TestConnectionRequest {
     pub service: String,
 }
 
-async fn test_service(Json(req): Json<TestServiceRequest>) -> Response {
+async fn test_service(
+    Extension(role): Extension<auth::Role>,
+    Json(req): Json<TestServiceRequest>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
+
     match req.service_type.as_str() {
         "mineru" => {
             let url = req.url.unwrap_or_default().trim_end_matches('/').to_string();
@@ -193,9 +233,13 @@ async fn test_service(Json(req): Json<TestServiceRequest>) -> Response {
 }
 
 async fn test_connection(
+    Extension(role): Extension<auth::Role>,
     Extension(settings): Extension<Arc<Settings>>,
     Json(req): Json<TestConnectionRequest>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     match req.service.as_str() {
         "mineru" => {
             let url = settings.mineru_url();

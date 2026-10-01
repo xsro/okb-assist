@@ -18,6 +18,7 @@ use crate::database::Database;
 use crate::models::Document;
 use crate::paths;
 use crate::services::pdf_meta::{extract_pdf_metadata_async, normalize_doi};
+use crate::auth;
 use crate::routers::pipeline::run_crossref_override;
 use crate::utils::{calculate_file_hash_async, now_datetime, now_iso, sha256_hex_async};
 
@@ -542,10 +543,14 @@ pub struct UpdateDocumentBody {
 }
 
 async fn update_document(
+    axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
     Path(id): Path<i64>,
     Json(body): Json<UpdateDocumentBody>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     let result = sqlx::query(
         "UPDATE documents SET title = COALESCE(?, title), authors = COALESCE(?, authors), \
          year = COALESCE(?, year), doi = COALESCE(?, doi), source = COALESCE(?, source), \
@@ -585,10 +590,14 @@ async fn update_document(
 }
 
 async fn delete_document(
+    axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(id): Path<i64>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     match fetch_doc(&db, id).await {
         Ok(Some(doc)) => {
             // 删除本地文件
@@ -648,10 +657,14 @@ fn merge_metadata_into(target: &mut Document, source: &Document) {
 
 /// 将重复文献合并进目标文献：填充目标空字段，删除源文献（文件 + 向量 + 记录）。
 async fn merge_documents(
+    axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Json(body): Json<MergeDocumentsBody>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     // 去重并排除目标自身
     let mut source_ids: Vec<i64> = body
         .source_ids
@@ -830,10 +843,14 @@ async fn insert_document(db: &Database, doc: Document) -> Result<i64, String> {
 }
 
 async fn upload_document(
+    axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     mut multipart: axum::extract::Multipart,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-upload"]) {
+        return resp;
+    }
     let mut filename: Option<String> = None;
     let mut content: Vec<u8> = Vec::new();
     let mut force = false;
@@ -1005,10 +1022,14 @@ pub struct RegisterByPath {
 }
 
 async fn register_document_by_path(
+    axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Json(data): Json<RegisterByPath>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-upload"]) {
+        return resp;
+    }
     if !std::path::Path::new(&data.file_path).exists() {
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("文件不存在: {}", data.file_path)}))).into_response();
     }
@@ -1476,27 +1497,35 @@ async fn grep_search(
     )
     .await;
 
-    // 补充文档元数据
+    // 补充文档元数据（批量查询，避免 N+1）
     let mut enriched = Vec::new();
-    for hit in &results {
-        let doc_id = hit["document_id"].as_i64();
-        let mut doc_info = json!({});
-        if let Some(did) = doc_id {
-            if let Ok(Some(doc)) = fetch_doc(&db, did).await {
-                doc_info = json!({
+    let ids: Vec<i64> = results.iter().filter_map(|hit| hit["id"].as_i64()).collect();
+    let mut doc_map: std::collections::HashMap<i64, serde_json::Value> = std::collections::HashMap::new();
+    if !ids.is_empty() {
+        let ids_str: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        let sql = format!("SELECT {} FROM documents WHERE id IN ({})", DOC_COLUMNS, ids_str.join(","));
+        if let Ok(rows) = sqlx::query_as::<_, Document>(&sql).fetch_all(db.pool()).await {
+            for doc in rows {
+                doc_map.insert(doc.id, json!({
                     "title": doc.title,
                     "filename": doc.filename,
                     "status": doc.status,
                     "authors": doc.authors,
                     "year": doc.year,
                     "journal": doc.journal,
-                });
+                }));
             }
         }
+    }
+    for hit in &results {
         let mut item = hit.clone();
-        if let (Some(obj), Some(info)) = (item.as_object_mut(), doc_info.as_object()) {
-            for (k, v) in info {
-                obj.insert(k.clone(), v.clone());
+        if let Some(did) = hit["id"].as_i64() {
+            if let Some(info) = doc_map.get(&did) {
+                if let (Some(obj), Some(info_obj)) = (item.as_object_mut(), info.as_object()) {
+                    for (k, v) in info_obj {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
             }
         }
         enriched.push(item);
@@ -1614,11 +1643,15 @@ pub struct MarkdownQuery {
 ///   - line_count: 返回行数（默认 -1 即到末尾）
 ///   - full: 忽略其他参数，返回全部内容
 async fn get_markdown(
+    axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(id): Path<i64>,
     Query(params): Query<MarkdownQuery>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return resp;
+    }
     match fetch_doc(&db, id).await {
         Ok(Some(_)) => {}
         Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
@@ -1711,11 +1744,15 @@ pub struct MarkdownUpdate {
 }
 
 async fn update_markdown(
+    axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(id): Path<i64>,
     Json(data): Json<MarkdownUpdate>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     match fetch_doc(&db, id).await {
         Ok(Some(_)) => {}
         Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
@@ -1743,11 +1780,15 @@ pub struct ParseResultBody {
 }
 
 async fn upload_parse_result(
+    axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(id): Path<i64>,
     Json(data): Json<ParseResultBody>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
     // 校验文档存在
     let doc = match fetch_doc(&db, id).await {
         Ok(Some(d)) => d,
@@ -1784,10 +1825,14 @@ async fn upload_parse_result(
 }
 
 async fn get_pdf(
+    axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(id): Path<i64>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return resp;
+    }
     match fetch_doc(&db, id).await {
         Ok(Some(_)) => {}
         Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
@@ -1810,10 +1855,14 @@ async fn get_pdf(
 
 /// 通过别名获取文档信息（用于 /assist/file/ 路由）
 async fn file_alias(
+    axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(id): Path<i64>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return resp;
+    }
     match fetch_doc(&db, id).await {
         Ok(Some(doc)) => {
             let (alias, expires_iso) = get_or_create_alias(id, doc.year, doc.title.as_deref(), settings.alias_expiration_hours());
@@ -2015,10 +2064,14 @@ fn image_mime(filename: &str) -> &'static str {
 
 /// GET /assist/api/documents/{id}/image/{filename} —— 从图片资源 zip 中读取图片
 async fn get_image_from_zip(
+    axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path((id, filename)): Path<(i64, String)>,
 ) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return resp;
+    }
     match fetch_doc(&db, id).await {
         Ok(Some(_)) => {}
         Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文档不存在"}))).into_response(),

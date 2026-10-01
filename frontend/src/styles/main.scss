@@ -132,6 +132,18 @@ input, textarea, select {
   background: var(--bg-hover);
 }
 
+.btn-outline-danger {
+  color: #f44336;
+  border-color: #f44336;
+  background: transparent;
+  white-space: nowrap;
+}
+
+.btn-outline-danger:hover {
+  background: #f44336;
+  color: #fff;
+}
+
 /* ── 导航 ────────────────────────────────────────────── */
 
 .app-header {

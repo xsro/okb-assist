@@ -58,61 +58,17 @@
         :key="i"
         class="log-entry"
         :class="'level-' + (entry.level || 'info').toLowerCase()"
-        @click="openDetail(entry)"
       >
-        <span class="log-level-badge">{{ (entry.level || 'INFO').toUpperCase() }}</span>
-        <span class="log-timestamp">{{ formatTimestamp(entry.timestamp) }}</span>
-        <span class="log-target" v-if="entry.target">{{ entry.target }}</span>
-        <span class="log-message">{{ entry.message }}</span>
-        <span class="log-location" v-if="entry.file && entry.line">
-          <small>{{ entry.file }}:{{ entry.line }}</small>
-        </span>
-        <!-- 展开详情（请求信息） -->
-        <div v-if="expandedIndex === i && hasRequestFields(entry)" class="log-detail">
-          <div class="detail-row" v-if="entry.method && entry.uri">
-            <span class="detail-label">请求</span>
-            <span class="detail-value">{{ entry.method }} {{ entry.uri }}</span>
-          </div>
-          <div class="detail-row" v-if="entry.status">
-            <span class="detail-label">状态</span>
-            <span class="detail-value">{{ entry.status }}</span>
-          </div>
-          <div class="detail-row" v-if="entry.client_ip">
-            <span class="detail-label">来源 IP</span>
-            <span class="detail-value">{{ entry.client_ip }}</span>
-          </div>
-          <div class="detail-row" v-if="entry.x_forwarded_for">
-            <span class="detail-label">X-Forwarded-For</span>
-            <span class="detail-value">{{ entry.x_forwarded_for }}</span>
-          </div>
-          <div class="detail-row" v-if="entry.x_real_ip">
-            <span class="detail-label">X-Real-IP</span>
-            <span class="detail-value">{{ entry.x_real_ip }}</span>
-          </div>
-          <div class="detail-row" v-if="entry.user_agent">
-            <span class="detail-label">User-Agent</span>
-            <span class="detail-value detail-user-agent">{{ entry.user_agent }}</span>
-          </div>
-          <div class="detail-row" v-if="entry.referer">
-            <span class="detail-label">Referer</span>
-            <span class="detail-value">{{ entry.referer }}</span>
-          </div>
-          <div class="detail-row" v-if="entry.origin">
-            <span class="detail-label">Origin</span>
-            <span class="detail-value">{{ entry.origin }}</span>
-          </div>
-          <div class="detail-row" v-if="entry.content_type">
-            <span class="detail-label">Content-Type</span>
-            <span class="detail-value">{{ entry.content_type }}</span>
-          </div>
-          <div class="detail-row" v-if="entry.resp_content_type">
-            <span class="detail-label">响应类型</span>
-            <span class="detail-value">{{ entry.resp_content_type }}</span>
-          </div>
-          <div class="detail-row" v-if="entry.resp_content_length">
-            <span class="detail-label">响应大小</span>
-            <span class="detail-value">{{ entry.resp_content_length }} bytes</span>
-          </div>
+        <div class="log-entry-main" @click="toggleExpand(i)">
+          <span class="log-timestamp">{{ formatTimestamp(entry.timestamp) }}</span>
+          <span class="log-target" v-if="entry.target">{{ entry.target }}</span>
+          <span class="log-arrow">→</span>
+          <span class="log-message">{{ entry.fields?.message || entry.message }}</span>
+          <span class="log-expand-icon">{{ expandedIndex === i ? '▼' : '▶' }}</span>
+        </div>
+        <!-- 展开详情：原始 JSON -->
+        <div v-if="expandedIndex === i" class="log-detail">
+          <pre class="detail-json">{{ formatJson(entry) }}</pre>
         </div>
       </div>
     </div>
@@ -171,8 +127,13 @@ const autoRefresh = ref(false)
 const logListRef = ref<HTMLElement | null>(null)
 const versionInfo = ref<VersionInfo | null>(null)
 const detailEntry = ref<LogEntry | null>(null)
+const expandedIndex = ref<number | null>(null)
 const copied = ref(false)
 let refreshTimer: ReturnType<typeof setInterval> | null = null
+
+function toggleExpand(i: number) {
+  expandedIndex.value = expandedIndex.value === i ? null : i
+}
 
 function openDetail(entry: LogEntry) {
   detailEntry.value = entry
@@ -196,7 +157,6 @@ function copyJson() {
 
 function formatTimestamp(ts: string): string {
   if (!ts) return ''
-  // JSONL 格式: 2024-01-15T10:30:00.123456Z
   try {
     const d = new Date(ts)
     if (isNaN(d.getTime())) return ts
@@ -238,7 +198,6 @@ async function loadLogs() {
 
 onMounted(async () => {
   loadLogs()
-  // 加载版本信息
   try {
     const info = await apiGet<VersionInfo>('/assist/api/admin/')
     versionInfo.value = info
@@ -371,10 +330,17 @@ onUnmounted(() => {
 }
 
 .log-entry {
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.log-entry:last-child {
+  border-bottom: none;
+}
+
+.log-entry-main {
   display: flex;
   gap: 8px;
   padding: 3px 12px;
-  border-bottom: 1px solid #2a2a2a;
   align-items: baseline;
   color: #d4d4d4;
   cursor: pointer;
@@ -382,12 +348,17 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 
-.log-entry:last-child {
-  border-bottom: none;
+.log-entry-main:hover {
+  background: #2a2a2a;
 }
 
-.log-entry:hover {
-  background: #2a2a2a;
+.log-expand-icon {
+  flex-shrink: 0;
+  color: #666;
+  font-size: 10px;
+  width: 14px;
+  text-align: center;
+  margin-left: auto;
 }
 
 /* ── JSON 详情模态框 ──────────────────────────────────── */
@@ -496,16 +467,16 @@ onUnmounted(() => {
 }
 
 /* 级别着色 */
-.log-entry.level-error {
+.log-entry.level-error .log-entry-main {
   background: rgba(244, 67, 54, 0.08);
 }
-.log-entry.level-error:hover {
+.log-entry.level-error .log-entry-main:hover {
   background: rgba(244, 67, 54, 0.15);
 }
-.log-entry.level-warn {
+.log-entry.level-warn .log-entry-main {
   background: rgba(255, 152, 0, 0.06);
 }
-.log-entry.level-warn:hover {
+.log-entry.level-warn .log-entry-main:hover {
   background: rgba(255, 152, 0, 0.12);
 }
 
@@ -541,6 +512,12 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+.log-arrow {
+  flex-shrink: 0;
+  color: #888;
+  font-size: 11px;
+}
+
 .log-message {
   flex: 1;
   word-break: break-word;
@@ -551,7 +528,30 @@ onUnmounted(() => {
   flex-shrink: 0;
   color: #569cd6;
   font-size: 11px;
-  margin-left: auto;
+}
+
+/* ── 展开详情 ─────────────────────────────────────────── */
+.log-detail {
+  padding: 8px 12px 8px 12px;
+  background: #252526;
+  border-top: 1px solid #333;
+  font-size: 12px;
+}
+
+.detail-json {
+  margin: 0;
+  padding: 8px;
+  background: #1e1e1e;
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #ce9178;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
 }
 
 @media (max-width: 768px) {
@@ -562,7 +562,7 @@ onUnmounted(() => {
   .filter-input {
     min-width: 0;
   }
-  .log-entry {
+  .log-entry-main {
     flex-wrap: wrap;
     gap: 2px 8px;
   }
@@ -574,6 +574,12 @@ onUnmounted(() => {
   }
   .log-count {
     margin-left: 0;
+  }
+  .log-detail {
+    padding-left: 12px;
+  }
+  .detail-json {
+    font-size: 10px;
   }
 }
 </style>

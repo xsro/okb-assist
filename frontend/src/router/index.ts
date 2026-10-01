@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { useTokenStore } from '@/stores/token'
 
 const routes = [
   {
@@ -33,13 +34,13 @@ const routes = [
     path: '/assist/admin',
     name: 'admin',
     component: () => import('@/views/AdminView.vue'),
-    meta: { title: '管理后台' }
+    meta: { title: '管理后台', requiresAdmin: true }
   },
   {
     path: '/assist/config',
     name: 'config',
     component: () => import('@/views/ConfigView.vue'),
-    meta: { title: '服务配置' }
+    meta: { title: '服务配置', requiresAdmin: true }
   },
   {
     path: '/assist/doc/:id',
@@ -51,31 +52,31 @@ const routes = [
     path: '/assist/markdown/:id',
     name: 'markdown',
     component: () => import('@/views/MarkdownView.vue'),
-    meta: { title: 'Markdown 查看' }
+    meta: { title: 'Markdown 查看', requiresViewMarkdown: true }
   },
   {
     path: '/assist/markdown/:id/edit',
     name: 'markdownEdit',
     component: () => import('@/views/MarkdownEditView.vue'),
-    meta: { title: 'Markdown 编辑' }
+    meta: { title: 'Markdown 编辑', requiresAdmin: true }
   },
   {
     path: '/assist/duplicates',
     name: 'duplicates',
     component: () => import('@/views/DuplicatesView.vue'),
-    meta: { title: '去重' }
+    meta: { title: '去重', requiresAdmin: true }
   },
   {
     path: '/assist/point',
     name: 'point',
     component: () => import('@/views/PointView.vue'),
-    meta: { title: '向量库管理' }
+    meta: { title: '向量库管理', requiresAdmin: true }
   },
   {
     path: '/assist/mcp-setup',
     name: 'mcpSetup',
     component: () => import('@/views/McpSetupView.vue'),
-    meta: { title: 'MCP 配置' }
+    meta: { title: 'MCP 配置', requiresAdmin: true }
   },
   {
     path: '/assist/logs',
@@ -90,10 +91,39 @@ const router = createRouter({
   routes
 })
 
-// 路由守卫：设置页面标题
+// 路由守卫：权限检查 + 设置页面标题
 router.beforeEach((to, _from, next) => {
   const title = (to.meta?.title as string) || 'OKB-Assist'
   document.title = `${title} - OKB-Assist`
+
+  const store = useTokenStore()
+  const role = store.role
+  const hasToken = store.isAuthenticated
+
+  // role 为 null 但已有 token（正在验证中），放行让 api 鉴权
+  if (!role && hasToken) {
+    next()
+    return
+  }
+
+  // requiresAdmin: 仅 admin 可访问
+  if (to.meta.requiresAdmin && role !== 'admin') {
+    if (!hasToken) {
+      store.promptForToken()
+    }
+    next('/assist')
+    return
+  }
+
+  // 上传页面：admin 或 view-upload 可访问
+  if (to.name === 'upload' && role !== 'admin' && role !== 'view-upload') {
+    if (!hasToken) {
+      store.promptForToken()
+    }
+    next('/assist')
+    return
+  }
+
   next()
 })
 

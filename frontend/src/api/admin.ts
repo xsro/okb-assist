@@ -77,3 +77,20 @@ export function getLogs(params: {
 }) {
   return apiGet<LogResponse>('/assist/api/admin/logs', params)
 }
+
+// ── 权限管理 ────────────────────────────────────────────
+
+/** 获取权限 token 列表 */
+export function getPermissionTokens() {
+  return apiGet<{ permissions: Record<string, string[]> }>('/assist/api/admin/permissions')
+}
+
+/** 添加权限 token */
+export function addPermissionToken(role: string, token: string) {
+  return apiPost<{ permissions: Record<string, string[]> }>('/assist/api/admin/permissions', { role, token })
+}
+
+/** 删除权限 token */
+export function deletePermissionToken(role: string, token: string) {
+  return apiPost<{ permissions: Record<string, string[]> }>('/assist/api/admin/permissions/delete', { role, token })
+}

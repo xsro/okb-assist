@@ -354,8 +354,21 @@ impl McpServer {
         let has_more = results.len() as i64 > offset.saturating_add(limit);
         let page_results = results.into_iter().skip(offset as usize).take(limit as usize);
 
+        // 批量查询文档元数据（避免 N+1）
+        let all_results: Vec<Value> = page_results.collect();
+        let ids: Vec<i64> = all_results.iter().filter_map(|hit| hit["id"].as_i64()).collect();
+        let mut doc_map: std::collections::HashMap<i64, Document> = std::collections::HashMap::new();
+        if !ids.is_empty() {
+            let ids_str: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+            let sql = format!("SELECT {} FROM documents WHERE id IN ({})", DOC_COLUMNS, ids_str.join(","));
+            if let Ok(rows) = sqlx::query_as::<_, Document>(&sql).fetch_all(self.db.pool()).await {
+                for doc in rows {
+                    doc_map.insert(doc.id, doc);
+                }
+            }
+        }
         let mut enriched = Vec::new();
-        for hit in page_results {
+        for hit in all_results {
             let doc_id = hit["id"].as_i64();
             let raw_content = hit["content"].as_str().unwrap_or("").to_string();
             let content = Self::truncate_chars(&raw_content, max_context_chars);
@@ -364,7 +377,7 @@ impl McpServer {
                 "content": content,
             });
             if let Some(id) = doc_id {
-                if let Some(doc) = self.fetch_doc(id).await {
+                if let Some(doc) = doc_map.get(&id) {
                     info["title"] = json!(doc.title.clone().unwrap_or_default());
                     info["authors"] = json!(doc.authors.clone().unwrap_or_default());
                     info["year"] = json!(doc.year);
@@ -946,7 +959,7 @@ pub async fn mcp_stream_handler(
 ) -> Response {
     // Bearer token 校验（mcp_token）
     let mcp_token = settings.mcp_token();
-    let auth_enabled = !mcp_token.is_empty() && mcp_token != "change-me";
+    let auth_enabled = !mcp_token.is_empty();
     if auth_enabled {
         let authorized = headers
             .get("authorization")

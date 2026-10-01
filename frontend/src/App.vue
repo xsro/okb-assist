@@ -19,6 +19,7 @@
 import { onMounted, onUnmounted, ref, provide } from 'vue'
 import { useTokenStore } from '@/stores/token'
 import { useErrorStore } from '@/stores/error'
+import { apiGet } from '@/api/client'
 import AppHeader from '@/components/AppHeader.vue'
 import Toast from '@/components/Toast.vue'
 import TokenModal from '@/components/TokenModal.vue'
@@ -36,10 +37,20 @@ provide('closeMobileMenu', () => {
   showMobileMenu.value = false
 })
 
-onMounted(() => {
+onMounted(async () => {
   window.addEventListener('auth:required', () => {
     tokenStore.promptForToken()
   })
+  // 启动时验证已存储的 token（localStorage 中有 token 但 role=null 的情况）
+  if (tokenStore.token && !tokenStore.role) {
+    try {
+      const res = await apiGet<{ role: string; permissions: Record<string, boolean> }>('/assist/api/auth/check')
+      tokenStore.role = res.role as 'admin' | 'view-only' | 'view-upload' | null
+      tokenStore.permissions = res.permissions
+    } catch {
+      tokenStore.clearToken()
+    }
+  }
 })
 
 // 处理全局的 Vue 运行时警告，记录到错误日志

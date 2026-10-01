@@ -21,17 +21,35 @@
         <button v-if="!tokenStore.isAuthenticated" class="btn" @click="promptToken">
           设置 Token
         </button>
-        <span v-else class="token-status">已连接</span>
+        <template v-else>
+          <div class="mobile-token-status">
+            <span class="token-indicator">●</span>
+            <span class="token-role-label">{{ roleName }}</span>
+          </div>
+          <div class="mobile-token-actions">
+            <button class="btn btn-sm" @click="switchToken">切换 Token</button>
+            <button class="btn btn-sm btn-outline-danger" @click="logout">登出</button>
+          </div>
+        </template>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { inject } from 'vue'
+import { inject, computed } from 'vue'
 import { useTokenStore } from '@/stores/token'
 
 const tokenStore = useTokenStore()
+
+const roleName = computed(() => {
+  const labels: Record<string, string> = {
+    'admin': '管理员',
+    'view-only': '只读用户',
+    'view-upload': '查看+上传'
+  }
+  return labels[tokenStore.role || ''] || tokenStore.role || '已连接'
+})
 
 const closeMenu = inject('closeMobileMenu') as (() => void) | undefined
 
@@ -50,6 +68,17 @@ const navItems = [
 function promptToken() {
   closeMenu?.()
   tokenStore.promptForToken()
+}
+
+function switchToken() {
+  closeMenu?.()
+  tokenStore.clearToken()
+  tokenStore.promptForToken()
+}
+
+function logout() {
+  closeMenu?.()
+  tokenStore.clearToken()
 }
 </script>
 
@@ -158,11 +187,31 @@ function promptToken() {
   width: 100%;
 }
 
-.token-status {
-  display: block;
-  text-align: center;
-  font-size: 14px;
+.mobile-token-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.token-indicator {
   color: var(--success);
+  font-size: 12px;
+}
+
+.token-role-label {
+  font-size: 14px;
+  color: var(--text);
   font-weight: 500;
+}
+
+.mobile-token-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.mobile-token-actions .btn {
+  flex: 1;
 }
 </style>
