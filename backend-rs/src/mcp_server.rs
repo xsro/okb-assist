@@ -143,6 +143,17 @@ impl McpServer {
                 "description": "List all document types used in the knowledge base (Zotero standard types).",
                 "inputSchema": {"type": "object", "properties": {}}
             }),
+            json!({
+                "name": "get_toc",
+                "description": "Get document table of contents (headings with line numbers). Extracted from the full Markdown file, independent of pagination.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"}
+                    },
+                    "required": ["id"]
+                }
+            }),
         ]
     }
 
@@ -156,6 +167,7 @@ impl McpServer {
             "get_document_abstract" => self.tool_get_document_abstract(args).await,
             "get_stats" => self.tool_get_stats().await,
             "list_doc_types" => self.tool_list_doc_types().await,
+            "get_toc" => self.tool_get_toc(args).await,
             _ => {
                 return json!({
                     "isError": true,
@@ -684,6 +696,48 @@ impl McpServer {
         let mut types: Vec<String> = rows.into_iter().filter_map(|(t,)| t).collect();
         types.sort();
         Self::pretty(&json!({"doc_types": types}))
+    }
+
+    async fn tool_get_toc(&self, args: &Value) -> String {
+        let doc_id = args["id"].as_i64().unwrap_or(0);
+
+        let doc = match self.fetch_doc(doc_id).await {
+            Some(d) => d,
+            None => return Self::err("not_found", &format!("文档 {} 不存在", doc_id)),
+        };
+
+        let md_path = paths::get_markdown_path(&self.settings, doc_id);
+        let content = match std::fs::read_to_string(&md_path) {
+            Ok(c) => c,
+            Err(_) => {
+                return Self::err("not_found", "Markdown file not yet generated, please parse the PDF first")
+            }
+        };
+
+        let title = doc.title.clone().unwrap_or_else(|| doc.filename.clone());
+        let mut toc: Vec<Value> = Vec::new();
+        let re = regex::Regex::new(r"^(#{1,6})\s+(.+)$").unwrap();
+
+        for (line_idx, line) in content.lines().enumerate() {
+            if let Some(caps) = re.captures(line) {
+                let level = caps.get(1).unwrap().as_str().len();
+                let heading = caps.get(2).unwrap().as_str().trim().to_string();
+                if !heading.is_empty() {
+                    toc.push(json!({
+                        "level": level,
+                        "title": heading,
+                        "line": line_idx,
+                    }));
+                }
+            }
+        }
+
+        Self::pretty(&json!({
+            "id": doc_id,
+            "title": title,
+            "total_headings": toc.len(),
+            "toc": toc,
+        }))
     }
 }
 

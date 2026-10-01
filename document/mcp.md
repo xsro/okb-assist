@@ -8,12 +8,13 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
 |---------|------|------|
 | `grep_search` | 全文搜索（基于 grep，轻量快速），支持分页与上下文截断 | `query: str`, `limit: int = 10`, `max_results: int`, `page: int = 1`, `offset: int = 0`, `context: int = 2`, `max_context_chars: int = 500`, `doc_ids: str`, `algorithm: str = "full"`, `regex: bool = true`, `journal: str`, `year_start: int`, `year_end: int` |
 | `search_info` | 搜索文献元数据（中英文），支持分页、字段过滤与年份/类型过滤 | `query: str`, `limit: int = 10`, `max_results: int`, `page: int = 1`, `offset: int = 0`, `year_from: int`, `year_to: int`, `doc_type: str`, `fields: list[str]` |
-| `read_markdown` | 读取文献 Markdown 内容（分页），或按标题提取指定章节 | `id: int`, `page: int = 1`, `page_size: int = 5000`, `section: str`, `sections: list[str]` |
+| `read_markdown` | 读取文献 Markdown 内容（行切片分页），或按标题提取指定章节 | `id: int`, `line_start: int = 0`, `line_count: int = 5000`, `page: int (legacy)`, `page_size: int (legacy)`, `section: str`, `sections: list[str]` |
 | `get_document_info` | 获取文献详细信息 | `id: int` |
 | `list_documents` | 搜索/列出文献，支持字段过滤 | `query: str`, `status: str`, `doc_type: str`, `page: int`, `page_size: int = 20`, `limit: int`, `fields: list[str]` |
 | `get_document_abstract` | 获取文献摘要 | `id: int` |
 | `get_stats` | 获取知识库统计信息 | 无 |
 | `list_doc_types` | 列出所有已使用的文献类型 | 无 |
+| `get_toc` | 获取文献目录（标题+行号），不受分页影响 | `id: int` |
 
 ### 分页、字段过滤、章节提取与统一错误格式
 
@@ -350,6 +351,8 @@ http://localhost:5001/assist/mcp/stream
 - **按标题搜索**: "有没有标题包含 Attention 的论文"
 - **按期刊搜索**: "列出发表在 Nature 上的文献"
 - **阅读文献**: "读取文档 42 的 Markdown 内容"
+- **查看目录**: "文档 42 的目录结构是什么？" 或 "获取文档 42 的目录"
+- **按章节读取**: "读取文档 42 的 Introduction 章节"
 - **查看信息**: "文档 42 的详细信息是什么？"
 - **获取摘要**: "给我看看文档 42 的摘要"
 - **列出文献**: "列出所有已索引的 journalArticle 类型文献"
