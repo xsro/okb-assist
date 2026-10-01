@@ -316,13 +316,20 @@ impl ConfigManager {
         self.save_config(config)
     }
 
-    /// 更新系统配置（仅允许修改部分字段）
+    /// 更新系统配置（仅允许修改部分字段）。
+    /// 写入文件时从磁盘重新读取以保留文件的 key 顺序。
     pub fn update_system_config(&self, config: &serde_json::Value) -> anyhow::Result<()> {
-        let current = self.load_system_config();
+        // 从磁盘读取原始 JSON，保留文件中 key 的顺序
+        let file_content = fs::read_to_string(&self.system_file).unwrap_or_default();
+        let current = if file_content.is_empty() {
+            default_system()
+        } else {
+            serde_json::from_str(&file_content).unwrap_or_else(|_| default_system())
+        };
         let merged = Self::deep_merge(&current, config);
-        let result = Self::write_json_file(&self.system_file, &merged)?;
+        Self::write_json_file(&self.system_file, &merged)?;
         *self.system_cache.write().unwrap() = Some(merged);
-        Ok(result)
+        Ok(())
     }
 
     /// 列出所有向量数据库配置
