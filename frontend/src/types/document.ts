@@ -76,6 +76,22 @@ export interface MarkdownResponse {
   lines_returned: number
 }
 
+/** Markdown 区块 */
+export interface ChunkInfo {
+  id: number
+  start_line: number
+  end_line: number
+  content: string
+  heading: string | null
+}
+
+/** Chunks API 响应 */
+export interface ChunkResponse {
+  chunks: ChunkInfo[]
+  total_lines: number
+  doc_id: number
+}
+
 export interface SimilarTitleGroup {
   groups: {
     normalized_title: string

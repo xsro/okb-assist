@@ -98,6 +98,39 @@ export function renderMath(content: string, mode: MathMode): string {
   }
 }
 
+/**
+ * 提取公式并生成含占位符的文本。
+ * 使用 @@ 作为占位符定界符（避免 marked 解析 __ 为强调语法）。
+ * 返回的 text 中包含 @@MATH_BLOCK_N@@ / @@MATH_INLINE_N@@ 占位符，
+ * matches 数组中保存每个公式的 id、LaTeX 源码和展示模式。
+ */
+export function extractMathPlaceholders(content: string): { text: string; matches: MathMatch[] } {
+  const matches: MathMatch[] = []
+  let counter = 0
+
+  // 块级公式 $$...$$
+  const blockReplaced = content.replace(
+    /\$\$([\s\S]*?)\$\$/g,
+    (_match: string, latex: string) => {
+      const id = `@@MATH_BLOCK_${counter++}@@`
+      matches.push({ id, latex: latex.trim(), displayMode: true })
+      return id
+    }
+  )
+
+  // 行内公式 $...$
+  const inlineReplaced = blockReplaced.replace(
+    /(?<!\\)\$(?!\$)([^\n\$]+?)(?<!\\)\$(?!\$)/g,
+    (_match: string, latex: string) => {
+      const id = `@@MATH_INLINE_${counter++}@@`
+      matches.push({ id, latex: latex.trim(), displayMode: false })
+      return id
+    }
+  )
+
+  return { text: inlineReplaced, matches }
+}
+
 /** 动态加载 MathJax CDN */
 export function loadMathJax(): Promise<void> {
   if ((window as any).MathJax) {

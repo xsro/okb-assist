@@ -5,7 +5,8 @@ import type {
   SearchResultList,
   SimilarTitleGroup,
   TocItem,
-  MarkdownResponse
+  MarkdownResponse,
+  ChunkResponse
 } from '@/types/document'
 
 // ── 文档 CRUD ───────────────────────────────────────────
@@ -185,6 +186,11 @@ export function getMarkdown(
 /** 获取文档目录（标题 + 行号） */
 export function getTOC(id: number) {
   return apiGet<{ toc: TocItem[] }>(`/assist/api/documents/${id}/toc/`)
+}
+
+/** 获取 Markdown 区块（按 heading 边界分组） */
+export function getChunks(id: number) {
+  return apiGet<ChunkResponse>(`/assist/api/documents/${id}/chunks/`)
 }
 
 /** 保存 Markdown */

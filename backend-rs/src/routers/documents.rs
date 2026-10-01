@@ -9,7 +9,7 @@ use axum::extract::{Path, Query};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, head, post};
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
@@ -139,6 +139,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/:id/file-alias", get(file_alias))
         .route("/assist/api/documents/:id/rehash/", post(rehash_document))
         .route("/assist/api/documents/:id/rehash", post(rehash_document))
+        .route("/assist/api/documents/:id/chunks/", get(get_markdown_chunks))
+        .route("/assist/api/documents/:id/chunks", get(get_markdown_chunks))
         .layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024))
 }
 
@@ -1707,6 +1709,110 @@ async fn get_markdown(
         "line_start": actual_start,
         "line_count": line_count,
         "lines_returned": lines_returned as i64,
+    })).into_response()
+}
+
+/// 一个 Markdown 区块
+#[derive(Debug, Serialize)]
+struct ChunkItem {
+    pub id: usize,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub content: String,
+    pub heading: Option<String>,
+}
+
+/// GET /assist/api/documents/:id/chunks
+///
+/// 将 Markdown 文件按 heading 边界分为~200-500行的语义完整区块。
+/// 每个 chunk 自然从 heading 开始，前端用于增量加载和渲染。
+async fn get_markdown_chunks(
+    axum::Extension(role): axum::Extension<auth::Role>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return resp;
+    }
+
+    let md_path = paths::get_markdown_path(&settings, id);
+    if !std::path::Path::new(&md_path).exists() {
+        return (StatusCode::NOT_FOUND, Json(json!({"detail": "Markdown 文件尚未生成"}))).into_response();
+    }
+
+    let content = match std::fs::read_to_string(&md_path) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
+    };
+    let content = rewrite_image_paths(&content, id);
+    let total_lines = content.lines().count();
+    if total_lines == 0 {
+        return Json(json!({"chunks": [], "total_lines": 0, "doc_id": id})).into_response();
+    }
+
+    // 找出所有 heading 行号（行以 # 开头）
+    let lines: Vec<&str> = content.lines().collect();
+    let heading_indices: Vec<usize> = lines.iter().enumerate()
+        .filter(|(_, line)| line.starts_with('#'))
+        .map(|(i, _)| i)
+        .collect();
+
+    const MIN_CHUNK: usize = 200;
+    const MAX_CHUNK: usize = 500;
+
+    let mut chunks: Vec<ChunkItem> = Vec::new();
+    let mut start = 0usize;
+
+    while start < total_lines {
+        // 理想结束点：在 [start+MIN_CHUNK, start+MAX_CHUNK) 内找最近的 heading
+        let search_lo = (start + MIN_CHUNK).min(total_lines);
+        let search_hi = (start + MAX_CHUNK).min(total_lines);
+
+        let mut end = search_hi - 1; // 默认在 MAX_CHUNK 处截断
+
+        // 优先在 heading 处切分
+        for &h in &heading_indices {
+            if h >= search_lo && h < search_hi {
+                end = h.saturating_sub(1); // heading 放到下一个 chunk
+                break;
+            }
+        }
+
+        // 边界保护：剩余行数不足 MIN_CHUNK 时合并到最后 chunk
+        if total_lines - end <= MIN_CHUNK && !chunks.is_empty() {
+            // 合并到最后 chunk
+            let last = chunks.last_mut().unwrap();
+            let old_end = last.end_line;
+            let new_content = lines[old_end + 1..total_lines].join("\n");
+            last.content.push_str("\n");
+            last.content.push_str(&new_content);
+            last.end_line = total_lines - 1;
+            break;
+        }
+
+        let chunk_lines = &lines[start..=end];
+        let first_line = chunk_lines.first().unwrap_or(&"");
+        let heading = if first_line.starts_with('#') {
+            Some(first_line.trim_start_matches('#').trim().to_string())
+        } else {
+            None
+        };
+
+        chunks.push(ChunkItem {
+            id: chunks.len(),
+            start_line: start,
+            end_line: end,
+            content: chunk_lines.join("\n"),
+            heading,
+        });
+
+        start = end + 1;
+    }
+
+    Json(json!({
+        "chunks": chunks,
+        "total_lines": total_lines,
+        "doc_id": id,
     })).into_response()
 }
 

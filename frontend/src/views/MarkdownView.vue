@@ -1,13 +1,13 @@
 <template>
   <div class="markdown-view">
     <!-- 加载骨架屏 -->
-    <div v-if="loading && !content" class="mdv-loading">
+    <div v-if="loading && allChunks.length === 0" class="mdv-loading">
       <div class="skeleton-header">
         <div class="skeleton-line w-40"></div>
         <div class="skeleton-line w-80"></div>
       </div>
       <div class="skeleton-body">
-        <div v-for="i in 8" :key="i" class="skeleton-line" :class="`w-${[100,85,90,70,95,60,88,75][i-1]}`"></div>
+        <div v-for="i in 8" :key="i" class="skeleton-line skeleton-w"></div>
       </div>
     </div>
 
@@ -19,11 +19,10 @@
 
     <!-- 内容区 -->
     <template v-else>
-      <!-- 正文区域 -->
       <div class="mdv-content">
         <MarkdownViewer
           :key="viewerKey"
-          :content="content"
+          :chunks="visibleChunks"
           :math-mode="mathMode"
           :load-images="loadImages"
           :show-source="showSource"
@@ -31,17 +30,26 @@
           :placeholder-images="!loadImages"
           trusted
         />
+        <!-- 底部哨兵元素（用于 IntersectionObserver） -->
+        <div ref="sentinelEl" class="mdv-sentinel">
+          <div v-if="loadingMore" class="mdv-loading-more">
+            <span class="loading-spinner"></span>
+            <span>加载更多...</span>
+          </div>
+          <div v-else-if="allLoaded" class="mdv-end">
+            — 已加载全部内容（共 {{ totalChunks }} 段，{{ totalLines }} 行） —
+          </div>
+        </div>
       </div>
 
-      <!-- ========== 右下角浮动区域 ========== -->
+      <!-- 右下角浮动区域 -->
       <div class="mdv-floatbar">
-        <!-- 分页控件（仅多页时显示） -->
-        <div v-if="showPagination" class="float-pagination">
-          <button class="float-btn" :disabled="currentPage <= 1" @click="prevPage" title="上一页">‹</button>
-          <button class="float-btn page-indicator" @click="showPageJump = !showPageJump" title="点击跳转页码">
-            {{ currentPage }}/{{ totalPages }}
-          </button>
-          <button class="float-btn" :disabled="currentPage >= totalPages" @click="nextPage" title="下一页">›</button>
+        <!-- 进度信息（替代分页） -->
+        <div class="float-progress" @click="tocOpen = !tocOpen" title="点击打开目录">
+          <span class="progress-text">{{ visibleChunks.length }}/{{ allChunks.length }} 段</span>
+          <span class="progress-bar-track">
+            <span class="progress-bar-fill" :style="{ width: progressPercent + '%' }"></span>
+          </span>
         </div>
 
         <!-- 主按钮 -->
@@ -58,20 +66,9 @@
           </button>
         </div>
       </div>
-
-      <!-- ========== 页码跳转弹窗 ========== -->
-      <div v-if="showPageJump" class="page-jump-overlay" @click.self="showPageJump = false">
-        <div class="page-jump-panel">
-          <label>跳转到第</label>
-          <input v-model.number="jumpPageInput" type="number" :min="1" :max="totalPages"
-            @keyup.enter="jumpToPage" @keyup.escape="showPageJump = false" ref="jumpInput" />
-          <label>页（共 {{ totalPages }} 页）</label>
-          <button class="mdv-btn" @click="jumpToPage">跳转</button>
-        </div>
-      </div>
     </template>
 
-    <!-- ========== 目录抽屉 ========== -->
+    <!-- 目录抽屉 -->
     <Transition name="drawer-slide">
       <div v-if="tocOpen" class="toc-overlay" @click.self="tocOpen = false">
         <div class="toc-drawer">
@@ -101,7 +98,7 @@
       </div>
     </Transition>
 
-    <!-- ========== 工具栏 Popover ========== -->
+    <!-- 工具栏 Popover -->
     <Teleport to="body">
       <Transition name="popover-fade">
         <div v-if="toolbarOpen" class="toolbar-overlay" @click.self="toolbarOpen = false">
@@ -149,51 +146,51 @@
 
 <script setup lang="ts">
 /**
- * MarkdownView — 沉浸式 Markdown 阅读器
+ * MarkdownView — 沉浸式 Markdown 阅读器（滚动增量加载版）
  *
- * 特性：
- * - 全屏宽阅读，无顶部工具栏
- * - 右下角浮动：翻页 + 目录 + 工具栏
- * - 目录由后端 API 提供，支持跨页跳转
- * - 图片默认占位符，点击加载单张
- * - 前端分页计算（后端只做行切片）
+ * 与旧版区别：
+ * - 去掉前端行数分页，改为后端按 heading 边界分块
+ * - 初始加载 2 个 chunk，滚动到底部自动加载更多
+ * - 每个 chunk 通过 MarkdownViewer 独立渲染并追加
+ * - 公式通过 requestIdleCallback 异步渲染
  */
-import { ref, computed, onMounted, watch, nextTick, defineAsyncComponent } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick, defineAsyncComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getMarkdown, getTOC } from '@/api/documents'
+import { getChunks, getTOC } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
-import type { TocItem, MarkdownResponse } from '@/types/document'
+import type { TocItem, ChunkInfo } from '@/types/document'
 
-// 懒加载 MarkdownViewer
 const MarkdownViewer = defineAsyncComponent(() =>
   import('@/components/MarkdownViewer.vue')
 )
 
-const LINES_PER_PAGE = 5000
+const INITIAL_CHUNKS = 2  // 初始加载前 2 个 chunk
 
 const route = useRoute()
 const router = useRouter()
 const { showError } = useToast()
 const { requireToken } = useRequireToken()
 
-// ── 内容状态 ──
-const content = ref('')
+// ── 状态 ──
+const allChunks = ref<ChunkInfo[]>([])
+const visibleCount = ref(INITIAL_CHUNKS)
 const loading = ref(false)
+const loadingMore = ref(false)
 const error = ref('')
 const highlight = ref('')
-const targetLine = ref<number | null>(null)
 const viewerKey = ref(0)
 
 // ── 元数据 ──
-const totalLength = ref(0)
 const totalLines = ref(0)
-const currentPage = ref(1)
-const linesReturned = ref(0)
 
-// ── 计算属性 ──
-const totalPages = computed(() => Math.max(1, Math.ceil(totalLines.value / LINES_PER_PAGE)))
-const showPagination = computed(() => totalPages.value > 1)
+// ── 计算 ──
+const visibleChunks = computed(() => allChunks.value.slice(0, visibleCount.value))
+const totalChunks = computed(() => allChunks.value.length)
+const allLoaded = computed(() => visibleCount.value >= allChunks.value.length)
+const progressPercent = computed(() =>
+  totalChunks.value > 0 ? Math.round((visibleCount.value / totalChunks.value) * 100) : 0
+)
 
 // ── 视图设置 ──
 const mathMode = ref<'none' | 'katex' | 'mathjax'>('katex')
@@ -203,82 +200,71 @@ const showSource = ref(false)
 // ── 浮动 UI ──
 const tocOpen = ref(false)
 const toolbarOpen = ref(false)
-const showPageJump = ref(false)
-const jumpPageInput = ref(1)
-const jumpInput = ref<HTMLInputElement | null>(null)
+const sentinelEl = ref<HTMLElement | null>(null)
 const tocListEl = ref<HTMLElement | null>(null)
 
 // ── 目录 ──
 const toc = ref<TocItem[]>([])
 const activeTocLine = ref<number | null>(null)
 
-// ===== 工具函数 =====
+// ── IntersectionObserver ──
+let observer: IntersectionObserver | null = null
 
-/** 加载某页内容 */
-async function loadPage(page: number) {
-  const id = parseInt(route.params.id as string)
-  loading.value = true
-  error.value = ''
-  try {
-    const res = await getMarkdown(id, {
-      line_start: (page - 1) * LINES_PER_PAGE,
-      line_count: LINES_PER_PAGE
-    })
-    applyContent(res)
-    currentPage.value = page
-  } catch (err: any) {
-    error.value = err?.message || '加载失败'
-    showError(error.value)
-  } finally {
-    loading.value = false
-  }
+function setupObserver() {
+  if (observer) observer.disconnect()
+  if (!sentinelEl.value) return
+
+  observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting && !allLoaded.value && !loadingMore.value) {
+          loadMoreChunks()
+        }
+      }
+    },
+    { rootMargin: '400px' } // 提前 400px 触发加载
+  )
+  observer.observe(sentinelEl.value)
 }
 
-/** 应用 API 响应到状态 */
-function applyContent(res: MarkdownResponse) {
-  content.value = res.content
-  totalLength.value = res.total_length
-  totalLines.value = res.total_lines
-  linesReturned.value = res.lines_returned
+async function loadMoreChunks() {
+  if (loadingMore.value || allLoaded.value) return
+  loadingMore.value = true
+  // 每次加载 3 个 chunk
+  const nextCount = Math.min(visibleCount.value + 3, allChunks.value.length)
+  visibleCount.value = nextCount
+  loadingMore.value = false
+  // 调整 observer（sentinel 可能因 DOM 变化需要重新绑定）
+  await nextTick()
+  setupObserver()
 }
 
-/** 首次加载 + 目录 */
+// ===== 加载 =====
+
 async function load() {
   const id = parseInt(route.params.id as string)
   if (!requireToken()) return
 
   loading.value = true
   error.value = ''
-
-  // 从查询参数中读取跳转目标行和高亮词
-  const tl = route.query.target_line
-  targetLine.value = tl ? parseInt(tl as string) || null : null
   highlight.value = (route.query.highlight as string) || ''
 
-  // 若指定了目标行，计算对应页
-  let startLine = 0
-  if (targetLine.value !== null) {
-    currentPage.value = Math.floor(targetLine.value / LINES_PER_PAGE) + 1
-    startLine = (currentPage.value - 1) * LINES_PER_PAGE
-  } else {
-    currentPage.value = 1
-  }
-
   try {
-    const [res, tocRes] = await Promise.all([
-      getMarkdown(id, { line_start: startLine, line_count: LINES_PER_PAGE }),
+    const [chunkRes, tocRes] = await Promise.all([
+      getChunks(id),
       getTOC(id).catch(() => null)
     ])
-    applyContent(res)
+
+    allChunks.value = chunkRes.chunks
+    totalLines.value = chunkRes.total_lines
+    visibleCount.value = Math.min(INITIAL_CHUNKS, chunkRes.chunks.length)
+
     if (tocRes) {
       toc.value = tocRes.toc
     }
+
     await nextTick()
-    // 如果是通过搜索跳转，滚动到目标位置
-    if (targetLine.value !== null) {
-      const relLine = targetLine.value - startLine
-      scrollToLineInView(relLine)
-    }
+    setupObserver()
   } catch (err: any) {
     error.value = err?.message || '加载失败'
     showError(error.value)
@@ -287,55 +273,25 @@ async function load() {
   }
 }
 
-// ===== 分页操作 =====
-
-function nextPage() {
-  if (currentPage.value < totalPages.value) {
-    loadPage(currentPage.value + 1)
-  }
-}
-
-function prevPage() {
-  if (currentPage.value > 1) {
-    loadPage(currentPage.value - 1)
-  }
-}
-
-function jumpToPage() {
-  const p = Math.max(1, Math.min(totalPages.value, jumpPageInput.value || 1))
-  if (p !== currentPage.value) {
-    loadPage(p)
-  }
-  showPageJump.value = false
-}
-
 // ===== 目录跳转 =====
 
-async function jumpToToc(item: TocItem) {
-  const targetPage = Math.floor(item.line / LINES_PER_PAGE) + 1
-  const curLineStart = (currentPage.value - 1) * LINES_PER_PAGE
-  const curLineEnd = curLineStart + linesReturned.value
-
-  if (item.line >= curLineStart && item.line < curLineEnd) {
-    // 同页：直接滚动
-    scrollToHeading(item.title)
-  } else {
-    // 跨页：加载目标页后再滚动
-    await loadPage(targetPage)
-    await nextTick()
-    scrollToHeading(item.title)
+function jumpToToc(item: TocItem) {
+  // 找到 item.line 所在的 chunk
+  const chunkIdx = allChunks.value.findIndex(c =>
+    item.line >= c.start_line && item.line <= c.end_line
+  )
+  if (chunkIdx >= 0) {
+    // 确保该 chunk 已加载
+    if (chunkIdx + 1 > visibleCount.value) {
+      visibleCount.value = Math.min(chunkIdx + 3, allChunks.value.length)
+      nextTick(() => {
+        scrollToHeading(item.title)
+      })
+    } else {
+      scrollToHeading(item.title)
+    }
   }
   tocOpen.value = false
-}
-
-function scrollToLineInView(relativeLine: number) {
-  const viewer = document.querySelector('.markdown-viewer')
-  if (!viewer || relativeLine < 0) return
-  const blocks = viewer.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, pre, blockquote, table')
-  const target = blocks[Math.min(relativeLine, blocks.length - 1)]
-  if (target) {
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
 }
 
 function scrollToHeading(title: string) {
@@ -358,47 +314,42 @@ function goBack() {
 }
 
 function triggerSearch() {
-  // 浏览器原生查找
   if (window.find) {
-    // 大多数浏览器
     window.find('')
   }
-  // 备用：dispatch Ctrl+F
   document.dispatchEvent(new KeyboardEvent('keydown', {
-    key: 'f',
-    ctrlKey: true,
-    metaKey: true,
-    bubbles: true
+    key: 'f', ctrlKey: true, metaKey: true, bubbles: true
   }))
   toolbarOpen.value = false
 }
 
 function reloadViewer() {
   viewerKey.value++
-  // 关闭工具栏
   toolbarOpen.value = false
 }
 
 function onLoadImagesChange() {
-  // 切换后重新渲染 MarkdownViewer
   viewerKey.value++
   toolbarOpen.value = false
 }
 
-// ===== 生命周期 =====
+// ===== 监听路由变化 =====
 
 watch(() => route.params.id, () => {
-  currentPage.value = 1
+  allChunks.value = []
+  visibleCount.value = INITIAL_CHUNKS
   viewerKey.value++
   error.value = ''
   load()
 })
 
-watch(() => [route.query.highlight, route.query.target_line], () => {
-  highlight.value = (route.query.highlight as string) || ''
-}, { immediate: false })
+// ===== 生命周期 =====
 
 onMounted(load)
+
+onBeforeUnmount(() => {
+  if (observer) observer.disconnect()
+})
 </script>
 
 <style scoped>
@@ -417,7 +368,7 @@ onMounted(load)
 /* ── 内容区 ── */
 .mdv-content {
   flex: 1;
-  padding: 40px 48px;
+  padding: 40px 48px 120px;
   max-width: 900px;
   margin: 0 auto;
   width: 100%;
@@ -425,19 +376,40 @@ onMounted(load)
   line-height: 1.8;
 }
 
-.mdv-content :deep(img) {
-  max-width: 100%;
-  height: auto;
-  border-radius: 4px;
+/* ── 底部哨兵/加载提示 ── */
+.mdv-sentinel {
+  min-height: 1px;
+  padding: 20px 0;
+  text-align: center;
 }
 
-.mdv-content :deep(pre) {
-  background: #f5f5f5;
-  padding: 16px;
-  border-radius: 8px;
-  overflow-x: auto;
+.mdv-loading-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-tertiary);
   font-size: 14px;
-  line-height: 1.6;
+}
+
+.loading-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.mdv-end {
+  color: var(--text-tertiary);
+  font-size: 13px;
+  padding: 10px;
 }
 
 /* ── 右下角浮动栏 ── */
@@ -451,16 +423,47 @@ onMounted(load)
   z-index: 100;
 }
 
-.float-pagination {
+.float-progress {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   background: rgba(255,255,255,0.95);
   backdrop-filter: blur(8px);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 4px;
+  padding: 6px 12px;
   box-shadow: 0 2px 12px rgba(0,0,0,0.1);
+  cursor: pointer;
+  transition: background 0.15s;
+  user-select: none;
+}
+
+.float-progress:hover {
+  background: rgba(245,245,245,0.95);
+}
+
+.progress-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.progress-bar-track {
+  display: inline-block;
+  width: 50px;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--primary);
+  border-radius: 2px;
+  transition: width 0.3s ease;
 }
 
 .float-actions {
@@ -492,80 +495,10 @@ onMounted(load)
   user-select: none;
 }
 
-.float-btn:hover:not(:disabled) {
-  background: var(--bg-secondary);
-  color: var(--text);
-}
+.float-btn:hover { background: var(--bg-secondary); color: var(--text); }
+.float-btn:active { transform: scale(0.95); }
 
-.float-btn:active:not(:disabled) {
-  transform: scale(0.95);
-}
-
-.float-btn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
-
-.float-btn.main-btn {
-  min-width: 38px;
-  height: 38px;
-}
-
-.page-indicator {
-  font-size: 13px;
-  font-weight: 600;
-  min-width: 44px;
-  padding: 0 6px;
-  color: var(--primary);
-  cursor: pointer;
-}
-
-/* ── 页码跳转弹窗 ── */
-.page-jump-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.3);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 200;
-}
-
-.page-jump-panel {
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 20px 24px;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.15);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-}
-
-.page-jump-panel input {
-  width: 70px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 14px;
-  text-align: center;
-}
-
-.mdv-btn {
-  padding: 6px 16px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--primary);
-  color: #fff;
-  cursor: pointer;
-  font-size: 14px;
-  transition: opacity 0.15s;
-}
-
-.mdv-btn:hover {
-  opacity: 0.9;
-}
+.float-btn.main-btn { min-width: 38px; height: 38px; }
 
 /* ── 骨架屏 ── */
 .mdv-loading {
@@ -576,9 +509,7 @@ onMounted(load)
   box-sizing: border-box;
 }
 
-.skeleton-header {
-  margin-bottom: 32px;
-}
+.skeleton-header { margin-bottom: 32px; }
 
 .skeleton-body {
   display: flex;
@@ -594,16 +525,10 @@ onMounted(load)
   border-radius: 4px;
 }
 
-.skeleton-line.w-40 { width: 40%; }
-.skeleton-line.w-60 { width: 60%; }
-.skeleton-line.w-70 { width: 70%; }
-.skeleton-line.w-75 { width: 75%; }
-.skeleton-line.w-80 { width: 80%; }
-.skeleton-line.w-85 { width: 85%; }
-.skeleton-line.w-88 { width: 88%; }
-.skeleton-line.w-90 { width: 90%; }
-.skeleton-line.w-95 { width: 95%; }
-.skeleton-line.w-100 { width: 100%; }
+.skeleton-w { width: 100%; }
+.skeleton-w:nth-child(2n) { width: 85%; }
+.skeleton-w:nth-child(3n) { width: 70%; }
+.skeleton-w:nth-child(5n) { width: 90%; }
 
 @keyframes skeleton-shimmer {
   0% { background-position: 200% 0; }
@@ -616,14 +541,22 @@ onMounted(load)
   padding: 80px 20px;
   color: var(--text-secondary);
 }
+.mdv-error p { margin-bottom: 16px; font-size: 16px; }
 
-.mdv-error p {
-  margin-bottom: 16px;
-  font-size: 16px;
+.mdv-btn {
+  padding: 6px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--primary);
+  color: #fff;
+  cursor: pointer;
+  font-size: 14px;
+  transition: opacity 0.15s;
 }
+.mdv-btn:hover { opacity: 0.9; }
 
 /* ==========================================
-   目录抽屉（右侧滑入）
+   目录抽屉
    ========================================== */
 
 .toc-overlay {
@@ -655,31 +588,15 @@ onMounted(load)
   flex-shrink: 0;
 }
 
-.toc-header h3 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-}
+.toc-header h3 { margin: 0; font-size: 16px; font-weight: 600; }
 
 .toc-close {
-  background: none;
-  border: none;
-  font-size: 20px;
-  cursor: pointer;
-  color: var(--text-secondary);
-  padding: 4px 8px;
-  border-radius: 4px;
+  background: none; border: none; font-size: 20px; cursor: pointer;
+  color: var(--text-secondary); padding: 4px 8px; border-radius: 4px;
 }
+.toc-close:hover { background: var(--bg-secondary); }
 
-.toc-close:hover {
-  background: var(--bg-secondary);
-}
-
-.toc-items {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px 0;
-}
+.toc-items { flex: 1; overflow-y: auto; padding: 8px 0; }
 
 .toc-item {
   display: flex;
@@ -694,258 +611,91 @@ onMounted(load)
   color: var(--text-secondary);
 }
 
-.toc-item:hover {
-  background: var(--bg-secondary);
-  color: var(--text);
-}
-
-.toc-item.toc-active {
-  border-left-color: var(--primary);
-  background: #f0f4ff;
-  color: var(--primary);
-  font-weight: 500;
-}
-
-.toc-item.toc-l1 {
-  padding-left: 20px;
-  font-weight: 500;
-}
-
-.toc-item.toc-l2 {
-  padding-left: 36px;
-  font-size: 13px;
-}
-
-.toc-item.toc-l3 {
-  padding-left: 52px;
-  font-size: 13px;
-  color: var(--text-tertiary);
-}
+.toc-item:hover { background: var(--bg-secondary); color: var(--text); }
+.toc-item.toc-active { border-left-color: var(--primary); background: #f0f4ff; color: var(--primary); font-weight: 500; }
+.toc-item.toc-l1 { padding-left: 20px; font-weight: 500; }
+.toc-item.toc-l2 { padding-left: 36px; font-size: 13px; }
+.toc-item.toc-l3 { padding-left: 52px; font-size: 13px; color: var(--text-tertiary); }
 
 .toc-dot {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: currentColor;
-  flex-shrink: 0;
+  width: 4px; height: 4px; border-radius: 50%; background: currentColor; flex-shrink: 0;
 }
 
 .toc-title {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-.toc-empty {
-  padding: 40px 20px;
-  text-align: center;
-  color: var(--text-tertiary);
-  font-size: 14px;
-}
+.toc-empty { padding: 40px 20px; text-align: center; color: var(--text-tertiary); font-size: 14px; }
 
-/* 抽屉动画 */
-.drawer-slide-enter-active,
-.drawer-slide-leave-active {
-  transition: all 0.25s ease;
-}
-
-.drawer-slide-enter-from,
-.drawer-slide-leave-to {
-  opacity: 0;
-}
-
-.drawer-slide-enter-from .toc-drawer,
-.drawer-slide-leave-to .toc-drawer {
-  transform: translateX(100%);
-}
+.drawer-slide-enter-active, .drawer-slide-leave-active { transition: all 0.25s ease; }
+.drawer-slide-enter-from, .drawer-slide-leave-to { opacity: 0; }
+.drawer-slide-enter-from .toc-drawer, .drawer-slide-leave-to .toc-drawer { transform: translateX(100%); }
 
 /* ==========================================
    工具栏 Popover
    ========================================== */
 
 .toolbar-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.2);
-  z-index: 500;
-  display: flex;
-  justify-content: flex-end;
-  align-items: flex-end;
-  padding: 24px;
+  position: fixed; inset: 0; background: rgba(0,0,0,0.2); z-index: 500;
+  display: flex; justify-content: flex-end; align-items: flex-end; padding: 24px;
 }
 
 .toolbar-popover {
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.12);
-  padding: 12px;
-  min-width: 220px;
+  background: #fff; border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.12); padding: 12px; min-width: 220px;
 }
 
-.toolbar-item {
-  padding: 4px 0;
-}
+.toolbar-item { padding: 4px 0; }
 
 .tb-action {
-  display: block;
-  width: 100%;
-  padding: 8px 12px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  cursor: pointer;
-  font-size: 14px;
-  text-align: left;
-  color: var(--text);
-  transition: background 0.12s;
-  font-family: inherit;
+  display: block; width: 100%; padding: 8px 12px; border: none; border-radius: 8px;
+  background: transparent; cursor: pointer; font-size: 14px; text-align: left;
+  color: var(--text); transition: background 0.12s; font-family: inherit;
 }
+.tb-action:hover { background: var(--bg-secondary); }
 
-.tb-action:hover {
-  background: var(--bg-secondary);
-}
-
-.tb-divider {
-  border: none;
-  border-top: 1px solid var(--border);
-  margin: 6px 0;
-}
+.tb-divider { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
 
 .tb-label {
-  display: block;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-tertiary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 6px;
-  padding: 0 12px;
+  display: block; font-size: 12px; font-weight: 600; color: var(--text-tertiary);
+  text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; padding: 0 12px;
 }
 
 .tb-radio-group {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 0 12px;
+  display: flex; flex-direction: column; gap: 2px; padding: 0 12px;
 }
 
 .tb-radio-group label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 14px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  cursor: pointer;
-  color: var(--text-secondary);
-  transition: all 0.12s;
+  display: flex; align-items: center; gap: 6px; font-size: 14px; padding: 6px 8px;
+  border-radius: 6px; cursor: pointer; color: var(--text-secondary); transition: all 0.12s;
 }
-
-.tb-radio-group label:hover {
-  background: var(--bg-secondary);
-  color: var(--text);
-}
-
-.tb-radio-group label.active {
-  color: var(--primary);
-  font-weight: 500;
-}
-
-.tb-radio-group input[type="radio"] {
-  accent-color: var(--primary);
-}
+.tb-radio-group label:hover { background: var(--bg-secondary); color: var(--text); }
+.tb-radio-group label.active { color: var(--primary); font-weight: 500; }
+.tb-radio-group input[type="radio"] { accent-color: var(--primary); }
 
 .tb-checkbox {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  padding: 6px 12px;
-  border-radius: 6px;
-  cursor: pointer;
-  color: var(--text-secondary);
-  transition: all 0.12s;
+  display: flex; align-items: center; gap: 8px; font-size: 14px; padding: 6px 12px;
+  border-radius: 6px; cursor: pointer; color: var(--text-secondary); transition: all 0.12s;
 }
+.tb-checkbox:hover { background: var(--bg-secondary); color: var(--text); }
+.tb-checkbox input[type="checkbox"] { accent-color: var(--primary); }
 
-.tb-checkbox:hover {
-  background: var(--bg-secondary);
-  color: var(--text);
-}
-
-.tb-checkbox input[type="checkbox"] {
-  accent-color: var(--primary);
-}
-
-/* Popover 动画 */
-.popover-fade-enter-active,
-.popover-fade-leave-active {
-  transition: opacity 0.15s;
-}
-
-.popover-fade-enter-from,
-.popover-fade-leave-to {
-  opacity: 0;
-}
+.popover-fade-enter-active, .popover-fade-leave-active { transition: opacity 0.15s; }
+.popover-fade-enter-from, .popover-fade-leave-to { opacity: 0; }
 
 /* ==========================================
    响应式
    ========================================== */
 
 @media (max-width: 768px) {
-  .mdv-content {
-    padding: 20px 20px 100px;
-  }
-
-  .mdv-floatbar {
-    bottom: 16px;
-    right: 16px;
-    gap: 6px;
-  }
-
-  .float-btn {
-    min-width: 40px;
-    height: 40px;
-    font-size: 14px;
-  }
-
-  .float-btn.main-btn {
-    min-width: 42px;
-    height: 42px;
-  }
-
-  .page-indicator {
-    font-size: 13px;
-    min-width: 48px;
-  }
-
-  .toc-drawer {
-    width: 280px;
-  }
-
-  .toolbar-overlay {
-    padding: 12px;
-  }
-
-  .toolbar-popover {
-    min-width: 200px;
-  }
+  .mdv-content { padding: 20px 20px 100px; }
+  .mdv-floatbar { bottom: 16px; right: 12px; gap: 6px; flex-direction: column-reverse; }
 }
 
 @media (max-width: 480px) {
-  .mdv-content {
-    padding: 16px 14px 90px;
-  }
-
-  .mdv-floatbar {
-    bottom: 12px;
-    right: 12px;
-  }
-
-  .float-btn {
-    min-width: 44px;
-    height: 44px;
-  }
+  .mdv-content { padding: 16px 14px 90px; }
+  .mdv-floatbar { bottom: 12px; right: 8px; }
+  .float-progress { padding: 4px 10px; }
+  .progress-bar-track { width: 40px; }
 }
 </style>
