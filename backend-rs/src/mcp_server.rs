@@ -82,13 +82,15 @@ impl McpServer {
             }),
             json!({
                 "name": "read_markdown",
-                "description": "Read document Markdown content (paginated), or extract a specific section by heading.",
+                "description": "Read document Markdown content (line-based pagination, won't break document structure), or extract a specific section by heading.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "id": {"type": "integer"},
-                        "page": {"type": "integer", "default": 1},
-                        "page_size": {"type": "integer", "default": 5000},
+                        "line_start": {"type": "integer", "default": 0, "description": "Starting line number (0-indexed). Alternative to page."},
+                        "line_count": {"type": "integer", "default": 5000, "description": "Number of lines to return. Alternative to page_size."},
+                        "page": {"type": "integer", "default": 1, "description": "Page number (1-indexed, legacy). Use line_start instead for precise control."},
+                        "page_size": {"type": "integer", "default": 5000, "description": "Lines per page (legacy). Use line_count instead."},
                         "section": {"type": "string", "description": "Extract the section matching this heading (case-insensitive), e.g. 'Introduction'. Takes precedence over pagination."},
                         "sections": {"type": "array", "items": {"type": "string"}, "description": "Extract multiple sections by heading names."}
                     },
@@ -445,8 +447,19 @@ impl McpServer {
 
     async fn tool_read_markdown(&self, args: &Value) -> String {
         let doc_id = args["id"].as_i64().unwrap_or(0);
-        let page = args["page"].as_i64().unwrap_or(1).max(1) as usize;
-        let page_size = args["page_size"].as_i64().unwrap_or(5000).max(1) as usize;
+
+        // 解析行范围参数：优先 line_start/line_count，回退 page/page_size
+        let line_start = args["line_start"].as_i64().map(|v| v.max(0) as usize)
+            .unwrap_or_else(|| {
+                // 兼容旧参数：page → line_start
+                let page = args["page"].as_i64().unwrap_or(1).max(1) as usize;
+                let page_size = args["page_size"].as_i64().unwrap_or(5000).max(1) as usize;
+                (page - 1) * page_size
+            });
+        let line_count = args["line_count"].as_i64().map(|v| v.max(1) as usize)
+            .unwrap_or_else(|| {
+                args["page_size"].as_i64().unwrap_or(5000).max(1) as usize
+            });
 
         // 解析章节过滤目标（section 与 sections 合并）
         let mut targets: Vec<String> = Vec::new();
@@ -507,12 +520,14 @@ impl McpServer {
             }));
         }
 
-        // 分页模式
-        let total_pages = (content.len() + page_size - 1) / page_size.max(1);
-        let total_pages = total_pages.max(1);
-        let start = (page - 1) * page_size;
-        let page_content = if start < content.len() {
-            content.chars().skip(start).take(page_size).collect::<String>()
+        // 分页模式（行切片）
+        let total_lines = content.lines().count();
+        let lines: Vec<&str> = content.lines().collect();
+        let actual_start = line_start.min(lines.len());
+        let actual_end = (actual_start + line_count).min(lines.len());
+        let lines_returned = actual_end - actual_start;
+        let page_content = if lines_returned > 0 {
+            lines[actual_start..actual_end].join("\n")
         } else {
             String::new()
         };
@@ -520,8 +535,10 @@ impl McpServer {
         Self::pretty(&json!({
             "id": doc_id,
             "title": title,
-            "page": page,
-            "total_pages": total_pages,
+            "line_start": actual_start,
+            "line_count": line_count,
+            "lines_returned": lines_returned,
+            "total_lines": total_lines,
             "content": page_content,
         }))
     }
