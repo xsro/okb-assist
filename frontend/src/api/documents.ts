@@ -3,7 +3,9 @@ import type {
   Document,
   SearchResult,
   SearchResultList,
-  SimilarTitleGroup
+  SimilarTitleGroup,
+  TocItem,
+  MarkdownResponse
 } from '@/types/document'
 
 // ── 文档 CRUD ───────────────────────────────────────────
@@ -168,22 +170,21 @@ export function replacePdf(id: number, file: File) {
   return apiUpload<Document>(`/assist/api/documents/${id}/pdf/`, fd)
 }
 
-/** 获取 Markdown 内容 */
+/** 获取 Markdown 内容（行切片） */
 export function getMarkdown(
   id: number,
-  options: { page?: number; page_size?: number; full?: boolean } = {}
+  options: { line_start?: number; line_count?: number; full?: boolean } = {}
 ) {
-  const { page = 1, page_size = 100000, full = false } = options
-  return apiGet<{
-    content: string
-    total_pages: number
-    page: number
-    total_length: number
-  }>(`/assist/api/documents/${id}/markdown/`, {
-    page,
-    page_size,
-    full: full ? 1 : 0
-  })
+  const { line_start, line_count, full = false } = options
+  const params: Record<string, string | number> = { full: full ? 1 : 0 }
+  if (line_start !== undefined) params.line_start = line_start
+  if (line_count !== undefined) params.line_count = line_count
+  return apiGet<MarkdownResponse>(`/assist/api/documents/${id}/markdown/`, params)
+}
+
+/** 获取文档目录（标题 + 行号） */
+export function getTOC(id: number) {
+  return apiGet<{ toc: TocItem[] }>(`/assist/api/documents/${id}/toc/`)
 }
 
 /** 保存 Markdown */

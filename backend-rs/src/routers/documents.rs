@@ -128,6 +128,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/:id/image/:filename", get(get_image_from_zip))
         .route("/assist/api/documents/:id/markdown/", get(get_markdown).put(update_markdown))
         .route("/assist/api/documents/:id/markdown", get(get_markdown).put(update_markdown))
+        .route("/assist/api/documents/:id/toc/", get(get_toc))
+        .route("/assist/api/documents/:id/toc", get(get_toc))
         .route("/assist/api/documents/:id/parse-result/", post(upload_parse_result))
         .route("/assist/api/documents/:id/parse-result", post(upload_parse_result))
         .route("/assist/api/documents/:id/pdf/", get(get_pdf).post(replace_pdf).head(check_pdf_exists))
@@ -1550,67 +1552,25 @@ async fn by_doi(
     }
 }
 
-/// 将 Markdown 按段落分页
-fn split_into_pages(content: &str, max_chars: usize) -> Vec<String> {
-    // 使用字符数而非字节数判断，避免 UTF-8 多字节字符切片 panic
-    let char_count: usize = content.chars().count();
-    if char_count <= max_chars {
-        return vec![content.to_string()];
-    }
+/// 从 Markdown 文本中提取目录（标题 + 行号）
+fn extract_toc(content: &str) -> Vec<Value> {
+    let mut toc = Vec::new();
+    let re = regex::Regex::new(r"^(#{1,6})\s+(.+)$").unwrap();
 
-    let mut pages = Vec::new();
-    let mut current_char_idx = 0;
-
-    // 构建字符索引到字节偏移的映射，用于安全切片
-    let char_offsets: Vec<usize> = content.char_indices().map(|(i, _)| i).collect();
-    let content_len = content.len();
-
-    while current_char_idx < char_count {
-        if current_char_idx + max_chars >= char_count {
-            let byte_start = char_offsets[current_char_idx];
-            pages.push(content[byte_start..].to_string());
-            break;
-        }
-
-        let search_start_char = if max_chars >= 500 {
-            current_char_idx + max_chars - 500
-        } else {
-            current_char_idx
-        };
-        let search_end_char = (current_char_idx + max_chars).min(char_count);
-
-        let byte_start = char_offsets[current_char_idx];
-        let byte_search_start = char_offsets[search_start_char];
-        let byte_search_end = char_offsets.get(search_end_char).copied().unwrap_or(content_len);
-
-        let chunk = &content[byte_search_start..byte_search_end];
-
-        if let Some(break_byte_offset) = chunk.rfind("\n\n") {
-            let split_byte = byte_search_start + break_byte_offset;
-            pages.push(content[byte_start..split_byte].to_string());
-            // 找到 split_byte 之后第一个字符的索引
-            let remainder = &content[split_byte..];
-            let skip = remainder.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
-            let remainder_start = split_byte + skip;
-            // 计算跳过的字符数
-            let skipped = content[byte_start..remainder_start].chars().count();
-            current_char_idx += skipped;
-        } else if let Some(break_byte_offset) = chunk.rfind('\n') {
-            let split_byte = byte_search_start + break_byte_offset;
-            pages.push(content[byte_start..split_byte].to_string());
-            let remainder = &content[split_byte..];
-            let skip = remainder.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
-            let remainder_start = split_byte + skip;
-            let skipped = content[byte_start..remainder_start].chars().count();
-            current_char_idx += skipped;
-        } else {
-            let byte_end = char_offsets.get(current_char_idx + max_chars).copied().unwrap_or(content_len);
-            pages.push(content[byte_start..byte_end].to_string());
-            current_char_idx += max_chars;
+    for (line_idx, line) in content.lines().enumerate() {
+        if let Some(caps) = re.captures(line) {
+            let level = caps.get(1).unwrap().as_str().len();
+            let title = caps.get(2).unwrap().as_str().trim().to_string();
+            if !title.is_empty() {
+                toc.push(json!({
+                    "level": level,
+                    "title": title,
+                    "line": line_idx,
+                }));
+            }
         }
     }
-
-    pages
+    toc
 }
 
 /// 重写 Markdown 中的图片路径
@@ -1640,12 +1600,19 @@ fn restore_image_paths(content: &str, doc_id: i64) -> String {
 
 #[derive(Debug, Deserialize)]
 pub struct MarkdownQuery {
-    pub page: Option<i64>,
-    pub page_size: Option<i64>,
+    pub line_start: Option<i64>,
+    pub line_count: Option<i64>,
     #[serde(default, deserialize_with = "de_flexible_bool")]
     pub full: Option<bool>,
 }
 
+/// GET /assist/api/documents/:id/markdown
+///
+/// 按行范围读取 Markdown 内容。
+/// 参数：
+///   - line_start: 起始行号（0-indexed，默认 0）
+///   - line_count: 返回行数（默认 -1 即到末尾）
+///   - full: 忽略其他参数，返回全部内容
 async fn get_markdown(
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
@@ -1669,29 +1636,73 @@ async fn get_markdown(
     };
 
     let content = rewrite_image_paths(&content, id);
+    let total_length = content.len();
+    let total_lines = content.lines().count();
 
     if params.full.unwrap_or(false) {
-        let len = content.len();
         return Json(json!({
             "content": content,
-            "page": 1,
-            "total_pages": 1,
-            "total_length": len,
+            "total_length": total_length,
+            "total_lines": total_lines,
+            "line_start": 0,
+            "line_count": total_lines as i64,
+            "lines_returned": total_lines as i64,
         })).into_response();
     }
 
-    let page_size = params.page_size.unwrap_or(100000).max(1) as usize;
-    let pages = split_into_pages(&content, page_size);
-    let total_pages = pages.len();
-    let page = params.page.unwrap_or(1).clamp(1, total_pages as i64) as usize;
-    let len = content.len();
+    let line_start = params.line_start.unwrap_or(0).max(0) as usize;
+    let line_count = params.line_count.unwrap_or(-1);
+
+    let lines: Vec<&str> = content.lines().collect();
+    let actual_start = line_start.min(lines.len());
+    let actual_end = if line_count < 0 {
+        lines.len()
+    } else {
+        (actual_start + line_count as usize).min(lines.len())
+    };
+    let lines_returned = actual_end - actual_start;
+    let slice = if lines_returned > 0 {
+        lines[actual_start..actual_end].join("\n")
+    } else {
+        String::new()
+    };
 
     Json(json!({
-        "content": pages.get(page - 1).cloned().unwrap_or_default(),
-        "page": page,
-        "total_pages": total_pages,
-        "total_length": len,
+        "content": slice,
+        "total_length": total_length,
+        "total_lines": total_lines as i64,
+        "line_start": actual_start,
+        "line_count": line_count,
+        "lines_returned": lines_returned as i64,
     })).into_response()
+}
+
+/// GET /assist/api/documents/:id/toc
+///
+/// 从完整 Markdown 文件中提取目录（标题 + 行号）。
+async fn get_toc(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+) -> Response {
+    match fetch_doc(&db, id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    }
+
+    let md_path = paths::get_markdown_path(&settings, id);
+    if !std::path::Path::new(&md_path).exists() {
+        return (StatusCode::NOT_FOUND, Json(json!({"detail": "Markdown 文件尚未生成"}))).into_response();
+    }
+
+    let content = match std::fs::read_to_string(&md_path) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
+    };
+
+    let toc = extract_toc(&content);
+    Json(json!({"toc": toc})).into_response()
 }
 
 #[derive(Debug, Deserialize)]

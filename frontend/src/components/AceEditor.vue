@@ -29,7 +29,7 @@
         <div ref="editorEl" class="ace-editor-container"></div>
       </div>
       <div v-if="preview || splitView" class="ace-preview" :class="{ 'ace-side-by-side': splitView }">
-        <MarkdownViewer :content="splitView ? visibleContent : contentRef" />
+        <MarkdownViewer :content="splitView ? visibleContent : contentRef" trusted />
       </div>
     </div>
 

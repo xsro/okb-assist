@@ -139,7 +139,7 @@
     </div>
 
     <!-- Markdown 渲染 -->
-    <div v-if="doc.has_markdown" class="section">
+    <div v-if="hasMarkdown" class="section">
       <div class="section-header">
         <h3>全文</h3>
         <div class="page-nav">
@@ -148,7 +148,7 @@
           <button :disabled="currentPage >= totalPages" @click="currentPage++; loadMarkdown()">下一页</button>
         </div>
       </div>
-      <MarkdownViewer :content="markdownContent" />
+      <MarkdownViewer :content="markdownContent" trusted />
     </div>
 
     <!-- 操作按钮 -->
@@ -164,25 +164,27 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { getDocument, getMarkdown, getFileAlias } from '@/api/documents'
+import { getDocument, getFileAlias } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import { useResponsive } from '@/composables/useResponsive'
 import StatusBadge from '@/components/StatusBadge.vue'
-import MarkdownViewer from '@/components/MarkdownViewer.vue'
 import type { Document } from '@/types/document'
 
 const route = useRoute()
 const { showError } = useToast()
 const { requireToken } = useRequireToken()
+// isMobile 注入（仅响应式需要）
 const { isMobile } = useResponsive()
 
 const doc = ref<Document | null>(null)
-const markdownContent = ref('')
-const currentPage = ref(1)
-const totalPages = ref(1)
+
+const hasMarkdown = computed(() => {
+  return !!(doc.value?.md_size && doc.value.md_size > 0)
+})
+
 const openingPdf = ref(false)
 
 function formatSize(bytes: number | null): string {
@@ -210,27 +212,15 @@ async function openPdf() {
   }
 }
 
+/** 加载文档详情 */
 async function load() {
   const id = parseInt(route.params.id as string)
   if (!requireToken()) return
+
   try {
     doc.value = await getDocument(id)
-    if (doc.value.has_markdown) {
-      await loadMarkdown()
-    }
   } catch {
     showError('加载失败')
-  }
-}
-
-async function loadMarkdown() {
-  const id = parseInt(route.params.id as string)
-  try {
-    const res = await getMarkdown(id, currentPage.value)
-    markdownContent.value = res.content
-    totalPages.value = res.total_pages
-  } catch {
-    showError('加载 Markdown 失败')
   }
 }
 

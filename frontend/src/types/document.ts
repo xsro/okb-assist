@@ -58,6 +58,22 @@ export interface SearchParams {
   page_size?: number
 }
 
+export interface TocItem {
+  level: number
+  title: string
+  line: number
+}
+
+/** Markdown 内容响应（行切片 API） */
+export interface MarkdownResponse {
+  content: string
+  total_length: number
+  total_lines: number
+  line_start: number
+  line_count: number
+  lines_returned: number
+}
+
 export interface SimilarTitleGroup {
   groups: {
     normalized_title: string
