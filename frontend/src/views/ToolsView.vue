@@ -106,10 +106,10 @@
               {{ r.title }}
             </router-link>
             <span class="doc-id">ID: {{ r.id }}</span>
-            <span class="result-actions">
+            <div class="result-actions">
               <router-link :to="{ name: 'detail', params: { id: r.id } }" class="btn btn-sm btn-outline">详情</router-link>
-              <router-link :to="{ name: 'markdown', params: { id: r.id }, query: { highlight: grepPattern } }" class="btn btn-sm btn-outline">Markdown</router-link>
-            </span>
+              <router-link :to="{ name: 'markdown', params: { id: r.id }, query: { highlight: grepPattern, target_line: r.first_line } }" class="btn btn-sm btn-outline">查看</router-link>
+            </div>
           </div>
           <p v-if="r.snippet" class="snippet" v-html="highlightSnippet(r.snippet, grepPattern)" />
         </div>

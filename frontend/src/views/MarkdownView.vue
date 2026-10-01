@@ -309,6 +309,16 @@ async function jumpToToc(item: TocItem) {
   tocOpen.value = false
 }
 
+function scrollToLineInView(relativeLine: number) {
+  const viewer = document.querySelector('.markdown-viewer')
+  if (!viewer || relativeLine < 0) return
+  const blocks = viewer.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, pre, blockquote, table')
+  const target = blocks[Math.min(relativeLine, blocks.length - 1)]
+  if (target) {
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+}
+
 function scrollToHeading(title: string) {
   const viewer = document.querySelector('.markdown-viewer')
   if (!viewer) return
@@ -316,7 +326,7 @@ function scrollToHeading(title: string) {
   for (const h of headings) {
     if (h.textContent?.trim() === title) {
       h.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      activeTocLine.value = title // 简化为标题文字作为标识
+      activeTocLine.value = title
       return
     }
   }
@@ -365,9 +375,9 @@ watch(() => route.params.id, () => {
   load()
 })
 
-watch(() => route.query.highlight, (val) => {
-  highlight.value = (val as string) || ''
-}, { immediate: true })
+watch(() => [route.query.highlight, route.query.target_line], () => {
+  highlight.value = (route.query.highlight as string) || ''
+}, { immediate: false })
 
 onMounted(load)
 </script>

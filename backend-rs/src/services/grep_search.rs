@@ -230,45 +230,44 @@ fn parse_grep_output(output: &str, limit: usize) -> Vec<serde_json::Value> {
     let mut results = Vec::new();
     let mut current_file = String::new();
     let mut current_lines: Vec<String> = Vec::new();
+    let mut current_first_line: i64 = 0;
     let mut seen_files: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
-    for line in output.lines() {
-        if line == "--" {
-            if !current_file.is_empty() && !current_lines.is_empty() {
-                if let Some(doc_id) = extract_doc_id(&current_file) {
-                    if !seen_files.contains(&doc_id) {
-                        seen_files.insert(doc_id);
-                        results.push(serde_json::json!({
-                            "id": doc_id,
-                            "content": current_lines.join("\n"),
-                            "file_path": current_file,
-                        }));
-                        if results.len() >= limit {
-                            return results;
-                        }
-                    }
+    let flush = |results: &mut Vec<_>, current_file: &str, current_lines: &[String], first_line: i64, seen_files: &mut std::collections::HashSet<i64>, limit: usize| {
+        if !current_file.is_empty() && !current_lines.is_empty() {
+            if let Some(doc_id) = extract_doc_id(current_file) {
+                if !seen_files.contains(&doc_id) {
+                    seen_files.insert(doc_id);
+                    results.push(serde_json::json!({
+                        "id": doc_id,
+                        "content": current_lines.join("\n"),
+                        "file_path": current_file,
+                        "first_line": first_line,
+                    }));
                 }
             }
+        }
+    };
+
+    for line in output.lines() {
+        if results.len() >= limit {
+            break;
+        }
+
+        if line == "--" {
+            flush(&mut results, &current_file, &current_lines, current_first_line, &mut seen_files, limit);
             current_lines.clear();
             continue;
         }
 
         if let Some(caps) = parse_grep_line(line) {
             if !current_file.is_empty() && caps.0 != current_file && !current_lines.is_empty() {
-                if let Some(doc_id) = extract_doc_id(&current_file) {
-                    if !seen_files.contains(&doc_id) {
-                        seen_files.insert(doc_id);
-                        results.push(serde_json::json!({
-                            "id": doc_id,
-                            "content": current_lines.join("\n"),
-                            "file_path": current_file,
-                        }));
-                        if results.len() >= limit {
-                            return results;
-                        }
-                    }
-                }
+                flush(&mut results, &current_file, &current_lines, current_first_line, &mut seen_files, limit);
                 current_lines.clear();
+            }
+            if current_file != caps.0 || current_lines.is_empty() {
+                // 新文件的第一条匹配，记录行号
+                current_first_line = caps.1.parse::<i64>().unwrap_or(0);
             }
             current_file = caps.0;
             current_lines.push(caps.2);
@@ -278,17 +277,7 @@ fn parse_grep_output(output: &str, limit: usize) -> Vec<serde_json::Value> {
     }
 
     // 处理最后一块
-    if !current_file.is_empty() && !current_lines.is_empty() {
-        if let Some(doc_id) = extract_doc_id(&current_file) {
-            if !seen_files.contains(&doc_id) {
-                results.push(serde_json::json!({
-                    "id": doc_id,
-                    "content": current_lines.join("\n"),
-                    "file_path": current_file,
-                }));
-            }
-        }
-    }
+    flush(&mut results, &current_file, &current_lines, current_first_line, &mut seen_files, limit);
 
     results.truncate(limit);
     results

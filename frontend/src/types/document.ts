@@ -38,6 +38,8 @@ export interface SearchResult {
   title: string
   score: number
   snippet: string | null
+  /** grep 搜索时返回首个匹配行号 */
+  first_line?: number
 }
 
 export interface SearchResultList {
