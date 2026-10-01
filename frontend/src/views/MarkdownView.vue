@@ -182,6 +182,7 @@ const content = ref('')
 const loading = ref(false)
 const error = ref('')
 const highlight = ref('')
+const targetLine = ref<number | null>(null)
 const viewerKey = ref(0)
 
 // ── 元数据 ──
@@ -241,25 +242,43 @@ function applyContent(res: MarkdownResponse) {
   linesReturned.value = res.lines_returned
 }
 
-/** 首次加载（第 1 页 + 目录） */
+/** 首次加载 + 目录 */
 async function load() {
   const id = parseInt(route.params.id as string)
   if (!requireToken()) return
 
   loading.value = true
   error.value = ''
-  currentPage.value = 1
+
+  // 从查询参数中读取跳转目标行和高亮词
+  const tl = route.query.target_line
+  targetLine.value = tl ? parseInt(tl as string) || null : null
+  highlight.value = (route.query.highlight as string) || ''
+
+  // 若指定了目标行，计算对应页
+  let startLine = 0
+  if (targetLine.value !== null) {
+    currentPage.value = Math.floor(targetLine.value / LINES_PER_PAGE) + 1
+    startLine = (currentPage.value - 1) * LINES_PER_PAGE
+  } else {
+    currentPage.value = 1
+  }
 
   try {
     const [res, tocRes] = await Promise.all([
-      getMarkdown(id, { line_start: 0, line_count: LINES_PER_PAGE }),
-      getTOC(id).catch(() => null) // TOC 失败不阻塞正文
+      getMarkdown(id, { line_start: startLine, line_count: LINES_PER_PAGE }),
+      getTOC(id).catch(() => null)
     ])
     applyContent(res)
     if (tocRes) {
       toc.value = tocRes.toc
     }
     await nextTick()
+    // 如果是通过搜索跳转，滚动到目标位置
+    if (targetLine.value !== null) {
+      const relLine = targetLine.value - startLine
+      scrollToLineInView(relLine)
+    }
   } catch (err: any) {
     error.value = err?.message || '加载失败'
     showError(error.value)

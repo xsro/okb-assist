@@ -78,39 +78,87 @@ const rendered = computed(() => {
 
   const mode = props.mathMode || 'katex'
   const loadImages = props.loadImages ?? true
-  const keyword = props.highlight?.trim() || ''
   const trusted = props.trusted !== false // 默认信任
 
-  // 1. 检查缓存
+  // 检查缓存
   const cacheKey = getCacheKey()
   const cached = renderCache.get(cacheKey)
   if (cached !== undefined) {
     return cached
   }
 
-  // 2. 渲染管线
+  // 2. 渲染管线（不含高亮，高亮在渲染后通过 innerHTML 替换）
   const html = renderPipeline(content, mode, loadImages, trusted)
 
-  // 3. 关键词高亮（在 DOM 就绪时通过 mutationObserver 做，此处跳过）
-  //    但如果 keyword 存在，先做一次简单高亮（正式高亮在 mounted 后通过 DOM 操作做更精确的）
-  let result = html
-  if (keyword && !trusted) {
-    // 注意：非信任模式的高亮用 escape + 正则，仅保底
-    try {
-      const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const regex = new RegExp(`(${escaped})`, 'gi')
-      result = html.replace(regex, '<mark class="search-highlight">$1</mark>')
-    } catch { /* ignore */ }
-  }
-
-  // 4. 写入缓存（限制大小）
+  // 3. 写入缓存
   if (renderCache.size >= CACHE_MAX) {
     const firstKey = renderCache.keys().next().value
     if (firstKey !== undefined) renderCache.delete(firstKey)
   }
-  renderCache.set(cacheKey, result)
+  renderCache.set(cacheKey, html)
 
-  return result
+  return html
+})
+
+// ===== 渲染后关键词高亮（直接替换 innerHTML） =====
+let highlightApplied = false
+
+function applyHighlightToDOM(keyword: string) {
+  if (!viewerEl.value || !keyword) return
+  try {
+    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const regex = new RegExp(`(${escaped})`, 'gi')
+    viewerEl.value.innerHTML = viewerEl.value.innerHTML.replace(
+      regex,
+      '<mark class="search-highlight">$1</mark>'
+    )
+    highlightApplied = true
+  } catch { /* ignore */ }
+}
+
+function clearHighlight() {
+  if (!viewerEl.value) return
+  viewerEl.value.querySelectorAll('.search-highlight').forEach(el => {
+    const parent = el.parentNode
+    if (parent) {
+      parent.replaceChild(document.createTextNode(el.textContent || ''), el)
+      parent.normalize()
+    }
+  })
+  highlightApplied = false
+}
+
+// 内容渲染完成后执行高亮
+watch(rendered, () => {
+  nextTick(() => {
+    const keyword = props.highlight?.trim() || ''
+    if (keyword) {
+      applyHighlightToDOM(keyword)
+    } else if (highlightApplied) {
+      clearHighlight()
+    }
+  })
+})
+
+// highlight 关键词变化时直接更新 DOM（不重新渲染）
+watch(() => props.highlight, (newKw, oldKw) => {
+  if (!viewerEl.value) return
+  // 清除旧高亮
+  if (highlightApplied) {
+    clearHighlight()
+  }
+  // 应用新高亮
+  if (newKw?.trim()) {
+    // 需要等 DOM 稳定
+    nextTick(() => applyHighlightToDOM(newKw.trim()))
+  }
+})
+
+onMounted(() => {
+  const keyword = props.highlight?.trim() || ''
+  if (keyword) {
+    nextTick(() => applyHighlightToDOM(keyword))
+  }
 })
 
 // ===== 渲染管线（分离为独立函数便于测试） =====
@@ -231,6 +279,7 @@ function afterRender() {
 
   // 在信任模式下，使用 DOM 操作来做精确关键词高亮
   const keyword = props.highlight?.trim() || ''
+  console.debug('[MarkdownViewer] afterRender called, highlight:', keyword)
   if (keyword) {
     applyHighlight(viewerEl.value, keyword)
     // 滚动到第一个高亮
@@ -300,18 +349,13 @@ function handleViewerClick(e: MouseEvent) {
 
 // ===== 生命周期 =====
 onMounted(() => {
-  afterRender()
-  // 添加图片点击委托
+  // 内容加载后通过 watch 触发高亮，无需额外初始化
   viewerEl.value?.addEventListener('click', handleViewerClick)
 })
 
 onBeforeUnmount(() => {
   renderCache.clear()
   viewerEl.value?.removeEventListener('click', handleViewerClick)
-  if (highlightObserver) {
-    highlightObserver.disconnect()
-    highlightObserver = null
-  }
 })
 </script>
 
