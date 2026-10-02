@@ -281,7 +281,7 @@ watch(() => props.highlight, (kw) => {
   if (!viewerEl.value) return
   clearHighlight()
   if (kw?.trim()) nextTick(() => applyHighlight(kw.trim()))
-})
+}, { immediate: true })
 
 // ===== MathJax =====
 watch(() => [props.content, props.chunks, props.mathMode], async () => {

@@ -410,6 +410,8 @@ async function load() {
   loading.value = true
   error.value = ''
   highlight.value = (route.query.highlight as string) || ''
+  const targetLineParam = route.query.target_line
+  const targetLine = targetLineParam ? parseInt(targetLineParam as string) || null : null
 
   try {
     const [chunkRes, tocRes] = await Promise.all([
@@ -419,14 +421,33 @@ async function load() {
 
     allChunks.value = chunkRes.chunks
     totalLines.value = chunkRes.total_lines
-    visibleCount.value = Math.min(INITIAL_CHUNKS, chunkRes.chunks.length)
 
     if (tocRes) {
       toc.value = tocRes.toc
     }
 
+    // 如果指定了 target_line，跳到对应行所在的 chunk
+    if (targetLine !== null) {
+      const chunkIdx = allChunks.value.findIndex(c =>
+        targetLine >= c.start_line && targetLine <= c.end_line
+      )
+      if (chunkIdx >= 0) {
+        visibleCount.value = Math.min(chunkIdx + 3, allChunks.value.length)
+      } else {
+        visibleCount.value = Math.min(INITIAL_CHUNKS, chunkRes.chunks.length)
+      }
+    } else {
+      visibleCount.value = Math.min(INITIAL_CHUNKS, chunkRes.chunks.length)
+    }
+
     await nextTick()
     setupObserver()
+
+    // 跳转到目标行（如果指定了）
+    if (targetLine !== null) {
+      await nextTick()
+      scrollToLine(targetLine)
+    }
   } catch (err: any) {
     error.value = err?.message || '加载失败'
     showError(error.value)
@@ -466,6 +487,30 @@ function scrollToHeading(title: string) {
       activeTocLine.value = title
       return
     }
+  }
+}
+
+/** 滚动到文档中的指定行号 */
+function scrollToLine(targetLine: number) {
+  // 从 TOC 中找到目标行之前的最近 heading
+  let bestHeading: TocItem | null = null
+  for (const item of toc.value) {
+    if (item.line <= targetLine) {
+      bestHeading = item
+    } else {
+      break
+    }
+  }
+
+  if (bestHeading) {
+    scrollToHeading(bestHeading.title)
+    return
+  }
+
+  // 无 heading 时滚到文档开头
+  const viewer = document.querySelector('.markdown-viewer')
+  if (viewer) {
+    viewer.firstElementChild?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 }
 
