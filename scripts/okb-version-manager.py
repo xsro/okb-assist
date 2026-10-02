@@ -8,6 +8,7 @@ okb-version-manager.py — 管理 OKB-Assist 多版本
   {script} install latest-artifact|la [选项]   从 Actions Artifact 安装最新版
   {script} install latest-release|lr [选项]     从 GitHub Release 安装最新版
   {script} bin [版本]                            列出/查询已安装版本
+  {script} self-update|su                       从 GitHub 更新自身脚本
 
 选项:
   -p, --proxy PROXY          设置代理 (如 http://127.0.0.1:7899)
@@ -29,8 +30,9 @@ Token 来源 (la 需要):
 
 目录结构:
   ~/.okb/cache/               下载的压缩包缓存
-  ~/.okb/{git_hash}/          按提交 SHA(artifact) 解压的目录
-  ~/.okb/{tag_name}/          按 Release 标签名解压的目录
+  ~/.okb/cache/               下载的压缩包缓存
+  ~/.okb/versions/{git_hash}/  按提交 SHA(artifact) 解压的目录
+  ~/.okb/versions/{tag_name}/  按 Release 标签名解压的目录
 """
 
 import argparse
@@ -41,6 +43,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -49,6 +52,7 @@ from pathlib import Path
 REPO = "xsro/okb-assist"
 OKB_DIR = Path.home() / ".okb"
 CACHE_DIR = OKB_DIR / "cache"
+VERSIONS_DIR = OKB_DIR / "versions"
 RETRY_COUNT = 3
 RETRY_DELAY = 10  # 秒
 
@@ -460,10 +464,10 @@ def download_release_asset(download_url: str, output_path: Path,
 
 def get_installed_versions() -> list[dict]:
     versions = []
-    if not OKB_DIR.exists():
+    if not VERSIONS_DIR.exists():
         return versions
-    for item in OKB_DIR.iterdir():
-        if item.is_dir() and item.name not in ("cache",):
+    for item in VERSIONS_DIR.iterdir():
+        if item.is_dir():
             binary = find_binary_in_dir(item)
             versions.append({
                 "version": item.name,
@@ -522,7 +526,7 @@ def cmd_install_artifact():
     artifact = get_latest_artifact_info(token)
     head_sha = artifact["head_sha"]
     short_sha = head_sha[:12] if len(head_sha) > 12 else head_sha
-    version_dir = OKB_DIR / short_sha
+    version_dir = VERSIONS_DIR / short_sha
     cache_path = CACHE_DIR / f"{short_sha}.zip"
     repo = getattr(args, 'repo', REPO)
     download_url = (
@@ -583,7 +587,7 @@ def cmd_install_release():
     release = get_latest_release_info()
     tag = release["tag"]
     asset = release["asset"]
-    version_dir = OKB_DIR / tag
+    version_dir = VERSIONS_DIR / tag
     cache_path = CACHE_DIR / asset["name"]
     dl_timeout = getattr(args, 'timeout', None)
 
@@ -624,6 +628,69 @@ def cmd_install_release():
         warn(f"未在 {version_dir}/ 中找到二进制文件 (预期名称: {BINARY_NAME})")
 
 
+# ── 命令: self-update ──
+
+def cmd_self_update():
+    """从 GitHub 下载最新版本脚本并替换自身。"""
+    repo = getattr(args, 'repo', REPO)
+    script_name = Path(__file__).name
+    raw_url = (f"https://raw.githubusercontent.com/{repo}/main/scripts/"
+               f"{script_name}")
+
+    info(f"检查更新: {raw_url}")
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="okb-self-update-"))
+    tmp_path = tmp_dir / script_name
+
+    ensure_dirs()
+    _download_with_retry(raw_url, tmp_path, timeout=60)
+
+    # 验证 Python 语法
+    try:
+        import py_compile
+        py_compile.compile(str(tmp_path), doraise=True)
+    except py_compile.PyCompileError as e:
+        err(f"下载的脚本语法错误: {e}")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        sys.exit(1)
+
+    self_path = Path(__file__).resolve()
+    local_content = self_path.read_bytes() if self_path.exists() else b""
+    new_content = tmp_path.read_bytes()
+
+    if local_content == new_content:
+        ok("已是最新版本，无需更新。")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return
+
+    print(f"\n  当前: {self_path}")
+    print(f"  来源: {raw_url}")
+    print(f"  新旧差异: {fmt_size(abs(len(new_content) - len(local_content)))}")
+    print()
+
+    if not confirm("确认更新自身脚本？[Y/n]"):
+        info("已取消。")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return
+
+    try:
+        self_path.write_bytes(new_content)
+        self_path.chmod(self_path.stat().st_mode | stat.S_IEXEC
+                        | stat.S_IXGRP | stat.S_IXOTH)
+    except OSError as e:
+        err(f"写入失败: {e}")
+        err(f"请手动复制 {tmp_path} 到 {self_path}")
+        sys.exit(1)
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    new_size = fmt_size(new_content)
+    ok("更新完成！")
+    print(f"\n  路径: {self_path}")
+    print(f"  大小: {new_size}")
+    print(f"\n  提示: 部分改动可能需要重新运行本命令才能生效。\n")
+
+
 # ── 入口 ──
 
 def main():
@@ -635,8 +702,8 @@ def main():
         epilog=(
             "目录结构:\n"
             f"  {OKB_DIR}/cache/              下载的压缩包缓存\n"
-            f"  {OKB_DIR}/{{git_hash}}/        按提交 SHA 解压的目录\n"
-            f"  {OKB_DIR}/{{tag_name}}/        按 Release 标签解压的目录\n\n"
+            f"  {OKB_DIR}/versions/{{git_hash}}/  按提交 SHA 解压的目录\n"
+            f"  {OKB_DIR}/versions/{{tag_name}}/  按 Release 标签解压的目录\n\n"
             "Token 来源 (la 需要):\n"
             "  1. 环境变量 GH_TOKEN\n"
             "  2. 环境变量 GITHUB_TOKEN\n"
@@ -672,6 +739,10 @@ def main():
         "version", nargs="?",
         help="版本标识 (留空则列出所有已安装版本)")
 
+    subparsers.add_parser(
+        "self-update", aliases=["su"],
+        help="从 GitHub 更新自身脚本")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -686,6 +757,8 @@ def main():
             cmd_install_release()
     elif args.command == "bin":
         cmd_bin(args.version)
+    elif args.command in ("self-update", "su"):
+        cmd_self_update()
 
 
 if __name__ == "__main__":

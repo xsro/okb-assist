@@ -91,6 +91,42 @@ jobs:
           name: okb-assist-linux-x64
           path: okb-assist-linux-x64
 
+  build-frontend:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install
+        working-directory: frontend
+
+      - name: Build frontend
+        run: pnpm run build
+        working-directory: frontend
+
+      - name: Package frontend dist
+        run: zip -r ../frontend-dist.zip dist
+        working-directory: frontend
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-dist.zip
+
   build-raspberry-pi-arm64:
     runs-on: ubuntu-22.04-arm
     steps:
@@ -126,6 +162,7 @@ jobs:
     name: Create GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
+      - build-frontend
       - build-macos-arm64
       - build-win-x64
       - build-linux-x64
