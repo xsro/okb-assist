@@ -457,30 +457,38 @@ async function load() {
 
     // 跳转到目标行（如果指定了）
     if (targetLine !== null) {
-      // 等 MarkdownViewer 渲染完成后再滚动
       const doScroll = () => {
+        const viewer = document.querySelector('.markdown-viewer')
+        if (!viewer) return
+
+        // 方案 1: 从 TOC 中找到 targetLine 之前的最近 heading，精确匹配
         let bestTitle: string | null = null
         for (const item of toc.value) {
-          if (item.line <= targetLine) {
-            bestTitle = item.title
-          } else break
+          if (item.line <= targetLine) bestTitle = item.title
+          else break
         }
         if (bestTitle) {
-          const viewer = document.querySelector('.markdown-viewer')
-          if (viewer) {
-            const headings = viewer.querySelectorAll('h1, h2, h3, h4, h5, h6')
-            for (const h of headings) {
-              const t = h.textContent?.trim() || ''
-              if (t === bestTitle || t.includes(bestTitle) || bestTitle.includes(t)) {
-                h.scrollIntoView({ behavior: 'instant', block: 'start' })
-                activeTocLine.value = bestTitle
-                break
-              }
+          const headings = viewer.querySelectorAll('h1, h2, h3, h4, h5, h6')
+          for (const h of headings) {
+            if (h.textContent?.trim() === bestTitle) {
+              ;(h as HTMLElement).scrollIntoView({ behavior: 'instant', block: 'start' })
+              activeTocLine.value = bestTitle
+              return
             }
           }
         }
+
+        // 方案 2: 滚动到目标行所在的 chunk 容器开头
+        const chunkIdx = allChunks.value.findIndex(c =>
+          targetLine >= c.start_line && targetLine <= c.end_line
+        )
+        if (chunkIdx >= 0) {
+          const chunkEl = viewer.querySelector(`[data-chunk-id="${chunkIdx}"]`) as HTMLElement
+          if (chunkEl) {
+            chunkEl.scrollIntoView({ behavior: 'instant', block: 'start' })
+          }
+        }
       }
-      // 延迟一帧确保 chunks 渲染完毕
       requestAnimationFrame(() => requestAnimationFrame(doScroll))
     }
   } catch (err: any) {
