@@ -8,7 +8,8 @@ update-okb.py — 从 GitHub Actions 下载最新构建并替换 data/ 中的二
 选项:
   -y, --yes       跳过确认，直接更新（非交互模式）
   -k, --keep      保留旧版本备份为 .bak
-  -p, --proxy     设置代理，如 http://127.0.0.1:7899
+  -p, --proxy     设置代理，如 http://127.0.0.1:7899（仅下载时使用）
+  --all-proxy     所有 gh 命令均使用代理（含查询 artifact 列表）
   -h, --help      显示帮助
 
 环境变量:
@@ -71,26 +72,32 @@ def fmt_size(bytes_: int) -> str:
         return f"{bytes_} B"
 
 
-def run_gh(args: list[str], timeout: int = 120) -> str:
-    """执行 gh CLI 命令，返回 stdout。"""
+def run_gh(cmd_args: list[str], timeout: int = 120, use_proxy: bool | None = None) -> str:
+    """执行 gh CLI 命令，返回 stdout。
+
+    use_proxy: True=强制使用代理, False=不用, None=跟随 --all-proxy 标志
+    """
     env = os.environ.copy()
     proxy = proxy_url()
     if proxy:
-        env.setdefault("HTTPS_PROXY", proxy)
+        if use_proxy is None:
+            use_proxy = getattr(args, 'all_proxy', False)
+        if use_proxy:
+            env.setdefault("HTTPS_PROXY", proxy)
     try:
         result = subprocess.run(
-            ["gh"] + args,
+            ["gh"] + cmd_args,
             capture_output=True, text=True, timeout=timeout,
             env=env,
         )
         if result.returncode != 0:
             err_msg = result.stderr.strip() or f"exit code {result.returncode}"
-            raise RuntimeError(f"gh 命令失败: gh {' '.join(args)}\n  {err_msg}")
+            raise RuntimeError(f"gh 命令失败: gh {' '.join(cmd_args)}\n  {err_msg}")
         return result.stdout.strip()
     except FileNotFoundError:
         raise RuntimeError("gh 未安装，请先安装 GitHub CLI: https://cli.github.com")
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"gh 命令超时 (>{timeout}s): {' '.join(args)}")
+        raise RuntimeError(f"gh 命令超时 (>{timeout}s): {' '.join(cmd_args)}")
 
 
 def proxy_url() -> str | None:
@@ -127,10 +134,15 @@ def check_dependencies():
             err("请安装 GitHub CLI: https://cli.github.com")
         sys.exit(1)
 
-    # 验证 gh 已认证
+    # 验证 gh 已认证（注意：不设代理，因为这是本地凭据检查）
     try:
-        run_gh(["auth", "status"], timeout=10)
-    except RuntimeError:
+        result = subprocess.run(
+            ["gh", "auth", "status"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip())
+    except (FileNotFoundError, RuntimeError):
         err("gh 未认证，请先运行: gh auth login")
         sys.exit(1)
 
@@ -173,53 +185,97 @@ def get_latest_artifact() -> dict:
     return artifact
 
 
-def download_artifact(artifact_id: int, output_dir: Path) -> Path:
-    """下载 artifact zip 到 output_dir，返回 zip 路径。"""
-    info("下载中 ... (可能较慢，请耐心等待)")
-    proxy = proxy_url()
-    if proxy:
-        info(f"使用代理: {proxy}")
+def get_gh_token() -> str:
+    """通过 gh auth status --show-token 获取 GitHub API token。
 
+    注意：不设任何代理环境变量，token 读取是本地操作。
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "status", "--show-token"],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+        # 输出在 stderr，格式 "✓ Token: xxx"
+        for line in result.stderr.splitlines():
+            if "Token:" in line:
+                token = line.split("Token:")[-1].strip()
+                if token:
+                    return token
+        raise RuntimeError("未找到 Token")
+    except FileNotFoundError:
+        raise RuntimeError("gh 未安装，请先安装 GitHub CLI: https://cli.github.com")
+    except subprocess.CalledProcessError:
+        raise RuntimeError("无法获取 GitHub token，请先运行: gh auth login")
+
+
+def _do_curl_download(curl_cmd: list[str], timeout: int) -> None:
+    """执行 curl 下载，统一异常处理。"""
+    try:
+        subprocess.run(curl_cmd, capture_output=True, text=True, timeout=timeout, check=True)
+    except FileNotFoundError:
+        raise RuntimeError("curl 未安装，请先安装 curl")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("下载超时")
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.strip()
+        raise RuntimeError(f"下载失败: {stderr[:200]}")
+
+
+def download_artifact(artifact_id: int, output_dir: Path) -> Path:
+    """下载 artifact zip 到 output_dir，返回 zip 路径。
+
+    用 curl 替代 gh api 下载，以获得更好的代理兼容性。
+    若设了代理但下载失败，自动回退到直连。
+    """
+    info("下载中 ... (可能较慢，请耐心等待)")
+
+    download_url = f"https://api.github.com/repos/{REPO}/actions/artifacts/{artifact_id}/zip"
     zip_path = output_dir / f"{ARTIFACT_NAME}.zip"
 
+    # 获取 token（不走代理，纯本地操作）
+    token = get_gh_token()
+
+    def build_cmd(use_proxy: bool) -> list[str]:
+        cmd = ["curl", "-sSfL"]
+        if use_proxy:
+            p = proxy_url()
+            if p:
+                cmd += ["-x", p]
+        cmd += [
+            "-H", f"Authorization: Bearer {token}",
+            "-o", str(zip_path),
+            download_url,
+        ]
+        return cmd
+
+    proxy = proxy_url()
     for attempt in range(1, RETRY_COUNT + 1):
         if attempt > 1:
             warn(f"重试第 {attempt} 次 ...")
             time.sleep(RETRY_DELAY)
 
+        # 第一轮尝试：用代理下载
+        if proxy:
+            info(f"使用代理: {proxy}")
+            try:
+                _do_curl_download(build_cmd(True), timeout=30)
+                if zip_path.stat().st_size > 1000:
+                    break
+            except RuntimeError as e:
+                warn(f"代理下载失败: {e}")
+                info("回退到直连下载 ...")
+                proxy = None  # 后续重试走直连
+                # 这轮直接用直连重试（不递增 attempt）
+                continue
+
+        # 直连下载
         try:
-            download_url = f"repos/{REPO}/actions/artifacts/{artifact_id}/zip"
-            raw = run_gh(["api", download_url], timeout=300)
+            _do_curl_download(build_cmd(False), timeout=120)
         except RuntimeError as e:
             if attempt < RETRY_COUNT:
-                warn(f"下载失败: {e}")
+                warn(f"直连下载失败: {e}")
                 continue
             raise
-
-        # gh api 返回二进制数据，需要写入文件
-        # 使用 subprocess 直接输出到文件
-        try:
-            env = os.environ.copy()
-            proxy = proxy_url()
-            if proxy:
-                env.setdefault("HTTPS_PROXY", proxy)
-            with open(zip_path, "wb") as f:
-                subprocess.run(
-                    ["gh", "api", download_url],
-                    stdout=f, stderr=subprocess.PIPE,
-                    timeout=300, env=env, check=True,
-                )
-        except subprocess.CalledProcessError as e:
-            stderr = e.stderr.decode() if e.stderr else ""
-            if attempt < RETRY_COUNT:
-                warn(f"下载失败: {stderr[:200]}")
-                continue
-            raise RuntimeError(f"下载失败: {stderr[:200]}")
-        except subprocess.TimeoutExpired:
-            if attempt < RETRY_COUNT:
-                warn("下载超时")
-                continue
-            raise RuntimeError("下载超时")
 
         # 检查文件大小
         if zip_path.stat().st_size > 1000:
@@ -360,7 +416,9 @@ def main():
     )
     parser.add_argument("-y", "--yes", action="store_true", help="跳过确认，直接更新")
     parser.add_argument("-k", "--keep", action="store_true", help="保留旧版本备份为 .bak")
-    parser.add_argument("-p", "--proxy", help="设置代理，如 http://127.0.0.1:7899")
+    parser.add_argument("-p", "--proxy", help="设置代理，如 http://127.0.0.1:7899（仅下载时使用）")
+    parser.add_argument("--all-proxy", action="store_true", default=False,
+                        help="所有 gh 命令均使用代理（含查询 artifact 列表）")
     args = parser.parse_args()
 
     # ── 前置检查 ──
