@@ -198,7 +198,7 @@ fn create_app(
         .merge(routers::admin::router())
         .merge(routers::config::router())
         .merge(routers::openapi::router())
-        .route("/assist/mcp/stream", post(mcp_server::mcp_stream_handler))
+        .route("/assist/mcp/stream", post(mcp_server::mcp_stream_handler).options(mcp_server::mcp_options_handler))
         .route("/assist/file/:filename", get(serve_file_alias))
         .route("/assist/api/auth/check", get(auth_check_handler))
         .route("/", get(root_redirect))

@@ -8,7 +8,7 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
 |---------|------|------|
 | `grep_search` | 全文搜索（基于 grep，轻量快速），支持分页与上下文截断 | `query: str`, `limit: int = 10`, `max_results: int`, `page: int = 1`, `offset: int = 0`, `context: int = 2`, `max_context_chars: int = 500`, `doc_ids: str`, `algorithm: str = "full"`, `regex: bool = true`, `journal: str`, `year_start: int`, `year_end: int` |
 | `search_info` | 搜索文献元数据（中英文），支持分页、字段过滤与年份/类型过滤 | `query: str`, `limit: int = 10`, `max_results: int`, `page: int = 1`, `offset: int = 0`, `year_from: int`, `year_to: int`, `doc_type: str`, `fields: list[str]` |
-| `read_markdown` | 读取文献 Markdown 内容（行切片分页），或按标题提取指定章节 | `id: int`, `line_start: int = 0`, `line_count: int = 5000`, `page: int (legacy)`, `page_size: int (legacy)`, `section: str`, `sections: list[str]` |
+| `read_markdown` | 读取文献 Markdown 内容（行切片分页），或按标题提取指定章节 | `id: int`, `line_start: int = 0`, `line_count: int = 5000`, `section: str`, `sections: list[str]` |
 | `get_document_info` | 获取文献详细信息 | `id: int` |
 | `list_documents` | 搜索/列出文献，支持字段过滤 | `query: str`, `status: str`, `doc_type: str`, `page: int`, `page_size: int = 20`, `limit: int`, `fields: list[str]` |
 | `get_document_abstract` | 获取文献摘要 | `id: int` |
@@ -27,15 +27,6 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
 - **上下文截断**：`grep_search` 的 `max_context_chars`（默认 500）限制每条结果 `content` 的字符数，设为 `0` 不截断。
 - **章节提取**：`read_markdown` 的 `section`（单个标题）或 `sections`（多个标题数组）可按标题提取章节，不区分大小写，支持子串匹配（如 `"Intro"` 可匹配 `"Introduction"`），并自动包含其子章节；提供后优先于分页。未匹配到章节时返回 `error`，并在 `available_sections` 中给出顶层标题供参考。
 - **统一错误格式**：工具出错时返回 `{"error": {"code": "...", "message": "..."}}`，常见错误码：`invalid_argument`、`not_found`。
-
-## 可用资源
-
-| URI | 内容 |
-|-----|------|
-| `okb://documents/{doc_id}` | 文档详情 JSON |
-| `okb://documents/{doc_id}/markdown` | 文档 Markdown 全文 |
-
----
 
 ## 认证配置
 
@@ -318,12 +309,7 @@ curl http://192.168.1.100:5001/assist/api/admin/services/status
 curl -s -o /dev/null -w "%{http_code}\n" http://192.168.1.100:5001/assist/mcp/stream \
   -H "Authorization: Bearer <token>"
 
-# SSE 端点（无 token 应返回401；带 token 返回 SSE 事件流）
-curl -s -N http://192.168.1.100:5001/assist/mcp/sse \
-  -H "Authorization: Bearer <token>"
-```
-
-> 注意：Streamable HTTP 端点为精确路径 `/assist/mcp/stream`，末尾不要加斜杠；SSE 端点为 `/assist/mcp/sse`。
+> 注意：Streamable HTTP 端点为精确路径 `/assist/mcp/stream`，末尾不要加斜杠。
 
 ### 3. 使用 MCP Inspector 测试
 
@@ -333,10 +319,23 @@ cargo run
 # 记下服务地址（默认 http://localhost:5001）
 ```
 
-然后在浏览器中打开 MCP Inspector，将端点 URL 设置为：
+运行 `npx @modelcontextprotocol/inspector` 命令，
+然后在浏览器中打开 MCP Inspector，将servers选项卡的端点 URL 设置为：
 
 ```
 http://localhost:5001/assist/mcp/stream
+```
+
+设置完成后配置文件` ~/.mcp-inspector/mcp.json`大致变成：
+
+```json
+"local": {
+  "type": "streamable-http",
+  "url": "http://127.0.0.1:5001/assist/mcp/stream"
+  "headers": {
+    "Authorization": "Bearer we-network-control"
+  }
+}
 ```
 
 ---
@@ -432,7 +431,4 @@ http://192.168.1.100:5001/assist/tools
 - 检查 Rust 工具链：`cargo --version`
 - 检查端口 5001 是否被占用
 
-### SSE 消息端点404
 
-- 确认使用正确的端点路径：Streamable HTTP 为 `/assist/mcp/stream`，SSE 为 `/assist/mcp`
-- 重启服务后重试

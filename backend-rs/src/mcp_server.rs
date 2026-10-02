@@ -3,13 +3,16 @@
 //! 提供与 Python 版 `app/mcp_server.py` 一致的 MCP 工具集，
 //! 以及 Streamable HTTP JSON-RPC 端点（`/assist/mcp/stream`）。
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::extract::ConnectInfo;
 use axum::extract::Extension;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
 use sqlx::Row;
+use tracing::{debug, info, warn};
 
 use crate::config::Settings;
 use crate::database::Database;
@@ -23,6 +26,9 @@ const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, year, doi, s
      keywords, abstract, category, doc_type, language, title_en, authors_en, \
      keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
      progress, qdrant_collection, vector_db_id, created_at, updated_at";
+
+/// 分页 offset 上限（防止恶意大 offset 导致全表扫描）。
+const MAX_OFFSET: i64 = 10000;
 
 pub struct McpServer {
     db: Arc<Database>,
@@ -38,14 +44,14 @@ impl McpServer {
         vec![
             json!({
                 "name": "grep_search",
-                "description": "Full-text search of document content (grep-based, lightweight and fast). No vector database required, supports regex. Supports pagination via page/offset and context truncation.",
+                "description": "Full-text search of document content (grep-based, lightweight and fast). No vector database required, supports regex. Supports pagination via page/offset (alias: page/offset for backward compat; max_results is alias for limit) and context truncation.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Search keywords (supports regex)"},
                         "limit": {"type": "integer", "default": 10, "description": "Results per page (alias: max_results)"},
                         "max_results": {"type": "integer", "default": 10, "description": "Results per page (alias for limit)"},
-                        "page": {"type": "integer", "default": 1, "description": "Page number (1-based)"},
+                        "page": {"type": "integer", "default": 1, "description": "Page number (1-based). Use offset for precise control."},
                         "offset": {"type": "integer", "default": 0, "description": "Zero-based result offset (overrides page when provided)"},
                         "context": {"type": "integer", "default": 2, "description": "Number of context lines before/after each match"},
                         "max_context_chars": {"type": "integer", "default": 500, "description": "Maximum characters per result content (0 = no truncation)"},
@@ -61,14 +67,14 @@ impl McpServer {
             }),
             json!({
                 "name": "search_info",
-                "description": "Search document metadata (title, authors, journal, keywords, abstract, DOI, etc.), supports Chinese and English. Supports pagination, field filtering and year/type filters.",
+                "description": "Search document metadata (title, authors, journal, keywords, abstract, DOI, etc.), supports Chinese and English. Supports pagination via page/offset (alias: max_results for limit), field filtering and year/type filters.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string"},
                         "limit": {"type": "integer", "default": 10, "description": "Results per page (alias: max_results)"},
                         "max_results": {"type": "integer", "default": 10, "description": "Results per page (alias for limit)"},
-                        "page": {"type": "integer", "default": 1, "description": "Page number (1-based)"},
+                        "page": {"type": "integer", "default": 1, "description": "Page number (1-based). Use offset for precise control."},
                         "offset": {"type": "integer", "default": 0, "description": "Zero-based result offset (overrides page when provided)"},
                         "year_from": {"type": "integer", "default": 0, "description": "Filter: minimum publication year"},
                         "year_to": {"type": "integer", "default": 0, "description": "Filter: maximum publication year"},
@@ -87,10 +93,8 @@ impl McpServer {
                     "type": "object",
                     "properties": {
                         "id": {"type": "integer"},
-                        "line_start": {"type": "integer", "default": 0, "description": "Starting line number (0-indexed). Alternative to page."},
-                        "line_count": {"type": "integer", "default": 5000, "description": "Number of lines to return. Alternative to page_size."},
-                        "page": {"type": "integer", "default": 1, "description": "Page number (1-indexed, legacy). Use line_start instead for precise control."},
-                        "page_size": {"type": "integer", "default": 5000, "description": "Lines per page (legacy). Use line_count instead."},
+                        "line_start": {"type": "integer", "default": 0, "description": "Starting line number (0-indexed)."},
+                        "line_count": {"type": "integer", "default": 5000, "description": "Number of lines to return."},
                         "section": {"type": "string", "description": "Extract the section matching this heading (case-insensitive), e.g. 'Introduction'. Takes precedence over pagination."},
                         "sections": {"type": "array", "items": {"type": "string"}, "description": "Extract multiple sections by heading names."}
                     },
@@ -157,18 +161,82 @@ impl McpServer {
         ]
     }
 
+    /// 前置校验：验证必需的字符串参数不为空，返回 `Ok(value)` 或 `Err(error_response)`。
+    fn validate_required_string(args: &Value, key: &str) -> Result<String, Value> {
+        args.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                json!({
+                    "isError": true,
+                    "content": [{"type": "text", "text": Self::err("invalid_argument", &format!("缺少必需参数: {}", key))}]
+                })
+            })
+    }
+
+    /// 前置校验：验证必需的整数参数 > 0，返回 `Ok(value)` 或 `Err(error_response)`。
+    fn validate_required_i64(args: &Value, key: &str) -> Result<i64, Value> {
+        args.get(key)
+            .and_then(|v| v.as_i64())
+            .filter(|v| *v > 0)
+            .ok_or_else(|| {
+                json!({
+                    "isError": true,
+                    "content": [{"type": "text", "text": Self::err("invalid_argument", &format!("缺少必需的参数或值无效: {}", key))}]
+                })
+            })
+    }
+
     pub async fn call_tool(&self, name: &str, args: &Value) -> Value {
+        // 前置校验：必填参数在进入工具前检查
+        macro_rules! check_required_str {
+            ($key:expr) => {
+                match Self::validate_required_string(args, $key) {
+                    Err(e) => return e,
+                    Ok(v) => v,
+                }
+            };
+        }
+        macro_rules! check_required_id {
+            () => {
+                match Self::validate_required_i64(args, "id") {
+                    Err(e) => return e,
+                    Ok(v) => v,
+                }
+            };
+        }
+
         let text = match name {
-            "grep_search" => self.tool_grep_search(args).await,
-            "search_info" => self.tool_search_info(args).await,
-            "read_markdown" => self.tool_read_markdown(args).await,
-            "get_document_info" => self.tool_get_document_info(args).await,
+            "grep_search" => {
+                let _query = check_required_str!("query");
+                self.tool_grep_search(args).await
+            }
+            "search_info" => {
+                let _query = check_required_str!("query");
+                self.tool_search_info(args).await
+            }
+            "read_markdown" => {
+                let _id = check_required_id!();
+                self.tool_read_markdown(args).await
+            }
+            "get_document_info" => {
+                let _id = check_required_id!();
+                self.tool_get_document_info(args).await
+            }
             "list_documents" => self.tool_list_documents(args).await,
-            "get_document_abstract" => self.tool_get_document_abstract(args).await,
+            "get_document_abstract" => {
+                let _id = check_required_id!();
+                self.tool_get_document_abstract(args).await
+            }
             "get_stats" => self.tool_get_stats().await,
             "list_doc_types" => self.tool_list_doc_types().await,
-            "get_toc" => self.tool_get_toc(args).await,
+            "get_toc" => {
+                let _id = check_required_id!();
+                self.tool_get_toc(args).await
+            }
             _ => {
+                warn!(tool = %name, "Unknown tool called");
                 return json!({
                     "isError": true,
                     "content": [{"type": "text", "text": format!("Unknown tool: {}", name)}]
@@ -231,7 +299,9 @@ impl McpServer {
         Self::pretty(&json!({"error": {"code": code, "message": message}}))
     }
 
-    /// 解析分页参数，返回 `(offset, limit)`。`offset` 优先于 `page`；`limit` 兼容 `max_results` 别名。
+    /// 解析分页参数，返回 `(offset, limit)`。
+    /// `offset` 优先于 `page`；`limit` 兼容 `max_results` 别名。
+    /// `offset` 上限为 `MAX_OFFSET`，超出时返回 `(MAX_OFFSET, limit)` 并记录警告。
     fn parse_pagination(args: &Value, default_limit: i64, max_limit: i64) -> (i64, i64) {
         let limit = args["limit"]
             .as_i64()
@@ -241,7 +311,13 @@ impl McpServer {
         let offset = args["offset"].as_i64().unwrap_or_else(|| {
             (args["page"].as_i64().unwrap_or(1).max(1) - 1).saturating_mul(limit)
         });
-        (offset.max(0), limit)
+        let offset = offset.max(0);
+        if offset > MAX_OFFSET {
+            warn!(offset, max = %MAX_OFFSET, "Pagination offset exceeds maximum, clamping");
+            (MAX_OFFSET, limit)
+        } else {
+            (offset, limit)
+        }
     }
 
     /// 解析 `fields` 参数为字段白名单；未提供或为空时返回 `None`。
@@ -319,6 +395,7 @@ impl McpServer {
         let year_end = args["year_end"].as_i64().unwrap_or(0);
         let max_context_chars = args["max_context_chars"].as_i64().unwrap_or(500).max(0) as usize;
 
+        // query 为空由前置校验拦截，这里保留冗余检查以防绕开
         if query.trim().is_empty() {
             return Self::err("invalid_argument", "查询不能为空");
         }
@@ -372,9 +449,12 @@ impl McpServer {
             let doc_id = hit["id"].as_i64();
             let raw_content = hit["content"].as_str().unwrap_or("").to_string();
             let content = Self::truncate_chars(&raw_content, max_context_chars);
+            let truncated = max_context_chars > 0 && raw_content.chars().count() > max_context_chars;
             let mut info = json!({
                 "id": doc_id,
                 "content": content,
+                "truncated": truncated,
+                "original_length": raw_content.chars().count(),
             });
             if let Some(id) = doc_id {
                 if let Some(doc) = doc_map.get(&id) {
@@ -473,18 +553,9 @@ impl McpServer {
     async fn tool_read_markdown(&self, args: &Value) -> String {
         let doc_id = args["id"].as_i64().unwrap_or(0);
 
-        // 解析行范围参数：优先 line_start/line_count，回退 page/page_size
-        let line_start = args["line_start"].as_i64().map(|v| v.max(0) as usize)
-            .unwrap_or_else(|| {
-                // 兼容旧参数：page → line_start
-                let page = args["page"].as_i64().unwrap_or(1).max(1) as usize;
-                let page_size = args["page_size"].as_i64().unwrap_or(5000).max(1) as usize;
-                (page - 1) * page_size
-            });
-        let line_count = args["line_count"].as_i64().map(|v| v.max(1) as usize)
-            .unwrap_or_else(|| {
-                args["page_size"].as_i64().unwrap_or(5000).max(1) as usize
-            });
+        // 解析行范围参数
+        let line_start = args["line_start"].as_i64().map(|v| v.max(0)).unwrap_or(0) as usize;
+        let line_count = args["line_count"].as_i64().map(|v| v.max(1)).unwrap_or(5000) as usize;
 
         // 解析章节过滤目标（section 与 sections 合并）
         let mut targets: Vec<String> = Vec::new();
@@ -754,6 +825,8 @@ impl McpServer {
     }
 }
 
+// ── 辅助函数 ──
+
 /// 向 QueryBuilder 追加 list_documents 的筛选条件。
 fn append_list_filters<'a>(
     qb: &mut sqlx::QueryBuilder<'a, sqlx::Sqlite>,
@@ -830,6 +903,8 @@ fn append_search_info_filters<'a>(
         qb.push(")");
     }
 }
+
+// ── Markdown 章节解析 ──
 
 /// Markdown 章节（标题 + 级别 + 标题后正文）。
 struct MdSection {
@@ -950,13 +1025,44 @@ fn top_headings(sections: &[MdSection], limit: usize) -> Vec<String> {
     pool.into_iter().take(limit).map(|s| s.to_string()).collect()
 }
 
+// ── 全局日志级别（由 MCP logging/setLevel 控制） ──
+
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// 当前 MCP 日志级别。0=trace, 1=debug, 2=info, 3=warn, 4=error。
+static MCP_LOG_LEVEL: AtomicU8 = AtomicU8::new(2); // 默认 info
+
+fn set_mcp_log_level(level: &str) {
+    let v = match level {
+        "trace" => 0,
+        "debug" => 1,
+        "info" => 2,
+        "warn" => 3,
+        "error" => 4,
+        _ => 2,
+    };
+    MCP_LOG_LEVEL.store(v, Ordering::Relaxed);
+    info!(level, "MCP log level updated");
+}
+
+/// 检查当前 MCP 日志级别是否允许输出指定级别。
+#[allow(dead_code)]
+fn mcp_log_enabled(target: u8) -> bool {
+    MCP_LOG_LEVEL.load(Ordering::Relaxed) <= target
+}
+
+// ── HTTP 端点 ──
+
 /// Streamable HTTP JSON-RPC 端点。
 pub async fn mcp_stream_handler(
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
+    let client_ip = addr.ip().to_string();
+
     // Bearer token 校验（mcp_token）
     let mcp_token = settings.mcp_token();
     let auth_enabled = !mcp_token.is_empty();
@@ -966,12 +1072,9 @@ pub async fn mcp_stream_handler(
             .and_then(|v| v.to_str().ok())
             .map(|s| s == format!("Bearer {}", mcp_token))
             .unwrap_or(false);
-        let lan = headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.split(',').next().unwrap_or("").trim().starts_with("192.168.1."))
-            .unwrap_or(false);
+        let lan = client_ip.starts_with("192.168.1.");
         if !authorized && !lan {
+            warn!(client_ip, "MCP authentication failed");
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"jsonrpc": "2.0", "error": {"code": -32001, "message": "Unauthorized"}})),
@@ -981,9 +1084,12 @@ pub async fn mcp_stream_handler(
     }
 
     let server = McpServer::new(db, settings);
+
+    // JSON-RPC 解析
     let req: Value = match serde_json::from_str(&body) {
         Ok(v) => v,
-        Err(_) => {
+        Err(e) => {
+            warn!(error = %e, body_len = %body.len(), "MCP JSON-RPC parse error");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}})),
@@ -992,45 +1098,125 @@ pub async fn mcp_stream_handler(
         }
     };
 
+    // 校验 jsonrpc 版本
+    if req.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
+        warn!(body = %body.chars().take(200).collect::<String>(), "MCP request missing jsonrpc 2.0");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request: must use jsonrpc 2.0"}})),
+        )
+            .into_response();
+    }
+
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let params = req.get("params").cloned().unwrap_or(json!({}));
 
+    // 非通知请求必须有 id
+    if id.is_null() && !method.starts_with("notifications/") {
+        warn!(method, "MCP request missing id");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request: missing id"}})),
+        )
+            .into_response();
+    }
+
     // 通知类消息不返回响应
     if method.starts_with("notifications/") {
+        match method.as_str() {
+            "notifications/initialized" => {
+                debug!("MCP client initialized");
+            }
+            "notifications/cancelled" => {
+                debug!("MCP request cancelled by client");
+            }
+            "notifications/progress" => {
+                // 客户端报告的进度，暂不处理
+            }
+            "logging/setLevel" => {
+                if let Some(level) = params.get("level").and_then(|v| v.as_str()) {
+                    set_mcp_log_level(level);
+                }
+            }
+            _ => {
+                debug!(method, "MCP unhandled notification");
+            }
+        }
         return (StatusCode::ACCEPTED, "").into_response();
     }
 
+    debug!(method, client_ip, "MCP request");
+
     let response = match method.as_str() {
-        "initialize" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "protocolVersion": params.get("protocolVersion").cloned().unwrap_or_else(|| json!("2024-11-05")),
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "OKB-Assist", "version": "0.1.0-rust"}
-            }
-        }),
+        "initialize" => {
+            let protocol_version = params
+                .get("protocolVersion")
+                .cloned()
+                .unwrap_or_else(|| json!("2024-11-05"));
+            let client_info = params.get("clientInfo");
+            info!(
+                protocol = %protocol_version,
+                client = %client_info.map(|c| c.to_string()).unwrap_or_default(),
+                "MCP client initialize"
+            );
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": protocol_version,
+                    "capabilities": {
+                        "tools": {},
+                        "resources": {},
+                        "logging": {}
+                    },
+                    "serverInfo": {"name": "OKB-Assist", "version": "0.1.0-rust"}
+                }
+            })
+        }
         "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-        "tools/list" => json!({"jsonrpc": "2.0", "id": id, "result": {"tools": server.list_tools().await}}),
+        "tools/list" => {
+            let tools = server.list_tools().await;
+            debug!(count = %tools.len(), "MCP tools/list");
+            json!({"jsonrpc": "2.0", "id": id, "result": {"tools": tools}})
+        }
         "tools/call" => {
             let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            info!(tool = %name, args = %args.to_string().chars().take(200).collect::<String>(), "MCP tool call");
             let result = server.call_tool(name, &args).await;
+            debug!(tool = %name, result_len = %result.to_string().len(), "MCP tool call completed");
             json!({"jsonrpc": "2.0", "id": id, "result": result})
         }
-        "resources/list" => json!({"jsonrpc": "2.0", "id": id, "result": {"resources": []}}),
-        "resources/read" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {"code": -32601, "message": "Resources not supported"}
-        }),
-        _ => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {"code": -32601, "message": format!("Method not found: {}", method)}
-        }),
+        "resources/list" => {
+            debug!("MCP resources/list (empty)");
+            json!({"jsonrpc": "2.0", "id": id, "result": {"resources": []}})
+        }
+        "resources/read" => {
+            // 标准做法：返回空 contents 表示没有可读资源
+            debug!("MCP resources/read (not supported)");
+            json!({"jsonrpc": "2.0", "id": id, "result": {"contents": []}})
+        }
+        _ => {
+            warn!(method, "MCP unknown method");
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32601, "message": format!("Method not found: {}", method)}
+            })
+        }
     };
 
     Json(response).into_response()
+}
+
+/// MCP Streamable HTTP 端点的 OPTIONS 预检请求处理。
+pub async fn mcp_options_handler() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::ALLOW, "POST, OPTIONS"),
+        ],
+    )
+        .into_response()
 }
