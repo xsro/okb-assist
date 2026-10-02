@@ -59,6 +59,11 @@
               <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
             </svg>
           </button>
+          <button class="float-btn main-btn" @click="openSearch" title="搜索">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+          </button>
           <button class="float-btn main-btn" @click="toolbarOpen = !toolbarOpen" title="工具栏">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -99,15 +104,54 @@
     </Transition>
 
     <!-- 工具栏 Popover -->
+    <!-- 搜索抽屉 -->
+    <Transition name="drawer-slide">
+      <div v-if="searchOpen" class="search-overlay" @click.self="searchOpen = false">
+        <div class="search-drawer">
+          <div class="search-header">
+            <h3>全文搜索</h3>
+            <button class="search-close" @click="searchOpen = false">✕</button>
+          </div>
+          <div class="search-input-wrap">
+            <input
+              ref="searchInputEl"
+              v-model="searchQuery"
+              class="search-input"
+              type="text"
+              placeholder="输入搜索关键词..."
+              @keyup.enter="doSearch"
+              @input="onSearchInput"
+            />
+            <button class="search-go-btn" @click="doSearch" :disabled="searching || !searchQuery.trim()">
+              {{ searching ? '搜索中...' : '搜索' }}
+            </button>
+          </div>
+          <div class="search-meta" v-if="searchResults.length > 0">
+            共找到 {{ searchResults.length }} 处匹配
+          </div>
+          <div class="search-results" ref="searchResultsEl">
+            <div
+              v-for="(r, idx) in searchResults"
+              :key="r.line"
+              class="search-result-item"
+              :class="{ 'sr-active': activeSearchIdx === idx }"
+              @click="jumpToSearchResult(idx)"
+            >
+              <div class="sr-line">第 {{ r.line + 1 }} 行</div>
+              <div class="sr-context" v-html="r.displayHtml"></div>
+            </div>
+            <div v-if="searchResults.length === 0 && searched" class="search-empty">未找到匹配结果</div>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
     <Teleport to="body">
       <Transition name="popover-fade">
         <div v-if="toolbarOpen" class="toolbar-overlay" @click.self="toolbarOpen = false">
           <div class="toolbar-popover">
             <div class="toolbar-item">
               <button class="tb-action" @click="goBack">← 返回</button>
-            </div>
-            <div class="toolbar-item">
-              <button class="tb-action" @click="triggerSearch">🔍 搜索 (Ctrl+F)</button>
             </div>
             <hr class="tb-divider" />
             <div class="toolbar-item">
@@ -206,6 +250,124 @@ const tocListEl = ref<HTMLElement | null>(null)
 // ── 目录 ──
 const toc = ref<TocItem[]>([])
 const activeTocLine = ref<number | null>(null)
+
+// ── 搜索 ──
+const searchOpen = ref(false)
+const searchQuery = ref('')
+const searchResults = ref<Array<{ line: number; chunkId: number; text: string; displayHtml: string }>>([])
+const searching = ref(false)
+const searched = ref(false)
+const activeSearchIdx = ref(-1)
+const searchInputEl = ref<HTMLInputElement | null>(null)
+const searchResultsEl = ref<HTMLElement | null>(null)
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+function openSearch() {
+  searchOpen.value = true
+  searchQuery.value = ''
+  searchResults.value = []
+  searched.value = false
+  activeSearchIdx.value = -1
+  highlight.value = ''
+  nextTick(() => searchInputEl.value?.focus())
+}
+
+function onSearchInput() {
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
+  searchDebounceTimer = setTimeout(() => {
+    if (searchQuery.value.trim()) doSearch()
+  }, 300)
+}
+
+async function doSearch() {
+  const q = searchQuery.value.trim()
+  if (!q) {
+    searchResults.value = []
+    searched.value = false
+    highlight.value = ''
+    return
+  }
+  
+  searching.value = true
+  searched.value = true
+  activeSearchIdx.value = -1
+  
+  // 加载所有 chunk
+  if (!allLoaded.value) {
+    visibleCount.value = allChunks.value.length
+    await nextTick()
+  }
+  
+  // 全文中搜索
+  const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const regex = new RegExp(escaped, 'gi')
+  
+  const results: Array<{ line: number; chunkId: number; text: string; displayHtml: string }> = []
+  
+  for (const chunk of allChunks.value) {
+    const lines = chunk.content.split('\n')
+    for (let i = 0; i < lines.length; i++) {
+      regex.lastIndex = 0
+      if (regex.test(lines[i])) {
+        const absLine = chunk.start_line + i
+        const lineText = lines[i]
+        // 生成带高亮的显示文本
+        const displayHtml = lineText.trim().substring(0, 200).replace(
+          new RegExp(escaped, 'gi'),
+          m => `<mark class=\"sr-hl\">${m}</mark>`
+        )
+        results.push({
+          line: absLine,
+          chunkId: chunk.id,
+          text: lineText.trim().substring(0, 120),
+          displayHtml: displayHtml || '&nbsp;',
+        })
+      }
+    }
+  }
+  
+  searchResults.value = results
+  searching.value = false
+  
+  // 设置 MarkdownViewer 的高亮
+  highlight.value = q
+  
+  // 自动跳转到第一条结果
+  if (results.length > 0) {
+    await nextTick()
+    jumpToSearchResult(0)
+  }
+}
+
+function jumpToSearchResult(idx: number) {
+  const result = searchResults.value[idx]
+  if (!result) return
+  
+  activeSearchIdx.value = idx
+  
+  // 找到结果所在的 chunk，确保已加载
+  const chunkIdx = allChunks.value.findIndex(c =>
+    result.line >= c.start_line && result.line <= c.end_line
+  )
+  if (chunkIdx < 0) return
+  
+  if (chunkIdx + 1 > visibleCount.value) {
+    visibleCount.value = Math.min(chunkIdx + 1, allChunks.value.length)
+  }
+  
+  // 滚动到第 idx 个高亮元素
+  nextTick(() => scrollToSearchHighlight(idx))
+}
+
+function scrollToSearchHighlight(idx: number) {
+  const viewer = document.querySelector('.markdown-viewer')
+  if (!viewer) return
+  const highlights = viewer.querySelectorAll('.search-highlight')
+  const target = highlights[idx]
+  if (target) {
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+}
 
 // ── IntersectionObserver ──
 let observer: IntersectionObserver | null = null
@@ -314,13 +476,8 @@ function goBack() {
 }
 
 function triggerSearch() {
-  if (window.find) {
-    window.find('')
-  }
-  document.dispatchEvent(new KeyboardEvent('keydown', {
-    key: 'f', ctrlKey: true, metaKey: true, bubbles: true
-  }))
   toolbarOpen.value = false
+  openSearch()
 }
 
 function reloadViewer() {
@@ -630,6 +787,151 @@ onBeforeUnmount(() => {
 .drawer-slide-enter-active, .drawer-slide-leave-active { transition: all 0.25s ease; }
 .drawer-slide-enter-from, .drawer-slide-leave-to { opacity: 0; }
 .drawer-slide-enter-from .toc-drawer, .drawer-slide-leave-to .toc-drawer { transform: translateX(100%); }
+
+/* ==========================================
+   搜索抽屉
+   ========================================== */
+
+.search-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.3);
+  z-index: 500;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.search-drawer {
+  width: 380px;
+  max-width: 90vw;
+  height: 100%;
+  background: #fff;
+  box-shadow: -4px 0 24px rgba(0,0,0,0.12);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.search-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 20px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.search-header h3 { margin: 0; font-size: 16px; font-weight: 600; }
+
+.search-close {
+  background: none; border: none; font-size: 20px; cursor: pointer;
+  color: var(--text-secondary); padding: 4px 8px; border-radius: 4px;
+}
+.search-close:hover { background: var(--bg-secondary); }
+
+.search-input-wrap {
+  display: flex;
+  gap: 8px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.search-input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.search-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.search-go-btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.15s;
+}
+.search-go-btn:hover:not(:disabled) { opacity: 0.9; }
+.search-go-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.search-meta {
+  padding: 8px 20px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.search-results {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.search-result-item {
+  padding: 10px 20px;
+  cursor: pointer;
+  transition: background 0.12s;
+  border-left: 3px solid transparent;
+}
+
+.search-result-item:hover {
+  background: var(--bg-secondary);
+}
+
+.search-result-item.sr-active {
+  border-left-color: var(--primary);
+  background: #f0f4ff;
+}
+
+.sr-line {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.sr-context {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.sr-context :deep(.sr-hl) {
+  background: #ffeb3b;
+  padding: 0 2px;
+  border-radius: 2px;
+  color: #000;
+}
+
+.search-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 14px;
+}
 
 /* ==========================================
    工具栏 Popover
