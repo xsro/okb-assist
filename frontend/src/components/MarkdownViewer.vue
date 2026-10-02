@@ -64,7 +64,7 @@ function renderChunk(content: string, chunkId: number, startLine?: number) {
   const loadImages = props.loadImages ?? true
   const trusted = props.trusted !== false
 
-  // ── Phase 1: 提取公式占位符 + marked 解析（同步，快） ──
+  // ── Phase 1: 提取公式占位符 ──
   const { text, matches } = extractMathPlaceholders(content)
 
   const renderer = new Renderer()
@@ -89,53 +89,80 @@ function renderChunk(content: string, chunkId: number, startLine?: number) {
     return Renderer.prototype.image.call(renderer, e)
   }
 
-  const raw = marked.parse(text, {
-    async: false,
-    gfm: true,
-    breaks: true,
-    renderer,
-  }) as string
+  const parseOpts = { async: false as const, gfm: true, breaks: true, renderer }
 
-  // 将公式占位符转换为 DOM 中的 data-math-id span
-  let html = raw
-  // 占位符显示为原始公式文本，但仍可通过 data-math-id 找到
-  for (const m of matches) {
-    const escapedLatex = m.latex
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    const display = m.displayMode
-    const placeholderContent = display
-      ? `<span class="math-raw">$$${escapedLatex}$$</span>`
-      : `<span class="math-raw">$${escapedLatex}$</span>`
-    // 先将占位符替换为 span
-    const placeholder = `<span class="math-placeholder" data-math-id="${m.id}" data-math-latex="${escapedLatex}" data-math-display="${display ? 'true' : 'false'}">${placeholderContent}</span>`
-    html = html.replaceAll(m.id, placeholder)
-  }
+  // ── Phase 2: marked 解析（全量） ──
+  const raw = marked.parse(text, parseOpts) as string
 
-  // 信任模式净化
-  if (!trusted) {
-    html = html.replace(/<script[\s\S]*?<\/script>/gi, '<!-- script removed -->')
-  }
+  // 替换公式占位符 + 净化
+  let html = replacePlaceholders(raw, matches, trusted)
 
-  // ── Phase 2: 插入 DOM ──
   const container = document.createElement('div')
   container.dataset.chunkId = String(chunkId)
   container.innerHTML = html
-  
-  // 如果启用了行号，为每个直接子元素添加 data-line 属性
+
+  // 如果启用了行号，为每个子元素分配对应的 markdown 行号
+  // 策略：扫描原始 markdown 内容，跳过空行，为每个渲染出的块元素分配行号
   if (props.showLineNumbers && startLine !== undefined) {
     const children = container.children
-    for (let i = 0; i < children.length; i++) {
-      children[i].setAttribute('data-line', String(startLine + i + 1))
+    const contentLines = text.split('\n')
+    let linePtr = 0
+    let childIdx = 0
+
+    while (childIdx < children.length && linePtr < contentLines.length) {
+      // 跳过空行
+      while (linePtr < contentLines.length && contentLines[linePtr].trim() === '') {
+        linePtr++
+      }
+      if (linePtr >= contentLines.length) break
+
+      children[childIdx].setAttribute('data-line', String(startLine + linePtr + 1))
+
+      // 该块元素可能占了多行，跳过直到遇到空行或文件末尾
+      linePtr++
+      while (linePtr < contentLines.length && contentLines[linePtr].trim() !== '') {
+        linePtr++
+      }
+      childIdx++
     }
   }
-  viewerEl.value.appendChild(container)
 
+  viewerEl.value.appendChild(container)
   renderedChunkIds.value.add(chunkId)
 
   // ── Phase 3: 异步渲染公式 ──
   if (mode === 'katex' && matches.length > 0) {
     scheduleFormulaRender(container)
   }
+}
+
+function replacePlaceholderIds(html: string, matches: { id: string; latex: string; displayMode: boolean }[]): string {
+  let result = html
+  for (const m of matches) {
+    const escapedLatex = m.latex
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const placeholderHtml = `<span class=\"math-placeholder\" data-math-id=\"${m.id}\" data-math-latex=\"${escapedLatex}\" data-math-display=\"${m.displayMode ? 'true' : 'false'}\">`
+      + `<span class=\"math-raw\">${m.displayMode ? '$$' : '$'}${escapedLatex}${m.displayMode ? '$$' : '$'}</span></span>`
+    result = result.replaceAll(m.id, placeholderHtml)
+  }
+  return result
+}
+
+function replacePlaceholders(html: string, matches: { id: string; latex: string; displayMode: boolean }[], trusted: boolean): string {
+  let result = html
+  for (const m of matches) {
+    const escapedLatex = m.latex
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const placeholderContent = m.displayMode
+      ? `<span class=\"math-raw\">$$${escapedLatex}$$</span>`
+      : `<span class=\"math-raw\">$${escapedLatex}$</span>`
+    const placeholder = `<span class=\"math-placeholder\" data-math-id=\"${m.id}\" data-math-latex=\"${escapedLatex}\" data-math-display=\"${m.displayMode ? 'true' : 'false'}\">${placeholderContent}</span>`
+    result = result.replaceAll(m.id, placeholder)
+  }
+  if (!trusted) {
+    result = result.replace(/<script[\s\S]*?<\/script>/gi, '<!-- script removed -->')
+  }
+  return result
 }
 
 // ===== Idle Callback 公式渲染 =====
