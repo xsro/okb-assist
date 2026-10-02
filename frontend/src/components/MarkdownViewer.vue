@@ -27,6 +27,7 @@ const props = defineProps<{
   mathMode?: MathMode
   loadImages?: boolean
   showSource?: boolean
+  showLineNumbers?: boolean
   highlight?: string
   trusted?: boolean
   placeholderImages?: boolean
@@ -56,7 +57,7 @@ async function ensureKatex() {
 }
 
 // ===== 渲染单个 chunk =====
-function renderChunk(content: string, chunkId: number) {
+function renderChunk(content: string, chunkId: number, startLine?: number) {
   if (!viewerEl.value) return
 
   const mode = props.mathMode || 'katex'
@@ -119,6 +120,14 @@ function renderChunk(content: string, chunkId: number) {
   const container = document.createElement('div')
   container.dataset.chunkId = String(chunkId)
   container.innerHTML = html
+  
+  // 如果启用了行号，为每个直接子元素添加 data-line 属性
+  if (props.showLineNumbers && startLine !== undefined) {
+    const children = container.children
+    for (let i = 0; i < children.length; i++) {
+      children[i].setAttribute('data-line', String(startLine + i + 1))
+    }
+  }
   viewerEl.value.appendChild(container)
 
   renderedChunkIds.value.add(chunkId)
@@ -263,7 +272,7 @@ watch(() => props.chunks, (chunks) => {
   if (!chunks || !viewerEl.value) return
   for (const chunk of chunks) {
     if (!renderedChunkIds.value.has(chunk.id)) {
-      renderChunk(chunk.content, chunk.id)
+      renderChunk(chunk.content, chunk.id, chunk.start_line)
     }
   }
 }, { immediate: true, deep: false })
@@ -298,7 +307,7 @@ onMounted(async () => {
   if (props.chunks && viewerEl.value) {
     for (const chunk of props.chunks) {
       if (!renderedChunkIds.value.has(chunk.id)) {
-        renderChunk(chunk.content, chunk.id)
+        renderChunk(chunk.content, chunk.id, chunk.start_line)
       }
     }
   }
@@ -405,6 +414,32 @@ onBeforeUnmount(() => {
   background: #ffeb3b;
   padding: 0 2px;
   border-radius: 2px;
+}
+
+/* ===== 行号 ===== */
+.markdown-viewer :deep([data-line]) {
+  position: relative;
+  padding-left: 56px;
+  min-height: 1.4em;
+}
+
+.markdown-viewer :deep([data-line]::before) {
+  content: attr(data-line);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 44px;
+  text-align: right;
+  padding-right: 8px;
+  font-size: 12px;
+  line-height: inherit;
+  color: #bbb;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  user-select: none;
+  pointer-events: none;
+  border-right: 1px solid #eee;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 /* ===== 公式溢出滚动 ===== */

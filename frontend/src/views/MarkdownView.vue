@@ -26,6 +26,7 @@
           :math-mode="mathMode"
           :load-images="loadImages"
           :show-source="showSource"
+          :show-line-numbers="showLineNumbers"
           :highlight="highlight"
           :placeholder-images="!loadImages"
           trusted
@@ -181,6 +182,12 @@
                 加载全部图片
               </label>
             </div>
+            <div class="toolbar-item">
+              <label class="tb-checkbox">
+                <input v-model="showLineNumbers" type="checkbox" @change="reloadViewer" />
+                显示行号
+              </label>
+            </div>
           </div>
         </div>
       </Transition>
@@ -240,6 +247,7 @@ const progressPercent = computed(() =>
 const mathMode = ref<'none' | 'katex' | 'mathjax'>('katex')
 const loadImages = ref(false)
 const showSource = ref(false)
+const showLineNumbers = ref(false)
 
 // ── 浮动 UI ──
 const tocOpen = ref(false)
