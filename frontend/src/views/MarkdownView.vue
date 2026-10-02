@@ -461,33 +461,43 @@ async function load() {
         const viewer = document.querySelector('.markdown-viewer')
         if (!viewer) return
 
-        // 方案 1: 从 TOC 中找到 targetLine 之前的最近 heading，精确匹配
-        let bestTitle: string | null = null
-        for (const item of toc.value) {
-          if (item.line <= targetLine) bestTitle = item.title
-          else break
-        }
-        if (bestTitle) {
-          const headings = viewer.querySelectorAll('h1, h2, h3, h4, h5, h6')
+        const chunkIdx = allChunks.value.findIndex(c =>
+          targetLine >= c.start_line && targetLine <= c.end_line
+        )
+        if (chunkIdx < 0) return
+        const chunk = allChunks.value[chunkIdx]
+        const chunkEl = viewer.querySelector(`[data-chunk-id="${chunkIdx}"]`) as HTMLElement
+        if (!chunkEl) return
+
+        // 方案 1: 目标行距 chunk heading 很近时，直接滚动到 heading
+        const headingLine = chunk.start_line
+        if (chunk.heading && Math.abs(targetLine - headingLine) < 50) {
+          const headings = chunkEl.querySelectorAll('h1, h2, h3, h4, h5, h6')
           for (const h of headings) {
-            if (h.textContent?.trim() === bestTitle) {
+            if (h.textContent?.trim() === chunk.heading) {
               ;(h as HTMLElement).scrollIntoView({ behavior: 'instant', block: 'start' })
-              activeTocLine.value = bestTitle
               return
             }
           }
         }
 
-        // 方案 2: 滚动到目标行所在的 chunk 容器开头
-        const chunkIdx = allChunks.value.findIndex(c =>
-          targetLine >= c.start_line && targetLine <= c.end_line
-        )
-        if (chunkIdx >= 0) {
-          const chunkEl = viewer.querySelector(`[data-chunk-id="${chunkIdx}"]`) as HTMLElement
-          if (chunkEl) {
-            chunkEl.scrollIntoView({ behavior: 'instant', block: 'start' })
+        // 方案 2: 按行号在 chunk 内的比例估算元素位置
+        const chunkLineRange = chunk.end_line - chunk.start_line
+        if (chunkLineRange > 0) {
+          const children = Array.from(chunkEl.children)
+          if (children.length > 0) {
+            const proportion = (targetLine - chunk.start_line) / chunkLineRange
+            const targetIdx = Math.min(
+              Math.floor(proportion * children.length),
+              children.length - 1
+            )
+            children[targetIdx].scrollIntoView({ behavior: 'instant', block: 'center' })
+            return
           }
         }
+
+        // 方案 3: 滚动到 chunk 开头
+        chunkEl.scrollIntoView({ behavior: 'instant', block: 'start' })
       }
       requestAnimationFrame(() => requestAnimationFrame(doScroll))
     }
