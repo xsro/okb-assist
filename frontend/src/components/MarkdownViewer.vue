@@ -402,6 +402,40 @@ onBeforeUnmount(() => {
   border-radius: 2px;
 }
 
+/* ===== 公式溢出滚动 ===== */
+.markdown-viewer :deep(.katex-display) {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 0;
+  /* 滚动条不占宽度 */
+  scrollbar-width: thin;
+}
+
+.markdown-viewer :deep(.katex) {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* ===== 长链接折行 ===== */
+.markdown-viewer :deep(a) {
+  word-break: break-all;
+  overflow-wrap: break-word;
+}
+
+/* ===== 图片、代码块、表格溢出 ===== */
+.markdown-viewer :deep(pre) {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.markdown-viewer :deep(table) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 .markdown-source {
   background: #f8f9fa;
   border: 1px solid var(--border);
