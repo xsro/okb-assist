@@ -418,6 +418,10 @@ async function load() {
   loading.value = true
   error.value = ''
   highlight.value = (route.query.highlight as string) || ''
+  // 从 URL 参数启用行号
+  if (route.query.enable_line_number !== undefined) {
+    showLineNumbers.value = true
+  }
   const targetLineParam = route.query.target_line
   const targetLine = targetLineParam ? parseInt(targetLineParam as string) || null : null
 
