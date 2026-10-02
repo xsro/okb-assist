@@ -445,8 +445,31 @@ async function load() {
 
     // 跳转到目标行（如果指定了）
     if (targetLine !== null) {
-      await nextTick()
-      scrollToLine(targetLine)
+      // 等 MarkdownViewer 渲染完成后再滚动
+      const doScroll = () => {
+        let bestTitle: string | null = null
+        for (const item of toc.value) {
+          if (item.line <= targetLine) {
+            bestTitle = item.title
+          } else break
+        }
+        if (bestTitle) {
+          const viewer = document.querySelector('.markdown-viewer')
+          if (viewer) {
+            const headings = viewer.querySelectorAll('h1, h2, h3, h4, h5, h6')
+            for (const h of headings) {
+              const t = h.textContent?.trim() || ''
+              if (t === bestTitle || t.includes(bestTitle) || bestTitle.includes(t)) {
+                h.scrollIntoView({ behavior: 'instant', block: 'start' })
+                activeTocLine.value = bestTitle
+                break
+              }
+            }
+          }
+        }
+      }
+      // 延迟一帧确保 chunks 渲染完毕
+      requestAnimationFrame(() => requestAnimationFrame(doScroll))
     }
   } catch (err: any) {
     error.value = err?.message || '加载失败'
@@ -477,22 +500,30 @@ function jumpToToc(item: TocItem) {
   tocOpen.value = false
 }
 
-function scrollToHeading(title: string) {
+function scrollToHeading(title: string, behavior: ScrollBehavior = 'smooth') {
   const viewer = document.querySelector('.markdown-viewer')
   if (!viewer) return
   const headings = viewer.querySelectorAll('h1, h2, h3, h4, h5, h6')
+  const tryScroll = (h: Element) => {
+    h.scrollIntoView({ behavior, block: 'start' })
+    activeTocLine.value = title
+    return true
+  }
   for (const h of headings) {
     if (h.textContent?.trim() === title) {
-      h.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      activeTocLine.value = title
-      return
+      tryScroll(h); return
+    }
+  }
+  for (const h of headings) {
+    const t = h.textContent?.trim() || ''
+    if (t.includes(title) || title.includes(t)) {
+      tryScroll(h); return
     }
   }
 }
 
 /** 滚动到文档中的指定行号 */
 function scrollToLine(targetLine: number) {
-  // 从 TOC 中找到目标行之前的最近 heading
   let bestHeading: TocItem | null = null
   for (const item of toc.value) {
     if (item.line <= targetLine) {
@@ -503,14 +534,13 @@ function scrollToLine(targetLine: number) {
   }
 
   if (bestHeading) {
-    scrollToHeading(bestHeading.title)
+    scrollToHeading(bestHeading.title, 'instant')
     return
   }
 
-  // 无 heading 时滚到文档开头
   const viewer = document.querySelector('.markdown-viewer')
   if (viewer) {
-    viewer.firstElementChild?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    viewer.firstElementChild?.scrollIntoView({ behavior: 'instant', block: 'start' })
   }
 }
 

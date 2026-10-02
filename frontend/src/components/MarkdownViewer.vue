@@ -302,6 +302,11 @@ onMounted(async () => {
       }
     }
   }
+  // 初始渲染完成后，应用高亮
+  const kw = props.highlight?.trim()
+  if (kw && viewerEl.value) {
+    nextTick(() => applyHighlight(kw))
+  }
 })
 
 onBeforeUnmount(() => {
