@@ -1,6 +1,8 @@
 # okb-assist
 
-OKB (Oh my Knowledge Base) is my personal service to organize papers, books as a MCP for AI agents like Codex, Claude.
+OKB is my personal service to organize papers, books as a MCP for AI agents like Codex, Claude.
+I name this by "Open-webui Knowledge Base" because I used to use this to extend my open webui's knowledge base.
+Now it only a place for manage papers, parse to markdowns and serve as MCP.
 I use pi agent to code this and test this.
 
 ## 外部依赖
