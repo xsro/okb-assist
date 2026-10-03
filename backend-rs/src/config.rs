@@ -261,17 +261,15 @@ impl Settings {
 
     // ── 系统配置 ──
     pub fn token(&self) -> String {
-        self.get_system_config()["token"]
-            .as_str()
-            .unwrap_or("change-me")
-            .to_string()
+        let cfg = self.get_system_config();
+        let raw = cfg["token"].as_str().unwrap_or("change-me");
+        crate::utils::resolve_token(raw)
     }
 
     pub fn mcp_token(&self) -> String {
-        self.get_system_config()["mcp_token"]
-            .as_str()
-            .unwrap_or("change-me")
-            .to_string()
+        let cfg = self.get_system_config();
+        let raw = cfg["mcp_token"].as_str().unwrap_or("change-me");
+        crate::utils::resolve_token(raw)
     }
 
     pub fn max_concurrent_tasks(&self) -> usize {

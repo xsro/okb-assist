@@ -327,8 +327,9 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
         return next.run(req).await;
     }
 
-    // 图片 URL 放行
+    // 图片 URL 放行（免 token，但注入 ViewOnly 角色以便后续处理）
     if path.contains("/image/") {
+        req.extensions_mut().insert(auth::Role::ViewOnly);
         return next.run(req).await;
     }
 

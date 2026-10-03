@@ -1,6 +1,7 @@
 //! 工具函数。
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 /// 计算文件 SHA256 哈希（可能阻塞，请在 spawn_blocking 中调用）
 pub fn calculate_file_hash(file_path: &str) -> std::io::Result<String> {
@@ -90,6 +91,67 @@ pub fn now_iso() -> String {
 /// 返回当前 UTC 时间的 SQLite DateTime 字符串（微秒级，与 Python SQLAlchemy 存储格式一致）
 pub fn now_datetime() -> String {
     chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+}
+
+/// 解析 Token 配置：若 value 以 `!` 开头，则执行后续 shell 命令取其输出作为 token。
+/// 结果通过 `OnceLock` 缓存，仅首次执行命令，后续直接返回缓存值。
+pub fn resolve_token(value: &str) -> String {
+    if !value.starts_with('!') {
+        return value.to_string();
+    }
+
+    let cmd_str = &value[1..];
+    static CACHE: OnceLock<Mutex<Vec<(String, String)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+
+    // 检查缓存
+    {
+        let cache = cache.lock().unwrap();
+        if let Some(entry) = cache.iter().find(|(k, _)| k == value) {
+            return entry.1.clone();
+        }
+    }
+
+    // 执行命令
+    let output = if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd")
+            .args(["/C", cmd_str])
+            .output()
+    } else {
+        std::process::Command::new("sh")
+            .args(["-c", cmd_str])
+            .output()
+    };
+
+    let resolved = match output {
+        Ok(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!("token 命令执行失败 (exit={}): {}",
+                out.status.code().unwrap_or(-1), stderr.trim());
+            value.to_string()
+        }
+        Err(e) => {
+            tracing::warn!("token 命令无法启动: {}", e);
+            value.to_string()
+        }
+    };
+
+    if resolved != value {
+        tracing::info!("token 通过命令解析: {} -> {} 字节", cmd_str, resolved.len());
+    }
+
+    if !resolved.is_empty() {
+        let mut cache = cache.lock().unwrap();
+        cache.push((value.to_string(), resolved.clone()));
+        if cache.len() > 32 {
+            cache.remove(0);
+        }
+    }
+
+    resolved
 }
 
 /// 检查给定的 IP 字符串是否匹配任一 CIDR 子网。

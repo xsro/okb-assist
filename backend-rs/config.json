@@ -1,5 +1,5 @@
 {
-  "active_mineru": "官方标准（需要token）",
+  "active_mineru": "datalab official",
   "alias_expiration_hours": 1,
   "base_url": "http://127.0.0.1:5001/",
   "mineru": [
@@ -20,6 +20,15 @@
       "token": "sk-use-your-token",
       "type": "official",
       "url": "https://mineru.net"
+    },
+    {
+      "max_tasks": 3,
+      "name": "datalab official",
+      "task_timeout": 900,
+      "tier": "standard",
+      "token": "!cat ./data/tokens/datalab",
+      "type": "datalab",
+      "url": "https://www.datalab.to"
     }
   ],
   "ollama": {
