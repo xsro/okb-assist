@@ -71,6 +71,11 @@ async fn update_config(
     }
     let mut config = cm.get_service_config();
 
+    // base_url
+    if let Some(base_url) = body.get("base_url").and_then(|v| v.as_str()) {
+        config["base_url"] = json!(base_url);
+    }
+
     // active_mineru：前端可以选择使用哪个 mineru 配置（按 name 匹配）
     if let Some(active) = body.get("active_mineru").and_then(|v| v.as_str()) {
         config["active_mineru"] = json!(active);

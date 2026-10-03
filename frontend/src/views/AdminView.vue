@@ -127,39 +127,7 @@
       </div>
     </div>
 
-    <!-- 权限管理 -->
-    <div class="section">
-      <h3>权限管理</h3>
-      <p class="section-desc">管理角色 token，支持 view-only、view-upload</p>
 
-      <div v-if="permEntries.length > 0" class="perm-token-list">
-        <div v-for="(entry, idx) in permEntries" :key="idx" class="perm-token-row">
-          <code class="perm-token-value">{{ entry.token }}</code>
-          <span class="perm-token-role" :class="'role-' + entry.role">{{ roleLabel(entry.role) }}</span>
-          <button class="btn btn-sm btn-outline-danger" @click="removeToken(entry.token)" :disabled="savingPerm">删除</button>
-        </div>
-      </div>
-      <div v-else class="empty-hint">暂无权限 token</div>
-
-      <div class="perm-add-row">
-        <select v-model="newPermRole" class="perm-select">
-          <option value="view-only">view-only（只读）</option>
-          <option value="view-upload">view-upload（查看+上传）</option>
-        </select>
-        <input
-          v-model="newPermToken"
-          type="text"
-          :placeholder="'输入 ' + newPermRole + ' token'"
-          class="perm-input"
-          @keyup.enter="addToken"
-        />
-        <button class="btn btn-sm" @click="addToken" :disabled="savingPerm || !newPermToken.trim()">
-          添加
-        </button>
-      </div>
-
-      <div v-if="permError" class="error-message">{{ permError }}</div>
-    </div>
   </div>
 </template>
 
@@ -169,10 +137,7 @@ import { useRouter } from 'vue-router'
 import {
   getStats,
   recalculateHashes,
-  deduplicateDocuments,
-  getPermissionTokens,
-  addPermissionToken,
-  deletePermissionToken
+  deduplicateDocuments
 } from '@/api/admin'
 import { startBatchParse } from '@/api/pipeline'
 import { usePipelineStore } from '@/stores/pipeline'
@@ -196,68 +161,6 @@ const progressPercent = computed(() => {
   return Math.min(100, Math.round((p.processed / p.total) * 100))
 })
 
-// ── 权限管理 ──
-
-interface PermEntry { token: string; role: string }
-
-const permTokens = ref<Record<string, string>>({})
-const newPermToken = ref('')
-const newPermRole = ref('view-only')
-const savingPerm = ref(false)
-const permError = ref('')
-
-const permEntries = computed<PermEntry[]>(() => {
-  return Object.entries(permTokens.value).map(([token, role]) => ({ token, role }))
-})
-
-function roleLabel(role: string): string {
-  const labels: Record<string, string> = {
-    'view-only': '只读',
-    'view-upload': '查看+上传'
-  }
-  return labels[role] || role
-}
-
-async function loadPermTokens() {
-  try {
-    const res = await getPermissionTokens()
-    permTokens.value = (res.permissions || {}) as Record<string, string>
-  } catch {
-    // 静默忽略
-  }
-}
-
-async function addToken() {
-  const token = newPermToken.value.trim()
-  if (!token) return
-  savingPerm.value = true
-  permError.value = ''
-  try {
-    const res = await addPermissionToken(newPermRole.value, token)
-    permTokens.value = (res.permissions || {}) as Record<string, string>
-    newPermToken.value = ''
-  } catch {
-    permError.value = '添加失败，请重试'
-  } finally {
-    savingPerm.value = false
-  }
-}
-
-async function removeToken(token: string) {
-  const role = permTokens.value[token]
-  if (!role) return
-  if (!confirm(`确定删除 token: ${token}（${roleLabel(role)}）？`)) return
-  savingPerm.value = true
-  permError.value = ''
-  try {
-    const res = await deletePermissionToken(role, token)
-    permTokens.value = (res.permissions || {}) as Record<string, string>
-  } catch {
-    permError.value = '删除失败，请重试'
-  } finally {
-    savingPerm.value = false
-  }
-}
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return bytes + ' B'
@@ -319,7 +222,6 @@ function formatTime(iso: string) {
 
 onMounted(() => {
   load()
-  loadPermTokens()
   pipelineStore.fetchStatus()
   pipelineStore.startPolling(3000)
 })
@@ -452,106 +354,4 @@ onUnmounted(() => {
   }
 }
 
-/* ── 权限管理 ── */
-.section-desc {
-  color: var(--text-secondary);
-  font-size: 13px;
-  margin-top: -8px;
-  margin-bottom: 16px;
-}
-
-.perm-select {
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 13px;
-  background: var(--bg-white);
-  color: var(--text);
-  outline: none;
-  cursor: pointer;
-  min-width: 140px;
-}
-.perm-select:focus {
-  border-color: var(--primary);
-}
-
-.perm-token-role {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.perm-token-role.role-view-only {
-  background: #e3f2fd;
-  color: #1565c0;
-}
-.perm-token-role.role-view-upload {
-  background: #e8f5e9;
-  color: #2e7d32;
-}
-
-.perm-token-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 12px;
-}
-
-.perm-token-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 10px;
-  background: var(--bg-white);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
-
-.perm-token-value {
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
-  font-size: 12px;
-  color: var(--text);
-  word-break: break-all;
-  flex: 1;
-}
-
-.btn-outline-danger {
-  color: #f44336;
-  border-color: #f44336;
-  background: transparent;
-  white-space: nowrap;
-}
-.btn-outline-danger:hover {
-  background: #f44336;
-  color: #fff;
-}
-
-.perm-add-row {
-  display: flex;
-  gap: 8px;
-}
-
-.perm-input {
-  flex: 1;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 13px;
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
-  outline: none;
-}
-.perm-input:focus {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.12);
-}
-
-.error-message {
-  color: #f44336;
-  font-size: 13px;
-  margin-top: 8px;
-}
 </style>
