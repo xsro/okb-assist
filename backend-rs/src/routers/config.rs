@@ -317,6 +317,24 @@ async fn test_mineru(url: &str, key: &str, mineru_type: &str) -> Value {
                 Err(e) => json!({"status": "disconnected", "detail": format!("无法连接到官方 API {}: {}", url, e)}),
             }
         }
+        MineruType::Datalab => {
+            // Datalab API：使用 /api/v1/user_health 检查
+            let resp = client
+                .get("https://www.datalab.to/api/v1/user_health")
+                .header("X-API-Key", key)
+                .send()
+                .await;
+            match resp {
+                Ok(resp) if resp.status().is_success() => {
+                    json!({
+                        "status": "connected",
+                        "detail": "Datalab API 连接成功",
+                    })
+                }
+                Ok(resp) => json!({"status": "error", "detail": format!("HTTP {}", resp.status())}),
+                Err(e) => json!({"status": "disconnected", "detail": format!("无法连接到 Datalab API: {}", e)}),
+            }
+        }
     }
 }
 

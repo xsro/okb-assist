@@ -2,6 +2,7 @@
 
 pub mod crossref;
 pub mod grep_search;
+pub mod datalab;
 pub mod mineru;
 pub mod ollama;
 pub mod pdf_meta;

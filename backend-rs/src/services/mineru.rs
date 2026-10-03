@@ -22,8 +22,9 @@ use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
 
 use crate::config::MinerUConfig;
+use crate::services::datalab::DatalabClient;
 
-/// MinerU 模式类型
+/// MinerU/Datalab 模式类型
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MineruType {
     /// 自部署 V1 API 服务（type=local）
@@ -32,6 +33,8 @@ pub enum MineruType {
     Official,
     /// 官方云 V1 Agent 轻量解析 API（type=official-lightweight）
     OfficialLightweight,
+    /// Datalab Document Intelligence API（type=datalab）
+    Datalab,
 }
 
 impl MineruType {
@@ -41,6 +44,7 @@ impl MineruType {
             "official_lightweight" | "official-lightweight" | "轻量解析" | "轻量" | "agent" => {
                 MineruType::OfficialLightweight
             }
+            "datalab" => MineruType::Datalab,
             _ => MineruType::Local,
         }
     }
@@ -60,12 +64,21 @@ pub struct MinerUClient {
     mineru_type: MineruType,
     tier: String,
     http: reqwest::Client,
+    datalab_client: Option<DatalabClient>,
 }
 
 impl MinerUClient {
     pub fn new(config: &MinerUConfig) -> Self {
         let mineru_type = MineruType::from_str(&config.mineru_type);
         let base_url = Self::build_base_url(&config.url, mineru_type);
+
+        // Datalab 类型时提前创建 DatalabClient
+        let datalab_client = if mineru_type == MineruType::Datalab {
+            Some(DatalabClient::new(&config.token))
+        } else {
+            None
+        };
+
         Self {
             base_url,
             key: config.token.clone(),
@@ -76,6 +89,7 @@ impl MinerUClient {
                 .connect_timeout(std::time::Duration::from_secs(15))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
+            datalab_client,
         }
     }
 
@@ -97,6 +111,8 @@ impl MinerUClient {
                     url
                 }
             }
+            // Datalab：固定使用 https://www.datalab.to，忽略 config 中的 url
+            MineruType::Datalab => "https://www.datalab.to".to_string(),
         }
     }
 
@@ -104,12 +120,19 @@ impl MinerUClient {
     //  公开接口（统一签名，路由到不同实现）
     // ════════════════════════════════════════════════════════
 
-    /// 提交解析任务，返回 task_id / job_id
+    /// 提交解析任务，返回 task_id / job_id / request_id
     pub async fn submit_parse_task(&self, file_path: &str) -> anyhow::Result<String> {
         match self.mineru_type {
             MineruType::Local => self.submit_parse_task_v1(file_path).await,
             MineruType::Official => self.submit_parse_task_v4(file_path).await,
             MineruType::OfficialLightweight => self.submit_parse_task_lightweight(file_path).await,
+            MineruType::Datalab => {
+                if let Some(ref client) = self.datalab_client {
+                    client.submit_parse_task(file_path).await
+                } else {
+                    anyhow::bail!("Datalab 客户端未初始化")
+                }
+            }
         }
     }
 
@@ -119,21 +142,38 @@ impl MinerUClient {
             MineruType::Local => self.check_task_status_v1(task_id).await,
             MineruType::Official => self.check_task_status_v4(task_id).await,
             MineruType::OfficialLightweight => self.check_task_status_lightweight(task_id).await,
+            MineruType::Datalab => {
+                if let Some(ref client) = self.datalab_client {
+                    client.check_task_status(task_id).await
+                } else {
+                    json!({"_done": false, "status": "unknown"})
+                }
+            }
         }
     }
 
     /// 轮询任务直到完成
     pub async fn poll_task(&self, task_id: &str, timeout_secs: u64) -> anyhow::Result<Value> {
+        // Datalab 类型使用 DatalabClient 的 poll
+        if self.mineru_type == MineruType::Datalab {
+            if let Some(ref client) = self.datalab_client {
+                return client.poll_task(task_id, timeout_secs).await;
+            }
+            anyhow::bail!("Datalab 客户端未初始化");
+        }
+
         let poll_interval = match self.mineru_type {
             MineruType::Local => 2u64,
             MineruType::Official => 5u64,
             MineruType::OfficialLightweight => 3u64,
+            MineruType::Datalab => unreachable!(),
         };
         let max_polls = timeout_secs / poll_interval;
         let task_type = match self.mineru_type {
             MineruType::Local => "V1",
             MineruType::Official => "V4",
             MineruType::OfficialLightweight => "轻量",
+            MineruType::Datalab => unreachable!(),
         };
 
         info!("开始轮询 MinerU {} 任务 task_id={}, timeout={}s, poll_interval={}s",
@@ -190,6 +230,13 @@ impl MinerUClient {
             MineruType::OfficialLightweight => {
                 self.get_task_result_lightweight(task_id, output_dir, doc_id)
                     .await
+            }
+            MineruType::Datalab => {
+                if let Some(ref client) = self.datalab_client {
+                    client.get_task_result(task_id, output_dir, doc_id).await
+                } else {
+                    anyhow::bail!("Datalab 客户端未初始化")
+                }
             }
         }
     }

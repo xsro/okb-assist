@@ -213,6 +213,28 @@ async fn check_mineru(settings: &Settings) -> Value {
                     }
                 }
             }
+            MineruType::Datalab => {
+                // Datalab API：使用 /api/v1/user_health 检查
+                let resp = client
+                    .get("https://www.datalab.to/api/v1/user_health")
+                    .header("X-API-Key", &config.token)
+                    .send()
+                    .await;
+                match resp {
+                    Ok(resp) if resp.status().is_success() => {
+                        item["status"] = json!("connected");
+                        item["api_version"] = json!("datalab-v1");
+                    }
+                    Ok(resp) => {
+                        item["status"] = json!("error");
+                        item["error"] = json!(format!("HTTP {}", resp.status()));
+                    }
+                    Err(e) => {
+                        item["status"] = json!("disconnected");
+                        item["error"] = json!(e.to_string());
+                    }
+                }
+            }
         }
         items.push(item);
     }
