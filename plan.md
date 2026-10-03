@@ -1,97 +1,85 @@
-# MCP 服务改进计划
+# 修复 okb-assist MCP 服务器握手 500 的问题
 
-基于对 `backend-rs/src/mcp_server.rs` 和 `document/mcp.md` 的审计，按优先级分组。
+## 现象
 
----
+CodeBuddy 配置的 MCP 服务器 `okb-assist`（`https://xsro20.xyz/assist/mcp/stream`）
+无法连接。直接探测发现：
 
-## 🔴 P0 — 必须修复
+- `GET` 该端点返回 **405**（符合预期，Streamable HTTP 只接受 POST）。
+- `POST` `initialize` JSON-RPC 请求返回 **HTTP 500**，响应体为：
 
-### 1. 文档与实现不一致：SSE 端点不存在 ✅ 已修复
+  ```
+  Missing request extension: Extension of type
+  `axum::extract::connect_info::ConnectInfo<core::net::socket_addr::SocketAddr>`
+  was not found. Perhaps you forgot to add it? See `axum::Extension`.
+  ```
 
-**问题**：`document/mcp.md` 多处提到 SSE 端点 `/assist/mcp/sse`，但代码中未实现。
+- 无论是否带 `Authorization: Bearer ...` 头，都会返回同样的 500，说明**不是鉴权问题**。
+- 服务器前面是 `nginx/1.18.0 (Ubuntu)` 反向代理。
 
-**处理**：从 `document/mcp.md` 中清除所有 SSE 引用（传输表格、SSE 配置章节、curl 测试命令、故障排除项）。不再实现 SSE。
+## 根因
 
-### 2. 缺少关键路径日志 ✅ 已实现
+后端 `backend-rs` 是用 **Axum 0.7** 写的 MCP 服务。问题出在
+`src/mcp_server.rs` 的 `mcp_stream_handler` 处理函数签名上：
 
-`mcp_server.rs` 全链路日志已添加：initialize（info）、tools/call 入口（info）+ 完成（debug）、认证失败（warn，含客户端 IP）、JSON-RPC 解析错误（warn）、未知 method（warn）。
+```rust
+pub async fn mcp_stream_handler(
+    Extension(db): Extension<Arc<Database>>,
+    Extension(settings): Extension<Arc<Settings>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,   // ← 问题所在
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+```
 
----
+`ConnectInfo<SocketAddr>` 是 Axum 的“硬提取器”（`FromRequestParts`）。它要能成功提取，
+前提是服务器启动时用
+`app.into_make_service_with_connect_info::<SocketAddr>()` 把 TCP 对端地址注入到每个请求里。
 
-## 🟡 P1 — 应修复
+但 `src/main.rs` 的启动代码是：
 
-### 3. Resources 声明与实现不匹配 ✅ 已修复
+```rust
+axum::serve::serve(listener, app).await?;   // ← 没有 into_make_service_with_connect_info
+```
 
-**问题**：`document/mcp.md` 列出两个资源 URI，但服务端未实现。
+因为没有调用 `into_make_service_with_connect_info`，请求里根本不存在
+`ConnectInfo<SocketAddr>` 这个扩展。于是 Axum 永远无法构造该提取器，
+对 **每一个** 到达 `mcp_stream_handler` 的请求都返回 500，MCP 的 `initialize`
+握手因此永远无法完成，客户端也就报 “Failed to connect”。
 
-**处理**：从 `document/mcp.md` 中移除"可用资源"表格。纯工具接口已覆盖所有功能，Resources 无法替代搜索、过滤、分页等工具特性，不计划实现。
+> 注意：项目里其实已经有一个安全的 `extract_client_ip` 辅助函数
+> （`src/main.rs`），它用 `req.extensions().get::<ConnectInfo<SocketAddr>>()`
+> **可选**地读取该扩展，并回退到 `X-Forwarded-For` 头。但 `mcp_stream_handler`
+> 没有复用这个安全写法，而是直接把 `ConnectInfo` 当作必填参数，从而触发了崩溃。
 
-### 4. 缺少前置参数校验 ✅ 已实现
+## 修复方案
 
-`call_tool` 入口添加了 `validate_required_string` 和 `validate_required_i64` 方法，通过宏 `check_required_str!` / `check_required_id!` 在 match 分支中 fail-fast 校验必需参数。grep_search/search_info校验 query，read_markdown/get_document_info/get_document_abstract/get_toc校验 id。
+1. **移除 `mcp_stream_handler` 中对 `ConnectInfo` 的硬依赖。**
+   改为接收整个 `Request`，通过已有的安全辅助函数 `extract_client_ip`
+   （优先 `X-Forwarded-For`，回退 TCP 对端地址，最后 `"unknown"`）来取客户端 IP。
+   这样无论服务端是否配置了 `into_make_service_with_connect_info` 都不会再 500。
 
-### 5. 缺少 offset/limit 上限保护 ✅ 已实现
+2. **把 `extract_client_ip` 的优先级调整为“先 `X-Forwarded-For`、后 `ConnectInfo`”**。
+   因为服务部署在 nginx 反代之后，`ConnectInfo` 拿到的是 nginx 的地址，
+   真实客户端 IP 在 `X-Forwarded-For` 里。先读 XFF 才是反代环境下的正确做法。
 
-`parse_pagination` 添加 `MAX_OFFSET = 10000` 上限，超出时 clamp 并记录 warn 日志。
+3. **在 `main.rs` 的启动处补上 `into_make_service_with_connect_info::<SocketAddr>()`**。
+   虽然第 1 步已让 handler 不再依赖它，但加上它可以让直连（无反代）环境下
+   日志/鉴权拿到真实的 TCP 对端地址，并与 `extract_client_ip` 的回退逻辑保持一致。
 
-### 6. 缺少 capabilities 声明 ✅ 已实现
+## 改动文件
 
-`initialize` 响应现在声明 `tools`、`resources`、`logging` 三项能力。
+- `src/main.rs`
+  - `extract_client_ip`：改为 `pub(crate)`，并交换 XFF / ConnectInfo 的优先级。
+  - `main()` 启动处：`.into_make_service_with_connect_info::<SocketAddr>()`。
+- `src/mcp_server.rs`
+  - `mcp_stream_handler`：去掉 `ConnectInfo(addr)` 参数，改为接收 `Request`，
+    用 `crate::extract_client_ip(&req)` 取 IP，再从请求中拆出 `headers` 与 `body`。
+  - 清理不再使用的 `ConnectInfo` / `SocketAddr` 导入。
 
-### 7. JSON-RPC 版本校验缺失 ✅ 已实现
+## 验证
 
-`mcp_stream_handler` 入口现在校验 `jsonrpc: "2.0"` 和 id 字段存在性（非通知请求必须带 id），非法请求返回 400 + 明确错误信息。
-
-### 8. `resources/read` 错误响应不规范 ✅ 已实现
-
-`resources/read` 现在返回 `{"contents": []}` 而非 `-32601 Method not found`。
-
----
-
-## 🟢 P2 — 值得改进
-
-### 9. 日志级别协商（logging/setLevel） ✅ 已实现
-
-`notifications/` 分支处理 `logging/setLevel`，通过 `AtomicU8` 全局变量记录当前级别（默认 info）。
-
-### 10. OPTIONS 预检请求处理 ✅ 已实现
-
-`main.rs` 中添加 `.options(mcp_server::mcp_options_handler)`，`mcp_options_handler` 返回 200 + Allow header。
-
-### 11. 反向代理/负载均衡友好 ✅ 已实现
-
-`mcp_stream_handler` 现在通过 `ConnectInfo<SocketAddr>` 获取 TCP 对端 IP 进行 LAN 白名单检查，不再依赖可伪造的 `x-forwarded-for` 头。
-
-### 12. 参数别名文档化到工具描述 ✅ 已实现
-
-各工具的 `inputSchema` 中，参数的 `description` 字段现在更明确地标注了别名关系（alias、legacy），并在工具顶层 description 中提及分页参数别名。
-
----
-
-## 🔵 P3 — 未来考虑
-
-### 13. Progress 通知支持
-
-MCP 规范允许服务端在工具执行期间发送 `notifications/progress` 通知。如果将来添加耗时工具（如触发 PDF 解析），应支持此协议。
-
-### 14. 异步工具结果模式
-
-对于可能长时间运行的工具，设计"提交 → 返回 task_id → 轮询结果"的异步模式。
-
-### 15. 添加 `sections` 工具分类元信息
-
-利用 MCP 工具定义中的组织形式字段，按功能域对工具分组（搜索类、读取类、统计类）。
-
----
-
-## 执行顺序建议
-
-| 步骤 | 内容 | 状态 |
-|------|------|------|
-| 1 | 添加日志（P0 #2） | ✅ |
-| 2 | JSON-RPC 校验 + capabilities（P1 #6 #7） | ✅ |
-| 3 | resources/read 改为空结果（P1 #8） | ✅ |
-| 4 | 前置参数校验 + offset 上限（P1 #4 #5） | ✅ |
-| 5 | 日志级别协商（P2 #9） | ✅ |
-| 6 | OPTIONS 处理 + IP 获取（P2 #10 #11） | ✅ |
-| 7 | 文档描述优化（P2 #12） | ✅ |
+- `cargo build` 通过。
+- 重新部署后，对 `POST /assist/mcp/stream` 发送 `initialize` 应返回 200 且带有
+  `result.serverInfo`（不再是 500）。
+- CodeBuddy 中 `okb-assist` 服务器应能从 “Failed to connect” 变为正常连接。

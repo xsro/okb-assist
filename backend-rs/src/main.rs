@@ -149,7 +149,12 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("OKB-Assist (Rust) listening on http://{}", addr);
-    axum::serve::serve(listener, app).await?;
+    // 注入 TCP 对端地址，供 extract_client_ip 在直连环境下取真实客户端 IP。
+    axum::serve::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -574,12 +579,8 @@ fn mime_for_path(path: &std::path::Path) -> &'static str {
 ///
 /// 优先使用 `ConnectInfo` 获取 TCP 对端地址；若不可用（如测试环境），
 /// 回退到 `X-Forwarded-For` 头部。
-fn extract_client_ip<B>(req: &axum::extract::Request<B>) -> String {
-    // 优先使用 TCP 连接的真实对端地址
-    if let Some(connect_info) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
-        return connect_info.0.ip().to_string();
-    }
-    // 回退到 X-Forwarded-For（代理环境）
+pub(crate) fn extract_client_ip<B>(req: &axum::extract::Request<B>) -> String {
+    // 代理环境优先使用 X-Forwarded-For（由 nginx 等反代写入真实客户端 IP）
     if let Some(xff) = req.headers().get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
     {
@@ -587,6 +588,10 @@ fn extract_client_ip<B>(req: &axum::extract::Request<B>) -> String {
         if !ip.is_empty() {
             return ip.to_string();
         }
+    }
+    // 回退到 TCP 对端地址（直连环境，无 X-Forwarded-For 时）
+    if let Some(connect_info) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        return connect_info.0.ip().to_string();
     }
     "unknown".to_string()
 }

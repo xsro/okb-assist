@@ -3,12 +3,11 @@
 //! 提供与 Python 版 `app/mcp_server.py` 一致的 MCP 工具集，
 //! 以及 Streamable HTTP JSON-RPC 端点（`/assist/mcp/stream`）。
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::ConnectInfo;
 use axum::extract::Extension;
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::Request;
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -1057,11 +1056,39 @@ fn mcp_log_enabled(target: u8) -> bool {
 pub async fn mcp_stream_handler(
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    body: String,
+    req: Request,
 ) -> Response {
-    let client_ip = addr.ip().to_string();
+    // 安全提取客户端 IP：优先 X-Forwarded-For（反代环境），回退 TCP 对端地址。
+    // 不直接使用 axum 的 `ConnectInfo` 硬提取器，避免服务端未配置
+    // into_make_service_with_connect_info 时 MCP 握手直接返回 500。
+    let client_ip = crate::extract_client_ip(&req);
+
+    // 拆分请求，取出 headers 与 body
+    let (parts, body) = req.into_parts();
+    let headers = parts.headers;
+
+    // axum 0.7 的 Request body 为 `axum::body::Body`，需显式收集为字节后再转 String
+    let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"jsonrpc": "2.0", "error": {"code": -32603, "message": "Failed to read request body"}})),
+            )
+                .into_response();
+        }
+    };
+
+    let body = match String::from_utf8(body_bytes.to_vec()) {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error: invalid utf-8"}})),
+            )
+                .into_response();
+        }
+    };
 
     // Bearer token 校验（mcp_token）
     let mcp_token = settings.mcp_token();
