@@ -1,6 +1,6 @@
 [package]
 name = "okb-assist"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 [[bin]]
@@ -32,6 +32,7 @@ async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 http = "1.0"
+ipnet = "2.11"
 mupdf = { version = "0.8", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }

@@ -91,3 +91,38 @@ pub fn now_iso() -> String {
 pub fn now_datetime() -> String {
     chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.6f").to_string()
 }
+
+/// 检查给定的 IP 字符串是否匹配任一 CIDR 子网。
+///
+/// 支持 IPv4 和 IPv6 CIDR 表示法（如 `192.168.1.0/24`、`10.0.0.0/8`、`::1/128`）。
+/// 若 CIDR 省略前缀长度，视为 `/32`（IPv4）或 `/128`（IPv6）。
+/// 若子网列表为空，始终返回 `false`（不信任任何 IP）。
+pub fn ip_matches_subnets(ip: &str, subnets: &[String]) -> bool {
+    use std::net::IpAddr;
+
+    let ip_addr: IpAddr = match ip.parse() {
+        Ok(addr) => addr,
+        Err(_) => return false,
+    };
+
+    subnets.iter().any(|cidr| {
+        let cidr = cidr.trim();
+        // 尝试按 IPv4 CIDR 解析
+        if let Ok(net) = cidr.parse::<ipnet::Ipv4Net>() {
+            if let IpAddr::V4(ip4) = ip_addr {
+                return net.contains(&ip4);
+            }
+        }
+        // 尝试按 IPv6 CIDR 解析
+        if let Ok(net) = cidr.parse::<ipnet::Ipv6Net>() {
+            if let IpAddr::V6(ip6) = ip_addr {
+                return net.contains(&ip6);
+            }
+        }
+        // 尝试作为无前缀长度的 IP 解析（视为 /32 或 /128）
+        if let Ok(addr) = cidr.parse::<IpAddr>() {
+            return ip_addr == addr;
+        }
+        false
+    })
+}

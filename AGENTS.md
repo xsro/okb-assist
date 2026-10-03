@@ -73,7 +73,7 @@ cargo build --release
 | `backend-rs/src/mcp_server.rs` | MCP 服务 |
 | `backend-rs/src/settings.rs`、`backend-rs/src/utils.rs` | 全局 Settings 单例、工具函数 |
 | `backend-rs/config.json` | 服务配置（MinerU/Ollama/向量库），可由 UI 编辑 |
-| `backend-rs/system.json` | 系统配置（token、DB URL、上传路径、路径模板），需手动改 |
+| `backend-rs/system.json` | 系统配置（token、MCP token、白名单、DB URL、上传路径、路径模板），需手动改 |
 | `client-rs/` | Zotero CSV 导入客户端（Rust） |
 | `frontend/src/components/` | Vue 组件：`AceEditor.vue`（编辑+分屏预览+KaTeX）、`MarkdownViewer.vue`（marked 渲染）、`ConfirmDialog.vue`、`AppHeader.vue`（含汉堡菜单）、`AppNav.vue`（桌面端导航）、`MobileMenu.vue`（移动端侧滑菜单）、`StatusBadge.vue`、`Toast.vue`、`TokenModal.vue`、`McpConfigPanel.vue` |
 | `frontend/src/views/` | 页面视图：`MarkdownEditView.vue`、`MarkdownView.vue`、`HomeView.vue`（桌面表格/移动卡片）、`DetailView.vue`（桌面表格/移动堆叠）、`DocManageView.vue`、`UploadView.vue`、`ConfigView.vue`、`AdminView.vue`、`MonitorView.vue`、`PointView.vue`、`DuplicatesView.vue`、`ToolsView.vue`、`McpSetupView.vue` |
@@ -106,38 +106,33 @@ cargo build --release
 - 其他路径属性均为相对于 `cwd` 的相对路径，仅支持 `{id}` 变量（文档 ID）
 - `env:VAR_NAME` 语法在所有路径属性中均支持
 
-支持的路径属性：
+### system.json 字段一览
 
-| 属性 | 说明 | 默认值 |
+| 字段 | 说明 | 默认值 |
 |------|------|--------|
+| `cwd` | 工作目录，支持 `{system_dir}` 替换 | `{system_dir}` |
+| `token` | Admin Token（为空或 `change-me` 时跳过鉴权） | `change-me` |
+| `mcp_token` | MCP Bearer Token | `change-me` |
+| `trusted_subnets` | 受信任子网白名单（CIDR 数组），匹配的请求免 Token 鉴权 | `[]` |
+| `max_concurrent_tasks` | 全局 extract/index 最大并发数 | `3` |
 | `database_url` | SQLite 连接串 | `sqlite:///data/okb_assist.db` |
-| `markdown_path` | Markdown 文件路径 | `data/markdowns/{id}.md` |
-| `info_path` | 元信息 JSON 路径 | `data/markdowns/{id}.json` |
-| `crossref_path` | Crossref 数据路径 | `data/markdowns/{id}_crossref.json` |
-| `markdown_asset_path` | Markdown 资产包路径 | `data/pdfs/{id}/{id}.zip` |
-| `pdf_path` | PDF 文件路径 | `data/pdfs/{id}/{id}.pdf` |
+| `markdown_path` | Markdown 文件路径模板 | `data/markdowns/{id}.md` |
+| `info_path` | 元信息 JSON 路径模板 | `data/markdowns/{id}.json` |
+| `crossref_path` | Crossref 数据路径模板 | `data/markdowns/{id}_crossref.json` |
+| `markdown_asset_path` | Markdown 资产包路径模板 | `data/pdfs/{id}/{id}.zip` |
+| `pdf_path` | PDF 文件路径模板 | `data/pdfs/{id}/{id}.pdf` |
 | `uploads_folder` | 上传目录 | `data/_uploads` |
-| `config_path` | config.json 路径 | `config.json` |
-| `log_path` | 日志路径 | `stdout` |
-| `grep_path` | grep 可执行文件路径 | `grep` |
+| `config_path` | config.json 路径（相对于 system.json 所在目录） | `config.json` |
+| `log_path` | 日志路径 | `okb-log.jsonl` |
 | `mutool_path` | mutool 可执行文件路径 | `mutool` |
 | `ui_path` | 前端 UI 构建产物路径 | `frontend/dist` |
 
-示例：
-
-```json
-{
-  "cwd": "{system_dir}",
-  "database_url": "sqlite:///data/okb_assist.db",
-  "markdown_path": "data/markdowns/{id}.md",
-  "pdf_path": "data/pdfs/{id}/{id}.pdf",
-  "uploads_folder": "data/_uploads"
-}
-```
+> **路径模板**：`cwd` 支持 `{system_dir}` 替换；其他路径属性相对于 `cwd`，支持 `{id}` 和 `{env:VAR_NAME}` 变量。
+> **trusted_subnets**：空数组 `[]` 表示不信任任何子网，全部需要 Token 鉴权。设为 `["192.168.1.0/24", "127.0.0.1/32"]` 可允许局域网和本机免认证。
 
 ## 架构与请求流
 
-1. **Web/API 层**：`backend-rs/src/main.rs` + `backend-rs/src/routers/*`。`TokenMiddleware` 仅对 `/assist/api/*` 校验 `X-Token`/query `token`，放行 `/assist/mcp`、`/assist/assets`（前端静态资源）、`/assist/uploads`、`/assist/file`、`/redirect`，以及对 `/assist/api/documents/` 下含 `/image/` 的图片 URL 放行。`token` 为 `change-me`（或未设置）时整体跳过校验；来自 `192.168.1.0/24` 局域网的请求也免校验。CORS 限定前端来源（开发 `localhost:5173`，生产同源 `localhost:5001`）。
+1. **Web/API 层**：`backend-rs/src/main.rs` + `backend-rs/src/routers/*`。`TokenMiddleware` 仅对 `/assist/api/*` 校验 `X-Token`/query `token`，放行 `/assist/mcp`、`/assist/assets`（前端静态资源）、`/assist/uploads`、`/assist/file`、`/redirect`，以及对 `/assist/api/documents/` 下含 `/image/` 的图片 URL 放行。`token` 为 `change-me`（或未设置）时整体跳过校验；来自 `trusted_subnets` 白名单的请求也免校验。CORS 限定前端来源（开发 `localhost:5173`，生产同源 `localhost:5001`）。
 2. **数据模型**：`Document`（主记录 + 状态）、`DocumentVectorIndex`（每个向量库的索引状态，唯一键 `(document_id, vector_db_id)`）。状态机用 `DocStatus` / `IndexStatus` 枚举（`backend-rs/src/models.rs`）。
 3. **摄取流水线**（`backend-rs/src/routers/pipeline.rs`，核心状态机）：
    - parse（MinerU）→ `parsing` → `markdown_done`
@@ -294,7 +289,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 2. **配置改动不会自动生效**：`config.json` 改后需 reload；`system.json` 改后需重启进程（进程内缓存）。
 3. **MCP 路由注册顺序有依赖**（`backend-rs/src/main.rs`）：必须在 SSE 挂载之前精确注册 Streamable HTTP 端点。不要"整理"这个顺序。
 4. **没有测试、没有 lint**：编辑后需手动 `cargo build` 确认编译通过，并用 curl 校验端点。
-5. **硬编码的局域网 IP**（`192.168.1.x`）出现在 `config.json`、`system.json`、代码中，是部署相关配置，视为环境配置而非代码。`TokenMiddleware` 另把 `192.168.1.0/24` 作为 **LAN 免 Token 白名单**硬编码，改动需谨慎。
+5. **局域网白名单配置**：`TokenMiddleware` 和 MCP 鉴权的 LAN 免 Token 白名单由 `system.json` 的 `trusted_subnets` 控制（CIDR 数组）。空数组 `[]` 表示不信任任何子网，全部需要 Token 鉴权。默认值为 `["192.168.1.0/24", "127.0.0.1/32"]`。
 6. **SQLite 单写者**：并发写入可行但仍是瓶颈，勿引入大量并发写。
 7. **SPA Fallback 路由**（`backend-rs/src/main.rs`）：`@app.get("/assist/{full_path:path}")` 必须放在所有路由之后。命中 `api/`、`mcp/`、`uploads/`、`file/` 前缀时避免吞掉 API 和 MCP 端点。
 8. **前端构建产物在 `frontend/dist/`**：`pnpm run build` 输出到 `frontend/dist/`。`vite.config.ts` 的 `base: '/assist/'` 使所有资源 URL 以 `/assist/assets/` 开头。

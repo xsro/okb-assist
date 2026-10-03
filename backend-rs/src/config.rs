@@ -242,6 +242,23 @@ impl Settings {
         result
     }
 
+    // ── 受信任子网白名单 ──
+
+    /// 返回受信任子网白名单（CIDR 格式字符串列表）。
+    ///
+    /// 来自匹配子网的请求免 Token/Bearer 鉴权。
+    /// 配置缺失或为空数组时，不信任任何子网（全部需要鉴权）。
+    pub fn trusted_subnets(&self) -> Vec<String> {
+        self.get_system_config()["trusted_subnets"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     // ── 系统配置 ──
     pub fn token(&self) -> String {
         self.get_system_config()["token"]

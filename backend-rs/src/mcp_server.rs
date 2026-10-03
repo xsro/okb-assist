@@ -1099,7 +1099,8 @@ pub async fn mcp_stream_handler(
             .and_then(|v| v.to_str().ok())
             .map(|s| s == format!("Bearer {}", mcp_token))
             .unwrap_or(false);
-        let lan = client_ip.starts_with("192.168.1.");
+        let subnets = settings.trusted_subnets();
+        let lan = !subnets.is_empty() && crate::utils::ip_matches_subnets(&client_ip, &subnets);
         if !authorized && !lan {
             warn!(client_ip, "MCP authentication failed");
             return (

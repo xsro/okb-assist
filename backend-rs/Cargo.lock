@@ -1732,7 +1732,7 @@ dependencies = [
 
 [[package]]
 name = "okb-assist"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1741,6 +1741,7 @@ dependencies = [
  "clap",
  "hex",
  "http 1.5.0",
+ "ipnet",
  "memchr",
  "mupdf",
  "rand",

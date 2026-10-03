@@ -1,19 +1,15 @@
-# 个人文献库
+# okb-assist
 
-本仓库实现一个简易的文献库，可以通过 MCP 访问。
+OKB (Oh my Knowledge Base) is my personal service to organize papers, books as a MCP for AI agents like Codex, Claude.
+I use pi agent to code this and test this.
 
 ## 外部依赖
 
-本项目依赖以下外部命令行工具：
+本项目依赖 `mutool` 处理 PDF 元数据提取
 
-| 工具 | 用途 | 配置方式 |
-|------|------|----------|
-| `grep` | 全文搜索（`/api/documents/grep-search/`） | `system.json` 的 `grep_path`（默认 `grep`） |
-| `mutool` | PDF 元数据提取（未启用 `mupdf` feature 时使用） | 系统 PATH 中需包含 `mutool` |
-
-> 安装方式：
-> - **grep**：Linux/macOS 系统通常自带；Windows 需安装 Git Bash 或 WSL
-> - **mutool**：来自 MuPDF 工具集，安装方式见 <https://mupdf.com/downloads/>
+- release中的版本将mupdf的功能内置了
+- 如果编译的时候未启用 `mupdf` feature ，则需要系统 PATH 中需包含 `mutool` 
+  - **mutool**：来自 MuPDF 工具集，安装方式见 <https://mupdf.com/downloads/>
 
 ## 后端（Rust）
 
@@ -31,6 +27,24 @@ cargo run -- --host 0.0.0.0 --port 5001
 > 修改 `config.json` 后需调用 `/assist/api/config/reload` 端点或重启才能生效。
 
 系统配置文件为 `backend-rs/system.json`，修改后需要重启服务生效。
+
+### 系统配置
+
+```json
+{
+  "token": "change-me",
+  "mcp_token": "change-me",
+  "trusted_subnets": ["192.168.1.0/24", "127.0.0.1/32"],
+  "max_concurrent_tasks": 3
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `token` | Admin Token，为空或 `change-me` 时跳过鉴权 |
+| `mcp_token` | MCP Bearer Token |
+| `trusted_subnets` | 受信任子网白名单（CIDR 数组），匹配的请求免 Token 鉴权。空数组 `[]` 表示不信任任何子网 |
+| `max_concurrent_tasks` | 全局 extract/index 最大并发数 |
 
 ### 工作目录（`cwd`）
 
@@ -52,25 +66,12 @@ cargo run -- --host 0.0.0.0 --port 5001
 | `markdown_path` | Markdown 文件路径 | `"data/markdowns/{id}.md"` |
 | `pdf_path` | PDF 文件路径 | `"data/pdfs/{id}/{id}.pdf"` |
 | `info_path` | 元信息 JSON 路径 | `"data/markdowns/{id}.json"` |
+| `crossref_path` | Crossref 数据路径 | `"data/markdowns/{id}_crossref.json"` |
+| `markdown_asset_path` | Markdown 资产包路径 | `"data/pdfs/{id}/{id}.zip"` |
 | `uploads_folder` | 上传目录 | `"data/_uploads"` |
-| `grep_path` | grep 可执行文件路径 | `"grep"` |
 | `mutool_path` | mutool 可执行文件路径 | `"mutool"` |
 | `ui_path` | 前端 UI 构建产物路径 | `"frontend/dist"` |
 
-详见 [AGENTS.md](AGENTS.md) 的配置章节。
-
-## 启动向量化数据库和索引服务
-
-```bash
-cd data
-qdrant
-```
-
-```bash
-cd backend-rs
-# Fastembed 嵌入服务（如需）
-# 旧版 Python 脚本已移除，如需启动请查看 scripts/ 目录或使用 Docker
-```
 
 ## 启动 Web UI
 
@@ -88,13 +89,6 @@ pnpm run dev
 # 访问 http://localhost:5173/assist/
 ```
 
-## 其他选择
+## TODO
 
-### 使用 Docker 启动向量数据库
-
-```
-sudo docker pull docker.1ms.run/qdrant/qdrant:latest
-sudo docker run -p 6333:6333 -v $(pwd)/qdrant_data:/qdrant/storage docker.1ms.run/qdrant/qdrant:latest
-```
-
-可以访问 `http://localhost:6333/dashboard` 管理向量数据库。
+程序虽然包含部分向量数据库相关的语义搜索功能，但是由于我觉得可能用处不大，所以没有测试。

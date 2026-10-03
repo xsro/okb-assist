@@ -341,14 +341,15 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
     if let Some(settings) = settings {
         let admin_token = settings.token();
 
-        // 局域网 192.168.1.0/24 免校验
+        // 受信任子网白名单免校验
         let client_ip = req
             .headers()
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.split(',').next().unwrap_or("").trim().to_string());
-        if let Some(ip) = client_ip {
-            if ip.starts_with("192.168.1.") {
+        if let Some(ref ip) = client_ip {
+            let subnets = settings.trusted_subnets();
+            if !subnets.is_empty() && crate::utils::ip_matches_subnets(ip, &subnets) {
                 req.extensions_mut().insert(auth::Role::Admin);
                 return next.run(req).await;
             }
