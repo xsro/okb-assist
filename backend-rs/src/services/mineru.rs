@@ -771,12 +771,30 @@ impl MinerUClient {
                         });
                     } else if any_running {
                         debug!("V4 任务 (batch_id={}) 正在解析中, task_count={}", batch_id, tasks.len());
-                        return json!({
+                        // 从第一个运行中的任务提取进度信息
+                        let first_running = tasks.iter().find(|t| {
+                            matches!(t["state"].as_str(), Some("running") | Some("extract") | Some("converting"))
+                        });
+                        let extract_progress = first_running
+                            .and_then(|t| t.get("extract_progress"))
+                            .and_then(|p| {
+                                let extracted = p["extracted_pages"].as_i64();
+                                let total = p["total_pages"].as_i64();
+                                extracted.zip(total).map(|(e, t)| json!({
+                                    "extracted_pages": e,
+                                    "total_pages": t,
+                                }))
+                            });
+                        let mut result = json!({
                             "_done": false,
                             "status": "processing",
                             "batch_id": batch_id,
                             "task_count": tasks.len(),
                         });
+                        if let Some(progress) = extract_progress {
+                            result["extract_progress"] = progress;
+                        }
+                        return result;
                     } else {
                         // 没有运行中的任务，也没有完成的，可能还在排队
                         debug!("V4 任务 (batch_id={}) 排队中...", batch_id);

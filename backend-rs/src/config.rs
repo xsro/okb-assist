@@ -57,7 +57,7 @@ impl Settings {
                     .unwrap_or("http://127.0.0.1:8002")
                     .trim_end_matches('/')
                     .to_string(),
-                token: v["token"].as_str().unwrap_or("").to_string(),
+                token: crate::utils::resolve_token(v["token"].as_str().unwrap_or("")),
                 name: v["name"].as_str().unwrap_or("").to_string(),
                 mineru_type: v["type"]
                     .as_str()

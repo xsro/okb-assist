@@ -13,6 +13,9 @@ export interface ActiveTask {
   started_at: string
   status_message: string
   status: string
+  mineru_config_name: string | null
+  extracted_pages: number | null
+  total_pages: number | null
 }
 
 export interface BatchInfo {

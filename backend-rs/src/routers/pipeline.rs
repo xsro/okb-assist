@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use axum::extract::{Path, Query};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -80,6 +80,9 @@ struct ActiveTask {
     task_type: String,
     started_at: String,
     status_message: String,
+    mineru_config_name: Option<String>,
+    extracted_pages: Option<i32>,
+    total_pages: Option<i32>,
 }
 
 static ACTIVE_TASKS: OnceLock<RwLock<HashMap<i64, ActiveTask>>> = OnceLock::new();
@@ -134,13 +137,16 @@ fn max_concurrent_tasks() -> usize {
     crate::settings::get_settings().max_concurrent_tasks().max(1)
 }
 
-fn track_task_start(doc_id: i64, task_type: &str) {
+fn track_task_start(doc_id: i64, task_type: &str, mineru_config_name: Option<String>) {
     active_tasks_map().write().unwrap().insert(
         doc_id,
         ActiveTask {
             task_type: task_type.to_string(),
             started_at: now_iso(),
             status_message: "正在处理...".to_string(),
+            mineru_config_name,
+            extracted_pages: None,
+            total_pages: None,
         },
     );
 }
@@ -148,6 +154,19 @@ fn track_task_start(doc_id: i64, task_type: &str) {
 fn track_task_update(doc_id: i64, status_message: &str) {
     if let Some(t) = active_tasks_map().write().unwrap().get_mut(&doc_id) {
         t.status_message = status_message.to_string();
+    }
+}
+
+fn track_task_progress(doc_id: i64, extracted_pages: i32, total_pages: i32) {
+    if let Some(t) = active_tasks_map().write().unwrap().get_mut(&doc_id) {
+        t.extracted_pages = Some(extracted_pages);
+        t.total_pages = Some(total_pages);
+    }
+}
+
+fn track_task_set_mineru_config(doc_id: i64, config_name: &str) {
+    if let Some(t) = active_tasks_map().write().unwrap().get_mut(&doc_id) {
+        t.mineru_config_name = Some(config_name.to_string());
     }
 }
 
@@ -220,6 +239,57 @@ fn remove_dir_all_ignore(path: &std::path::Path) {
     let _ = std::fs::remove_dir_all(path);
 }
 
+/// 手动轮询 MinerU 任务，每次检查后更新进度到 ActiveTask
+async fn poll_task_with_progress(
+    client: &MinerUClient,
+    task_id: &str,
+    doc_id: i64,
+    timeout_secs: u64,
+    poll_interval_secs: u64,
+) -> anyhow::Result<Value> {
+    let max_polls = if timeout_secs > 0 { timeout_secs / poll_interval_secs } else { u64::MAX };
+
+    for i in 0..max_polls {
+        let status_result = client.check_task_status(task_id).await;
+
+        // 提取并更新进度
+        if let Some(progress) = status_result.get("extract_progress") {
+            if let (Some(extracted), Some(total)) = (
+                progress["extracted_pages"].as_i64(),
+                progress["total_pages"].as_i64(),
+            ) {
+                track_task_progress(doc_id, extracted as i32, total as i32);
+            }
+        }
+
+        if let Some(done) = status_result.get("_done").and_then(|v| v.as_bool()) {
+            if done {
+                return Ok(status_result);
+            }
+        }
+
+        let status = status_result["status"].as_str().unwrap_or("unknown");
+        match status {
+            "failed" => {
+                let error = status_result["error"].as_str().unwrap_or("Unknown error");
+                anyhow::bail!("MinerU task failed: {}", error);
+            }
+            "canceled" => {
+                anyhow::bail!("MinerU task was canceled");
+            }
+            _ => {
+                if i > 0 && i % 10 == 0 {
+                    debug!("轮询 MinerU 任务 task_id={} [{}/{}], status={}",
+                           task_id, i + 1, max_polls, status);
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(poll_interval_secs)).await;
+            }
+        }
+    }
+
+    anyhow::bail!("MinerU task timed out: {}", task_id);
+}
+
 // ── 后台任务实现 ──
 
 async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
@@ -235,6 +305,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
     };
 
     info!("开始解析文档 {}: 使用 MinerU 配置 '{}' ({})", doc_id, active_config.name, active_config.mineru_type);
+    track_task_set_mineru_config(doc_id, &active_config.name);
 
     // 使用选中的配置创建客户端
     let primary_client = MinerUClient::new(&active_config);
@@ -279,7 +350,12 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
             "processing" | "pending" => {
                 info!("文档 {} 之前的任务仍在处理中, 等待完成", doc_id);
                 update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在等待之前的解析任务完成..."), Some(20.0)).await;
-                match primary_client.poll_task(task_id, settings.mineru_task_timeout()).await {
+                let poll_interval = match active_config.mineru_type.as_str() {
+                    "official" => 5u64,
+                    "official-lightweight" => 3u64,
+                    _ => 2u64,
+                };
+                match poll_task_with_progress(&primary_client, task_id, doc_id, settings.mineru_task_timeout(), poll_interval).await {
                     Ok(_) => {
                         info!("文档 {} 之前的任务轮询完成, 正在获取结果", doc_id);
                         if let Ok(md_path) = primary_client.get_task_result(task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
@@ -323,7 +399,12 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
             update_doc_status(&db, doc_id, DocStatus::Parsing, Some("已提交任务，正在解析..."), Some(20.0)).await;
 
             info!("文档 {} 开始轮询解析任务 (timeout={}s)", doc_id, active_config.task_timeout);
-            match client.poll_task(&task_id, active_config.task_timeout).await {
+            let poll_interval = match active_config.mineru_type.as_str() {
+                "official" => 5u64,
+                "official-lightweight" => 3u64,
+                _ => 2u64,
+            };
+            match poll_task_with_progress(&client, &task_id, doc_id, active_config.task_timeout, poll_interval).await {
                 Ok(_) => {
                     info!("文档 {} 解析任务完成, 获取结果中", doc_id);
                     update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在获取解析结果..."), Some(80.0)).await;
@@ -922,7 +1003,7 @@ where
     let sem = task_semaphore();
     let _permit = sem.acquire().await.expect("task semaphore closed");
     RUNNING_TASKS.fetch_add(1, Ordering::SeqCst);
-    track_task_start(doc_id, task_type);
+    track_task_start(doc_id, task_type, None);
     fut.await;
     track_task_end(doc_id);
     RUNNING_TASKS.fetch_sub(1, Ordering::SeqCst);
@@ -936,7 +1017,7 @@ where
     let sem = mineru_task_semaphore();
     let _permit = sem.acquire().await.expect("mineru semaphore closed");
     RUNNING_TASKS.fetch_add(1, Ordering::SeqCst);
-    track_task_start(doc_id, task_type);
+    track_task_start(doc_id, task_type, None);
     fut.await;
     track_task_end(doc_id);
     RUNNING_TASKS.fetch_sub(1, Ordering::SeqCst);
@@ -1231,6 +1312,9 @@ async fn active_tasks(
                 "started_at": info.started_at,
                 "status_message": doc.status_message.clone().unwrap_or(info.status_message),
                 "status": doc.status.clone(),
+                "mineru_config_name": info.mineru_config_name,
+                "extracted_pages": info.extracted_pages,
+                "total_pages": info.total_pages,
             }));
         }
     }

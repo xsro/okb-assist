@@ -76,6 +76,8 @@
                 <th>文档 ID</th>
                 <th>标题</th>
                 <th>任务类型</th>
+                <th>解析工具</th>
+                <th>解析进度</th>
                 <th>状态</th>
                 <th>开始时间</th>
               </tr>
@@ -84,7 +86,25 @@
               <tr v-for="task in activeTasks" :key="task.doc_id">
                 <td>{{ task.doc_id }}</td>
                 <td>{{ task.doc_title }}</td>
-                <td>{{ task.task_type }}</td>
+                <td>{{ taskTypeLabel(task.task_type) }}</td>
+                <td>
+                  <span v-if="task.mineru_config_name" class="tool-tag">
+                    {{ task.mineru_config_name }}
+                  </span>
+                  <span v-else class="text-muted">-</span>
+                </td>
+                <td>
+                  <div v-if="task.task_type === 'parse' && task.extracted_pages != null && task.total_pages != null" class="parse-progress">
+                    <div class="progress-mini-bar-wrap">
+                      <div
+                        class="progress-mini-bar"
+                        :style="{ width: (task.extracted_pages / task.total_pages * 100) + '%' }"
+                      ></div>
+                    </div>
+                    <span class="progress-text">{{ task.extracted_pages }}/{{ task.total_pages }} 页</span>
+                  </div>
+                  <span v-else class="text-muted">-</span>
+                </td>
                 <td><StatusBadge :status="task.status" /></td>
                 <td>{{ formatTime(task.started_at) }}</td>
               </tr>
@@ -216,6 +236,17 @@ function refresh() {
   pipelineStore.fetchStatus()
 }
 
+function taskTypeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    parse: '解析',
+    extract: '元数据提取',
+    index: '索引',
+    crossref: 'Crossref',
+    'extract-pdf-meta': 'PDF 元数据',
+  }
+  return labels[type] || type
+}
+
 function formatTime(iso: string) {
   return new Date(iso).toLocaleString('zh-CN')
 }
@@ -251,6 +282,53 @@ onUnmounted(() => {
 
 .table-wrap {
   overflow-x: auto;
+}
+
+.tool-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  white-space: nowrap;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.parse-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 100px;
+}
+
+.progress-mini-bar-wrap {
+  width: 50px;
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.progress-mini-bar {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+
+.progress-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.text-muted {
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
 .empty-hint {
