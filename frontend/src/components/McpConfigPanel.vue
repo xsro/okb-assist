@@ -44,7 +44,6 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { getServiceConfig } from '@/api/config'
 import { useToast } from '@/composables/useToast'
 import { useTokenStore } from '@/stores/token'
 
@@ -141,10 +140,8 @@ http_headers = {
 })
 
 async function load() {
-  try {
-    const svc = await getServiceConfig()
-    baseUrl.value = svc.base_url || ''
-  } catch { /* ignore */ }
+  // 不需要走后端 API，直接使用当前页面 origin
+  baseUrl.value = window.location.origin
 }
 
 function copy() {
