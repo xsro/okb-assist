@@ -142,6 +142,28 @@
 
     <!-- MCP 配置 -->
     <div v-if="activeTab === 'mcp'" class="tab-content">
+      <div class="user-token-section">
+        <h3>你的 Token</h3>
+        <p class="token-hint">
+          将此 Token 填入 MCP 客户端的 <code>Authorization</code> 请求头，即可使用你的角色权限访问 MCP 服务。
+        </p>
+        <div class="token-display">
+          <code class="token-value">{{ displayToken }}</code>
+          <button class="btn btn-sm" @click="copyToken">
+            {{ tokenCopied ? '已复制' : '复制' }}
+          </button>
+        </div>
+        <p class="token-note" v-if="!tokenStore.isAuthenticated">
+          尚未登录，请先设置 Token。
+        </p>
+        <details class="config-details">
+          <summary>查看 MCP 客户端配置示例</summary>
+          <div class="client-config-example">
+            <pre><code>{{ mcpClientExample }}</code></pre>
+            <button class="btn btn-sm" @click="copyExample">{{ exampleCopied ? '已复制' : '复制配置' }}</button>
+          </div>
+        </details>
+      </div>
       <McpConfigPanel />
     </div>
 
@@ -153,16 +175,79 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { grepSearch, semanticSearch } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
+import { useTokenStore } from '@/stores/token'
 import McpConfigPanel from '@/components/McpConfigPanel.vue'
 import McpSkillPanel from '@/components/McpSkillPanel.vue'
 import type { SearchResult } from '@/types/document'
 
-const { showError } = useToast()
+const { showError, showSuccess } = useToast()
 const { requireToken } = useRequireToken()
+const tokenStore = useTokenStore()
+
+const tokenCopied = ref(false)
+const exampleCopied = ref(false)
+
+const displayToken = computed(() => {
+  return tokenStore.token || '(未设置 Token)'
+})
+
+const mcpClientExample = computed(() => {
+  const token = tokenStore.token || 'your-token-here'
+  const origin = window.location.origin
+  return `{
+  "mcpServers": {
+    "okb-assist": {
+      "type": "http",
+      "url": "${origin}/assist/mcp/stream",
+      "headers": {
+        "Authorization": "Bearer ${token}"
+      }
+    }
+  }
+}`
+})
+
+async function copyToken() {
+  if (!tokenStore.token) return
+  try {
+    await navigator.clipboard.writeText(tokenStore.token)
+    tokenCopied.value = true
+    showSuccess('Token 已复制')
+    setTimeout(() => { tokenCopied.value = false }, 2000)
+  } catch {
+    // fallback
+    const ta = document.createElement('textarea')
+    ta.value = tokenStore.token
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+    tokenCopied.value = true
+    setTimeout(() => { tokenCopied.value = false }, 2000)
+  }
+}
+
+async function copyExample() {
+  try {
+    await navigator.clipboard.writeText(mcpClientExample.value)
+    exampleCopied.value = true
+    showSuccess('配置已复制')
+    setTimeout(() => { exampleCopied.value = false }, 2000)
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = mcpClientExample.value
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+    exampleCopied.value = true
+    setTimeout(() => { exampleCopied.value = false }, 2000)
+  }
+}
 
 const tabs = [
   { key: 'grep', label: '全文搜索' },
@@ -388,6 +473,97 @@ async function doSemanticSearch() {
   padding: 40px;
   color: var(--text-secondary);
   font-size: 14px;
+}
+
+/* ── 用户 Token 展示 ── */
+
+.user-token-section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.user-token-section h3 {
+  font-size: 16px;
+  margin-bottom: 8px;
+}
+
+.token-hint {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  line-height: 1.6;
+}
+
+.token-hint code {
+  font-size: 12px;
+  padding: 1px 5px;
+  background: #e8e8e8;
+  border-radius: 3px;
+}
+
+.token-display {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.token-value {
+  flex: 1;
+  padding: 10px 14px;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  border-radius: 6px;
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 13px;
+  word-break: break-all;
+  line-height: 1.5;
+  user-select: all;
+}
+
+.token-note {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--warning);
+}
+
+.config-details {
+  margin-top: 14px;
+}
+
+.config-details summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--primary);
+  padding: 4px 0;
+}
+
+.config-details summary:hover {
+  text-decoration: underline;
+}
+
+.client-config-example {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 10px;
+}
+
+.client-config-example pre {
+  flex: 1;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 14px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.client-config-example code {
+  white-space: pre;
 }
 
 @media (max-width: 768px) {
