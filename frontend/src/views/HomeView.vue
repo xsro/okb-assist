@@ -58,36 +58,6 @@
 
       <!-- 排序控制（由 sort:/order: 语法控制） -->
       <div class="search-controls">
-        <!-- 列管理按钮 -->
-        <div class="column-manager" ref="columnManagerRef">
-          <button class="btn btn-sm btn-columns" @click="toggleColumnMenu" title="管理显示的列">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-              <line x1="3" y1="9" x2="21" y2="9"/>
-              <line x1="9" y1="3" x2="9" y2="21"/>
-              <line x1="15" y1="3" x2="15" y2="21"/>
-            </svg>
-            列管理
-          </button>
-          <div v-if="showColumnMenu" class="column-dropdown" @click.stop>
-            <div
-              v-for="col in allColumns"
-              :key="col.key"
-              class="col-toggle"
-              :class="{ 'col-disabled': col.always }"
-            >
-              <label>
-                <input
-                  type="checkbox"
-                  :checked="visibleColumns[col.key]"
-                  :disabled="col.always"
-                  @change="toggleColumn(col.key)"
-                />
-                {{ col.label }}
-              </label>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -112,10 +82,15 @@
           <th v-if="visibleColumns.id">ID</th>
           <th v-if="visibleColumns.title">标题</th>
           <th v-if="visibleColumns.authors">作者</th>
+          <th v-if="visibleColumns.journal">期刊</th>
           <th v-if="visibleColumns.year">年份</th>
           <th v-if="visibleColumns.doc_type">类型</th>
           <th v-if="visibleColumns.status">状态</th>
           <th v-if="visibleColumns.files">文件</th>
+          <th v-if="visibleColumns.filename">文件名</th>
+          <th v-if="visibleColumns.file_hash">哈希</th>
+          <th v-if="visibleColumns.created_at">创建时间</th>
+          <th v-if="visibleColumns.updated_at">更新时间</th>
           <th v-if="visibleColumns.operations">操作</th>
         </tr>
       </thead>
@@ -128,6 +103,7 @@
             </router-link>
           </td>
           <td v-if="visibleColumns.authors">{{ doc.authors || '-' }}</td>
+          <td v-if="visibleColumns.journal">{{ doc.journal || '-' }}</td>
           <td v-if="visibleColumns.year">{{ doc.year || '-' }}</td>
           <td v-if="visibleColumns.doc_type">{{ doc.doc_type || '-' }}</td>
           <td v-if="visibleColumns.status">
@@ -147,6 +123,10 @@
               <span>Z: {{ formatFile(doc.zip_size) }}</span>
             </span>
           </td>
+          <td v-if="visibleColumns.filename" class="col-filename">{{ doc.filename }}</td>
+          <td v-if="visibleColumns.file_hash" class="col-hash">{{ doc.file_hash || '-' }}</td>
+          <td v-if="visibleColumns.created_at" class="col-date">{{ formatDate(doc.created_at) }}</td>
+          <td v-if="visibleColumns.updated_at" class="col-date">{{ formatDate(doc.updated_at) }}</td>
           <td v-if="visibleColumns.operations" class="col-actions">
             <a
               :href="`/assist/api/documents/${doc.id}/pdf/`"
@@ -197,6 +177,13 @@
             class="index-db-tag"
           >{{ dbId }}</span>
         </div>
+        <div v-if="visibleColumns.filename || visibleColumns.file_hash || visibleColumns.journal || visibleColumns.created_at || visibleColumns.updated_at" class="doc-card-details">
+          <span v-if="visibleColumns.journal" class="detail-item">📰 {{ doc.journal || '-' }}</span>
+          <span v-if="visibleColumns.filename" class="detail-item">📄 {{ doc.filename }}</span>
+          <span v-if="visibleColumns.file_hash" class="detail-item detail-hash"># {{ doc.file_hash || '-' }}</span>
+          <span v-if="visibleColumns.created_at" class="detail-item">📅 {{ formatDate(doc.created_at) }}</span>
+          <span v-if="visibleColumns.updated_at" class="detail-item">🔄 {{ formatDate(doc.updated_at) }}</span>
+        </div>
         <div class="doc-card-actions">
           <a
             :href="`/assist/api/documents/${doc.id}/pdf/`"
@@ -239,12 +226,17 @@
     </div>
 
     <!-- 高级搜索构建器 -->
-    <QueryBuilder ref="queryBuilderRef" />
+    <QueryBuilder
+      ref="queryBuilderRef"
+      :all-columns="allColumns"
+      :visible-columns="visibleColumns"
+      :toggle-column="toggleColumn"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { listDocuments, searchInfo } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
@@ -281,16 +273,23 @@ const allColumns: ColumnDef[] = [
   { key: 'id', label: 'ID' },
   { key: 'title', label: '标题' },
   { key: 'authors', label: '作者' },
+  { key: 'journal', label: '期刊/会议名' },
   { key: 'year', label: '年份' },
   { key: 'doc_type', label: '类型' },
   { key: 'status', label: '状态' },
   { key: 'files', label: '文件大小' },
+  { key: 'filename', label: '文件名' },
+  { key: 'file_hash', label: '文件哈希' },
+  { key: 'created_at', label: '创建时间' },
+  { key: 'updated_at', label: '更新时间' },
   { key: 'operations', label: '操作', always: true },
 ]
 
 const DEFAULT_COLUMNS: Record<string, boolean> = {
   id: true, title: true, authors: true, year: true,
   doc_type: true, status: true, files: false, operations: true,
+  journal: false, filename: false, file_hash: false,
+  created_at: false, updated_at: false,
 }
 
 function loadColumnVisibility(): Record<string, boolean> {
@@ -304,22 +303,10 @@ function loadColumnVisibility(): Record<string, boolean> {
 }
 
 const visibleColumns = ref<Record<string, boolean>>(loadColumnVisibility())
-const showColumnMenu = ref(false)
-const columnManagerRef = ref<HTMLElement | null>(null)
 
 function toggleColumn(key: string) {
   visibleColumns.value[key] = !visibleColumns.value[key]
   localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(visibleColumns.value))
-}
-
-function toggleColumnMenu() {
-  showColumnMenu.value = !showColumnMenu.value
-}
-
-function onClickOutside(e: MouseEvent) {
-  if (showColumnMenu.value && columnManagerRef.value && !columnManagerRef.value.contains(e.target as Node)) {
-    showColumnMenu.value = false
-  }
 }
 
 const { items, loading, page, total, totalPages, load } = usePagination<Document>()
@@ -470,14 +457,7 @@ onMounted(async () => {
   doLoad()
 })
 
-// 列管理：点击外部关闭下拉
-onMounted(() => {
-  document.addEventListener('click', onClickOutside)
-})
 
-onUnmounted(() => {
-  document.removeEventListener('click', onClickOutside)
-})
 
 function formatSize(bytes: number | null): string {
   if (!bytes) return '-'
@@ -489,6 +469,12 @@ function formatSize(bytes: number | null): string {
 function formatFile(size: number | null): string {
   if (size == null) return '不存在'
   return formatSize(size)
+}
+
+function formatDate(iso: string): string {
+  if (!iso) return '-'
+  // 取日期部分 YYYY-MM-DD
+  return iso.slice(0, 10)
 }
 </script>
 
@@ -540,72 +526,6 @@ function formatFile(size: number | null): string {
   padding: 8px 14px 10px;
 }
 
-/* ── 列管理 ──────────────────────────────────────────── */
-.column-manager {
-  position: relative;
-}
-
-.btn-columns {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  background: var(--bg-white);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 12px;
-  white-space: nowrap;
-  transition: all 0.15s;
-  min-height: 30px;
-}
-.btn-columns:hover {
-  border-color: var(--primary);
-  color: var(--primary);
-  background: var(--primary-light);
-}
-
-.column-dropdown {
-  position: absolute;
-  right: 0;
-  top: 100%;
-  margin-top: 4px;
-  min-width: 140px;
-  background: var(--bg-white);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
-  padding: 6px 0;
-  z-index: 100;
-}
-
-.col-toggle {
-  padding: 2px 12px;
-}
-.col-toggle label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  cursor: pointer;
-  padding: 4px 0;
-  color: var(--text);
-  user-select: none;
-}
-.col-toggle input[type="checkbox"] {
-  accent-color: var(--primary);
-  cursor: pointer;
-}
-
-.col-disabled {
-  opacity: 0.5;
-  pointer-events: none;
-}
-.col-disabled label {
-  cursor: not-allowed;
-}
-
 /* ── 文件列 ──────────────────────────────────────────── */
 .col-files {
   min-width: 130px;
@@ -638,6 +558,29 @@ function formatFile(size: number | null): string {
   padding: 2px 14px 6px;
   font-size: 11px;
   color: var(--text-secondary);
+}
+
+.doc-card-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 2px 14px 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.detail-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.detail-hash {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── 骨架屏 ──────────────────────────────────────────── */
@@ -887,6 +830,30 @@ function formatFile(size: number | null): string {
   gap: 1px;
   font-size: 11px;
   line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* 表格内文件名/哈希/日期 */
+.col-filename {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.col-hash {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.col-date {
+  font-size: 12px;
   color: var(--text-secondary);
   white-space: nowrap;
 }

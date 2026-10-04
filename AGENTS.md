@@ -4,7 +4,7 @@
 
 
 
-如果在嵌入式设备上运行，例如orangepi，请不要编译后端，执行代码检查即可。
+如果在嵌入式设备上运行，例如 orangepi，请不要编译后端，执行代码检查即可。
 ```
 cargo check
 ```
@@ -14,7 +14,7 @@ cargo check
 OKB-Assist 是一个**本地学术文献库管理系统**（论文与专著）。流程：上传/登记 PDF → MinerU 解析为 Markdown → Ollama 抽取元数据 → 向量库（默认 Qdrant）语义建索引 → 通过 Web UI 或 MCP 服务检索。
 
 - **后端**：Rust（Axum + SQLx + Tokio），位于 `backend-rs/`，API 接口与旧 Python 版兼容
-- **前端**：TypeScript + Vue 3（Vite 构建），位于 `frontend/`
+- **前端**：TypeScript + Vue 3（Vite 8 构建），位于 `frontend/`
 - **数据**：SQLx + SQLite（`okb_assist.db`）
 - **向量库**：Qdrant（默认），适配器层同时支持 Milvus / Chroma
 - **外部服务**：MinerU（解析）、Ollama（LLM/嵌入）、Qdrant（向量）、Fastembed（嵌入服务）、OpenWebUI（可选前端）、mutool（PDF 元数据提取，未启用 mupdf feature 时使用）
@@ -50,7 +50,7 @@ pnpm run dev         # 启动开发服务器（端口 5173，代理 /assist 到�
 pnpm run build       # 构建到 frontend/dist/
 ```
 
-> **注意**：`pnpm run type-check` 目前不可用（`vue-tsc` 与当前 TypeScript 版本不兼容）。构建通过即视为类型检查通过。
+> `pnpm run type-check` 因 `vue-tsc` 与当前 TypeScript 版本不兼容而不可用，构建通过即视为类型检查通过。
 
 ### 客户端工具
 
@@ -65,8 +65,10 @@ cargo build --release
 | 路径 | 说明 |
 |------|------|
 | `backend-rs/src/main.rs` | **入口**：Axum app、路由/MCP/中间件 |
+| `backend-rs/src/auth.rs` | 鉴权与角色匹配（Admin/ViewOnly/ViewUpload） |
+| `backend-rs/src/logger.rs` | 双日志初始化（文件 + 控制台） |
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`admin.rs`、`config.rs`、`openapi.rs`、`mod.rs` |
-| `backend-rs/src/services/` | 后端适配器：`qdrant.rs`、`ollama.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`vector_db.rs`（抽象接口） |
+| `backend-rs/src/services/` | 后端适配器：`qdrant.rs`、`ollama.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`vector_db.rs`、`datalab.rs`、`query_parser.rs` |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
@@ -75,18 +77,18 @@ cargo build --release
 | `backend-rs/config.json` | 服务配置（MinerU/Ollama/向量库），可由 UI 编辑 |
 | `backend-rs/system.json` | 系统配置（token、MCP token、白名单、DB URL、上传路径、路径模板），需手动改 |
 | `client-rs/` | Zotero CSV 导入客户端（Rust） |
-| `frontend/src/components/` | Vue 组件：`AceEditor.vue`（编辑+分屏预览+KaTeX）、`MarkdownViewer.vue`（marked 渲染）、`ConfirmDialog.vue`、`AppHeader.vue`（含汉堡菜单）、`AppNav.vue`（桌面端导航）、`MobileMenu.vue`（移动端侧滑菜单）、`StatusBadge.vue`、`Toast.vue`、`TokenModal.vue`、`McpConfigPanel.vue` |
-| `frontend/src/views/` | 页面视图：`MarkdownEditView.vue`、`MarkdownView.vue`、`HomeView.vue`（桌面表格/移动卡片）、`DetailView.vue`（桌面表格/移动堆叠）、`DocManageView.vue`、`UploadView.vue`、`ConfigView.vue`、`AdminView.vue`、`MonitorView.vue`、`PointView.vue`、`DuplicatesView.vue`、`ToolsView.vue`、`McpSetupView.vue` |
-| `frontend/src/router/` | Vue Router 配置（15+ 路由，`base: '/assist/'`） |
-| `frontend/src/stores/` | Pinia 存储：`pipeline.ts`、`toast.ts`、`token.ts` |
-| `frontend/src/composables/` | 组合式函数：`useToast.ts`、`useRequireToken.ts` |
+| `frontend/src/components/` | Vue 组件 — 见下方「前端架构 → 组件一览」 |
+| `frontend/src/views/` | 页面视图 — 见下方「前端架构 → 路由」 |
+| `frontend/src/router/index.ts` | Vue Router 配置（14 路由，`base: '/assist/'`） |
+| `frontend/src/stores/` | Pinia 存储：`pipeline.ts`、`toast.ts`、`token.ts`、`error.ts` |
+| `frontend/src/composables/` | 组合式函数：`useToast.ts`、`useRequireToken.ts`、`useResponsive.ts`、`usePagination.ts`、`useDebounce.ts` |
 | `frontend/src/types/` | TypeScript 类型定义：`document.ts`、`config.ts`、`pipeline.ts` |
-| `frontend/src/utils/` | 工具：`mathRenderer.ts`（KaTeX/MathJax 公式渲染） |
+| `frontend/src/utils/` | 工具：`mathRenderer.ts`（KaTeX/MathJax 公式渲染）、`searchParser.ts`（搜索语法解析） |
 | `frontend/src/api/` | API 客户端：`client.ts`、`documents.ts`、`pipeline.ts`、`admin.ts`、`config.ts` |
-| `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 构建，输出到 `frontend/dist/`，包管理器 `pnpm`） |
+| `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 8 构建，输出到 `frontend/dist/`，包管理器 `pnpm`） |
 | `frontend/dist/` | 前端构建产物（`index.html`、`assets/`），由后端 serving |
 | `data/` | 运行时数据（`okb_assist.db`、`_uploads/` 等），由 `system.json` 模板决定路径 |
-| `document/` | 参考文档：`mcp.md`（MCP 工具列表）、`build.md`（部署构建）、`mineru.md`（MinerU 部署）、`mineru-cloud-api.md`（官方云 API）、`mineru4/mineru-api-server-report.md`（V1 API 调研）、`openwebui.md`、`qdrant.md`、`rsync.md`、`udisks2-automount.md` |
+| `document/` | 参考文档：`mcp.md`（MCP 工具列表）、`build.md`（部署构建）、`search.md`（搜索语法）、`datalab.to.md`、`mineru4/`、`skills/`、`openwebui.md`、`qdrant.md`、`udisks2-automount.md` |
 
 ## 配置（JSON 文件，非环境变量）
 
@@ -112,7 +114,7 @@ cargo build --release
 |------|------|--------|
 | `cwd` | 工作目录，支持 `{system_dir}` 替换 | `{system_dir}` |
 | `token` | Admin Token（为空或 `change-me` 时跳过鉴权） | `change-me` |
-| `mcp_token` | MCP Bearer Token | `change-me` |
+| `mcp_token` | MCP Bearer Token（为空或 `change-me` 时跳过鉴权） | `change-me` |
 | `trusted_subnets` | 受信任子网白名单（CIDR 数组），匹配的请求免 Token 鉴权 | `[]` |
 | `max_concurrent_tasks` | 全局 extract/index 最大并发数 | `3` |
 | `database_url` | SQLite 连接串 | `sqlite:///data/okb_assist.db` |
@@ -143,13 +145,13 @@ cargo build --release
 4. **文档管理**（`documents.rs`）：CRUD、上传、按路径登记、语义搜索 `/search`、全文搜索 `/grep-search`、`/assist/markdown` 读写、PDF/图片服务、去重。
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、迁移、索引重置。
 6. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
-7. **MCP 服务**（`mcp_server.rs`）：Streamable HTTP 端点 `/assist/mcp/stream`，旧版 SSE 挂载在 `/assist/mcp`；Bearer token 用 `system.json` 的 `mcp_token` 校验。完整工具列表见 `document/mcp.md`。
+7. **MCP 服务**（`mcp_server.rs`）：Streamable HTTP 端点 `/assist/mcp/stream`，SSE 挂载在 `/assist/mcp`；Bearer token 用 `system.json` 的 `mcp_token` 校验。完整工具列表见 `document/mcp.md`。
 
 ## 后台任务（异步执行）
 
 后端大量耗时操作**不在请求内同步完成**，而是在后台运行，请求通常立即返回、由前端轮询状态。
 
-- **机制**：摄取阶段（parse / extract / crossref / extract-pdf-meta / index / process）及批量端点通过 Axum `BackgroundTasks` 提交 Tokio 协程。协程在 HTTP 响应发出后由同一个 Tokio 运行时调度，状态机流转记录在数据库中。
+- **机制**：摄取阶段（parse / extract / crossref / extract-pdf-meta / index / process）及批量端点通过 `tokio::spawn` 提交 Tokio 协程。协程在 HTTP 响应发出后由同一个 Tokio 运行时调度，状态机流转记录在数据库中。
 - **并发限制**：两级信号量独立控制。**全局** `Semaphore(max_concurrent_tasks)`（`system.json` 默认 `3`）限制 extract（Ollama 元数据抽取）和 index（向量索引）的并发。**MinerU 专用** `Semaphore(max_tasks)`（每个配置独立，默认 `3`）限制 PDF 解析并发。两者互不抢占，避免 MinerU 慢解析阻塞其他文档的抽取/索引。
 - **批量进度 / 暂停状态存于进程内存**：模块级全局变量，**进程重启即丢失**。重启后需手动重新触发。
 - **真·fire-and-forget**：删除文档时，SQLite 记录与本地文件先同步删除，而 Qdrant 中对应向量点的删除通过 `tokio::spawn` 异步执行，**请求不等待、失败也不可见**。
@@ -159,21 +161,10 @@ cargo build --release
 ## 路由前缀
 
 - 前端 SPA：`/assist/*` → fallback 到 `frontend/dist/index.html`（由 Vue Router 处理客户端路由）
-- API：`/assist/api/documents`、`/assist/api/pipeline`、`/assist/api/admin`、`/assist/api/config`、`/assist/openapi`
+- API：`/assist/api/documents`、`/assist/api/pipeline`、`/assist/api/admin`、`/assist/api/config`、`/assist/api/auth/check`、`/assist/openapi`
 - 文件别名（免 token）：`/assist/file/{filename}`
 - MCP：`/assist/mcp/stream`（Streamable HTTP）、`/assist/mcp`（SSE）
 - 上传文件：`/assist/uploads/`（由后端直接 serving）
-
-## 前端开发
-
-```bash
-cd frontend
-pnpm install         # 安装前端依赖
-pnpm run dev         # 启动开发服务器（端口 5173，代理 /assist 到后端 5001）
-pnpm run build       # 构建到 frontend/dist/
-```
-
-> **注意**：`pnpm run type-check` 当前不可用（`vue-tsc` 与 TypeScript 版本不兼容）。构建通过即视为类型检查通过。
 
 ## 前端架构
 
@@ -192,19 +183,45 @@ pnpm run build       # 构建到 frontend/dist/
 - **触摸目标**：最小 44px，按钮支持 `:active` 缩放反馈
 - **横向滚动**：表格、代码块、编辑器工具栏在小屏自动横向滚动
 
-### 路由（`src/router/index.ts`）
+### 组件一览（`src/components/`）
+
+| 组件 | 说明 |
+|------|------|
+| `AppHeader.vue` | 顶部导航栏（含汉堡菜单） |
+| `AppNav.vue` | 桌面端水平导航 |
+| `MobileMenu.vue` | 移动端侧滑菜单 |
+| `StatusBadge.vue` | 状态徽章（状态/索引状态） |
+| `Toast.vue` | 消息提示 |
+| `ConfirmDialog.vue` | 确认对话框 |
+| `TokenModal.vue` | Token 输入模态框 |
+| `ErrorBoundary.vue` | 错误边界（catch 渲染异常） |
+| `SkeletonLoading.vue` | 骨架屏 |
+| `MarkdownViewer.vue` | Markdown 渲染（marked + KaTeX + DOMPurify） |
+| `QueryBuilder.vue` | 高级搜索构建器 + 列管理（双选项卡面板） |
+| `AceEditor.vue` | Markdown 编辑器（ace-builds 1.44.0），编辑+分屏预览+KaTeX |
+| `McpConfigPanel.vue` | MCP 配置面板 |
+| `McpSkillPanel.vue` | MCP Skill 面板 |
+| `config/` | 配置子组件：`BaseUrlSection.vue`、`MineruConfigSection.vue`、`OllamaConfigSection.vue`、`VectorDbConfigSection.vue` |
+
+### 路由与视图（`src/router/index.ts` + `src/views/`）
+
 所有前端路由前缀为 `/assist/`，由 Vue Router 的 `createWebHistory()` 处理：
-- `/assist` — 文献列表
-- `/assist/detail/:id` — 文档详情
-- `/assist/markdown/:id` — 只读 Markdown 查看
-- `/assist/markdown/:id/edit` — Markdown 编辑（AceEditor）
-- `/assist/upload` — 上传 PDF
-- `/assist/config` — 服务配置
-- `/assist/admin` — 管理面板
-- `/assist/duplicates` — 去重
-- `/assist/mcp-setup` — MCP 配置引导
-- `/assist/monitor` — 任务监控
-- `/assist/point`、`/assist/tools` — 工具页面
+
+| 路由 | 视图 | 说明 | 权限 |
+|------|------|------|------|
+| `/assist` | `HomeView.vue` | 文献列表（桌面表格/移动卡片 + 列管理 + 高级搜索） | 全部 |
+| `/assist/detail/:id` | `DetailView.vue` | 文档详情 | 全部 |
+| `/assist/markdown/:id` | `MarkdownView.vue` | 只读 Markdown 查看（浮动设置按钮收纳全部工具） | 全部 |
+| `/assist/markdown/:id/edit` | `MarkdownEditView.vue` | Markdown 编辑（AceEditor） | admin |
+| `/assist/upload` | `UploadView.vue` | 上传 PDF | admin / view-upload |
+| `/assist/doc/:id` | `DocManageView.vue` | 文档管理 | 全部 |
+| `/assist/config` | `ConfigView.vue` | 服务配置 | admin |
+| `/assist/admin` | `AdminView.vue` | 管理面板（含监控、统计） | admin |
+| `/assist/duplicates` | `DuplicatesView.vue` | 去重 | admin |
+| `/assist/point` | `PointView.vue` | 向量库管理 | admin |
+| `/assist/mcp-setup` | `McpSetupView.vue` | MCP 配置引导 | admin |
+| `/assist/tools` | `ToolsView.vue` | 工具面板 | 全部 |
+| `/assist/logs` | `LogViewer.vue` | 日志查看 | admin |
 
 ### AceEditor 编辑器组件（`src/components/AceEditor.vue`）
 基于 `ace-builds@1.44.0` 封装的 Markdown 编辑器，内置完整编辑工具栏：
@@ -229,17 +246,20 @@ pnpm run build       # 构建到 frontend/dist/
 ### 状态管理
 - `useToast()`（`src/composables/useToast.ts`）：`showSuccess()` / `showError()` / `showInfo()` / `showToast()`
 - `useRequireToken()`（`src/composables/useRequireToken.ts`）：Token 校验引导
-- Pinia stores：`pipeline.ts`（任务状态）、`toast.ts`（消息队列）、`token.ts`（认证令牌）
+- `useResponsive()`（`src/composables/useResponsive.ts`）：响应式断点检测（`isMobile` / `isDesktop` / `isTablet` / `isSmallMobile`）
+- `usePagination()`（`src/composables/usePagination.ts`）：分页加载封装（`items` / `loading` / `page` / `total` / `load`）
+- `useDebounce()`（`src/composables/useDebounce.ts`）：防抖工具
+- Pinia stores：`pipeline.ts`（任务状态）、`toast.ts`（消息队列）、`token.ts`（认证令牌）、`error.ts`（错误记录）
 
 ### API 层
 `src/api/` 通过 `axios` 请求后端：
 - `client.ts`：axios 实例（baseURL `/assist/api`，自动附加 X-Token）
-- `documents.ts`：CRUD + 搜索 + 上传
+- `documents.ts`：CRUD + 搜索 + 上传 + 文件访问 URL 生成
 - `pipeline.ts`：流水线操作
 - `admin.ts`、`config.ts`：管理/配置
 
 ### 类型定义
-- `src/types/document.ts` — `Document`、`DocStatus`、`SearchResult`
+- `src/types/document.ts` — `Document`、`DocStatus`、`SearchResult`、`SearchResultList`、`TocItem`、`MarkdownResponse`、`ChunkResponse`
 - `src/types/config.ts` — `ServiceConfig`、`SystemConfig`
 - `src/types/pipeline.ts` — `PipelineState`、`BatchProgress`
 
@@ -247,10 +267,10 @@ pnpm run build       # 构建到 frontend/dist/
 
 OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类型：
 - **local**（自部署 V1 API）：通过 `mineru-kit api-server` 部署，`document/mineru4/mineru-api-server-report.md` 包含完整 API 参考。
-- **official**（官方云 V4 精准解析 API）：通过 Token 认证，`document/mineru-cloud-api.md`。
+- **official**（官方云 V4 精准解析 API）：通过 Token 认证，`document/mineru4/mineru-cloud-api.md`。
 - **official-lightweight**（官方云 V1 Agent 轻量 API）：无需 Token，IP 限频。
-`backend-rs/src/services/mineru.rs` 实现了完整的 API 客户端：
-`backend-rs/src/services/mineru.rs` 实现了完整的 API 客户端：
+
+`backend-rs/src/services/mineru.rs` 实现了完整的 API 客户端。
 
 ### 请求的输出格式
 
@@ -285,7 +305,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 
 ## ⚠️ 易错点（编辑前必读）
 
-1. **Token 校验**：`token` 为 `change-me`（或未设置）时整体跳过校验；来自 `192.168.1.0/24` 局域网的请求也免校验。`TokenMiddleware` 仅对 `/assist/api/*` 生效。
+1. **Token 校验**：`token` 为 `change-me`（或未设置）时整体跳过校验；来自 `trusted_subnets` 局域网的请求也免校验。`TokenMiddleware` 仅对 `/assist/api/*` 生效。
 2. **配置改动不会自动生效**：`config.json` 改后需 reload；`system.json` 改后需重启进程（进程内缓存）。
 3. **MCP 路由注册顺序有依赖**（`backend-rs/src/main.rs`）：必须在 SSE 挂载之前精确注册 Streamable HTTP 端点。不要"整理"这个顺序。
 4. **没有测试、没有 lint**：编辑后需手动 `cargo build` 确认编译通过，并用 curl 校验端点。
@@ -295,7 +315,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 8. **前端构建产物在 `frontend/dist/`**：`pnpm run build` 输出到 `frontend/dist/`。`vite.config.ts` 的 `base: '/assist/'` 使所有资源 URL 以 `/assist/assets/` 开头。
 9. **CORS 已限定**：开发环境只允许 `localhost:5173`，生产环境只允许同源 `localhost:5001`。
 10. **移动端导航**：`MobileMenu` 通过 Vue 的 `provide/inject` 机制与 `AppHeader` 通信。`App.vue` 提供 `toggleMobileMenu` / `closeMobileMenu`，`AppHeader` 注入并控制汉堡菜单状态。
-11. **Rust 异步**：后台任务用 `tokio::spawn` 或 Axum `BackgroundTasks`，不要在 `async` 块中使用 `std::thread::sleep` 或阻塞 I/O。
+11. **Rust 异步**：后台任务用 `tokio::spawn`，不要在 `async` 块中使用 `std::thread::sleep` 或阻塞 I/O。
 12. **SQLx 编译时检查**：`sqlx` 默认在 `debug` 模式下会校验 SQL 查询，如果迁移了数据库结构需运行 `cargo sqlx prepare`（需安装 `sqlx-cli`）。
 13. **MinerU Markdown 图片处理**（`backend-rs/src/services/mineru.rs`）：`get_task_result()` 必须优先从 ZIP 输出提取 Markdown（含本地图片引用），而非从独立 Markdown 输出（含 data URI）。`finish_parse_result()` 在 `pipeline.rs` 中还需**复制独立图片文件**到目标目录，否则 Markdown 中的相对路径引用会失效。
 14. **MinerU API 的 output_formats 顺序无关**：`submit_job()` 必须同时请求 `"markdown"` 和 `"zip"` 两个格式。`zip` 格式包含解析结果的完整输出（Markdown + 图片），而 `markdown` 格式是自包含的 data URI 版本。两套输出分别下载后合并处理。
@@ -305,6 +325,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 - 后端入口：`backend-rs/src/main.rs`
 - 配置：`backend-rs/config.json`、`backend-rs/system.json`、`backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs`
 - 架构核心：`backend-rs/src/routers/pipeline.rs`、`backend-rs/src/routers/documents.rs`、`backend-rs/src/models.rs`、`backend-rs/src/services/vector_db.rs`、`backend-rs/src/mcp_server.rs`
-- 前端：`frontend/`（Vue 3 + TypeScript + Vite）
+- 前端：`frontend/`（Vue 3 + TypeScript + Vite 8）
 - MCP 工具参考：`document/mcp.md`
+- 搜索语法参考：`document/search.md`
 - 启动说明：`README.md`

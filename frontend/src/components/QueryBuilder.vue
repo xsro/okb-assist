@@ -2,11 +2,39 @@
   <div v-if="visible" class="qb-overlay" @click.self="close">
     <div class="qb-modal">
       <div class="qb-header">
-        <h3>🔍 高级搜索构建器</h3>
+        <h3>🔧 工具面板</h3>
         <button class="qb-close" @click="close" title="关闭">×</button>
       </div>
 
-      <div class="qb-body">
+      <!-- 选项卡 -->
+      <div class="qb-tabs">
+        <button
+          class="qb-tab"
+          :class="{ active: activeTab === 'search' }"
+          @click="activeTab = 'search'"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          高级搜索
+        </button>
+        <button
+          class="qb-tab"
+          :class="{ active: activeTab === 'columns' }"
+          @click="activeTab = 'columns'"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <line x1="3" y1="9" x2="21" y2="9"/>
+            <line x1="9" y1="3" x2="9" y2="21"/>
+            <line x1="15" y1="3" x2="15" y2="21"/>
+          </svg>
+          列管理
+        </button>
+      </div>
+
+      <!-- 搜索面板 -->
+      <div v-show="activeTab === 'search'" class="qb-body">
         <!-- 自由文本搜索 -->
         <div class="qb-section">
           <label class="qb-label">自由文本</label>
@@ -122,11 +150,39 @@
         </div>
       </div>
 
+      <!-- 列管理面板 -->
+      <div v-show="activeTab === 'columns'" class="qb-body qb-body-columns">
+        <div class="qb-section">
+          <label class="qb-label">表格显示列</label>
+          <p class="qb-hint">勾选需要在文献列表中显示的列</p>
+          <div class="qb-col-list">
+            <div
+              v-for="col in allColumns"
+              :key="col.key"
+              class="qb-col-item"
+              :class="{ 'qb-col-disabled': col.always }"
+            >
+              <label>
+                <input
+                  type="checkbox"
+                  :checked="visibleColumns[col.key]"
+                  :disabled="col.always"
+                  @change="toggleColumn(col.key)"
+                />
+                <span class="qb-col-label">{{ col.label }}</span>
+                <span v-if="col.always" class="qb-col-always">始终显示</span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="qb-footer">
-        <button class="btn btn-primary" @click="apply" :disabled="!generatedQuery">
+        <button v-if="activeTab === 'search'" class="btn btn-primary" @click="apply" :disabled="!generatedQuery">
           ✅ 应用搜索
         </button>
-        <button class="btn btn-outline" @click="close">取消</button>
+        <button v-if="activeTab === 'search'" class="btn btn-outline" @click="close">取消</button>
+        <button v-if="activeTab === 'columns'" class="btn btn-primary" @click="close">✅ 完成</button>
       </div>
     </div>
   </div>
@@ -135,6 +191,19 @@
 <script setup lang="ts">
 import { ref, reactive, computed } from 'vue'
 
+interface ColumnDef {
+  key: string
+  label: string
+  always?: boolean
+}
+
+const props = defineProps<{
+  allColumns: ColumnDef[]
+  visibleColumns: Record<string, boolean>
+  toggleColumn: (key: string) => void
+}>()
+
+const activeTab = ref<'search' | 'columns'>('search')
 const visible = ref(false)
 
 interface QueryForm {
@@ -233,6 +302,7 @@ function show(initialQuery = ''): Promise<string | null> {
   if (initialQuery.trim()) {
     parseInitialQuery(initialQuery.trim())
   }
+  activeTab.value = 'search'
   visible.value = true
   return new Promise((resolve) => {
     resolveFn = resolve
@@ -265,12 +335,6 @@ function resetForm() {
 
 /** 从现有查询字符串反填表单（简化实现，仅支持基本字段） */
 function parseInitialQuery(q: string) {
-  // 提取引号中的内容
-  const extractQuoted = (s: string): string | null => {
-    const m = s.match(/^"([^"]*)"$/)
-    return m ? m[1] : null
-  }
-
   const tokens = q.match(/(?:[^\s"]+|"[^"]*")+/g) || []
 
   for (const token of tokens) {
@@ -317,11 +381,9 @@ function parseInitialQuery(q: string) {
           form.sortOrder = value
           break
         case 'year': {
-          // year:2023, year:2020-2023, year:>2020, year:>=2020, etc.
           const rangeMatch = value.match(/^(>=?|<=?)?\s*(\d+)(?:\s*-\s*(\d+))?$/)
           if (rangeMatch) {
             if (rangeMatch[3]) {
-              // 2020-2023
               form.yearFrom = rangeMatch[2]
               form.yearTo = rangeMatch[3]
             } else if (rangeMatch[1] === '>') {
@@ -333,7 +395,6 @@ function parseInitialQuery(q: string) {
             } else if (rangeMatch[1] === '<=') {
               form.yearTo = rangeMatch[2]
             } else {
-              // 精确年份
               form.yearFrom = rangeMatch[2]
               form.yearTo = rangeMatch[2]
             }
@@ -406,6 +467,43 @@ defineExpose({ show })
   color: var(--text, #333);
 }
 
+/* ── 选项卡 ──────────────────────────────────────────── */
+.qb-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border, #e0e0e0);
+  padding: 0 20px;
+  gap: 0;
+}
+
+.qb-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text-secondary, #666);
+  cursor: pointer;
+  transition: all 0.15s;
+  margin-bottom: -1px;
+  white-space: nowrap;
+}
+.qb-tab:hover {
+  color: var(--text, #333);
+  background: var(--bg, #f5f5f5);
+}
+.qb-tab.active {
+  color: var(--primary, #1976d2);
+  border-bottom-color: var(--primary, #1976d2);
+  font-weight: 500;
+}
+.qb-tab svg {
+  flex-shrink: 0;
+}
+
 /* ── 表单 ────────────────────────────────────────────── */
 .qb-body {
   padding: 16px 20px;
@@ -414,6 +512,10 @@ defineExpose({ show })
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.qb-body-columns {
+  min-height: 200px;
 }
 
 .qb-section {
@@ -428,6 +530,12 @@ defineExpose({ show })
   color: var(--text-secondary, #666);
   text-transform: uppercase;
   letter-spacing: 0.3px;
+}
+
+.qb-hint {
+  font-size: 13px;
+  color: var(--text-secondary, #666);
+  margin: 0 0 4px;
 }
 
 .qb-input {
@@ -499,6 +607,51 @@ defineExpose({ show })
   word-break: break-all;
   min-height: 36px;
   line-height: 1.5;
+}
+
+/* ── 列管理 ──────────────────────────────────────────── */
+.qb-col-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.qb-col-item {
+  padding: 4px 0;
+}
+.qb-col-item label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 6px;
+  color: var(--text, #333);
+  transition: background 0.12s;
+  user-select: none;
+}
+.qb-col-item label:hover {
+  background: var(--bg, #f5f5f5);
+}
+.qb-col-item input[type="checkbox"] {
+  accent-color: var(--primary, #1976d2);
+  cursor: pointer;
+}
+
+.qb-col-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.qb-col-label {
+  flex: 1;
+}
+
+.qb-col-always {
+  font-size: 11px;
+  color: var(--text-tertiary, #999);
+  font-style: italic;
 }
 
 /* ── 按钮栏 ──────────────────────────────────────────── */
