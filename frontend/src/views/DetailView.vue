@@ -3,16 +3,16 @@
     <div class="detail-header">
       <h2>{{ doc.title || doc.filename || '(无标题)' }}</h2>
       <div class="detail-actions-row">
-        <router-link v-if="tokenStore.role === 'admin'" :to="{ name: 'docManage', params: { id: doc.id } }" class="btn btn-sm btn-outline">
+        <router-link v-if="tokenStore.canEdit" :to="{ name: 'docManage', params: { id: doc.id } }" class="btn btn-sm btn-outline">
           管理
         </router-link>
-        <router-link v-if="tokenStore.role === 'admin'" :to="{ name: 'markdownEdit', params: { id: doc.id } }" class="btn btn-sm">
+        <router-link v-if="tokenStore.canEdit" :to="{ name: 'markdownEdit', params: { id: doc.id } }" class="btn btn-sm">
           编辑 Markdown
         </router-link>
-        <button v-if="tokenStore.role === 'admin' || tokenStore.role === 'view-only'" class="btn btn-sm btn-outline" :disabled="openingPdf" @click="openPdf">
+        <button v-if="tokenStore.canViewPdf" class="btn btn-sm btn-outline" :disabled="openingPdf" @click="openPdf">
           {{ openingPdf ? '准备中...' : '查看 PDF' }}
         </button>
-        <router-link v-if="tokenStore.role === 'admin' || tokenStore.role === 'view-only'" :to="{ name: 'markdown', params: { id: doc.id } }" class="btn btn-sm btn-outline">全屏阅读</router-link>
+        <router-link v-if="tokenStore.canViewMarkdown" :to="{ name: 'markdown', params: { id: doc.id } }" class="btn btn-sm btn-outline">全屏阅读</router-link>
       </div>
     </div>
 
