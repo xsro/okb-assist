@@ -159,11 +159,6 @@
       </div>
       <McpConfigPanel />
     </div>
-
-    <!-- MCP as Skill -->
-    <div v-if="activeTab === 'mcp-skill'" class="tab-content">
-      <McpSkillPanel />
-    </div>
   </div>
 </template>
 
@@ -174,7 +169,6 @@ import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import { useTokenStore } from '@/stores/token'
 import McpConfigPanel from '@/components/McpConfigPanel.vue'
-import McpSkillPanel from '@/components/McpSkillPanel.vue'
 import type { SearchResult } from '@/types/document'
 
 const { showError, showSuccess } = useToast()
@@ -209,8 +203,7 @@ async function copyToken() {
 const tabs = [
   { key: 'grep', label: '全文搜索' },
   { key: 'semantic', label: '语义搜索（暂未实现）' },
-  { key: 'mcp', label: 'MCP 配置' },
-  { key: 'mcp-skill', label: 'MCP as Skill' }
+  { key: 'mcp', label: 'MCP 配置' }
 ]
 const activeTab = ref('grep')
 
