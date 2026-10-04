@@ -45,6 +45,9 @@ export const SEARCH_FIELD_DEFS: FieldDef[] = [
   { prefix: 'lang', field: 'language', type: 'text', label: '语言' },
   { prefix: 'language', field: 'language', type: 'text', label: '语言' },
   { prefix: 'year', field: 'year', type: 'number', label: '年份' },
+  { prefix: 'filesize_pdf', field: 'pdf_size', type: 'number', label: 'PDF 大小' },
+  { prefix: 'filesize_md', field: 'md_size', type: 'number', label: 'MD 大小' },
+  { prefix: 'filesize_zip', field: 'zip_size', type: 'number', label: 'ZIP 大小' },
   { prefix: 'status', field: 'status', type: 'status', label: '状态' },
   // 排序控制（不参与字段过滤，由 parsedQueryToParams 特殊处理）
   { prefix: 'sort', field: '__sort__', type: 'sort', label: '排序字段' },

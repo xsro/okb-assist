@@ -143,6 +143,67 @@
           </div>
         </div>
 
+        <!-- 文件大小 -->
+        <div class="qb-section">
+          <label class="qb-label">文件大小</label>
+          <div class="qb-filesize-grid">
+            <div class="qb-filesize-row">
+              <span class="qb-filesize-label">PDF</span>
+              <select v-model="form.pdfSizeOp" class="qb-select qb-select-sm">
+                <option value="">无限制</option>
+                <option value=">">大于</option>
+                <option value=">=">≥</option>
+                <option value="<">小于</option>
+                <option value="<=">≤</option>
+                <option value="=">=</option>
+              </select>
+              <input v-model="form.pdfSizeVal" type="number" class="qb-input qb-input-sm" placeholder="数值" min="0" />
+              <select v-model="form.pdfSizeUnit" class="qb-select qb-select-sm">
+                <option value="B">B</option>
+                <option value="KB">KB</option>
+                <option value="MB" selected>MB</option>
+                <option value="GB">GB</option>
+              </select>
+            </div>
+            <div class="qb-filesize-row">
+              <span class="qb-filesize-label">MD</span>
+              <select v-model="form.mdSizeOp" class="qb-select qb-select-sm">
+                <option value="">无限制</option>
+                <option value=">">大于</option>
+                <option value=">=">≥</option>
+                <option value="<">小于</option>
+                <option value="<=">≤</option>
+                <option value="=">=</option>
+              </select>
+              <input v-model="form.mdSizeVal" type="number" class="qb-input qb-input-sm" placeholder="数值" min="0" />
+              <select v-model="form.mdSizeUnit" class="qb-select qb-select-sm">
+                <option value="B">B</option>
+                <option value="KB">KB</option>
+                <option value="MB" selected>MB</option>
+                <option value="GB">GB</option>
+              </select>
+            </div>
+            <div class="qb-filesize-row">
+              <span class="qb-filesize-label">ZIP</span>
+              <select v-model="form.zipSizeOp" class="qb-select qb-select-sm">
+                <option value="">无限制</option>
+                <option value=">">大于</option>
+                <option value=">=">≥</option>
+                <option value="<">小于</option>
+                <option value="<=">≤</option>
+                <option value="=">=</option>
+              </select>
+              <input v-model="form.zipSizeVal" type="number" class="qb-input qb-input-sm" placeholder="数值" min="0" />
+              <select v-model="form.zipSizeUnit" class="qb-select qb-select-sm">
+                <option value="B">B</option>
+                <option value="KB">KB</option>
+                <option value="MB" selected>MB</option>
+                <option value="GB">GB</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
         <!-- 生成的查询预览 -->
         <div class="qb-preview">
           <label class="qb-label">生成的查询</label>
@@ -218,6 +279,15 @@ interface QueryForm {
   status: string
   sortBy: string
   sortOrder: string
+  pdfSizeOp: string
+  pdfSizeVal: string
+  pdfSizeUnit: string
+  mdSizeOp: string
+  mdSizeVal: string
+  mdSizeUnit: string
+  zipSizeOp: string
+  zipSizeVal: string
+  zipSizeUnit: string
 }
 
 const form = reactive<QueryForm>({
@@ -232,6 +302,15 @@ const form = reactive<QueryForm>({
   status: '',
   sortBy: '',
   sortOrder: 'desc',
+  pdfSizeOp: '',
+  pdfSizeVal: '',
+  pdfSizeUnit: 'MB',
+  mdSizeOp: '',
+  mdSizeVal: '',
+  mdSizeUnit: 'MB',
+  zipSizeOp: '',
+  zipSizeVal: '',
+  zipSizeUnit: 'MB',
 })
 
 let resolveFn: ((query: string | null) => void) | null = null
@@ -292,6 +371,18 @@ const generatedQuery = computed(() => {
     }
   }
 
+  // 文件大小
+  const fileSizeParts = [
+    { op: form.pdfSizeOp, val: form.pdfSizeVal, unit: form.pdfSizeUnit, prefix: 'filesize_pdf' },
+    { op: form.mdSizeOp, val: form.mdSizeVal, unit: form.mdSizeUnit, prefix: 'filesize_md' },
+    { op: form.zipSizeOp, val: form.zipSizeVal, unit: form.zipSizeUnit, prefix: 'filesize_zip' },
+  ]
+  for (const fs of fileSizeParts) {
+    if (fs.op && fs.val.trim()) {
+      parts.push(`${fs.prefix}:${fs.op}${fs.val.trim()}${fs.unit}`)
+    }
+  }
+
   return parts.join(' ')
 })
 
@@ -331,6 +422,15 @@ function resetForm() {
   form.status = ''
   form.sortBy = ''
   form.sortOrder = 'desc'
+  form.pdfSizeOp = ''
+  form.pdfSizeVal = ''
+  form.pdfSizeUnit = 'MB'
+  form.mdSizeOp = ''
+  form.mdSizeVal = ''
+  form.mdSizeUnit = 'MB'
+  form.zipSizeOp = ''
+  form.zipSizeVal = ''
+  form.zipSizeUnit = 'MB'
 }
 
 /** 从现有查询字符串反填表单（简化实现，仅支持基本字段） */
@@ -380,6 +480,33 @@ function parseInitialQuery(q: string) {
         case 'order':
           form.sortOrder = value
           break
+        case 'filesize_pdf': {
+          const m = value.match(/^(>=?|<=?|=|>|<)?\s*(\d+(?:\.\d+)?)\s*(B|KB|MB|GB)?$/)
+          if (m) {
+            form.pdfSizeOp = m[1] || '>'
+            form.pdfSizeVal = m[2]
+            form.pdfSizeUnit = m[3] || 'B'
+          }
+          break
+        }
+        case 'filesize_md': {
+          const m = value.match(/^(>=?|<=?|=|>|<)?\s*(\d+(?:\.\d+)?)\s*(B|KB|MB|GB)?$/)
+          if (m) {
+            form.mdSizeOp = m[1] || '>'
+            form.mdSizeVal = m[2]
+            form.mdSizeUnit = m[3] || 'B'
+          }
+          break
+        }
+        case 'filesize_zip': {
+          const m = value.match(/^(>=?|<=?|=|>|<)?\s*(\d+(?:\.\d+)?)\s*(B|KB|MB|GB)?$/)
+          if (m) {
+            form.zipSizeOp = m[1] || '>'
+            form.zipSizeVal = m[2]
+            form.zipSizeUnit = m[3] || 'B'
+          }
+          break
+        }
         case 'year': {
           const rangeMatch = value.match(/^(>=?|<=?)?\s*(\d+)(?:\s*-\s*(\d+))?$/)
           if (rangeMatch) {
@@ -607,6 +734,32 @@ defineExpose({ show })
   word-break: break-all;
   min-height: 36px;
   line-height: 1.5;
+}
+
+/* ── 文件大小 ────────────────────────────────────────── */
+.qb-filesize-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.qb-filesize-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.qb-filesize-label {
+  min-width: 32px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary, #666);
+}
+
+.qb-select-sm {
+  width: 72px;
+  padding: 6px 8px;
+  font-size: 13px;
 }
 
 /* ── 列管理 ──────────────────────────────────────────── */

@@ -46,6 +46,9 @@ fn resolve_field(prefix: &str) -> Option<FieldInfo> {
         "type" | "doc_type" => Some(FieldInfo::text("doc_type")),
         "status" => Some(FieldInfo::enum_field("status")),
         "year" => Some(FieldInfo::number("year")),
+        "filesize_pdf" => Some(FieldInfo::number("pdf_size")),
+        "filesize_md" => Some(FieldInfo::number("md_size")),
+        "filesize_zip" => Some(FieldInfo::number("zip_size")),
         "sort" => Some(FieldInfo::sort("__sort__")),
         "order" => Some(FieldInfo::sort("__order__")),
         _ => None,
@@ -324,42 +327,90 @@ fn parse_single(input: &str) -> ParsedQuery {
     q
 }
 
-/// 解析数值范围表达式
+/// 解析带单位的文件大小值（如 "10KB", "1.5MB", "512"）为字节数
+fn parse_file_size_value(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // 找到数字结束位置（数字 + 可选小数点）
+    let num_end = s.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(s.len());
+    if num_end == 0 {
+        return None;
+    }
+
+    let num_str = &s[..num_end];
+    let unit_str = s[num_end..].trim().to_uppercase();
+
+    let num: f64 = num_str.parse().ok()?;
+    let bytes = match unit_str.as_str() {
+        "GB" | "GIB" => num * 1024.0 * 1024.0 * 1024.0,
+        "MB" | "MIB" => num * 1024.0 * 1024.0,
+        "KB" | "KIB" => num * 1024.0,
+        "B" | "" => num,
+        _ => return None, // 无法识别的单位
+    };
+    Some(bytes as i64)
+}
+
+/// 解析数值范围表达式，支持带单位的文件大小
 fn parse_range(value: &str) -> Option<RangeBound> {
-    // >2020, >=2020, <2020, <=2020, 2020-2023, 2020
     let v = value.trim();
 
-    if let Some(rest) = v.strip_prefix(">=") {
-        if let Ok(n) = rest.trim().parse::<i64>() {
-            return Some(RangeBound { min: Some(n), max: None });
-        }
+    // 尝试拆分运算符 + 数值部分
+    let (op, rest) = if let Some(r) = v.strip_prefix(">=") { (">=", r.trim()) }
+        else if let Some(r) = v.strip_prefix("<=") { ("<=", r.trim()) }
+        else if let Some(r) = v.strip_prefix('>') { (">", r.trim()) }
+        else if let Some(r) = v.strip_prefix('<') { ("<", r.trim()) }
+        else if let Some(r) = v.strip_prefix('=') { ("=", r.trim()) }
+        else { ("", v) };
+
+    // 尝试作为带单位的文件大小解析
+    if let Some(bytes) = parse_file_size_value(rest) {
+        return match op {
+            ">=" => Some(RangeBound { min: Some(bytes), max: None }),
+            "<=" => Some(RangeBound { min: None, max: Some(bytes) }),
+            ">" => Some(RangeBound { min: Some(bytes + 1), max: None }),
+            "<" => Some(RangeBound { min: None, max: Some(bytes - 1) }),
+            "=" => Some(RangeBound { min: Some(bytes), max: Some(bytes) }),
+            _ => Some(RangeBound { min: Some(bytes), max: Some(bytes) }),
+        };
     }
-    if let Some(rest) = v.strip_prefix("<=") {
-        if let Ok(n) = rest.trim().parse::<i64>() {
-            return Some(RangeBound { min: None, max: Some(n) });
-        }
-    }
-    if let Some(rest) = v.strip_prefix('>') {
-        if let Ok(n) = rest.trim().parse::<i64>() {
-            return Some(RangeBound { min: Some(n + 1), max: None });
-        }
-    }
-    if let Some(rest) = v.strip_prefix('<') {
-        if let Ok(n) = rest.trim().parse::<i64>() {
-            return Some(RangeBound { min: None, max: Some(n - 1) });
+
+    // 尝试范围格式：10KB-1MB, 1024-5120（两端都可能有单位）
+    if op.is_empty() {
+        if let Some((a, b)) = v.split_once('-') {
+            if let (Some(va), Some(vb)) = (parse_file_size_value(a.trim()), parse_file_size_value(b.trim())) {
+                return Some(RangeBound { min: Some(va), max: Some(vb) });
+            }
         }
     }
 
-    // 范围 2020-2023
-    if let Some((a, b)) = v.split_once('-') {
-        if let (Ok(min), Ok(max)) = (a.trim().parse::<i64>(), b.trim().parse::<i64>()) {
-            return Some(RangeBound { min: Some(min), max: Some(max) });
+    // 纯数字回退（原有逻辑）
+    if op.is_empty() {
+        // 范围 2020-2023（纯数字）
+        if let Some((a, b)) = v.split_once('-') {
+            if let (Ok(min), Ok(max)) = (a.trim().parse::<i64>(), b.trim().parse::<i64>()) {
+                return Some(RangeBound { min: Some(min), max: Some(max) });
+            }
         }
-    }
-
-    // 精确值 2020
-    if let Ok(n) = v.parse::<i64>() {
-        return Some(RangeBound { min: Some(n), max: Some(n) });
+        // 精确值
+        if let Ok(n) = v.parse::<i64>() {
+            return Some(RangeBound { min: Some(n), max: Some(n) });
+        }
+    } else {
+        // 有运算符 + 纯数字
+        if let Ok(n) = rest.parse::<i64>() {
+            return match op {
+                ">=" => Some(RangeBound { min: Some(n), max: None }),
+                "<=" => Some(RangeBound { min: None, max: Some(n) }),
+                ">" => Some(RangeBound { min: Some(n + 1), max: None }),
+                "<" => Some(RangeBound { min: None, max: Some(n - 1) }),
+                "=" => Some(RangeBound { min: Some(n), max: Some(n) }),
+                _ => None,
+            };
+        }
     }
 
     None
@@ -429,27 +480,25 @@ pub fn build_where_clause(
         }
     }
 
-    // 数值范围过滤
+    // 数值范围过滤（通用，支持所有数值字段）
     for (column, range) in &q.range_filters {
-        if column == "year" {
-            if let Some(min) = range.min {
-                if let Some(max) = range.max {
-                    if min == max {
-                        conditions.push("year = ?".to_string());
-                        binds.push(min.to_string());
-                    } else {
-                        conditions.push("year >= ? AND year <= ?".to_string());
-                        binds.push(min.to_string());
-                        binds.push(max.to_string());
-                    }
-                } else {
-                    conditions.push("year >= ?".to_string());
+        if let Some(min) = range.min {
+            if let Some(max) = range.max {
+                if min == max {
+                    conditions.push(format!("{} = ?", column));
                     binds.push(min.to_string());
+                } else {
+                    conditions.push(format!("{} >= ? AND {} <= ?", column, column));
+                    binds.push(min.to_string());
+                    binds.push(max.to_string());
                 }
-            } else if let Some(max) = range.max {
-                conditions.push("year <= ?".to_string());
-                binds.push(max.to_string());
+            } else {
+                conditions.push(format!("{} >= ?", column));
+                binds.push(min.to_string());
             }
+        } else if let Some(max) = range.max {
+            conditions.push(format!("{} <= ?", column));
+            binds.push(max.to_string());
         }
     }
 
@@ -636,5 +685,84 @@ mod tests {
     fn test_empty() {
         let pq = parse_query("");
         assert!(pq.is_empty());
+    }
+
+    // ── 文件大小筛选 ────────────────────────────────────
+
+    #[test]
+    fn test_filesize_pdf() {
+        let pq = parse_query("filesize_pdf:>0");
+        assert_eq!(pq.range_filters.len(), 1);
+        assert_eq!(pq.range_filters[0].0, "pdf_size");
+        assert_eq!(pq.range_filters[0].1.min, Some(1));
+    }
+
+    #[test]
+    fn test_filesize_md_with_kb() {
+        let pq = parse_query("filesize_md:>10KB");
+        assert_eq!(pq.range_filters.len(), 1);
+        assert_eq!(pq.range_filters[0].0, "md_size");
+        // 10KB = 10240, > means min = bytes + 1 = 10241
+        assert_eq!(pq.range_filters[0].1.min, Some(10241));
+    }
+
+    #[test]
+    fn test_filesize_zip_with_mb() {
+        let pq = parse_query("filesize_zip:<=1MB");
+        assert_eq!(pq.range_filters.len(), 1);
+        assert_eq!(pq.range_filters[0].0, "zip_size");
+        // 1MB = 1048576
+        assert_eq!(pq.range_filters[0].1.max, Some(1048576));
+    }
+
+    #[test]
+    fn test_filesize_zip_equal_zero() {
+        let pq = parse_query("filesize_zip:=0");
+        assert_eq!(pq.range_filters.len(), 1);
+        assert_eq!(pq.range_filters[0].0, "zip_size");
+        assert_eq!(pq.range_filters[0].1.min, Some(0));
+        assert_eq!(pq.range_filters[0].1.max, Some(0));
+    }
+
+    #[test]
+    fn test_filesize_range_with_units() {
+        let pq = parse_query("filesize_pdf:512KB-2MB");
+        assert_eq!(pq.range_filters.len(), 1);
+        assert_eq!(pq.range_filters[0].0, "pdf_size");
+        assert_eq!(pq.range_filters[0].1.min, Some(512 * 1024));
+        assert_eq!(pq.range_filters[0].1.max, Some(2 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_filesize_combined() {
+        let pq = parse_query("filesize_pdf:>=1MB filesize_md:>0");
+        assert_eq!(pq.range_filters.len(), 2);
+        // filesize_pdf
+        assert_eq!(pq.range_filters[0].0, "pdf_size");
+        assert_eq!(pq.range_filters[0].1.min, Some(1 * 1024 * 1024));
+        // filesize_md
+        assert_eq!(pq.range_filters[1].0, "md_size");
+        assert_eq!(pq.range_filters[1].1.min, Some(1));
+    }
+
+    #[test]
+    fn test_filesize_build_where() {
+        let pq = parse_query("filesize_pdf:>0");
+        let (sql, binds) = build_where_clause(&pq, false);
+        assert!(sql.contains("pdf_size"));
+        assert!(binds.contains(&"1".to_string()));
+    }
+
+    #[test]
+    fn test_parse_file_size_value() {
+        assert_eq!(parse_file_size_value("0"), Some(0));
+        assert_eq!(parse_file_size_value("1024"), Some(1024));
+        assert_eq!(parse_file_size_value("10KB"), Some(10240));
+        assert_eq!(parse_file_size_value("1.5KB"), Some(1536));
+        assert_eq!(parse_file_size_value("1MB"), Some(1048576));
+        assert_eq!(parse_file_size_value("1GB"), Some(1073741824));
+        assert_eq!(parse_file_size_value("10 B"), Some(10));
+        assert_eq!(parse_file_size_value(""), None);
+        assert_eq!(parse_file_size_value("abc"), None);
     }
 }
