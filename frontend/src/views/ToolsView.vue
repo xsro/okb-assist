@@ -156,13 +156,6 @@
         <p class="token-note" v-if="!tokenStore.isAuthenticated">
           尚未登录，请先设置 Token。
         </p>
-        <details class="config-details">
-          <summary>查看 MCP 客户端配置示例</summary>
-          <div class="client-config-example">
-            <pre><code>{{ mcpClientExample }}</code></pre>
-            <button class="btn btn-sm" @click="copyExample">{{ exampleCopied ? '已复制' : '复制配置' }}</button>
-          </div>
-        </details>
       </div>
       <McpConfigPanel />
     </div>
@@ -189,26 +182,9 @@ const { requireToken } = useRequireToken()
 const tokenStore = useTokenStore()
 
 const tokenCopied = ref(false)
-const exampleCopied = ref(false)
 
 const displayToken = computed(() => {
   return tokenStore.token || '(未设置 Token)'
-})
-
-const mcpClientExample = computed(() => {
-  const token = tokenStore.token || 'your-token-here'
-  const origin = window.location.origin
-  return `{
-  "mcpServers": {
-    "okb-assist": {
-      "type": "http",
-      "url": "${origin}/assist/mcp/stream",
-      "headers": {
-        "Authorization": "Bearer ${token}"
-      }
-    }
-  }
-}`
 })
 
 async function copyToken() {
@@ -219,7 +195,6 @@ async function copyToken() {
     showSuccess('Token 已复制')
     setTimeout(() => { tokenCopied.value = false }, 2000)
   } catch {
-    // fallback
     const ta = document.createElement('textarea')
     ta.value = tokenStore.token
     document.body.appendChild(ta)
@@ -228,24 +203,6 @@ async function copyToken() {
     document.body.removeChild(ta)
     tokenCopied.value = true
     setTimeout(() => { tokenCopied.value = false }, 2000)
-  }
-}
-
-async function copyExample() {
-  try {
-    await navigator.clipboard.writeText(mcpClientExample.value)
-    exampleCopied.value = true
-    showSuccess('配置已复制')
-    setTimeout(() => { exampleCopied.value = false }, 2000)
-  } catch {
-    const ta = document.createElement('textarea')
-    ta.value = mcpClientExample.value
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    document.body.removeChild(ta)
-    exampleCopied.value = true
-    setTimeout(() => { exampleCopied.value = false }, 2000)
   }
 }
 
@@ -527,43 +484,6 @@ async function doSemanticSearch() {
   margin-top: 10px;
   font-size: 13px;
   color: var(--warning);
-}
-
-.config-details {
-  margin-top: 14px;
-}
-
-.config-details summary {
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--primary);
-  padding: 4px 0;
-}
-
-.config-details summary:hover {
-  text-decoration: underline;
-}
-
-.client-config-example {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  margin-top: 10px;
-}
-
-.client-config-example pre {
-  flex: 1;
-  background: #1e1e1e;
-  color: #d4d4d4;
-  padding: 14px;
-  border-radius: 6px;
-  overflow-x: auto;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.client-config-example code {
-  white-space: pre;
 }
 
 @media (max-width: 768px) {

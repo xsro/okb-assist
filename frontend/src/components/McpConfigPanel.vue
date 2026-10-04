@@ -30,7 +30,13 @@
       <h4>通用配置</h4>
       <table class="info-table">
         <tr><th>MCP URL</th><td><code>{{ mcpUrl }}</code></td></tr>
-        <tr><th>MCP Token</th><td><code>{{ mcpToken }}</code></td></tr>
+        <tr>
+          <th>你的 Token</th>
+          <td class="token-cell">
+            <code class="token-value">{{ userToken }}</code>
+            <button class="btn btn-sm" @click="copyToken">{{ tokenCopied ? '已复制' : '复制' }}</button>
+          </td>
+        </tr>
       </table>
     </div>
   </div>
@@ -38,13 +44,19 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { getSystemConfig, getServiceConfig } from '@/api/config'
+import { getServiceConfig } from '@/api/config'
 import { useToast } from '@/composables/useToast'
+import { useTokenStore } from '@/stores/token'
 
 const { showSuccess } = useToast()
+const tokenStore = useTokenStore()
 
 const baseUrl = ref('')
-const mcpToken = ref('change-me')
+const tokenCopied = ref(false)
+
+const userToken = computed(() => {
+  return tokenStore.token || '(未登录)'
+})
 
 const mcpUrl = computed(() => {
   const origin = baseUrl.value || window.location.origin
@@ -72,6 +84,7 @@ const configPath = computed(() => {
 })
 
 const clientConfig = computed(() => {
+  const token = userToken.value
   const configs: Record<string, string> = {
     codebuddy: `{
   "mcpServers": {
@@ -79,7 +92,7 @@ const clientConfig = computed(() => {
       "type": "http",
       "url": "${mcpUrl.value}",
       "headers": {
-        "Authorization": "Bearer ${mcpToken.value}"
+        "Authorization": "Bearer ${token}"
       }
     }
   }
@@ -90,7 +103,7 @@ const clientConfig = computed(() => {
       "type": "http",
       "url": "${mcpUrl.value}",
       "headers": {
-        "Authorization": "Bearer ${mcpToken.value}"
+        "Authorization": "Bearer ${token}"
       }
     }
   }
@@ -99,7 +112,7 @@ const clientConfig = computed(() => {
 [mcp_servers.okb-assist]
 url = "${mcpUrl.value}"
 http_headers = {
-    Authorization = "Bearer ${mcpToken.value}"
+    Authorization = "Bearer ${token}"
 }
 `,
     pi: `{
@@ -107,7 +120,7 @@ http_headers = {
     "okb-assist": {
       "url": "${mcpUrl.value}",
       "headers": {
-        "Authorization": "Bearer ${mcpToken.value}"
+        "Authorization": "Bearer ${token}"
       }
     }
   }
@@ -118,7 +131,7 @@ http_headers = {
       "type": "remote",
       "url": "${mcpUrl.value}",
       "headers": {
-        "Authorization": "Bearer ${mcpToken.value}"
+        "Authorization": "Bearer ${token}"
       }
     }
   }
@@ -129,10 +142,6 @@ http_headers = {
 
 async function load() {
   try {
-    const sys = await getSystemConfig()
-    mcpToken.value = sys.mcp_token || 'change-me'
-  } catch { /* ignore */ }
-  try {
     const svc = await getServiceConfig()
     baseUrl.value = svc.base_url || ''
   } catch { /* ignore */ }
@@ -141,6 +150,25 @@ async function load() {
 function copy() {
   navigator.clipboard.writeText(clientConfig.value)
   showSuccess('已复制到剪贴板')
+}
+
+async function copyToken() {
+  if (!tokenStore.token) return
+  try {
+    await navigator.clipboard.writeText(tokenStore.token)
+    tokenCopied.value = true
+    showSuccess('Token 已复制')
+    setTimeout(() => { tokenCopied.value = false }, 2000)
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = tokenStore.token
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    document.body.removeChild(ta)
+    tokenCopied.value = true
+    setTimeout(() => { tokenCopied.value = false }, 2000)
+  }
 }
 
 onMounted(load)
@@ -226,6 +254,21 @@ onMounted(load)
   background: #f7f7f7;
 }
 
+.token-cell {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.token-value {
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 12px;
+  word-break: break-all;
+  user-select: all;
+  flex: 1;
+}
+
 @media (max-width: 768px) {
   .config-output {
     flex-direction: column;
@@ -254,6 +297,15 @@ onMounted(load)
 
   .info-table td {
     word-break: break-all;
+  }
+
+  .token-cell {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .token-cell button {
+    width: 100%;
   }
 }
 
