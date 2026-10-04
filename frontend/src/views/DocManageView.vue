@@ -87,6 +87,8 @@
         <span class="action-label">文件管理</span>
         <div class="action-buttons">
           <button class="btn btn-outline" @click="selectReplacePdf">替换 PDF</button>
+          <button class="btn btn-outline" @click="selectReplaceMarkdown">替换 Markdown</button>
+          <button class="btn btn-outline" @click="selectReplaceAsset">替换图片资源包</button>
           <button class="btn btn-outline" @click="rehash">重算哈希</button>
           <span v-if="hashResult" class="hash-result">
             {{ hashResult.old_file_hash === hashResult.file_hash ? '哈希一致' : '哈希已更新' }}
@@ -97,6 +99,20 @@
             accept=".pdf,application/pdf"
             style="display: none"
             @change="onReplacePdfSelected"
+          />
+          <input
+            ref="replaceMarkdownInput"
+            type="file"
+            accept=".md,text/markdown"
+            style="display: none"
+            @change="onReplaceMarkdownSelected"
+          />
+          <input
+            ref="replaceAssetInput"
+            type="file"
+            accept=".zip,application/zip"
+            style="display: none"
+            @change="onReplaceAssetSelected"
           />
         </div>
       </div>
@@ -120,11 +136,22 @@
         </div>
       </div>
 
+      <!-- 状态设置 -->
+      <div class="action-group">
+        <span class="action-label">设置状态</span>
+        <div class="action-buttons">
+          <select v-model="selectedTargetStatus" class="select status-select">
+            <option value="uploaded">uploaded</option>
+            <option value="markdown_done">markdown_done</option>
+          </select>
+          <button class="btn btn-warning" @click="setStatus">设置状态</button>
+        </div>
+      </div>
+
       <!-- 危险操作 -->
       <div class="action-group action-group-danger">
         <span class="action-label">危险操作</span>
         <div class="action-buttons">
-          <button class="btn btn-danger" @click="reset">重置</button>
           <button class="btn btn-danger" @click="removeDocument">删除文档</button>
         </div>
       </div>
@@ -178,7 +205,7 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getDocument, updateDocument, replacePdf, deleteDocument, rehashDocument } from '@/api/documents'
+import { getDocument, updateDocument, replacePdf, replaceMarkdown, replaceAsset, deleteDocument, rehashDocument } from '@/api/documents'
 import { getServiceConfig } from '@/api/config'
 import {
   parseDocument,
@@ -203,8 +230,11 @@ const { requireToken } = useRequireToken()
 const doc = ref<Document | null>(null)
 const form = ref<Partial<Document>>({})
 const replacePdfInput = ref<HTMLInputElement>()
+const replaceMarkdownInput = ref<HTMLInputElement>()
+const replaceAssetInput = ref<HTMLInputElement>()
 const vectorDbs = ref<VectorDbConfig[]>([])
 const selectedIndexDb = ref('')
+const selectedTargetStatus = ref('uploaded')
 const docIndexes = ref<DocumentIndexInfo[]>([])
 const hashResult = ref<{ file_hash: string; old_file_hash: string | null } | null>(null)
 
@@ -293,12 +323,13 @@ async function runIndex() {
   }
 }
 
-async function reset() {
+async function setStatus() {
   const id = parseInt(route.params.id as string)
-  if (!confirm('确定重置该文档状态？')) return
+  const target = selectedTargetStatus.value
+  if (!confirm(`确定将文档状态设置为「${target}」？`)) return
   try {
-    await resetDocument(id)
-    showSuccess('已重置')
+    const res = await resetDocument(id, target)
+    showSuccess(`状态已设置为 ${res.status}`)
     load()
   } catch (err) {
     showError(getErrorMessage(err))
@@ -333,6 +364,14 @@ function selectReplacePdf() {
   replacePdfInput.value?.click()
 }
 
+function selectReplaceMarkdown() {
+  replaceMarkdownInput.value?.click()
+}
+
+function selectReplaceAsset() {
+  replaceAssetInput.value?.click()
+}
+
 async function onReplacePdfSelected(e: Event) {
   const id = parseInt(route.params.id as string)
   const input = e.target as HTMLInputElement
@@ -346,6 +385,48 @@ async function onReplacePdfSelected(e: Event) {
   try {
     doc.value = await replacePdf(id, file)
     showSuccess('PDF 已替换')
+    load()
+  } catch (err) {
+    showError(getErrorMessage(err))
+  } finally {
+    input.value = ''
+  }
+}
+
+async function onReplaceMarkdownSelected(e: Event) {
+  const id = parseInt(route.params.id as string)
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.md')) {
+    showError('请选择 Markdown (.md) 文件')
+    input.value = ''
+    return
+  }
+  try {
+    await replaceMarkdown(id, file)
+    showSuccess('Markdown 已替换')
+    load()
+  } catch (err) {
+    showError(getErrorMessage(err))
+  } finally {
+    input.value = ''
+  }
+}
+
+async function onReplaceAssetSelected(e: Event) {
+  const id = parseInt(route.params.id as string)
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.zip')) {
+    showError('请选择 ZIP 资源包文件')
+    input.value = ''
+    return
+  }
+  try {
+    await replaceAsset(id, file)
+    showSuccess('图片资源包已替换')
     load()
   } catch (err) {
     showError(getErrorMessage(err))
@@ -450,6 +531,10 @@ function formatFile(size: number | null): string {
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
+}
+
+.status-select {
+  max-width: 180px;
 }
 
 .index-list {

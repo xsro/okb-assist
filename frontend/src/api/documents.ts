@@ -171,6 +171,20 @@ export function replacePdf(id: number, file: File) {
   return apiUpload<Document>(`/assist/api/documents/${id}/pdf/`, fd)
 }
 
+/** 替换文档 Markdown */
+export function replaceMarkdown(id: number, file: File) {
+  const fd = new FormData()
+  fd.append('file', file)
+  return apiUpload<Document>(`/assist/api/documents/${id}/replace-markdown/`, fd)
+}
+
+/** 替换文档图片资源包 (ZIP) */
+export function replaceAsset(id: number, file: File) {
+  const fd = new FormData()
+  fd.append('file', file)
+  return apiUpload<Document>(`/assist/api/documents/${id}/replace-asset/`, fd)
+}
+
 /** 获取 Markdown 内容（行切片） */
 export function getMarkdown(
   id: number,

@@ -139,6 +139,10 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/:id/file-alias", get(file_alias))
         .route("/assist/api/documents/:id/rehash/", post(rehash_document))
         .route("/assist/api/documents/:id/rehash", post(rehash_document))
+        .route("/assist/api/documents/:id/replace-markdown/", post(replace_markdown))
+        .route("/assist/api/documents/:id/replace-markdown", post(replace_markdown))
+        .route("/assist/api/documents/:id/replace-asset/", post(replace_asset))
+        .route("/assist/api/documents/:id/replace-asset", post(replace_asset))
         .route("/assist/api/documents/:id/chunks/", get(get_markdown_chunks))
         .route("/assist/api/documents/:id/chunks", get(get_markdown_chunks))
         .layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024))
@@ -2316,6 +2320,106 @@ async fn check_pdf_exists(
         StatusCode::OK.into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+/// POST /assist/api/documents/{id}/replace-markdown/ —— 替换文档的 Markdown 文件
+async fn replace_markdown(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    match fetch_doc(&db, id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文档不存在"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    }
+
+    let mut file_name: Option<String> = None;
+    let mut content: Vec<u8> = Vec::new();
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("file") {
+            file_name = field.file_name().map(|s| s.to_string());
+            match field.bytes().await {
+                Ok(bytes) => content = bytes.to_vec(),
+                Err(e) => {
+                    return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("读取文件内容失败: {}", e)}))).into_response();
+                }
+            }
+        }
+    }
+
+    if file_name.is_none() || content.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少文件"}))).into_response();
+    }
+
+    if !file_name.as_ref().unwrap().to_lowercase().ends_with(".md") {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "只支持 Markdown (.md) 文件"}))).into_response();
+    }
+
+    let md_path = std::path::PathBuf::from(paths::get_markdown_path(&settings, id));
+    if let Some(parent) = md_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let md_path_clone = md_path.clone();
+    if let Err(e) = tokio::task::spawn_blocking(move || std::fs::write(&md_path_clone, &content)).await.unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking panicked"))) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
+    }
+
+    match fetch_doc(&db, id).await {
+        Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "文档更新失败"}))).into_response(),
+    }
+}
+
+/// POST /assist/api/documents/{id}/replace-asset/ —— 替换文档的图片资源包 (ZIP)
+async fn replace_asset(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    match fetch_doc(&db, id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文档不存在"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    }
+
+    let mut file_name: Option<String> = None;
+    let mut content: Vec<u8> = Vec::new();
+    while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name() == Some("file") {
+            file_name = field.file_name().map(|s| s.to_string());
+            match field.bytes().await {
+                Ok(bytes) => content = bytes.to_vec(),
+                Err(e) => {
+                    return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("读取文件内容失败: {}", e)}))).into_response();
+                }
+            }
+        }
+    }
+
+    if file_name.is_none() || content.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少文件"}))).into_response();
+    }
+
+    if !file_name.as_ref().unwrap().to_lowercase().ends_with(".zip") {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "只支持 ZIP 资源包文件"}))).into_response();
+    }
+
+    let asset_path = std::path::PathBuf::from(paths::get_asset_path(&settings, id));
+    if let Some(parent) = asset_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let asset_path_clone = asset_path.clone();
+    if let Err(e) = tokio::task::spawn_blocking(move || std::fs::write(&asset_path_clone, &content)).await.unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking panicked"))) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
+    }
+
+    match fetch_doc(&db, id).await {
+        Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "文档更新失败"}))).into_response(),
     }
 }
 

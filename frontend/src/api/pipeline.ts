@@ -54,10 +54,12 @@ export function getDocumentIndexes(id: number) {
   )
 }
 
-/** 重置文档状态 */
-export function resetDocument(id: number) {
-  return apiPost<{ detail: string }>(
-    `/assist/api/pipeline/reset/${id}/`
+/** 重置文档状态（可指定目标状态） */
+export function resetDocument(id: number, targetStatus?: string) {
+  return apiPost<{ detail: string; status: string }>(
+    `/assist/api/pipeline/reset/${id}/`,
+    undefined,
+    { params: targetStatus ? { target_status: targetStatus } : undefined }
   )
 }
 
