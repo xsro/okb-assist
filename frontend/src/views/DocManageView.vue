@@ -598,8 +598,9 @@ function formatFile(size: number | null): string {
 
 .file-sizes-list {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-direction: row;
+  gap: 20px;
+  flex-wrap: wrap;
 }
 .file-size-item {
   display: inline-flex;

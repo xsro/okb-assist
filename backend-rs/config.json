@@ -36,7 +36,12 @@
     "model": "qwen3.5:9b",
     "url": "http://127.0.0.1:11434"
   },
-  "permissions": {},
+  "permissions": {
+    "60b8be6583ac41abb3af63e01151bd86": {
+      "access":"view-upload",
+      "mcp":true
+    }
+  },
   "vector_dbs": [
     {
       "collection": "documents",

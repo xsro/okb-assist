@@ -695,8 +695,11 @@ async fn get_logs(
 
 #[derive(Debug, Deserialize)]
 struct PermissionTokenBody {
+    #[serde(alias = "access")]
     role: String,
     token: String,
+    #[serde(default)]
+    mcp: bool,
 }
 
 /// 获取所有角色的权限 token 列表
@@ -712,7 +715,7 @@ async fn get_permissions(
     Json(json!({"permissions": perms}))
 }
 
-/// 添加一个 token 到指定角色
+/// 添加一个 token（新格式：{ token: { access: role, mcp: bool } }）
 async fn add_permission_token(
     Extension(role): Extension<auth::Role>,
     Extension(cm): Extension<Arc<crate::config_manager::ConfigManager>>,
@@ -732,11 +735,14 @@ async fn add_permission_token(
     let mut config = cm.get_service_config();
     let perms = config.get_mut("permissions").and_then(|p| p.as_object_mut());
     if let Some(perms) = perms {
-        // 新格式: { token: role }
+        // 新格式: { token: { access: role, mcp: bool } }
         if perms.contains_key(&body.token) {
             return Json(json!({"detail": "token 已存在"}));
         }
-        perms.insert(body.token.clone(), json!(body.role));
+        perms.insert(body.token.clone(), json!({
+            "access": body.role,
+            "mcp": body.mcp,
+        }));
     }
 
     cm.save_config(&config);
@@ -759,7 +765,7 @@ async fn delete_permission_token(
     let mut config = cm.get_service_config();
     let perms = config.get_mut("permissions").and_then(|p| p.as_object_mut());
     if let Some(perms) = perms {
-        // 新格式: { token: role }
+        // 新格式: { token: { access: role, mcp: bool } }
         perms.remove(&body.token);
     }
 

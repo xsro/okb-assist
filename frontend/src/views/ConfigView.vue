@@ -33,7 +33,8 @@
         <div v-if="permEntries.length > 0" class="perm-token-list">
           <div v-for="(entry, idx) in permEntries" :key="idx" class="perm-token-row">
             <code class="perm-token-value">{{ entry.token }}</code>
-            <span class="perm-token-role" :class="'role-' + entry.role">{{ roleLabel(entry.role) }}</span>
+            <span class="perm-token-role" :class="'role-' + entry.access">{{ roleLabel(entry.access) }}</span>
+            <span v-if="entry.mcp" class="perm-token-mcp-badge" title="允许 MCP 访问">MCP</span>
             <button class="btn btn-sm btn-outline-danger" @click="removeToken(entry.token)" :disabled="savingPerm">删除</button>
           </div>
         </div>
@@ -51,6 +52,10 @@
             class="perm-input"
             @keyup.enter="addToken"
           />
+          <label class="perm-mcp-label">
+            <input type="checkbox" v-model="newPermMcp" />
+            MCP 访问
+          </label>
           <button class="btn btn-sm" @click="addToken" :disabled="savingPerm || !newPermToken.trim()">
             添加
           </button>
@@ -179,16 +184,17 @@ function reset() {
 
 // ── 权限管理 ──
 
-interface PermEntry { token: string; role: string }
+interface PermEntry { token: string; access: string; mcp: boolean }
 
-const permTokens = ref<Record<string, string>>({})
+const permTokens = ref<Record<string, { access: string; mcp: boolean }>>({})
 const newPermToken = ref('')
 const newPermRole = ref('view-only')
+const newPermMcp = ref(false)
 const savingPerm = ref(false)
 const permError = ref('')
 
 const permEntries = computed<PermEntry[]>(() => {
-  return Object.entries(permTokens.value).map(([token, role]) => ({ token, role }))
+  return Object.entries(permTokens.value).map(([token, entry]) => ({ token, access: entry.access, mcp: entry.mcp }))
 })
 
 function roleLabel(role: string): string {
@@ -202,7 +208,7 @@ function roleLabel(role: string): string {
 async function loadPermTokens() {
   try {
     const res = await getPermissionTokens()
-    permTokens.value = (res.permissions || {}) as Record<string, string>
+    permTokens.value = (res.permissions || {}) as Record<string, { access: string; mcp: boolean }>
   } catch {
     // 静默忽略
   }
@@ -214,9 +220,10 @@ async function addToken() {
   savingPerm.value = true
   permError.value = ''
   try {
-    const res = await addPermissionToken(newPermRole.value, token)
-    permTokens.value = (res.permissions || {}) as Record<string, string>
+    const res = await addPermissionToken(newPermRole.value, token, newPermMcp.value)
+    permTokens.value = (res.permissions || {}) as Record<string, { access: string; mcp: boolean }>
     newPermToken.value = ''
+    newPermMcp.value = false
   } catch {
     permError.value = '添加失败，请重试'
   } finally {
@@ -225,14 +232,14 @@ async function addToken() {
 }
 
 async function removeToken(token: string) {
-  const role = permTokens.value[token]
-  if (!role) return
-  if (!confirm(`确定删除 token: ${token}（${roleLabel(role)}）？`)) return
+  const entry = permTokens.value[token]
+  if (!entry) return
+  if (!confirm(`确定删除 token: ${token}（${roleLabel(entry.access)}）？`)) return
   savingPerm.value = true
   permError.value = ''
   try {
-    const res = await deletePermissionToken(role, token)
-    permTokens.value = (res.permissions || {}) as Record<string, string>
+    const res = await deletePermissionToken(entry.access, token)
+    permTokens.value = (res.permissions || {}) as Record<string, { access: string; mcp: boolean }>
   } catch {
     permError.value = '删除失败，请重试'
   } finally {
@@ -365,6 +372,34 @@ onMounted(() => {
 .perm-input:focus {
   border-color: var(--primary);
   box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.12);
+}
+
+.perm-mcp-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.perm-mcp-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.perm-token-mcp-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  background: #fff3e0;
+  color: #e65100;
+  flex-shrink: 0;
+  letter-spacing: 0.5px;
 }
 
 .error-message {

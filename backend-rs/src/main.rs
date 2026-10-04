@@ -376,10 +376,10 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
             });
 
         if let Some(provided) = provided {
-            // 匹配角色：admin → view-only → restricted-view
+            // 匹配角色：admin → view-only → view-upload
             let perm_tokens = settings.permission_tokens();
-            if let Some(role) = auth::match_role(&provided, &admin_token, &perm_tokens) {
-                req.extensions_mut().insert(role);
+            if let Some(perm) = auth::match_role(&provided, &admin_token, &perm_tokens) {
+                req.extensions_mut().insert(perm.role);
                 return next.run(req).await;
             }
         }
@@ -418,18 +418,16 @@ async fn auth_check_handler(
             })
         });
 
-    let (role, is_valid) = match &provided {
+    let (role, mcp, is_valid) = match &provided {
         Some(token) => {
             let admin_token = settings.token();
             let perm_tokens = settings.permission_tokens();
             match auth::match_role(token, &admin_token, &perm_tokens) {
-                Some(auth::Role::Admin) => ("admin".to_string(), true),
-                Some(auth::Role::ViewOnly) => ("view-only".to_string(), true),
-                Some(auth::Role::ViewUpload) => ("view-upload".to_string(), true),
-                None => ("".to_string(), false),
+                Some(perm) => (perm.role.as_str().to_string(), perm.mcp, true),
+                None => ("".to_string(), false, false),
             }
         }
-        None => ("".to_string(), false),
+        None => ("".to_string(), false, false),
     };
 
     if !is_valid {
@@ -454,6 +452,7 @@ async fn auth_check_handler(
         "config": role == "admin",
         "upload": role == "admin" || role == "view-upload",
         "pipeline": role == "admin",
+        "mcp": mcp,
     });
 
     (

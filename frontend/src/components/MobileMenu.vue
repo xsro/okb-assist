@@ -53,7 +53,16 @@ const roleName = computed(() => {
 
 const closeMenu = inject('closeMobileMenu') as (() => void) | undefined
 
-const navItems = [
+const adminOnlyPaths = [
+  '/assist/admin',
+  '/assist/config',
+  '/assist/duplicates',
+  '/assist/point',
+  '/assist/mcp-setup',
+  '/assist/logs'
+]
+
+const allNavItems = [
   { path: '/assist', label: '文献列表' },
   { path: '/assist/upload', label: '上传' },
   { path: '/assist/tools', label: '工具' },
@@ -64,6 +73,13 @@ const navItems = [
   { path: '/assist/mcp-setup', label: 'MCP 配置' },
   { path: '/assist/logs', label: '日志' }
 ]
+
+const navItems = computed(() => {
+  if (tokenStore.role === 'admin') {
+    return allNavItems
+  }
+  return allNavItems.filter(item => !adminOnlyPaths.includes(item.path))
+})
 
 function promptToken() {
   closeMenu?.()

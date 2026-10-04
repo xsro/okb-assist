@@ -1090,15 +1090,30 @@ pub async fn mcp_stream_handler(
         }
     };
 
-    // Bearer token 校验（mcp_token）
+    // Bearer token 校验（优先 mcp_token，其次 permissions 中 mcp: true 的 token）
     let mcp_token = settings.mcp_token();
-    let auth_enabled = !mcp_token.is_empty();
+    let auth_enabled = !mcp_token.is_empty() || !settings.permission_tokens().is_empty();
     if auth_enabled {
-        let authorized = headers
+        let bearer_token = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .map(|s| s == format!("Bearer {}", mcp_token))
-            .unwrap_or(false);
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .map(|s| s.to_string());
+
+        let authorized = match &bearer_token {
+            Some(token) => {
+                // 检查 mcp_token
+                if !mcp_token.is_empty() && token == &mcp_token {
+                    true
+                } else {
+                    // 检查 permissions 中是否有 mcp: true 的 token
+                    let admin_token = settings.token();
+                    let perm_tokens = settings.permission_tokens();
+                    crate::auth::has_mcp_access(token, &admin_token, &mcp_token, &perm_tokens)
+                }
+            }
+            None => false,
+        };
         let subnets = settings.trusted_subnets();
         let lan = !subnets.is_empty() && crate::utils::ip_matches_subnets(&client_ip, &subnets);
         if !authorized && !lan {

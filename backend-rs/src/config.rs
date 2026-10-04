@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use serde_json::json;
+
 use crate::config_manager::ConfigManager;
 
 /// MinerU 配置项（V1 API）
@@ -229,13 +231,19 @@ impl Settings {
 
     // ── 权限 ──
 
-    /// 从 config.json 读取权限配置 { token: role } 映射
-    pub fn permission_tokens(&self) -> HashMap<String, String> {
+    /// 从 config.json 读取权限配置（新格式）。
+    /// 格式：{ token: { access: role, mcp: bool } }
+    pub fn permission_tokens(&self) -> HashMap<String, serde_json::Value> {
         let mut result = HashMap::new();
         if let Some(perms) = self.get_config()["permissions"].as_object() {
-            for (token, role_val) in perms {
-                if let Some(role) = role_val.as_str() {
-                    result.insert(token.clone(), role.to_string());
+            for (token, entry) in perms {
+                // entry 可以是旧版字符串（兼容）或新版对象
+                if entry.is_string() {
+                    // 旧格式 "token": "role" → 转为新格式
+                    let role = entry.as_str().unwrap_or("");
+                    result.insert(token.clone(), json!({"access": role, "mcp": false}));
+                } else if entry.is_object() {
+                    result.insert(token.clone(), entry.clone());
                 }
             }
         }

@@ -31,6 +31,7 @@ export const useTokenStore = defineStore('token', {
     canConfig: (state) => state.role === 'admin',
     canUpload: (state) => state.role === 'admin' || state.role === 'view-upload',
     canPipeline: (state) => state.role === 'admin',
+    canMcp: (state) => state.permissions['mcp'] === true,
   },
   actions: {
     async setToken(token: string) {
