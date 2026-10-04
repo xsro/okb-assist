@@ -58,6 +58,36 @@
 
       <!-- 排序控制（由 sort:/order: 语法控制） -->
       <div class="search-controls">
+        <!-- 列管理按钮 -->
+        <div class="column-manager" ref="columnManagerRef">
+          <button class="btn btn-sm btn-columns" @click="toggleColumnMenu" title="管理显示的列">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <line x1="3" y1="9" x2="21" y2="9"/>
+              <line x1="9" y1="3" x2="9" y2="21"/>
+              <line x1="15" y1="3" x2="15" y2="21"/>
+            </svg>
+            列管理
+          </button>
+          <div v-if="showColumnMenu" class="column-dropdown" @click.stop>
+            <div
+              v-for="col in allColumns"
+              :key="col.key"
+              class="col-toggle"
+              :class="{ 'col-disabled': col.always }"
+            >
+              <label>
+                <input
+                  type="checkbox"
+                  :checked="visibleColumns[col.key]"
+                  :disabled="col.always"
+                  @change="toggleColumn(col.key)"
+                />
+                {{ col.label }}
+              </label>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -70,6 +100,7 @@
         <div class="sk sk-year"></div>
         <div class="sk sk-type"></div>
         <div class="sk sk-status"></div>
+        <div class="sk sk-files"></div>
         <div class="sk sk-action"></div>
       </div>
     </div>
@@ -78,27 +109,28 @@
     <table v-if="!isMobile && !loading" class="doc-table">
       <thead>
         <tr>
-          <th>ID</th>
-          <th>标题</th>
-          <th>作者</th>
-          <th>年份</th>
-          <th>类型</th>
-          <th>状态</th>
-          <th>操作</th>
+          <th v-if="visibleColumns.id">ID</th>
+          <th v-if="visibleColumns.title">标题</th>
+          <th v-if="visibleColumns.authors">作者</th>
+          <th v-if="visibleColumns.year">年份</th>
+          <th v-if="visibleColumns.doc_type">类型</th>
+          <th v-if="visibleColumns.status">状态</th>
+          <th v-if="visibleColumns.files">文件</th>
+          <th v-if="visibleColumns.operations">操作</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="doc in items" :key="doc.id">
-          <td>{{ doc.id }}</td>
-          <td>
+          <td v-if="visibleColumns.id">{{ doc.id }}</td>
+          <td v-if="visibleColumns.title">
             <router-link :to="{ name: 'detail', params: { id: doc.id } }">
               {{ doc.title || doc.filename || '(无标题)' }}
             </router-link>
           </td>
-          <td>{{ doc.authors || '-' }}</td>
-          <td>{{ doc.year || '-' }}</td>
-          <td>{{ doc.doc_type || '-' }}</td>
-          <td>
+          <td v-if="visibleColumns.authors">{{ doc.authors || '-' }}</td>
+          <td v-if="visibleColumns.year">{{ doc.year || '-' }}</td>
+          <td v-if="visibleColumns.doc_type">{{ doc.doc_type || '-' }}</td>
+          <td v-if="visibleColumns.status">
             <StatusBadge :status="doc.status" :status_message="doc.status_message" />
             <span v-if="doc.indexed_dbs && doc.indexed_dbs.length" class="index-dbs">
               <span
@@ -108,13 +140,31 @@
               >{{ dbId }}</span>
             </span>
           </td>
-          <td>
+          <td v-if="visibleColumns.files">
+            <span class="file-sizes-inline">
+              <span>P: {{ formatFile(doc.pdf_size) }}</span>
+              <span>M: {{ formatFile(doc.md_size) }}</span>
+              <span>Z: {{ formatFile(doc.zip_size) }}</span>
+            </span>
+          </td>
+          <td v-if="visibleColumns.operations" class="col-actions">
+            <a
+              :href="`/assist/api/documents/${doc.id}/pdf/`"
+              target="_blank"
+              class="btn btn-sm btn-outline"
+              title="查看 PDF"
+            >PDF</a>
             <router-link
+              :to="{ name: 'markdown', params: { id: doc.id } }"
+              class="btn btn-sm btn-outline"
+              title="查看 Markdown"
+            >MD</router-link>
+            <router-link
+              v-if="tokenStore.canAdmin"
               :to="{ name: 'docManage', params: { id: doc.id } }"
               class="btn btn-sm btn-outline"
-            >
-              管理
-            </router-link>
+              title="管理文档"
+            >管理</router-link>
           </td>
         </tr>
       </tbody>
@@ -135,7 +185,7 @@
           <span v-if="doc.year">📅 {{ doc.year }}</span>
           <span v-if="doc.doc_type">📋 {{ doc.doc_type }}</span>
         </div>
-        <div class="doc-card-files">
+        <div v-if="visibleColumns.files" class="doc-card-files">
           <span>PDF: {{ formatFile(doc.pdf_size) }}</span>
           <span>MD: {{ formatFile(doc.md_size) }}</span>
           <span>ZIP: {{ formatFile(doc.zip_size) }}</span>
@@ -148,12 +198,23 @@
           >{{ dbId }}</span>
         </div>
         <div class="doc-card-actions">
+          <a
+            :href="`/assist/api/documents/${doc.id}/pdf/`"
+            target="_blank"
+            class="btn btn-sm btn-outline"
+            title="查看 PDF"
+          >PDF</a>
           <router-link
+            :to="{ name: 'markdown', params: { id: doc.id } }"
+            class="btn btn-sm btn-outline"
+            title="查看 Markdown"
+          >MD</router-link>
+          <router-link
+            v-if="tokenStore.canAdmin"
             :to="{ name: 'docManage', params: { id: doc.id } }"
             class="btn btn-sm btn-outline"
-          >
-            管理
-          </router-link>
+            title="管理文档"
+          >管理</router-link>
         </div>
       </div>
     </div>
@@ -183,7 +244,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { listDocuments, searchInfo } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
@@ -206,6 +267,60 @@ const { showError } = useToast()
 const { requireToken } = useRequireToken()
 const tokenStore = useTokenStore()
 const { isMobile } = useResponsive()
+
+// ── 列管理 ────────────────────────────────────────────
+const COLUMN_STORAGE_KEY = 'okb-assist-column-visibility'
+
+interface ColumnDef {
+  key: string
+  label: string
+  always?: boolean
+}
+
+const allColumns: ColumnDef[] = [
+  { key: 'id', label: 'ID' },
+  { key: 'title', label: '标题' },
+  { key: 'authors', label: '作者' },
+  { key: 'year', label: '年份' },
+  { key: 'doc_type', label: '类型' },
+  { key: 'status', label: '状态' },
+  { key: 'files', label: '文件大小' },
+  { key: 'operations', label: '操作', always: true },
+]
+
+const DEFAULT_COLUMNS: Record<string, boolean> = {
+  id: true, title: true, authors: true, year: true,
+  doc_type: true, status: true, files: false, operations: true,
+}
+
+function loadColumnVisibility(): Record<string, boolean> {
+  try {
+    const saved = localStorage.getItem(COLUMN_STORAGE_KEY)
+    if (saved) {
+      return { ...DEFAULT_COLUMNS, ...JSON.parse(saved) }
+    }
+  } catch { /* ignore */ }
+  return { ...DEFAULT_COLUMNS }
+}
+
+const visibleColumns = ref<Record<string, boolean>>(loadColumnVisibility())
+const showColumnMenu = ref(false)
+const columnManagerRef = ref<HTMLElement | null>(null)
+
+function toggleColumn(key: string) {
+  visibleColumns.value[key] = !visibleColumns.value[key]
+  localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(visibleColumns.value))
+}
+
+function toggleColumnMenu() {
+  showColumnMenu.value = !showColumnMenu.value
+}
+
+function onClickOutside(e: MouseEvent) {
+  if (showColumnMenu.value && columnManagerRef.value && !columnManagerRef.value.contains(e.target as Node)) {
+    showColumnMenu.value = false
+  }
+}
 
 const { items, loading, page, total, totalPages, load } = usePagination<Document>()
 
@@ -355,6 +470,15 @@ onMounted(async () => {
   doLoad()
 })
 
+// 列管理：点击外部关闭下拉
+onMounted(() => {
+  document.addEventListener('click', onClickOutside)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', onClickOutside)
+})
+
 function formatSize(bytes: number | null): string {
   if (!bytes) return '-'
   if (bytes < 1024) return bytes + ' B'
@@ -397,6 +521,89 @@ function formatFile(size: number | null): string {
 .empty p {
   margin-bottom: 16px;
   font-size: 15px;
+}
+
+/* ── 操作列 ──────────────────────────────────────────── */
+.col-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: nowrap;
+}
+.col-actions .btn {
+  flex-shrink: 0;
+}
+
+.doc-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 14px 10px;
+}
+
+/* ── 列管理 ──────────────────────────────────────────── */
+.column-manager {
+  position: relative;
+}
+
+.btn-columns {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: all 0.15s;
+  min-height: 30px;
+}
+.btn-columns:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-light);
+}
+
+.column-dropdown {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin-top: 4px;
+  min-width: 140px;
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  padding: 6px 0;
+  z-index: 100;
+}
+
+.col-toggle {
+  padding: 2px 12px;
+}
+.col-toggle label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 0;
+  color: var(--text);
+  user-select: none;
+}
+.col-toggle input[type="checkbox"] {
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.col-disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+.col-disabled label {
+  cursor: not-allowed;
 }
 
 /* ── 文件列 ──────────────────────────────────────────── */
@@ -471,6 +678,7 @@ function formatFile(size: number | null): string {
 .sk-type { width: 60%; }
 .sk-status { width: 70%; }
 .sk-action { width: 50px; }
+.sk-files { width: 100px; }
 
 /* ── 搜索栏 ──────────────────────────────────────────── */
 .search-bar {
@@ -672,6 +880,17 @@ function formatFile(size: number | null): string {
   border-color: var(--primary);
 }
 
+/* 表格内文件大小（紧凑） */
+.file-sizes-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
 /* ── 其它 ────────────────────────────────────────────── */
 .doc-cards-container {
   display: flex;
@@ -690,6 +909,7 @@ function formatFile(size: number | null): string {
   .sk-year { width: 40%; }
   .sk-type { width: 40%; }
   .sk-status { width: 50%; }
+  .sk-files { width: 80px; }
   .sk-action { width: 60px; }
 }
 </style>

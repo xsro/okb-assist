@@ -43,34 +43,13 @@
         </div>
       </div>
 
-      <!-- 右下角浮动区域 -->
+      <!-- 右下角浮动按钮（设置/菜单） -->
       <div class="mdv-floatbar">
-        <!-- 进度信息（替代分页） -->
-        <div class="float-progress" @click="tocOpen = !tocOpen" title="点击打开目录">
-          <span class="progress-text">{{ visibleChunks.length }}/{{ allChunks.length }} 段</span>
-          <span class="progress-bar-track">
-            <span class="progress-bar-fill" :style="{ width: progressPercent + '%' }"></span>
-          </span>
-        </div>
-
-        <!-- 主按钮 -->
-        <div class="float-actions">
-          <button class="float-btn main-btn" @click="tocOpen = !tocOpen" title="目录">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
-            </svg>
-          </button>
-          <button class="float-btn main-btn" @click="openSearch" title="搜索">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-            </svg>
-          </button>
-          <button class="float-btn main-btn" @click="toolbarOpen = !toolbarOpen" title="工具栏">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-          </button>
-        </div>
+        <button class="float-btn main-btn" @click="toolbarOpen = !toolbarOpen" title="菜单">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
       </div>
     </template>
 
@@ -151,10 +130,46 @@
       <Transition name="popover-fade">
         <div v-if="toolbarOpen" class="toolbar-overlay" @click.self="toolbarOpen = false">
           <div class="toolbar-popover">
+            <!-- 进度信息 -->
             <div class="toolbar-item">
-              <button class="tb-action" @click="goBack">← 返回</button>
+              <div class="tb-progress" @click="tocOpen = true; toolbarOpen = false" title="打开目录">
+                <span class="progress-text">{{ visibleChunks.length }}/{{ allChunks.length }} 段</span>
+                <span class="progress-bar-track">
+                  <span class="progress-bar-fill" :style="{ width: progressPercent + '%' }"></span>
+                </span>
+              </div>
             </div>
             <hr class="tb-divider" />
+            <!-- 目录 -->
+            <div class="toolbar-item">
+              <button class="tb-action" @click="tocOpen = true; toolbarOpen = false">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+                </svg>
+                目录
+              </button>
+            </div>
+            <!-- 搜索 -->
+            <div class="toolbar-item">
+              <button class="tb-action" @click="openSearch">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                </svg>
+                搜索
+              </button>
+            </div>
+            <hr class="tb-divider" />
+            <!-- 返回 -->
+            <div class="toolbar-item">
+              <button class="tb-action" @click="goBack">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
+                </svg>
+                返回
+              </button>
+            </div>
+            <hr class="tb-divider" />
+            <!-- 数学渲染器 -->
             <div class="toolbar-item">
               <label class="tb-label">数学渲染器</label>
               <div class="tb-radio-group">
@@ -170,18 +185,21 @@
               </div>
             </div>
             <hr class="tb-divider" />
+            <!-- 显示源码 -->
             <div class="toolbar-item">
               <label class="tb-checkbox">
                 <input v-model="showSource" type="checkbox" />
                 显示源码
               </label>
             </div>
+            <!-- 加载全部图片 -->
             <div class="toolbar-item">
               <label class="tb-checkbox">
                 <input v-model="loadImages" type="checkbox" @change="onLoadImagesChange" />
                 加载全部图片
               </label>
             </div>
+            <!-- 显示行号 -->
             <div class="toolbar-item">
               <label class="tb-checkbox">
                 <input v-model="showLineNumbers" type="checkbox" @change="reloadViewer" />
@@ -664,81 +682,30 @@ onBeforeUnmount(() => {
   padding: 10px;
 }
 
-/* ── 右下角浮动栏 ── */
+/* ── 右下角浮动按钮 ── */
 .mdv-floatbar {
   position: fixed;
   bottom: 24px;
-  right: 24px;
+  left: 24px;
   display: flex;
   align-items: center;
   gap: 8px;
   z-index: 100;
 }
 
-.float-progress {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: rgba(255,255,255,0.95);
-  backdrop-filter: blur(8px);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 6px 12px;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.1);
-  cursor: pointer;
-  transition: background 0.15s;
-  user-select: none;
-}
-
-.float-progress:hover {
-  background: rgba(245,245,245,0.95);
-}
-
-.progress-text {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-
-.progress-bar-track {
-  display: inline-block;
-  width: 50px;
-  height: 4px;
-  background: var(--border);
-  border-radius: 2px;
-  overflow: hidden;
-}
-
-.progress-bar-fill {
-  display: block;
-  height: 100%;
-  background: var(--primary);
-  border-radius: 2px;
-  transition: width 0.3s ease;
-}
-
-.float-actions {
-  display: flex;
-  gap: 4px;
-  background: rgba(255,255,255,0.95);
-  backdrop-filter: blur(8px);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 4px;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.1);
-}
-
 .float-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 36px;
-  height: 36px;
-  padding: 0 8px;
+  width: 48px;
+  height: 48px;
+  padding: 0;
   border: none;
-  border-radius: 8px;
-  background: transparent;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.95);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.12);
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 14px;
@@ -747,10 +714,10 @@ onBeforeUnmount(() => {
   user-select: none;
 }
 
-.float-btn:hover { background: var(--bg-secondary); color: var(--text); }
-.float-btn:active { transform: scale(0.95); }
+.float-btn:hover { background: #fff; color: var(--text); box-shadow: 0 4px 16px rgba(0,0,0,0.16); }
+.float-btn:active { transform: scale(0.92); }
 
-.float-btn.main-btn { min-width: 38px; height: 38px; }
+.float-btn.main-btn { width: 48px; height: 48px; }
 
 /* ── 骨架屏 ── */
 .mdv-loading {
@@ -1039,31 +1006,34 @@ onBeforeUnmount(() => {
 
 .toolbar-popover {
   background: #fff; border: 1px solid var(--border); border-radius: 12px;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.12); padding: 12px; min-width: 220px;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.12); padding: 10px; min-width: 230px;
+  max-height: calc(100vh - 48px); overflow-y: auto;
 }
 
-.toolbar-item { padding: 4px 0; }
+.toolbar-item { padding: 2px 0; }
 
 .tb-action {
-  display: block; width: 100%; padding: 8px 12px; border: none; border-radius: 8px;
-  background: transparent; cursor: pointer; font-size: 14px; text-align: left;
-  color: var(--text); transition: background 0.12s; font-family: inherit;
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 12px;
+  border: none; border-radius: 8px; background: transparent; cursor: pointer;
+  font-size: 14px; text-align: left; color: var(--text); transition: background 0.12s;
+  font-family: inherit;
 }
 .tb-action:hover { background: var(--bg-secondary); }
+.tb-action svg { flex-shrink: 0; color: var(--text-secondary); }
 
-.tb-divider { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
+.tb-divider { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
 
 .tb-label {
   display: block; font-size: 12px; font-weight: 600; color: var(--text-tertiary);
-  text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; padding: 0 12px;
+  text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; padding: 0 12px;
 }
 
 .tb-radio-group {
-  display: flex; flex-direction: column; gap: 2px; padding: 0 12px;
+  display: flex; flex-direction: column; gap: 1px; padding: 0 12px;
 }
 
 .tb-radio-group label {
-  display: flex; align-items: center; gap: 6px; font-size: 14px; padding: 6px 8px;
+  display: flex; align-items: center; gap: 6px; font-size: 14px; padding: 5px 8px;
   border-radius: 6px; cursor: pointer; color: var(--text-secondary); transition: all 0.12s;
 }
 .tb-radio-group label:hover { background: var(--bg-secondary); color: var(--text); }
@@ -1071,11 +1041,48 @@ onBeforeUnmount(() => {
 .tb-radio-group input[type="radio"] { accent-color: var(--primary); }
 
 .tb-checkbox {
-  display: flex; align-items: center; gap: 8px; font-size: 14px; padding: 6px 12px;
+  display: flex; align-items: center; gap: 8px; font-size: 14px; padding: 5px 12px;
   border-radius: 6px; cursor: pointer; color: var(--text-secondary); transition: all 0.12s;
 }
 .tb-checkbox:hover { background: var(--bg-secondary); color: var(--text); }
 .tb-checkbox input[type="checkbox"] { accent-color: var(--primary); }
+
+/* 工具栏内的进度条 */
+.tb-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s;
+  user-select: none;
+}
+.tb-progress:hover { background: var(--bg-secondary); }
+
+.progress-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.progress-bar-track {
+  display: inline-block;
+  width: 60px;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--primary);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
 
 .popover-fade-enter-active, .popover-fade-leave-active { transition: opacity 0.15s; }
 .popover-fade-enter-from, .popover-fade-leave-to { opacity: 0; }
@@ -1086,13 +1093,11 @@ onBeforeUnmount(() => {
 
 @media (max-width: 768px) {
   .mdv-content { padding: 20px 20px 100px; }
-  .mdv-floatbar { bottom: 16px; right: 12px; gap: 6px; flex-direction: column-reverse; }
+  .mdv-floatbar { bottom: 16px; left: 12px; }
 }
 
 @media (max-width: 480px) {
   .mdv-content { padding: 16px 14px 90px; }
-  .mdv-floatbar { bottom: 12px; right: 8px; }
-  .float-progress { padding: 4px 10px; }
-  .progress-bar-track { width: 40px; }
+  .mdv-floatbar { bottom: 12px; left: 8px; }
 }
 </style>
