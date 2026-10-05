@@ -7,6 +7,7 @@ okb-version-manager.py — 管理 OKB-Assist 多版本
 用法:
   {script} install latest-artifact|la [选项]   从 Actions Artifact 安装最新版
   {script} install latest-release|lr [选项]     从 GitHub Release 安装最新版
+  {script} install --frontend latest-release|lr [选项]  从 GitHub Release 安装前端资源
   {script} bin [版本]                            列出/查询已安装版本
   {script} self-update|su                       从 GitHub 更新自身脚本
 
@@ -15,6 +16,7 @@ okb-version-manager.py — 管理 OKB-Assist 多版本
   --timeout SECONDS          下载超时秒数 (默认: 不限制)
   --repo REPO                设置 GitHub 仓库 (默认: xsro/okb-assist)
   --artifact-name NAME       强制指定 artifact/asset 名称 (默认: 自动探测)
+  --frontend                 下载前端资源 (仅 latest-release/lr 有效)
   -y, --yes                  跳过确认
   -h, --help                 显示帮助
 
@@ -30,9 +32,8 @@ Token 来源 (la 需要):
 
 目录结构:
   ~/.okb/cache/               下载的压缩包缓存
-  ~/.okb/cache/               下载的压缩包缓存
   ~/.okb/versions/{git_hash}/  按提交 SHA(artifact) 解压的目录
-  ~/.okb/versions/{tag_name}/  按 Release 标签名解压的目录
+  ~/.okb/releases/{tag_name}/  按 Release 标签名解压的目录 (后端/前端)
 """
 
 import argparse
@@ -53,6 +54,7 @@ REPO = "xsro/okb-assist"
 OKB_DIR = Path.home() / ".okb"
 CACHE_DIR = OKB_DIR / "cache"
 VERSIONS_DIR = OKB_DIR / "versions"
+RELEASES_DIR = OKB_DIR / "releases"
 RETRY_COUNT = 3
 RETRY_DELAY = 10  # 秒
 
@@ -423,6 +425,11 @@ def get_latest_release_info() -> dict:
     raw = _curl_get_json(url)
     data = json.loads(raw)
 
+    return {"tag": data["tag_name"], "assets": data["assets"]}
+
+
+def find_best_backend_asset(assets: list[dict]) -> dict | None:
+    """在 Release assets 中找到匹配当前平台的后端二进制。"""
     artifact_name = (getattr(args, 'artifact_name', None)
                      or detect_platform_artifact_name())
     system = platform.system().lower()
@@ -439,20 +446,33 @@ def get_latest_release_info() -> dict:
             score += 10
         return score
 
-    scored = [(score_asset(a["name"]), a) for a in data["assets"]]
+    scored = [(score_asset(a["name"]), a) for a in assets]
     scored.sort(key=lambda x: x[0], reverse=True)
     best_score, best_asset = scored[0]
 
     if best_score == 0 or best_asset is None:
-        err("未在 Release 中找到匹配当前平台的 asset")
-        print(f"  尝试匹配: {artifact_name}")
-        print(f"  平台: {system} / {machine}")
-        print(f"  可用的 assets:")
-        for a in data["assets"]:
-            print(f"    - {a['name']}  ({fmt_size(a['size'])})")
-        sys.exit(1)
+        return None
 
-    return {"tag": data["tag_name"], "asset": best_asset}
+    return best_asset
+
+
+def find_frontend_asset(assets: list[dict]) -> dict | None:
+    """在 Release assets 中找到前端资源。"""
+    forced_name = getattr(args, 'artifact_name', None)
+
+    if forced_name:
+        for a in assets:
+            if a["name"] == forced_name:
+                return a
+        return None
+
+    frontend_keywords = ["frontend", "front-end", "front_end", "web"]
+    for keyword in frontend_keywords:
+        for a in assets:
+            if keyword in a["name"].lower():
+                return a
+
+    return None
 
 
 def download_release_asset(download_url: str, output_path: Path,
@@ -464,17 +484,18 @@ def download_release_asset(download_url: str, output_path: Path,
 
 def get_installed_versions() -> list[dict]:
     versions = []
-    if not VERSIONS_DIR.exists():
-        return versions
-    for item in VERSIONS_DIR.iterdir():
-        if item.is_dir():
-            binary = find_binary_in_dir(item)
-            versions.append({
-                "version": item.name,
-                "path": str(item),
-                "binary": str(binary) if binary else None,
-                "mtime": item.stat().st_mtime,
-            })
+    for base_dir in (VERSIONS_DIR, RELEASES_DIR):
+        if not base_dir.exists():
+            continue
+        for item in base_dir.iterdir():
+            if item.is_dir():
+                binary = find_binary_in_dir(item)
+                versions.append({
+                    "version": item.name,
+                    "path": str(item),
+                    "binary": str(binary) if binary else None,
+                    "mtime": item.stat().st_mtime,
+                })
     versions.sort(key=lambda v: v["mtime"], reverse=True)
     return versions
 
@@ -584,10 +605,32 @@ def cmd_install_artifact():
 # ── 命令: install latest-release ──
 
 def cmd_install_release():
+    is_frontend = getattr(args, 'frontend', False)
     release = get_latest_release_info()
     tag = release["tag"]
-    asset = release["asset"]
-    version_dir = VERSIONS_DIR / tag
+    assets = release["assets"]
+
+    if is_frontend:
+        asset = find_frontend_asset(assets)
+        if not asset:
+            err("未在 Release 中找到前端资源")
+            print(f"  可用的 assets:")
+            for a in assets:
+                print(f"    - {a['name']}  ({fmt_size(a['size'])})")
+            sys.exit(1)
+        info(f"找到前端资源: {asset['name']}")
+    else:
+        asset = find_best_backend_asset(assets)
+        if not asset:
+            err("未在 Release 中找到匹配当前平台的后端")
+            print(f"  平台: {platform.system().lower()} / {platform.machine().lower()}")
+            print(f"  可用的 assets:")
+            for a in assets:
+                print(f"    - {a['name']}  ({fmt_size(a['size'])})")
+            sys.exit(1)
+        info(f"找到后端资源: {asset['name']}")
+
+    version_dir = RELEASES_DIR / tag
     cache_path = CACHE_DIR / asset["name"]
     dl_timeout = getattr(args, 'timeout', None)
 
@@ -609,23 +652,27 @@ def cmd_install_release():
 
     ensure_dirs()
 
-    if resolve_cache_file(cache_path, asset["download_url"]):
+    download_url = asset["browser_download_url"]
+    if resolve_cache_file(cache_path, download_url):
         info("使用已有缓存文件解压 ...")
     else:
         if cache_path.exists():
             cache_path.unlink()
         info("下载中 ... (可能较慢，请耐心等待)")
-        download_release_asset(asset["download_url"], cache_path,
+        download_release_asset(download_url, cache_path,
                                timeout=dl_timeout)
 
     extract_archive(cache_path, version_dir)
     ok(f"已安装到: {version_dir}/")
 
-    binary = find_binary_in_dir(version_dir)
-    if binary:
-        ok(f"二进制文件: {binary}")
+    if is_frontend:
+        info("前端资源已安装。")
     else:
-        warn(f"未在 {version_dir}/ 中找到二进制文件 (预期名称: {BINARY_NAME})")
+        binary = find_binary_in_dir(version_dir)
+        if binary:
+            ok(f"二进制文件: {binary}")
+        else:
+            warn(f"未在 {version_dir}/ 中找到二进制文件 (预期名称: {BINARY_NAME})")
 
 
 # ── 命令: self-update ──
@@ -703,7 +750,7 @@ def main():
             "目录结构:\n"
             f"  {OKB_DIR}/cache/              下载的压缩包缓存\n"
             f"  {OKB_DIR}/versions/{{git_hash}}/  按提交 SHA 解压的目录\n"
-            f"  {OKB_DIR}/versions/{{tag_name}}/  按 Release 标签解压的目录\n\n"
+            f"  {OKB_DIR}/releases/{{tag_name}}/  按 Release 标签解压的目录\n\n"
             "Token 来源 (la 需要):\n"
             "  1. 环境变量 GH_TOKEN\n"
             "  2. 环境变量 GITHUB_TOKEN\n"
@@ -732,6 +779,10 @@ def main():
         choices=["latest-artifact", "la", "latest-release", "lr"],
         help="安装来源",
     )
+    install_parser.add_argument(
+        "--frontend", action="store_true",
+        help="下载前端资源 (仅 latest-release/lr 有效)",
+    )
 
     bin_parser = subparsers.add_parser(
         "bin", help="查看已安装版本的路径")
@@ -752,6 +803,8 @@ def main():
     if args.command in ("install", "i"):
         check_basic_deps()
         if args.source in ("latest-artifact", "la"):
+            if getattr(args, 'frontend', False):
+                warn("--frontend 仅对 latest-release (lr) 有效，已忽略。")
             cmd_install_artifact()
         elif args.source in ("latest-release", "lr"):
             cmd_install_release()
