@@ -95,6 +95,8 @@ pub fn now_datetime() -> String {
 
 /// 解析 Token 配置：若 value 以 `!` 开头，则执行后续 shell 命令取其输出作为 token。
 /// 结果通过 `OnceLock` 缓存，仅首次执行命令，后续直接返回缓存值。
+///
+/// 特殊处理：若命令为 `cat <path>`，直接读取文件内容，避免在 Windows 上依赖 cat 命令。
 pub fn resolve_token(value: &str) -> String {
     if !value.starts_with('!') {
         return value.to_string();
@@ -109,6 +111,31 @@ pub fn resolve_token(value: &str) -> String {
         let cache = cache.lock().unwrap();
         if let Some(entry) = cache.iter().find(|(k, _)| k == value) {
             return entry.1.clone();
+        }
+    }
+
+    // 特殊处理：!cat <path> — 直接读取文件，避免在 Windows 上依赖 cat 命令
+    let trimmed = cmd_str.trim();
+    if let Some(path_str) = trimmed.strip_prefix("cat ").or_else(|| trimmed.strip_prefix("cat\t")) {
+        // 去除可能的引号
+        let path_str = path_str.trim().trim_matches('"').trim_matches('\'');
+        match std::fs::read_to_string(path_str) {
+            Ok(content) => {
+                let resolved = content.trim().to_string();
+                if !resolved.is_empty() {
+                    tracing::info!("token 通过直接读取文件解析: {} -> {} 字节", path_str, resolved.len());
+                    let mut cache = cache.lock().unwrap();
+                    cache.push((value.to_string(), resolved.clone()));
+                    if cache.len() > 32 {
+                        cache.remove(0);
+                    }
+                }
+                return resolved;
+            }
+            Err(e) => {
+                tracing::warn!("读取 token 文件失败: {}: {}", path_str, e);
+                return value.to_string();
+            }
         }
     }
 
