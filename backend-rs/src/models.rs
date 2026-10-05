@@ -116,6 +116,12 @@ pub struct Document {
     pub vector_db_id: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+    #[sqlx(default)]
+    pub pdf_size: Option<i64>,
+    #[sqlx(default)]
+    pub md_size: Option<i64>,
+    #[sqlx(default)]
+    pub zip_size: Option<i64>,
 }
 
 impl Document {

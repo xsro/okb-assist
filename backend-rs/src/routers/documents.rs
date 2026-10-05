@@ -233,7 +233,8 @@ pub struct DocumentOut {
 const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, CAST(NULLIF(year, '') AS INTEGER) AS year, doi, source, journal, \
     keywords, abstract, category, doc_type, language, title_en, authors_en, \
     keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
-    progress, qdrant_collection, vector_db_id, created_at, updated_at";
+    progress, qdrant_collection, vector_db_id, created_at, updated_at, \
+    pdf_size, md_size, zip_size";
 
 /// 查询文档已索引的向量数据库列表（仅 indexed 状态）
 async fn indexed_dbs(db: &Database, doc_id: i64) -> Option<Vec<String>> {
@@ -255,6 +256,24 @@ async fn indexed_dbs(db: &Database, doc_id: i64) -> Option<Vec<String>> {
 
 fn file_size(path: &str) -> Option<i64> {
     std::fs::metadata(path).ok().map(|m| m.len() as i64)
+}
+
+/// 同步文档的文件大小信息到数据库（写时同步用）。
+/// 对 pdf、md、zip 三个文件执行 stat 并更新数据库列。
+pub async fn sync_doc_file_sizes(db: &Database, settings: &Settings, doc_id: i64) {
+    let pdf_size = file_size(&paths::get_pdf_path(settings, doc_id));
+    let md_size = file_size(&paths::get_markdown_path(settings, doc_id));
+    let zip_size = file_size(&paths::get_asset_path(settings, doc_id));
+    let _ = sqlx::query(
+        "UPDATE documents SET pdf_size = ?, md_size = ?, zip_size = ?, updated_at = ? WHERE id = ?"
+    )
+    .bind(pdf_size)
+    .bind(md_size)
+    .bind(zip_size)
+    .bind(now_iso())
+    .bind(doc_id)
+    .execute(db.pool())
+    .await;
 }
 
 async fn doc_to_out(doc: &Document, settings: &Settings, db: &Database) -> DocumentOut {
@@ -946,6 +965,9 @@ async fn upload_document(
         vector_db_id: None,
         created_at: None,
         updated_at: None,
+        pdf_size: None,
+        md_size: None,
+        zip_size: None,
     };
     fill_meta_fields(&mut doc, &meta);
 
@@ -1005,6 +1027,9 @@ async fn upload_document(
     if let Err(e) = tokio::task::spawn_blocking(move || std::fs::write(&pdf_path_clone, &content)).await.unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking panicked"))) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": format!("保存文件失败: {}", e)}))).into_response();
     }
+
+    // 写时同步：更新文件大小到数据库
+    sync_doc_file_sizes(&db, &settings, doc_id).await;
 
     // 如果有 DOI 且 auto_process 为 true，自动触发 Crossref 获取权威元数据
     if auto_process && doc.doi.is_some() {
@@ -1102,6 +1127,9 @@ async fn register_document_by_path(
         vector_db_id: None,
         created_at: None,
         updated_at: None,
+        pdf_size: None,
+        md_size: None,
+        zip_size: None,
     };
     fill_meta_fields(&mut doc, &meta);
 
@@ -1118,6 +1146,9 @@ async fn register_document_by_path(
     if let Err(e) = std::fs::copy(&data.file_path, &pdf_path) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": format!("复制文件失败: {}", e)}))).into_response();
     }
+
+    // 写时同步：更新文件大小到数据库
+    sync_doc_file_sizes(&db, &settings, doc_id).await;
 
     match fetch_doc(&db, doc_id).await {
         Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response(),
@@ -2287,6 +2318,9 @@ async fn replace_pdf(
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
     }
 
+    // 写时同步：更新文件大小到数据库
+    sync_doc_file_sizes(&db, &settings, id).await;
+
     let now = now_iso();
     if let Err(e) = sqlx::query("UPDATE documents SET file_hash = ?, status = 'uploaded', updated_at = ? WHERE id = ?")
         .bind(&file_hash)
@@ -2367,6 +2401,9 @@ async fn replace_markdown(
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
     }
 
+    // 写时同步：更新文件大小到数据库
+    sync_doc_file_sizes(&db, &settings, id).await;
+
     match fetch_doc(&db, id).await {
         Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response(),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "文档更新失败"}))).into_response(),
@@ -2416,6 +2453,9 @@ async fn replace_asset(
     if let Err(e) = tokio::task::spawn_blocking(move || std::fs::write(&asset_path_clone, &content)).await.unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking panicked"))) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
     }
+
+    // 写时同步：更新文件大小到数据库
+    sync_doc_file_sizes(&db, &settings, id).await;
 
     match fetch_doc(&db, id).await {
         Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response(),

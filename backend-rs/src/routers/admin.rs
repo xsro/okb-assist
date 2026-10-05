@@ -44,6 +44,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/admin/qdrant/point/:point_id", get(qdrant_point))
         .route("/assist/api/admin/recalculate-hashes/", post(recalculate_hashes))
         .route("/assist/api/admin/recalculate-hashes", post(recalculate_hashes))
+        .route("/assist/api/admin/sync-file-sizes/", post(sync_file_sizes))
+        .route("/assist/api/admin/sync-file-sizes", post(sync_file_sizes))
         .route("/assist/api/admin/dedup/", post(dedup))
         .route("/assist/api/admin/dedup", post(dedup))
         .route("/assist/api/admin/logs/", get(get_logs))
@@ -585,6 +587,37 @@ async fn recalculate_hashes(
         "skipped": skipped,
         "errors": errors,
     }))
+}
+
+/// POST /assist/api/admin/sync-file-sizes —— 同步所有文档的文件大小信息到数据库。
+/// 非阻塞：请求立即返回，后台遍历所有文档执行 stat。
+async fn sync_file_sizes(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+    Extension(settings): Extension<Arc<Settings>>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
+
+    // 后台执行，不阻塞当前请求
+    let db_clone = db.clone();
+    let settings_clone = settings.clone();
+    tokio::spawn(async move {
+        let docs: Vec<(i64,)> = sqlx::query_as("SELECT id FROM documents")
+            .fetch_all(db_clone.pool())
+            .await
+            .unwrap_or_default();
+        let total = docs.len();
+        let mut updated = 0i64;
+        for (doc_id,) in &docs {
+            crate::routers::documents::sync_doc_file_sizes(&db_clone, &settings_clone, *doc_id).await;
+            updated += 1;
+        }
+        tracing::info!("文件大小同步完成: {} 条", updated);
+    });
+
+    Json(json!({"detail": "文件大小同步任务已提交，后台执行中"}))
 }
 
 // ── 日志查看 ────────────────────────────────────────────

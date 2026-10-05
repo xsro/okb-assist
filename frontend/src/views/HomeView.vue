@@ -129,8 +129,8 @@
           <td v-if="visibleColumns.updated_at" class="col-date">{{ formatDate(doc.updated_at) }}</td>
           <td v-if="visibleColumns.operations" class="col-actions">
             <a
-              :href="`/assist/api/documents/${doc.id}/pdf/`"
-              target="_blank"
+              href="#"
+              @click.prevent="openPdf(doc.id)"
               class="btn btn-sm btn-outline"
               title="查看 PDF"
             >PDF</a>
@@ -186,8 +186,8 @@
         </div>
         <div class="doc-card-actions">
           <a
-            :href="`/assist/api/documents/${doc.id}/pdf/`"
-            target="_blank"
+            href="#"
+            @click.prevent="openPdf(doc.id)"
             class="btn btn-sm btn-outline"
             title="查看 PDF"
           >PDF</a>
@@ -238,7 +238,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { listDocuments, searchInfo } from '@/api/documents'
+import { listDocuments, searchInfo, getFileAlias } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import { useResponsive } from '@/composables/useResponsive'
@@ -259,6 +259,16 @@ const { showError } = useToast()
 const { requireToken } = useRequireToken()
 const tokenStore = useTokenStore()
 const { isMobile } = useResponsive()
+
+/** 通过临时别名在新标签页打开 PDF（免 token） */
+async function openPdf(id: number) {
+  try {
+    const { url } = await getFileAlias(id)
+    window.open(url, '_blank')
+  } catch (e) {
+    showError('获取 PDF 链接失败')
+  }
+}
 
 // ── 列管理 ────────────────────────────────────────────
 const COLUMN_STORAGE_KEY = 'okb-assist-column-visibility'

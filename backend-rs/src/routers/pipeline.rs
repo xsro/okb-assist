@@ -34,7 +34,8 @@ use crate::utils::{absolute_path, now_iso};
 const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, year, doi, source, journal, \
     keywords, abstract, category, doc_type, language, title_en, authors_en, \
     keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
-    progress, qdrant_collection, vector_db_id, created_at, updated_at";
+    progress, qdrant_collection, vector_db_id, created_at, updated_at, \
+    pdf_size, md_size, zip_size";
 
 /// 默认 Qdrant user id（无鉴权）
 const QDRANT_USER_ID: i64 = 0;
@@ -478,6 +479,9 @@ async fn finish_parse_result(db: &Database, settings: &Settings, doc_id: i64, md
     .bind(doc_id)
     .execute(db.pool())
     .await;
+
+    // 写时同步：更新 .md 和 .zip 文件大小到数据库
+    crate::routers::documents::sync_doc_file_sizes(db, settings, doc_id).await;
 }
 
 /// 从 Value 中取字符串字段（非空）

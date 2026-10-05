@@ -38,6 +38,7 @@
         <button class="btn btn-outline" @click="recalcHashes">重新计算哈希</button>
         <button class="btn btn-outline" @click="dedup">文献去重</button>
         <button class="btn btn-outline" @click="goDuplicates">手动去重</button>
+        <button class="btn btn-outline" @click="doSyncFileSizes">同步文件信息到数据库</button>
       </div>
     </div>
 
@@ -157,7 +158,8 @@ import { useRouter } from 'vue-router'
 import {
   getStats,
   recalculateHashes,
-  deduplicateDocuments
+  deduplicateDocuments,
+  syncFileSizes,
 } from '@/api/admin'
 import { startBatchParse } from '@/api/pipeline'
 import { usePipelineStore } from '@/stores/pipeline'
@@ -230,6 +232,16 @@ async function dedup() {
 
 function goDuplicates() {
   router.push('/assist/duplicates')
+}
+
+async function doSyncFileSizes() {
+  if (!confirm('确定同步所有文档的文件信息（PDF/MD/ZIP 大小）到数据库？')) return
+  try {
+    const res = await syncFileSizes()
+    showToast(res.detail, 'success')
+  } catch {
+    showError('同步文件信息失败')
+  }
 }
 
 function refresh() {

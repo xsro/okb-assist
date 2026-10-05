@@ -146,14 +146,14 @@ export function searchInfo(
 
 // ── 文件访问 ────────────────────────────────────────────
 
-/** 获取 PDF URL */
+/** 获取 PDF URL（需 token，用于程序内 fetch） */
 export function getPdfUrl(id: number): string {
   return `/assist/api/documents/${id}/pdf/`
 }
 
 /** 获取免 token 的 PDF 别名 URL */
 export function getFileAlias(id: number) {
-  return apiGet<{ url: string }>(`/assist/api/documents/${id}/file-alias/`)
+  return apiGet<{ url: string; expires_at: string }>(`/assist/api/documents/${id}/file-alias/`)
 }
 
 /** 重算文档哈希 */

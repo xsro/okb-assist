@@ -113,6 +113,22 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        // 迁移：添加文件大小列（安全幂等，若列已存在则跳过）
+        for col in &["pdf_size", "md_size", "zip_size"] {
+            let exists: bool = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM pragma_table_info('documents') WHERE name = ?"
+            )
+            .bind(col)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0)
+                > 0;
+            if !exists {
+                let alter = format!("ALTER TABLE documents ADD COLUMN {} INTEGER", col);
+                sqlx::query(&alter).execute(&self.pool).await?;
+            }
+        }
+
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS document_vector_index (

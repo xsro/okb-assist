@@ -37,6 +37,13 @@ export function deduplicateDocuments() {
   )
 }
 
+/** 同步文件信息到数据库（PDF/MD/ZIP 文件大小） */
+export function syncFileSizes() {
+  return apiPost<{ detail: string }>(
+    '/assist/api/admin/sync-file-sizes'
+  )
+}
+
 /** 获取 MinerU 任务列表 */
 export function getMinerUTasks() {
   return apiGet<{ tasks: unknown[] }>('/assist/api/admin/mineru/tasks')
