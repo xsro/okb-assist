@@ -46,16 +46,35 @@
 import { ref, computed, onMounted } from 'vue'
 import { useToast } from '@/composables/useToast'
 import { useTokenStore } from '@/stores/token'
+import { getSystemConfig } from '@/api/config'
 
 const { showSuccess } = useToast()
 const tokenStore = useTokenStore()
 
 const baseUrl = ref('')
 const tokenCopied = ref(false)
+const mcpToken = ref('')
 
+// 管理员：从后端 system.json 读取真正的 mcp_token
+// 非管理员：使用当前登录的 token（permissions 中 mcp: true 的 token）
 const userToken = computed(() => {
-  return tokenStore.token || '(未登录)'
+  return mcpToken.value || tokenStore.token || '(未登录)'
 })
+
+async function loadMcpToken() {
+  // 只有 admin 角色才能调用 getSystemConfig（需要 admin 权限）
+  if (tokenStore.role !== 'admin') {
+    mcpToken.value = tokenStore.token
+    return
+  }
+  try {
+    const sys = await getSystemConfig()
+    mcpToken.value = sys.mcp_token || tokenStore.token
+  } catch {
+    // 后端不可用时回退到当前 token
+    mcpToken.value = tokenStore.token
+  }
+}
 
 const mcpUrl = computed(() => {
   const origin = baseUrl.value || window.location.origin
@@ -150,15 +169,16 @@ function copy() {
 }
 
 async function copyToken() {
-  if (!tokenStore.token) return
+  const token = userToken.value
+  if (!token || token === '(未登录)') return
   try {
-    await navigator.clipboard.writeText(tokenStore.token)
+    await navigator.clipboard.writeText(token)
     tokenCopied.value = true
     showSuccess('Token 已复制')
     setTimeout(() => { tokenCopied.value = false }, 2000)
   } catch {
     const ta = document.createElement('textarea')
-    ta.value = tokenStore.token
+    ta.value = token
     document.body.appendChild(ta)
     ta.select()
     document.execCommand('copy')
@@ -168,7 +188,10 @@ async function copyToken() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadMcpToken()
+})
 </script>
 
 <style scoped>

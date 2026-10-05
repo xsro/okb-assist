@@ -142,63 +142,21 @@
 
     <!-- MCP 配置 -->
     <div v-if="activeTab === 'mcp'" class="tab-content">
-      <div class="user-token-section">
-        <h3>你的 Token</h3>
-        <p class="token-hint">
-          将此 Token 填入 MCP 客户端的 <code>Authorization</code> 请求头，即可使用你的角色权限访问 MCP 服务。
-        </p>
-        <div class="token-display">
-          <code class="token-value">{{ displayToken }}</code>
-          <button class="btn btn-sm" @click="copyToken">
-            {{ tokenCopied ? '已复制' : '复制' }}
-          </button>
-        </div>
-        <p class="token-note" v-if="!tokenStore.isAuthenticated">
-          尚未登录，请先设置 Token。
-        </p>
-      </div>
       <McpConfigPanel />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import { grepSearch, semanticSearch } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
-import { useTokenStore } from '@/stores/token'
 import McpConfigPanel from '@/components/McpConfigPanel.vue'
 import type { SearchResult } from '@/types/document'
 
 const { showError, showSuccess } = useToast()
 const { requireToken } = useRequireToken()
-const tokenStore = useTokenStore()
-
-const tokenCopied = ref(false)
-
-const displayToken = computed(() => {
-  return tokenStore.token || '(未设置 Token)'
-})
-
-async function copyToken() {
-  if (!tokenStore.token) return
-  try {
-    await navigator.clipboard.writeText(tokenStore.token)
-    tokenCopied.value = true
-    showSuccess('Token 已复制')
-    setTimeout(() => { tokenCopied.value = false }, 2000)
-  } catch {
-    const ta = document.createElement('textarea')
-    ta.value = tokenStore.token
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    document.body.removeChild(ta)
-    tokenCopied.value = true
-    setTimeout(() => { tokenCopied.value = false }, 2000)
-  }
-}
 
 const tabs = [
   { key: 'grep', label: '全文搜索' },
@@ -423,60 +381,6 @@ async function doSemanticSearch() {
   padding: 40px;
   color: var(--text-secondary);
   font-size: 14px;
-}
-
-/* ── 用户 Token 展示 ── */
-
-.user-token-section {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 20px;
-  margin-bottom: 20px;
-}
-
-.user-token-section h3 {
-  font-size: 16px;
-  margin-bottom: 8px;
-}
-
-.token-hint {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-bottom: 12px;
-  line-height: 1.6;
-}
-
-.token-hint code {
-  font-size: 12px;
-  padding: 1px 5px;
-  background: #e8e8e8;
-  border-radius: 3px;
-}
-
-.token-display {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-
-.token-value {
-  flex: 1;
-  padding: 10px 14px;
-  background: #1e1e1e;
-  color: #d4d4d4;
-  border-radius: 6px;
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
-  font-size: 13px;
-  word-break: break-all;
-  line-height: 1.5;
-  user-select: all;
-}
-
-.token-note {
-  margin-top: 10px;
-  font-size: 13px;
-  color: var(--warning);
 }
 
 @media (max-width: 768px) {
