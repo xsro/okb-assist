@@ -94,6 +94,20 @@ pub fn get_or_create_alias(doc_id: i64, year: Option<i64>, title: Option<&str>, 
     (alias, expires_iso)
 }
 
+/// 从别名文件名中提取文档 ID。
+///
+/// 别名格式: `{year}_{short_title}_{6 位随机字母}{doc_id}.pdf`
+/// 当别名已过期、内存中已不存在时，可借此从文件名恢复 doc_id。
+pub fn extract_doc_id_from_alias(alias: &str) -> Option<i64> {
+    let stem = alias.strip_suffix(".pdf")?;
+    let last_part = stem.rsplit('_').next()?;
+    // last_part = {6 位随机字母}{doc_id}
+    if last_part.len() <= 6 {
+        return None;
+    }
+    last_part[6..].parse::<i64>().ok()
+}
+
 pub fn router() -> axum::Router<()> {
     axum::Router::new()
         .route("/assist/api/documents/", get(list_documents).post(upload_document))

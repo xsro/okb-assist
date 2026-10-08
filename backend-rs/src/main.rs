@@ -230,11 +230,20 @@ async fn serve_file_alias(
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    use crate::routers::documents::{get_doc_by_alias, serve_pdf_file};
+    use crate::routers::documents::{get_doc_by_alias, serve_pdf_file, extract_doc_id_from_alias};
 
     let doc_id = match get_doc_by_alias(&filename) {
         Some(id) => id,
-        None => return axum::Json(serde_json::json!({"detail": "文件不存在或链接已过期"})).into_response(),
+        None => {
+            // 别名已过期 — 尝试从文件名中提取 doc_id，返回详情页链接
+            if let Some(extracted_id) = extract_doc_id_from_alias(&filename) {
+                return axum::Json(serde_json::json!({
+                    "detail": "链接已过期，请重新获取",
+                    "redirect_url": format!("/assist/detail/{}", extracted_id)
+                })).into_response();
+            }
+            return axum::Json(serde_json::json!({"detail": "文件不存在或链接已过期"})).into_response();
+        }
     };
 
     let doc: Option<crate::models::Document> = sqlx::query_as(
