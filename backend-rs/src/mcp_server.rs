@@ -102,7 +102,7 @@ impl McpServer {
             }),
             json!({
                 "name": "get_document_info",
-                "description": "Get detailed document information, including metadata, processing status, PDF and Markdown links.",
+                "description": "Get detailed document information, including metadata, processing status, PDF and Markdown links. NOTE: 'pdf_need_auth_url' requires an auth token and will fail for unauthenticated clients; use 'temp_downloadable_pdf_url' instead, which is directly fetchable without auth (valid until 'temp_downloadable_pdf_expiration').",
                 "inputSchema": {
                     "type": "object",
                     "properties": {"id": {"type": "integer"}},
@@ -281,7 +281,7 @@ impl McpServer {
             "language": doc.language,
             "status": doc.status,
             "has_markdown": has_markdown,
-            "pdf_url": format!("{}/assist/api/documents/{}/pdf", prefix, doc.id),
+            "pdf_need_auth_url": format!("{}/assist/api/documents/{}/pdf", prefix, doc.id),
             "temp_downloadable_pdf_url": format!("{}/assist/file/{}", prefix, alias),
             "temp_downloadable_pdf_expiration": alias_expires,
             "markdown_url": format!("{}/assist/markdown/{}", prefix, doc.id),

@@ -5,7 +5,7 @@
       <label>Base URL</label>
       <input v-model="modelValue.base_url" type="text" placeholder="https://xsro20.xyz" @input="emitUpdate" />
     </div>
-    <p class="hint">部署的基础地址，用于拼接文档链接（pdf_url / markdown_url / detail_url）。留空则使用相对路径。</p>
+    <p class="hint">部署的基础地址，用于拼接文档链接（pdf_need_auth_url / markdown_url / detail_url）。留空则使用相对路径。</p>
   </div>
 </template>
 
