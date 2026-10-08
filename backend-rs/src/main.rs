@@ -8,6 +8,7 @@ use std::sync::Arc;
 use clap::Parser;
 use axum::extract::ConnectInfo;
 use axum::Extension;
+use axum::http::HeaderMap;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -227,8 +228,9 @@ async fn serve_file_alias(
     axum::extract::Path(filename): axum::extract::Path<String>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    use crate::routers::documents::get_doc_by_alias;
+    use crate::routers::documents::{get_doc_by_alias, serve_pdf_file};
 
     let doc_id = match get_doc_by_alias(&filename) {
         Some(id) => id,
@@ -253,17 +255,7 @@ async fn serve_file_alias(
     };
 
     let pdf_path = crate::paths::get_pdf_path(&settings, doc.id);
-    match std::fs::read(&pdf_path) {
-        Ok(bytes) => (
-            http::StatusCode::OK,
-            [
-                (http::header::CONTENT_TYPE, "application/pdf"),
-                (http::header::CACHE_CONTROL, "public, max-age=86400"),
-            ],
-            bytes,
-        ).into_response(),
-        Err(_) => axum::Json(serde_json::json!({"detail": "文件不存在"})).into_response(),
-    }
+    serve_pdf_file(&pdf_path, &headers).await
 }
 
 /// 错误日志中间件：当响应状态码为 4xx/5xx 时，在控制台打印错误详情。

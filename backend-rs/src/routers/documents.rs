@@ -20,6 +20,9 @@ use crate::paths;
 use crate::services::pdf_meta::{extract_pdf_metadata_async, normalize_doi};
 use crate::auth;
 use crate::routers::pipeline::run_crossref_override;
+
+use axum::http::{HeaderMap, HeaderValue};
+use tokio::io::{AsyncSeekExt, AsyncReadExt};
 use crate::utils::{calculate_file_hash_async, now_datetime, now_iso, sha256_hex_async};
 
 /// 全局文件别名表（内存，重启即丢失，与 Python 版一致）
@@ -1965,11 +1968,144 @@ async fn upload_parse_result(
     Json(json!({"id": id, "status": new_status, "markdown_path": md_path})).into_response()
 }
 
+/// 带 HTTP Range / ETag / If-None-Match 支持的 PDF 文件响应。
+///
+/// 浏览器原生 PDF 查看器依赖 Range 头实现分页渲染和滚动跳转。
+/// ETag 基于文件修改时间+文件大小生成，支持条件请求（304 Not Modified）。
+pub async fn serve_pdf_file(pdf_path: &str, headers: &HeaderMap) -> Response {
+    let file = match tokio::fs::File::open(pdf_path).await {
+        Ok(f) => f,
+        Err(_) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"detail": "PDF 文件不存在"}))).into_response();
+        }
+    };
+
+    let meta = match file.metadata().await {
+        Ok(m) => m,
+        Err(_) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"detail": "PDF 文件不存在"}))).into_response();
+        }
+    };
+
+    let file_size = meta.len();
+    let etag = make_etag(&meta);
+
+    // --- If-None-Match: 资源未变更时返回 304 ---
+    if let Some(h) = headers.get(header::IF_NONE_MATCH) {
+        if let Ok(val) = h.to_str() {
+            if val == "*" || val == etag || val == format!("W/{}", etag) {
+                let mut resp = Response::new(axum::body::Body::empty());
+                *resp.status_mut() = StatusCode::NOT_MODIFIED;
+                resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400"));
+                resp.headers_mut().insert(header::ETAG, etag.parse().unwrap());
+                return resp;
+            }
+        }
+    }
+
+    // --- Range 请求: 返回 206 Partial Content ---
+    let range_result = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| parse_range(s, file_size));
+
+    if let Some((start, end)) = range_result {
+        let length = (end - start + 1) as usize;
+        let mut buf = vec![0u8; length];
+        let mut file = file;
+        let ok = file.seek(std::io::SeekFrom::Start(start)).await.is_ok()
+            && file.read_exact(&mut buf).await.is_ok();
+
+        if ok {
+            let body = axum::body::Body::from(buf);
+            let mut resp = Response::new(body);
+            *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
+            resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/pdf"));
+            resp.headers_mut().insert(header::CONTENT_RANGE, format!("bytes {}-{}/{}", start, end, file_size).parse().unwrap());
+            resp.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from_str(&length.to_string()).unwrap());
+            resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400"));
+            resp.headers_mut().insert(header::ETAG, etag.parse().unwrap());
+            resp.headers_mut().insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            return resp;
+        }
+    }
+
+    // --- 不支持 Range 或解析失败 → 返回完整文件 (200 OK) ---
+    match tokio::fs::read(pdf_path).await {
+        Ok(bytes) => {
+            let mut resp = Response::new(axum::body::Body::from(bytes));
+            *resp.status_mut() = StatusCode::OK;
+            resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/pdf"));
+            resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400"));
+            resp.headers_mut().insert(header::ETAG, etag.parse().unwrap());
+            resp.headers_mut().insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            resp
+        }
+        Err(_) => (StatusCode::NOT_FOUND, Json(json!({"detail": "PDF 文件不存在"}))).into_response(),
+    }
+}
+
+/// 基于文件修改时间和大小生成弱 ETag。
+fn make_etag(meta: &std::fs::Metadata) -> String {
+    let ts = meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("\"{:x}-{:x}\"", ts, meta.len())
+}
+
+/// 解析 HTTP Range 请求头，支持三种格式：
+/// - `bytes=start-end` — 闭区间
+/// - `bytes=start-` — 开区间（起始到末尾）
+/// - `bytes=-suffix` — 末尾 N 字节
+///
+/// 仅处理首个 range（浏览器原生 PDF 查看器只发单 range）。
+fn parse_range(range_str: &str, file_size: u64) -> Option<(u64, u64)> {
+    let s = range_str.trim();
+    if !s.starts_with("bytes=") {
+        return None;
+    }
+    let spec = s[6..].split(',').next()?.trim();
+    if spec.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = spec.strip_prefix('-') {
+        // bytes=-500: 最后 500 字节
+        let count: u64 = rest.parse().ok()?;
+        if count == 0 {
+            return None;
+        }
+        let start = file_size.saturating_sub(count);
+        return Some((start, file_size - 1));
+    }
+
+    if let Some((a, b)) = spec.split_once('-') {
+        let start: u64 = a.parse().ok()?;
+        if start >= file_size {
+            return None;
+        }
+        if b.is_empty() {
+            // bytes=1024-: 从 start 到末尾
+            return Some((start, file_size - 1));
+        }
+        let end: u64 = b.parse().ok()?;
+        if start > end {
+            return None;
+        }
+        return Some((start, end.min(file_size - 1)));
+    }
+
+    None
+}
+
 async fn get_pdf(
     axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(id): Path<i64>,
+    headers: HeaderMap,
 ) -> Response {
     if let Err(resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
         return resp;
@@ -1981,17 +2117,7 @@ async fn get_pdf(
     }
 
     let pdf_path = paths::get_pdf_path(&settings, id);
-    match std::fs::read(&pdf_path) {
-        Ok(bytes) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "application/pdf"),
-                (header::CACHE_CONTROL, "public, max-age=86400"),
-            ],
-            bytes,
-        ).into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, Json(json!({"detail": "PDF 文件不存在"}))).into_response(),
-    }
+    serve_pdf_file(&pdf_path, &headers).await
 }
 
 /// 通过别名获取文档信息（用于 /assist/file/ 路由）
