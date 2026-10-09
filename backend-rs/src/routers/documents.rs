@@ -181,6 +181,11 @@ pub struct ListQuery {
     pub year: Option<i64>,
     pub year_min: Option<i64>,
     pub year_max: Option<i64>,
+    /// 按文档 ID 精确筛选（对应 id:1）
+    pub id: Option<i64>,
+    /// 按文档 ID 范围筛选（对应 id:1-30 / id:>10）
+    pub id_min: Option<i64>,
+    pub id_max: Option<i64>,
     pub journal: Option<String>,
     /// 单一作者精确筛选（用于 author:xxx 语法）
     pub authors: Option<String>,
@@ -469,6 +474,18 @@ async fn list_documents(
     if let Some(year_max) = params.year_max {
         conditions.push("year <= ?".to_string());
         binds.push(year_max.to_string());
+    }
+    if let Some(id) = params.id {
+        conditions.push("id = ?".to_string());
+        binds.push(id.to_string());
+    }
+    if let Some(id_min) = params.id_min {
+        conditions.push("id >= ?".to_string());
+        binds.push(id_min.to_string());
+    }
+    if let Some(id_max) = params.id_max {
+        conditions.push("id <= ?".to_string());
+        binds.push(id_max.to_string());
     }
     if let Some(journal) = &params.journal {
         if !journal.trim().is_empty() {

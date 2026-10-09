@@ -66,6 +66,28 @@
           </div>
         </div>
 
+        <!-- ID 范围 -->
+        <div class="qb-section">
+          <label class="qb-label">文献 ID</label>
+          <div class="qb-range">
+            <input
+              v-model="form.idFrom"
+              type="number"
+              class="qb-input qb-input-sm"
+              placeholder="起始 ID"
+              min="1"
+            />
+            <span class="qb-range-sep">—</span>
+            <input
+              v-model="form.idTo"
+              type="number"
+              class="qb-input qb-input-sm"
+              placeholder="结束 ID"
+              min="1"
+            />
+          </div>
+        </div>
+
         <!-- 年份范围 -->
         <div class="qb-section">
           <label class="qb-label">年份</label>
@@ -273,6 +295,8 @@ interface QueryForm {
   author: string
   journal: string
   doi: string
+  idFrom: string
+  idTo: string
   yearFrom: string
   yearTo: string
   docType: string
@@ -296,6 +320,8 @@ const form = reactive<QueryForm>({
   author: '',
   journal: '',
   doi: '',
+  idFrom: '',
+  idTo: '',
   yearFrom: '',
   yearTo: '',
   docType: '',
@@ -337,6 +363,21 @@ const generatedQuery = computed(() => {
     parts.push(journal.includes(' ') ? `journal:"${journal}"` : `journal:${journal}`)
   }
   if (form.doi.trim()) parts.push(`doi:${form.doi.trim()}`)
+
+  // 文献 ID
+  const idf = form.idFrom.trim()
+  const idt = form.idTo.trim()
+  if (idf && idt) {
+    if (idf === idt) {
+      parts.push(`id:${idf}`)
+    } else {
+      parts.push(`id:${idf}-${idt}`)
+    }
+  } else if (idf) {
+    parts.push(`id:>=${idf}`)
+  } else if (idt) {
+    parts.push(`id:<=${idt}`)
+  }
 
   // 年份
   const yf = form.yearFrom.trim()
@@ -416,6 +457,8 @@ function resetForm() {
   form.author = ''
   form.journal = ''
   form.doi = ''
+  form.idFrom = ''
+  form.idTo = ''
   form.yearFrom = ''
   form.yearTo = ''
   form.docType = ''
@@ -504,6 +547,27 @@ function parseInitialQuery(q: string) {
             form.zipSizeOp = m[1] || '>'
             form.zipSizeVal = m[2]
             form.zipSizeUnit = m[3] || 'B'
+          }
+          break
+        }
+        case 'id': {
+          const rangeMatch = value.match(/^(>=?|<=?)?\s*(\d+)(?:\s*-\s*(\d+))?$/)
+          if (rangeMatch) {
+            if (rangeMatch[3]) {
+              form.idFrom = rangeMatch[2]
+              form.idTo = rangeMatch[3]
+            } else if (rangeMatch[1] === '>') {
+              form.idFrom = String(parseInt(rangeMatch[2], 10) + 1)
+            } else if (rangeMatch[1] === '>=') {
+              form.idFrom = rangeMatch[2]
+            } else if (rangeMatch[1] === '<') {
+              form.idTo = String(parseInt(rangeMatch[2], 10) - 1)
+            } else if (rangeMatch[1] === '<=') {
+              form.idTo = rangeMatch[2]
+            } else {
+              form.idFrom = rangeMatch[2]
+              form.idTo = rangeMatch[2]
+            }
           }
           break
         }

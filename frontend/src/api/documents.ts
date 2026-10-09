@@ -24,6 +24,9 @@ export function listDocuments(params: {
   year?: number
   year_min?: number
   year_max?: number
+  id?: number
+  id_min?: number
+  id_max?: number
   journal?: string
   authors?: string
 }) {

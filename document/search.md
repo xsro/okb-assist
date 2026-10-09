@@ -36,6 +36,7 @@ transformer attention
 | `lang:语言` | 按语言筛选 | `lang:en` |
 | `language:语言` | 同 lang | `language:zh` |
 | `status:状态` | 按文档状态筛选（见下方状态值） | `status:done` |
+| `id:ID` | 按文献 ID 筛选（支持范围，见下方） | `id:1`、`id:1-30` |
 | `sort:字段` | 排序字段 | `sort:year` |
 | `order:方向` | 排序方向（asc 升序 / desc 降序） | `order:desc` |
 
@@ -62,6 +63,27 @@ transformer attention
 | `year:<2020` | 年份小于 2020 | `year:<2020` |
 | `year:<=2020` | 年份小于等于 2020 | `year:<=2020` |
 | `year:2020-2023` | 年份在 2020 到 2023 之间（含） | `year:2020-2023` |
+
+### 文献 ID 筛选
+
+`id:` 用于按文献 ID（主键）筛选，语法与 `year:` 一致：
+
+| 语法 | 含义 | 示例 |
+|------|------|------|
+| `id:1` | 精确筛选 ID 为 1 的文献 | `id:1` |
+| `id:1-30` | ID 在 1 到 30 之间（含） | `id:1-30` |
+| `id:>30` | ID 大于 30 | `id:>30` |
+| `id:>=30` | ID 大于等于 30 | `id:>=30` |
+| `id:<30` | ID 小于 30 | `id:<30` |
+| `id:<=30` | ID 小于等于 30 | `id:<=30` |
+
+常用于快速定位或对比一组已知 ID 的文献，例如：
+
+```
+id:1-30 status:done sort:id order:asc
+```
+
+含义：查看 ID 1~30 中已解析完成的文献，并按 ID 升序排列。
 
 ### 精确短语
 
@@ -104,7 +126,7 @@ transformer title:attention year:>2018 status:done
 
 - 点击搜索框（内容为空时）会弹出**语法帮助面板**，列出所有支持的高级语法
 - 输入时 `field:` 前缀会**自动高亮**为蓝色，`-` 否定前缀为红色，`OR` 为橙色，引号短语为绿色
-- 输入后搜索框下方会显示**活跃筛选条件 chips**，点击 × 或「清除全部」可一键重置
+- 输入后搜索框下方会显示**活跃筛选条件 chips**（含 `ID: 1`、`ID ≥ 1`、`ID ≤ 30` 等），点击 × 或「清除全部」可一键重置
 
 ## 与旧界面控件的关系
 
@@ -120,34 +142,41 @@ transformer title:attention year:>2018 status:done
 ### 解析流程
 
 ```
-用户输入 → searchParser.ts（分词 → 字段识别 → 范围解析）→ SearchApiParams
+用户输入 → HomeView 直接把原始查询串发给后端 /assist/api/documents/search-info/
         ↓
-   后端 list_documents()（SQL LIKE + 条件过滤）→ 结果列表
+backend-rs/src/services/query_parser.rs（分词 → 字段识别 → 范围解析 → OR/否定）
+        ↓
+build_where_clause() / build_search_sql()（SQL WHERE 构建）→ 结果列表
 ```
+
+> 前端 `searchParser.ts` 负责语法高亮与筛选 chips 展示（如 `id ≥ 1`、`ID ≤ 30`），实际查询执行由后端解析器完成。
 
 ### 前端文件
 
 | 文件 | 职责 |
 |------|------|
-| `frontend/src/utils/searchParser.ts` | 查询语法解析器（分词、字段映射、范围解析、OR 分割） |
-| `frontend/src/views/HomeView.vue` | 搜索 UI（输入框、高亮、帮助面板、chips、调用解析器发起请求） |
+| `frontend/src/utils/searchParser.ts` | 查询语法解析器（用于高亮、chips、构建器回填）|
+| `frontend/src/views/HomeView.vue` | 搜索 UI（输入框、高亮、chips、发起请求）|
+| `frontend/src/components/QueryBuilder.vue` | 高级搜索构建器（含 ID 范围表单）|
 
 ### 后端文件
 
 | 文件 | 职责 |
 |------|------|
-| `backend-rs/src/routers/documents.rs` | `ListQuery` 结构体、`list_documents()` SQL 构建（含 `year_min`/`year_max`/`authors` 条件） |
+| `backend-rs/src/services/query_parser.rs` | 查询语法解析（`resolve_field`、`parse_range`）+ SQL WHERE 构建 |
+| `backend-rs/src/routers/documents.rs` | `search_info()` 端点、`list_documents()` 的 `ListQuery`（`id`/`id_min`/`id_max`）|
 
 ### 注意事项
 
-- OR 查询目前在前端被解析标记，但因后端 SQL 原生未支持 OR 语法，含 OR 的查询退化为基础字段匹配（按第一组条件搜索）
-- `year:>` 和 `year:<` 使用不包含边界（即 `>2020` → `year >= 2021`），`year:>=` 和 `year:<=` 包含边界
-- 否定条件（`-year:2020`）目前标记在前端 ParsedQuery 中，后端暂未实现排除逻辑
-- 所有搜索均为 SQL `LIKE %keyword%` 模糊匹配，不是全文索引
+- `year:>` 和 `year:<` 使用不包含边界（即 `>2020` → `year >= 2021`），`year:>=` 和 `year:<=` 包含边界；`id:` 各运算符同理
+- 所有文本字段搜索均为 SQL `LIKE %keyword%` 模糊匹配，不是全文索引
 
 ## 常见搜索场景
 
 ```bash
+# 查看指定 ID 区间的文献
+  id:1-30
+
 # 查找 2022 年以后 Nature 上的 transformer 论文
   transformer journal:Nature year:>2021
 

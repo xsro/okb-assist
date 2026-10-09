@@ -359,6 +359,12 @@ const activeFilterChips = computed(() => {
   }
   if (p.journal) chips.push(`期刊: ${p.journal}`)
   if (p.authors) chips.push(`作者: ${p.authors}`)
+  if (p.id !== undefined) {
+    chips.push(`ID: ${p.id}`)
+  } else {
+    if (p.id_min !== undefined) chips.push(`ID ≥ ${p.id_min}`)
+    if (p.id_max !== undefined) chips.push(`ID ≤ ${p.id_max}`)
+  }
   if (p.sort_by) chips.push(`排序: ${SORT_LABELS[p.sort_by] || p.sort_by}`)
   if (p.sort_order) chips.push(`方向: ${p.sort_order === 'asc' ? '升序' : '降序'}`)
   return chips

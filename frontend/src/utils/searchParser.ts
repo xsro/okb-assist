@@ -15,6 +15,7 @@
  *
  * 示例：
  *   transformer title:attention year:>2018 status:done type:article
+ *   id:1-30 year:2023
  *   author:smith journal:Nature
  *   "deep learning" year:2020-2023 OR year:2018
  */
@@ -45,6 +46,7 @@ export const SEARCH_FIELD_DEFS: FieldDef[] = [
   { prefix: 'lang', field: 'language', type: 'text', label: '语言' },
   { prefix: 'language', field: 'language', type: 'text', label: '语言' },
   { prefix: 'year', field: 'year', type: 'number', label: '年份' },
+  { prefix: 'id', field: 'id', type: 'number', label: '文献 ID' },
   { prefix: 'filesize_pdf', field: 'pdf_size', type: 'number', label: 'PDF 大小' },
   { prefix: 'filesize_md', field: 'md_size', type: 'number', label: 'MD 大小' },
   { prefix: 'filesize_zip', field: 'zip_size', type: 'number', label: 'ZIP 大小' },
@@ -272,6 +274,9 @@ export interface SearchApiParams {
   year?: number
   year_min?: number
   year_max?: number
+  id?: number
+  id_min?: number
+  id_max?: number
   journal?: string
   authors?: string
   sort_by?: string
@@ -319,7 +324,7 @@ export function parsedQueryToParams(pq: ParsedQuery): SearchApiParams {
     }
   }
 
-  // 范围过滤（year）
+  // 范围过滤（year / id）
   for (const [field, range] of Object.entries(pq.rangeFilters)) {
     if (field === 'year') {
       if (range.min !== undefined && range.max !== undefined && range.min === range.max) {
@@ -327,6 +332,13 @@ export function parsedQueryToParams(pq: ParsedQuery): SearchApiParams {
       } else {
         if (range.min !== undefined) params.year_min = range.min
         if (range.max !== undefined) params.year_max = range.max
+      }
+    } else if (field === 'id') {
+      if (range.min !== undefined && range.max !== undefined && range.min === range.max) {
+        params.id = range.min
+      } else {
+        if (range.min !== undefined) params.id_min = range.min
+        if (range.max !== undefined) params.id_max = range.max
       }
     }
   }
@@ -366,6 +378,8 @@ export const SYNTAX_HELP_ITEMS = [
   { syntax: 'author:姓名', description: '按作者搜索' },
   { syntax: 'journal:刊名', description: '按期刊搜索' },
   { syntax: 'year:2023', description: '按年份精确匹配' },
+  { syntax: 'id:1', description: '按文献 ID 精确筛选' },
+  { syntax: 'id:1-30', description: '按文献 ID 范围筛选' },
   { syntax: 'year:>2020', description: '年份大于 2020' },
   { syntax: 'year:2020-2023', description: '年份范围' },
   { syntax: 'type:article', description: '按文献类型筛选' },

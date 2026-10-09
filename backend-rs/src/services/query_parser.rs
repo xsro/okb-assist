@@ -10,6 +10,7 @@
 //! - `field:>=value`                   数值大于等于
 //! - `field:<value`                    数值小于（-1）
 //! - `field:<=value`                   数值小于等于
+//! - `id:1-30`                        按文档 ID 筛选（数值范围）
 //! - `field:min-max`                   数值范围
 //! - `"exact phrase"`                  精确短语
 //! - `-field:value`                    排除条件
@@ -46,6 +47,7 @@ fn resolve_field(prefix: &str) -> Option<FieldInfo> {
         "type" | "doc_type" => Some(FieldInfo::text("doc_type")),
         "status" => Some(FieldInfo::enum_field("status")),
         "year" => Some(FieldInfo::number("year")),
+        "id" => Some(FieldInfo::number("id")),
         "filesize_pdf" => Some(FieldInfo::number("pdf_size")),
         "filesize_md" => Some(FieldInfo::number("md_size")),
         "filesize_zip" => Some(FieldInfo::number("zip_size")),
@@ -619,6 +621,40 @@ mod tests {
         let (_, bound) = &pq.range_filters[0];
         assert_eq!(bound.min, Some(2020));
         assert_eq!(bound.max, Some(2023));
+    }
+
+    #[test]
+    fn test_id_exact() {
+        let pq = parse_query("id:1");
+        assert_eq!(pq.range_filters.len(), 1);
+        assert_eq!(pq.range_filters[0].0, "id");
+        assert_eq!(pq.range_filters[0].1.min, Some(1));
+        assert_eq!(pq.range_filters[0].1.max, Some(1));
+    }
+
+    #[test]
+    fn test_id_range() {
+        let pq = parse_query("id:1-30");
+        assert_eq!(pq.range_filters.len(), 1);
+        assert_eq!(pq.range_filters[0].0, "id");
+        assert_eq!(pq.range_filters[0].1.min, Some(1));
+        assert_eq!(pq.range_filters[0].1.max, Some(30));
+    }
+
+    #[test]
+    fn test_id_operators() {
+        let pq = parse_query("id:>10 id:<=20");
+        assert_eq!(pq.range_filters.len(), 2);
+        assert_eq!(pq.range_filters[0].1.min, Some(11));
+        assert_eq!(pq.range_filters[1].1.max, Some(20));
+    }
+
+    #[test]
+    fn test_id_build_where() {
+        let pq = parse_query("id:1-30");
+        let (sql, binds) = build_where_clause(&pq, false);
+        assert!(sql.contains("id >= ? AND id <= ?"));
+        assert_eq!(binds, vec!["1".to_string(), "30".to_string()]);
     }
 
     #[test]
