@@ -36,6 +36,7 @@ const { requireToken } = useRequireToken()
 
 const content = ref('')
 const saving = ref(false)
+const baseHash = ref('')
 const confirmDlg = ref<InstanceType<typeof ConfirmDialog> | null>(null)
 
 async function load() {
@@ -44,6 +45,7 @@ async function load() {
   try {
     const res = await getMarkdown(id, { full: true })
     content.value = res.content
+    baseHash.value = res.hash
   } catch {
     showError('加载失败')
   }
@@ -56,10 +58,16 @@ async function save() {
   const id = parseInt(route.params.id as string)
   saving.value = true
   try {
-    await saveMarkdown(id, content.value)
+    const res = await saveMarkdown(id, content.value, baseHash.value || undefined)
+    baseHash.value = res.hash
     showSuccess('已保存')
-  } catch {
-    showError('保存失败')
+  } catch (err: any) {
+    // 409：文件已被其它操作修改（MinerU 重解析 / MCP / 源码面板）
+    if (err?.response?.status === 409) {
+      showError(err?.response?.data?.detail || '文件已被其它操作修改，请重新加载后再保存')
+    } else {
+      showError(err?.response?.data?.detail || '保存失败')
+    }
   } finally {
     saving.value = false
   }

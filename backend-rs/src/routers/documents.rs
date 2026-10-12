@@ -146,6 +146,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/:id/image/:filename", get(get_image_from_zip))
         .route("/assist/api/documents/:id/markdown/", get(get_markdown).put(update_markdown))
         .route("/assist/api/documents/:id/markdown", get(get_markdown).put(update_markdown))
+        .route("/assist/api/documents/:id/markdown/lines/", axum::routing::put(update_markdown_lines))
+        .route("/assist/api/documents/:id/markdown/lines", axum::routing::put(update_markdown_lines))
         .route("/assist/api/documents/:id/toc/", get(get_toc))
         .route("/assist/api/documents/:id/toc", get(get_toc))
         .route("/assist/api/documents/:id/parse-result/", post(upload_parse_result))
@@ -1704,6 +1706,9 @@ pub struct MarkdownQuery {
     pub line_count: Option<i64>,
     #[serde(default, deserialize_with = "de_flexible_bool")]
     pub full: Option<bool>,
+    /// 返回文件原始内容（不做图片路径重写）。源码编辑器用它保证「读-改-写」无损。
+    #[serde(default, deserialize_with = "de_flexible_bool")]
+    pub raw: Option<bool>,
 }
 
 /// GET /assist/api/documents/:id/markdown
@@ -1734,12 +1739,20 @@ async fn get_markdown(
         return (StatusCode::NOT_FOUND, Json(json!({"detail": "Markdown 文件尚未生成"}))).into_response();
     }
 
-    let content = match std::fs::read_to_string(&md_path) {
+    let raw_content = match std::fs::read_to_string(&md_path) {
         Ok(c) => c,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
     };
 
-    let content = rewrite_image_paths(&content, id);
+    // 文件版本（乐观并发控制）：基于文件真实字节计算，与 raw 与否无关
+    let hash = sha256_hex_async(raw_content.clone().into_bytes()).await;
+
+    // 默认把本地图片路径重写为可访问的 API URL；源码面板用 raw=1 拿原始路径
+    let content = if params.raw.unwrap_or(false) {
+        raw_content
+    } else {
+        rewrite_image_paths(&raw_content, id)
+    };
     let total_length = content.len();
     let total_lines = content.lines().count();
 
@@ -1751,6 +1764,7 @@ async fn get_markdown(
             "line_start": 0,
             "line_count": total_lines as i64,
             "lines_returned": total_lines as i64,
+            "hash": hash,
         })).into_response();
     }
 
@@ -1778,6 +1792,7 @@ async fn get_markdown(
         "line_start": actual_start,
         "line_count": line_count,
         "lines_returned": lines_returned as i64,
+        "hash": hash,
     })).into_response()
 }
 
@@ -1916,6 +1931,24 @@ async fn get_toc(
 #[derive(Debug, Deserialize)]
 pub struct MarkdownUpdate {
     pub content: String,
+    /// 乐观并发控制：客户端读取时的文件 hash；不传则不做校验（兼容旧调用）
+    #[serde(default)]
+    pub base_hash: Option<String>,
+}
+
+/// 校验乐观并发控制：文件当前 hash 与客户端携带的 base_hash 不一致时返回 409。
+fn check_base_hash(base_hash: &Option<String>, current: &str) -> Option<Response> {
+    match base_hash {
+        Some(expected) if !expected.is_empty() && expected != current => Some(
+            (StatusCode::CONFLICT, Json(json!({
+                "detail": "文件已被其它操作修改，请重新加载后再保存",
+                "hash": current,
+                "code": "conflict",
+            })))
+            .into_response(),
+        ),
+        _ => None,
+    }
 }
 
 async fn update_markdown(
@@ -1939,11 +1972,156 @@ async fn update_markdown(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "Markdown 文件尚未生成"}))).into_response();
     }
 
+    // 并发校验：基于写之前的文件内容
+    let current_hash = match std::fs::read(&md_path) {
+        Ok(bytes) => sha256_hex_async(bytes).await,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
+    };
+    if let Some(resp) = check_base_hash(&data.base_hash, &current_hash) {
+        return resp;
+    }
+
     let content = restore_image_paths(&data.content, id);
-    match std::fs::write(&md_path, content) {
-        Ok(_) => Json(json!({"detail": "Markdown 已更新"})).into_response(),
+    match write_atomic(&md_path, &content) {
+        Ok(_) => {
+            // 同步文件大小，避免列表页 md_size 过期
+            sync_doc_file_sizes(&db, &settings, id).await;
+            let hash = sha256_hex_async(content.into_bytes()).await;
+            Json(json!({"detail": "Markdown 已更新", "hash": hash})).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MarkdownLinesUpdate {
+    /// 起始行号（0-indexed，含）
+    pub line_start: i64,
+    /// 要替换的行数（0 表示纯插入）
+    pub line_count: i64,
+    /// 替换后的文本；其行数 = `content.split('\n').count()`，与「按行切片再 join」互为逆运算。
+    /// 空字符串表示 1 个空行（不表示删除）。
+    #[serde(default)]
+    pub content: String,
+    /// 显式删除：true 时直接删除 [line_start, line_start + line_count) 这些行（忽略 content）。
+    /// 因为空字符串固定等于 1 个空行，删行必须由本字段显式表达。
+    #[serde(default)]
+    pub delete: Option<bool>,
+    /// 乐观并发控制：客户端加载该行范围时拿到的文件 hash；不传则跳过校验（兼容旧调用）
+    #[serde(default)]
+    pub base_hash: Option<String>,
+}
+
+/// 原子写文件：先写同目录临时文件再 rename，避免崩溃/磁盘满导致截断。
+fn write_atomic(path: &str, content: &str) -> std::io::Result<()> {
+    let target = std::path::Path::new(path);
+    let tmp = target.with_extension(format!(
+        "{}.tmp",
+        target.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default()
+    ));
+    std::fs::write(&tmp, content)?;
+    match std::fs::rename(&tmp, target) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// PUT /assist/api/documents/:id/markdown/lines
+///
+/// 按行范围替换 Markdown 源码（就地编辑用）。
+/// 语义：
+///   - line_start 为 0-indexed 且包含该行；
+///   - 被替换的区间为 [line_start, line_start + line_count)；
+///   - line_count = 0 时为纯插入；
+///   - 新行数 = content.split('\n').count()，这与「读切片 join('\n')」严格互逆，
+///     因此「读出来原样写回去」字节不变（含空行、末尾换行）；
+///   - `delete: true` 时直接删掉整段行范围（忽略 content）——空字符串固定等于 1 个空行，
+///     因此删行必须显式声明；
+///   - 写入的是文件真实内容，不做图片路径重写/还原（与 raw=1 读取配对）；
+///   - 携带 base_hash（GET 返回的 hash）时做乐观并发校验，不匹配返回 409。
+async fn update_markdown_lines(
+    axum::Extension(role): axum::Extension<auth::Role>,
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+    Json(data): Json<MarkdownLinesUpdate>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
+    match fetch_doc(&db, id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    }
+
+    let md_path = paths::get_markdown_path(&settings, id);
+    if !std::path::Path::new(&md_path).exists() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "Markdown 文件尚未生成"}))).into_response();
+    }
+
+    let raw = match std::fs::read_to_string(&md_path) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
+    };
+
+    let ends_with_newline = raw.ends_with('\n');
+    let lines: Vec<&str> = raw.lines().collect();
+
+    // 乐观并发校验：基于本次读取到的文件内容
+    let current_hash = sha256_hex_async(raw.clone().into_bytes()).await;
+    if let Some(resp) = check_base_hash(&data.base_hash, &current_hash) {
+        return resp;
+    }
+
+    if data.line_start < 0 || data.line_count < 0 {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "line_start / line_count 不能为负数"}))).into_response();
+    }
+
+    let start = (data.line_start as usize).min(lines.len());
+    let end = (start + data.line_count as usize).min(lines.len());
+
+    // 严格互逆：line_count=1 取回的空行是 ''，写回时也应得到 1 个空行；
+    // 删行由 delete=true 显式表达
+    let new_lines: Vec<&str> = if data.delete.unwrap_or(false) {
+        Vec::new()
+    } else {
+        data.content.split('\n').collect()
+    };
+    let lines_written = new_lines.len();
+
+    let mut merged: Vec<&str> = Vec::with_capacity(lines.len() + lines_written);
+    merged.extend_from_slice(&lines[..start]);
+    merged.extend_from_slice(&new_lines);
+    merged.extend_from_slice(&lines[end..]);
+
+    let mut result = merged.join("\n");
+    if ends_with_newline && !result.is_empty() {
+        result.push('\n');
+    }
+
+    if let Err(e) = write_atomic(&md_path, &result) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
+    }
+
+    // 同步文件大小，避免列表页 md_size 过期
+    sync_doc_file_sizes(&db, &settings, id).await;
+
+    let total_lines = result.lines().count();
+    let hash = sha256_hex_async(result.clone().into_bytes()).await;
+    Json(json!({
+        "detail": "Markdown 已更新",
+        "line_start": start,
+        "line_count": data.line_count,
+        "lines_written": lines_written,
+        "total_lines": total_lines,
+        "md_size": file_size(&md_path),
+        "hash": hash,
+    }))
+    .into_response()
 }
 
 /// 上传 MinerU 解析结果（Markdown 内容）到文档，并更新状态为 markdown_done。

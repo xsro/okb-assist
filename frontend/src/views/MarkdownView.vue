@@ -26,7 +26,6 @@
           :chunks="visibleChunks"
           :math-mode="mathMode"
           :load-images="loadImages"
-          :show-source="showSource"
           :show-line-numbers="showLineNumbers"
           :highlight="highlight"
           :placeholder-images="!loadImages"
@@ -53,6 +52,20 @@
           </svg>
         </button>
       </div>
+
+      <!-- 右侧源码面板 -->
+      <Transition name="panel-slide">
+        <SourcePanel
+          v-if="sourceOpen"
+          :doc-id="docId"
+          :start-line="sourceRange.start"
+          :end-line="sourceRange.end"
+          :can-edit="canEdit"
+          @locate="locateSourceRange"
+          @saved="onSourceSaved"
+          @close="sourceOpen = false"
+        />
+      </Transition>
     </template>
 
     <!-- 目录抽屉 -->
@@ -187,13 +200,6 @@
               </div>
             </div>
             <hr class="tb-divider" />
-            <!-- 显示源码 -->
-            <div class="toolbar-item">
-              <label class="tb-checkbox">
-                <input v-model="showSource" type="checkbox" />
-                显示源码
-              </label>
-            </div>
             <!-- 加载全部图片 -->
             <div class="toolbar-item">
               <label class="tb-checkbox">
@@ -207,6 +213,15 @@
                 <input v-model="showLineNumbers" type="checkbox" @change="reloadViewer" />
                 显示行号
               </label>
+            </div>
+            <!-- 源码面板 -->
+            <div class="toolbar-item">
+              <button class="tb-action" @click="openSourcePanel">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+                </svg>
+                源码
+              </button>
             </div>
             <!-- 公式按需渲染 -->
             <div class="toolbar-item">
@@ -245,10 +260,15 @@ import { useRoute, useRouter } from 'vue-router'
 import { getChunks, getTOC } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
+import { useResponsive } from '@/composables/useResponsive'
+import { useTokenStore } from '@/stores/token'
 import type { TocItem, ChunkInfo } from '@/types/document'
 
 const MarkdownViewer = defineAsyncComponent(() =>
   import('@/components/MarkdownViewer.vue')
+)
+const SourcePanel = defineAsyncComponent(() =>
+  import('@/components/SourcePanel.vue')
 )
 
 const INITIAL_CHUNKS = 2  // 初始加载前 2 个 chunk
@@ -257,6 +277,13 @@ const route = useRoute()
 const router = useRouter()
 const { showError } = useToast()
 const { requireToken } = useRequireToken()
+const { isSmallMobile } = useResponsive()
+const tokenStore = useTokenStore()
+
+// 当前文档 ID（源码面板等子组件用）
+const docId = computed(() => parseInt(route.params.id as string))
+// 是否可编辑（admin）
+const canEdit = computed(() => tokenStore.canEdit)
 
 // ── 状态 ──
 const allChunks = ref<ChunkInfo[]>([])
@@ -281,10 +308,15 @@ const progressPercent = computed(() =>
 // ── 视图设置 ──
 const mathMode = ref<'none' | 'katex' | 'mathjax'>('katex')
 const loadImages = ref(false)
-const showSource = ref(false)
-const showLineNumbers = ref(false)
+// 行号默认开启；小屏（≤ 480px）默认关闭，避免行号列挤扁正文
+const showLineNumbers = ref(!isSmallMobile.value)
 // 公式按需渲染：仅渲染视口内停留过的公式
 const lazyMath = ref(true)
+
+// ── 源码面板 ──
+const sourceOpen = ref(false)
+// 面板初始行范围（0-based 含端点）
+const sourceRange = ref<{ start: number; end: number }>({ start: 0, end: 0 })
 
 // ── MarkdownViewer 实例（用于强制渲染公式） ──
 type ViewerExposed = {
@@ -297,6 +329,100 @@ const viewerRef = ref<ViewerExposed | null>(null)
 function renderAllMath() {
   toolbarOpen.value = false
   void viewerRef.value?.renderAllMath()
+}
+
+// ── 源码面板 ──
+
+/** 取「当前阅读位置」所在 chunk 的行范围（0-based 含端点）作为面板默认范围 */
+function currentVisibleChunkRange(): { start: number; end: number } | null {
+  const viewer = document.querySelector('.markdown-viewer')
+  if (!viewer) return null
+  const mid = window.innerHeight / 2
+  let bestId: number | null = null
+  let bestDist = Infinity
+  viewer.querySelectorAll<HTMLElement>('[data-chunk-id]').forEach((el) => {
+    const rect = el.getBoundingClientRect()
+    const inside = rect.top <= mid && rect.bottom >= mid
+    const dist = inside ? 0 : Math.min(Math.abs(rect.top - mid), Math.abs(rect.bottom - mid))
+    if (dist < bestDist) {
+      bestDist = dist
+      bestId = Number(el.dataset.chunkId)
+    }
+  })
+  if (bestId === null) return null
+  const chunk = allChunks.value.find(c => c.id === bestId)
+  return chunk ? { start: chunk.start_line, end: chunk.end_line } : null
+}
+
+function openSourcePanel() {
+  toolbarOpen.value = false
+  const range = currentVisibleChunkRange()
+  if (range) sourceRange.value = range
+  sourceOpen.value = true
+}
+
+/** 面板内「定位」：更新为目标 chunk 的范围（面板 watch 到后会重新加载） */
+function locateSourceRange() {
+  const range = currentVisibleChunkRange()
+  if (range) sourceRange.value = range
+}
+
+/** 保存后：重新拉取 chunks/TOC，重建渲染，并回落到编辑起点行 */
+async function onSourceSaved(info: { lineStart: number }) {
+  const id = docId.value
+  try {
+    const [chunkRes, tocRes] = await Promise.all([
+      getChunks(id),
+      getTOC(id).catch(() => null)
+    ])
+    allChunks.value = chunkRes.chunks
+    totalLines.value = chunkRes.total_lines
+    if (tocRes) toc.value = tocRes.toc
+
+    const idx = allChunks.value.findIndex(c =>
+      info.lineStart >= c.start_line && info.lineStart <= c.end_line
+    )
+    if (idx >= 0) {
+      visibleCount.value = Math.min(Math.max(visibleCount.value, idx + 1), allChunks.value.length)
+    }
+    // 行号已变化，必须重建
+    viewerKey.value++
+    await nextTick()
+    requestAnimationFrame(() => requestAnimationFrame(() => scrollToEditedLine(info.lineStart + 1)))
+  } catch (err: any) {
+    showError(err?.message || '刷新内容失败，请手动重新加载')
+  }
+}
+
+/** 滚动到指定 1-based 行（优先按行号元素，退化到 chunk 开头） */
+function scrollToEditedLine(line: number) {
+  const viewer = document.querySelector('.markdown-viewer')
+  if (!viewer) return
+
+  let best: HTMLElement | null = null
+  let bestDiff = Infinity
+  viewer.querySelectorAll<HTMLElement>('[data-line]').forEach((el) => {
+    const n = parseInt(el.getAttribute('data-line') || '', 10)
+    if (Number.isNaN(n)) return
+    const diff = Math.abs(n - line)
+    if (diff < bestDiff) {
+      bestDiff = diff
+      best = el
+    }
+  })
+  if (best) {
+    ;(best as HTMLElement).scrollIntoView({ behavior: 'instant', block: 'center' })
+    return
+  }
+
+  // 行号未开启时的回退：按包含该行的 chunk 定位
+  const idx = allChunks.value.findIndex(c =>
+    line - 1 >= c.start_line && line - 1 <= c.end_line
+  )
+  if (idx >= 0) {
+    const el = viewer.querySelector<HTMLElement>(`[data-chunk-id="${allChunks.value[idx].id}"]`)
+    el?.scrollIntoView({ behavior: 'instant', block: 'start' })
+  }
 }
 
 // ── 浮动 UI ──
@@ -720,6 +846,17 @@ onBeforeUnmount(() => {
   color: var(--text-tertiary);
   font-size: 13px;
   padding: 10px;
+}
+
+/* ── 右侧源码面板过渡 ── */
+.panel-slide-enter-active,
+.panel-slide-leave-active {
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+.panel-slide-enter-from,
+.panel-slide-leave-to {
+  transform: translateX(100%);
+  opacity: 0.6;
 }
 
 /* ── 右下角浮动按钮 ── */

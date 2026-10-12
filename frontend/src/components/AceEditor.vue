@@ -1,7 +1,7 @@
 <template>
   <div class="ace-editor-wrapper" :class="{ 'ace-fullscreen': fullscreen }">
     <!-- Markdown 快捷插入工具栏 -->
-    <div class="ace-md-toolbar">
+    <div v-if="showToolbar" class="ace-md-toolbar">
       <button class="tb-btn" @click="insertMarkdown('bold')" title="加粗 Ctrl+B"><strong>B</strong></button>
       <button class="tb-btn" @click="insertMarkdown('italic')" title="斜体 Ctrl+I"><em>I</em></button>
       <button class="tb-btn" @click="insertMarkdown('strike')" title="删除线"><s>S</s></button>
@@ -39,12 +39,14 @@
         <button class="stat-btn" @click="search" title="搜索 Ctrl+F">🔍 搜索</button>
         <button class="stat-btn" @click="replace" title="替换 Ctrl+H">🔧 替换</button>
         <span class="tb-sep"></span>
-        <button class="stat-btn" @click="toggleSplit" :title="splitView ? '单栏编辑' : '分屏预览'">
-          {{ splitView ? '☰ 编辑' : '⬜ 分屏' }}
-        </button>
-        <button class="stat-btn" @click="preview = !preview" :title="preview ? '关闭预览' : '全屏预览'">
-          {{ preview ? '✕ 预览' : '👁 预览' }}
-        </button>
+        <template v-if="showPreviewControls">
+          <button class="stat-btn" @click="toggleSplit" :title="splitView ? '单栏编辑' : '分屏预览'">
+            {{ splitView ? '☰ 编辑' : '⬜ 分屏' }}
+          </button>
+          <button class="stat-btn" @click="preview = !preview" :title="preview ? '关闭预览' : '全屏预览'">
+            {{ preview ? '✕ 预览' : '👁 预览' }}
+          </button>
+        </template>
       </div>
       <div class="status-center">
         <button class="stat-btn" @click="zoomOut" title="缩小字体">A−</button>
@@ -78,13 +80,21 @@ import 'ace-builds/src-noconflict/mode-markdown'
 
 
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   modelValue: string
   mode?: string
   theme?: string
   fontSize?: number
   showToolbar?: boolean
-}>()
+  /** 是否显示“分屏/预览”按钮（阅读页源码面板用不到） */
+  showPreviewControls?: boolean
+  /** 只读模式 */
+  readOnly?: boolean
+}>(), {
+  showToolbar: true,
+  showPreviewControls: true,
+  readOnly: false,
+})
 
 const emit = defineEmits(['update:modelValue'])
 
@@ -149,6 +159,7 @@ function initEditor() {
 
   editor.setValue(props.modelValue, -1)
   contentRef.value = props.modelValue
+  editor.setReadOnly(!!props.readOnly)
 
   // 监听内容变化
   editor.on('change', () => {
@@ -344,6 +355,15 @@ function replace() {
   editor.execCommand('replace')
 }
 
+/** 当前选区所在行范围（0-based，含端点，相对编辑器内容）；无编辑器时返回 null */
+defineExpose({
+  getSelectedRowRange(): { startRow: number; endRow: number } | null {
+    if (!editor) return null
+    const r = editor.getSelectionRange()
+    return { startRow: r.start.row, endRow: r.end.row }
+  },
+})
+
 // --- 生命周期 ---
 onMounted(() => {
   initEditor()
@@ -359,10 +379,16 @@ onBeforeUnmount(() => {
 
 // --- 外部响应 ---
 watch(() => props.modelValue, (newVal) => {
-  if (editor && !editor.isFocused() && newVal !== editor.getValue()) {
+  // 注意：不能用 isFocused() 拦住，否则「程序式换内容」（如源码面板切换行范围）
+  // 在编辑器有焦点时会静默丢失。父子值不一致即同步。
+  if (editor && newVal !== editor.getValue()) {
     editor.setValue(newVal, -1)
     contentRef.value = newVal
   }
+})
+
+watch(() => props.readOnly, (ro) => {
+  if (editor) editor.setReadOnly(!!ro)
 })
 
 watch(() => props.theme, (newTheme) => {

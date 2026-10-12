@@ -6,6 +6,7 @@ import type {
   SimilarTitleGroup,
   TocItem,
   MarkdownResponse,
+  MarkdownLinesSaveResult,
   ChunkResponse
 } from '@/types/document'
 
@@ -191,12 +192,13 @@ export function replaceAsset(id: number, file: File) {
 /** 获取 Markdown 内容（行切片） */
 export function getMarkdown(
   id: number,
-  options: { line_start?: number; line_count?: number; full?: boolean } = {}
+  options: { line_start?: number; line_count?: number; full?: boolean; raw?: boolean } = {}
 ) {
-  const { line_start, line_count, full = false } = options
+  const { line_start, line_count, full = false, raw = false } = options
   const params: Record<string, string | number> = { full: full ? 1 : 0 }
   if (line_start !== undefined) params.line_start = line_start
   if (line_count !== undefined) params.line_count = line_count
+  if (raw) params.raw = 1
   return apiGet<MarkdownResponse>(`/assist/api/documents/${id}/markdown/`, params)
 }
 
@@ -210,11 +212,34 @@ export function getChunks(id: number) {
   return apiGet<ChunkResponse>(`/assist/api/documents/${id}/chunks/`)
 }
 
-/** 保存 Markdown */
-export function saveMarkdown(id: number, content: string) {
-  return apiPut<{ message: string }>(
+/** 保存 Markdown（baseHash 为读取时的文件版本，用于 409 并发检测） */
+export function saveMarkdown(id: number, content: string, baseHash?: string) {
+  return apiPut<{ detail: string; hash: string }>(
     `/assist/api/documents/${id}/markdown/`,
-    { content }
+    { content, base_hash: baseHash }
+  )
+}
+
+/**
+ * 按行范围保存 Markdown 源码（就地编辑）。
+ * line_start 为 0-based 含端点，line_count 为被替换的行数（0 = 纯插入）。
+ * 写入的是文件真实内容（不做图片路径还原），与 getMarkdown(..., {raw:true}) 配对使用。
+ * base_hash 为加载时的文件 hash，不匹配时后端返回 409。
+ */
+export function saveMarkdownLines(
+  id: number,
+  payload: {
+    line_start: number
+    line_count: number
+    content: string
+    /** true 时显式删除该行范围（忽略 content） */
+    delete?: boolean
+    base_hash?: string
+  }
+) {
+  return apiPut<MarkdownLinesSaveResult>(
+    `/assist/api/documents/${id}/markdown/lines/`,
+    payload
   )
 }
 

@@ -1,8 +1,5 @@
 <template>
-  <div v-if="showSource" class="markdown-source">
-    <pre><code>{{ combinedContent }}</code></pre>
-  </div>
-  <div v-else ref="viewerEl" class="markdown-viewer"></div>
+  <div ref="viewerEl" class="markdown-viewer"></div>
 </template>
 
 <script setup lang="ts">
@@ -17,7 +14,7 @@
  * 4. 保留 content 属性兼容旧用法
  */
 
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { marked, Renderer } from 'marked'
 import type { ChunkInfo } from '@/types/document'
 import { extractMathPlaceholders, loadMathJax, type MathMode } from '@/utils/mathRenderer'
@@ -27,7 +24,6 @@ const props = withDefaults(defineProps<{
   chunks?: ChunkInfo[]
   mathMode?: MathMode
   loadImages?: boolean
-  showSource?: boolean
   showLineNumbers?: boolean
   highlight?: string
   trusted?: boolean
@@ -41,12 +37,6 @@ const props = withDefaults(defineProps<{
 
 const viewerEl = ref<HTMLElement | null>(null)
 const renderedChunkIds = ref(new Set<number>())
-
-// ===== 合并后的全量内容（用于源码模式） =====
-const combinedContent = computed(() => {
-  if (props.content !== undefined) return props.content
-  return (props.chunks || []).map(c => c.content).join('\n')
-})
 
 // ===== KaTeX 动态 import（只加载一次） =====
 let katexRender: ((latex: string, opts: any) => string) | null = null
@@ -105,39 +95,39 @@ function renderChunk(content: string, chunkId: number, startLine?: number) {
 
   const parseOpts = { async: false as const, gfm: true, breaks: true, renderer }
 
-  // ── Phase 2: marked 解析（全量） ──
-  const raw = marked.parse(text, parseOpts) as string
+  // ── Phase 2: 按 token 渲染 + 精确行号映射 ──
+  // 用 marked 的 top-level token 顺序累计原始行号：
+  //   - token.raw 里的换行数 = 该 token 占用的源码行数；
+  //   - 多行块级公式被占位符折叠，需按其 lineSpan 把换行数补回，
+  //     否则一个跨 4 行的 $$ 片段就会让后续行号漂移 3 行。
+  const matchById = new Map(matches.map(m => [m.id, m]))
+  const collapsedNewlines = new Map<string, number>()
+  for (const m of matches) collapsedNewlines.set(m.id, m.lineSpan ?? 0)
 
-  // 替换公式占位符 + 净化
-  let html = replacePlaceholders(raw, matches, trusted)
-
+  const tokens = marked.lexer(text, parseOpts)
   const container = document.createElement('div')
   container.dataset.chunkId = String(chunkId)
-  container.innerHTML = html
+  const annotate = props.showLineNumbers && startLine !== undefined
 
-  // 如果启用了行号，为每个子元素分配对应的 markdown 行号
-  // 策略：扫描原始 markdown 内容，跳过空行，为每个渲染出的块元素分配行号
-  if (props.showLineNumbers && startLine !== undefined) {
-    const children = container.children
-    const contentLines = text.split('\n')
-    let linePtr = 0
-    let childIdx = 0
+  let cursor = 0 // 已消费的源码行数（相对 chunk 起点）
+  for (const token of tokens) {
+    const tokenLine = cursor
+    cursor += countTokenLines(token.raw, collapsedNewlines)
+    if (token.type === 'space') continue
 
-    while (childIdx < children.length && linePtr < contentLines.length) {
-      // 跳过空行
-      while (linePtr < contentLines.length && contentLines[linePtr].trim() === '') {
-        linePtr++
+    const tokenHtml = replacePlaceholders(
+      marked.parser([token], parseOpts) as string,
+      matchById,
+      trusted
+    )
+    const piece = document.createElement('div')
+    piece.innerHTML = tokenHtml
+    while (piece.firstChild) {
+      const node = piece.firstChild
+      if (annotate && node.nodeType === Node.ELEMENT_NODE) {
+        ;(node as HTMLElement).setAttribute('data-line', String(startLine! + tokenLine + 1))
       }
-      if (linePtr >= contentLines.length) break
-
-      children[childIdx].setAttribute('data-line', String(startLine + linePtr + 1))
-
-      // 该块元素可能占了多行，跳过直到遇到空行或文件末尾
-      linePtr++
-      while (linePtr < contentLines.length && contentLines[linePtr].trim() !== '') {
-        linePtr++
-      }
-      childIdx++
+      container.appendChild(node)
     }
   }
 
@@ -154,33 +144,51 @@ function renderChunk(content: string, chunkId: number, startLine?: number) {
   }
 }
 
-function replacePlaceholderIds(html: string, matches: { id: string; latex: string; displayMode: boolean }[]): string {
-  let result = html
-  for (const m of matches) {
-    const escapedLatex = m.latex
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    const placeholderHtml = `<span class=\"math-placeholder\" data-math-id=\"${m.id}\" data-math-latex=\"${escapedLatex}\" data-math-display=\"${m.displayMode ? 'true' : 'false'}\">`
-      + `<span class=\"math-raw\">${m.displayMode ? '$$' : '$'}${escapedLatex}${m.displayMode ? '$$' : '$'}</span></span>`
-    result = result.replaceAll(m.id, placeholderHtml)
+/** token.raw 占用的源码行数（补回被公式占位符折叠的换行） */
+function countTokenLines(raw: string, collapsed: Map<string, number>): number {
+  let newlines = 0
+  for (let i = 0; i < raw.length; i++) {
+    if (raw.charCodeAt(i) === 10) newlines++
   }
-  return result
+  if (raw.indexOf('@@MATH_') >= 0) {
+    const re = /@@MATH_(?:BLOCK|INLINE)_\d+@@/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(raw)) !== null) newlines += collapsed.get(m[0]) || 0
+  }
+  return newlines
 }
 
-function replacePlaceholders(html: string, matches: { id: string; latex: string; displayMode: boolean }[], trusted: boolean): string {
-  let result = html
-  for (const m of matches) {
-    const escapedLatex = m.latex
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    const placeholderContent = m.displayMode
-      ? `<span class=\"math-raw\">$$${escapedLatex}$$</span>`
-      : `<span class=\"math-raw\">$${escapedLatex}$</span>`
-    const placeholder = `<span class=\"math-placeholder\" data-math-id=\"${m.id}\" data-math-latex=\"${escapedLatex}\" data-math-display=\"${m.displayMode ? 'true' : 'false'}\">${placeholderContent}</span>`
-    result = result.replaceAll(m.id, placeholder)
-  }
+/**
+ * 将占位符替换为可延迟渲染的 math span。
+ * 单次正则扫描 + Map 查表（避免 匹配数 × HTML 长度 的重复扫描，
+ * 同时避免 replaceAll 对 `$&` 等替换模式的误解）。
+ */
+function replacePlaceholders(
+  html: string,
+  matchById: Map<string, { id: string; latex: string; displayMode: boolean }>,
+  trusted: boolean
+): string {
+  let result = html.replace(/@@MATH_(?:BLOCK|INLINE)_\d+@@/g, (whole) => {
+    const m = matchById.get(whole)
+    if (!m) return whole
+    const escapedLatex = escapeHtml(m.latex)
+    const raw = m.displayMode ? `$$${escapedLatex}$$` : `$${escapedLatex}$`
+    return `<span class="math-placeholder" data-math-id="${m.id}" data-math-latex="${escapedLatex}" data-math-display="${m.displayMode ? 'true' : 'false'}">`
+      + `<span class="math-raw">${raw}</span></span>`
+  })
   if (!trusted) {
     result = result.replace(/<script[\s\S]*?<\/script>/gi, '<!-- script removed -->')
   }
   return result
+}
+
+/** 属性/文本转义（含引号，否则 data-math-latex 会被含 " 的公式截断） */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
 }
 
 // ===== 公式渲染调度（视口惰性 + 空闲分片） =====
@@ -525,23 +533,6 @@ watch(() => props.content, (content) => {
   renderChunk(content, 0)
 })
 
-// ===== 源码/渲染视图切换后重建内容（v-if 会销毁 viewer 容器） =====
-watch(() => props.showSource, (show) => {
-  if (show) return
-  nextTick(() => {
-    if (!viewerEl.value) return
-    renderedChunkIds.value = new Set<number>()
-    viewerEl.value.innerHTML = ''
-    resetMathRuntime()
-    for (const chunk of props.chunks || []) {
-      renderChunk(chunk.content, chunk.id, chunk.start_line)
-    }
-    if (props.content !== undefined) renderChunk(props.content, 0)
-    const kw = props.highlight?.trim()
-    if (kw) nextTick(() => applyHighlight(kw))
-  })
-})
-
 // ===== 高亮 =====
 watch(() => props.highlight, (kw) => {
   if (!viewerEl.value) return
@@ -744,21 +735,5 @@ onBeforeUnmount(() => {
   display: block;
   max-width: 100%;
   overflow-x: auto;
-}
-
-.markdown-source {
-  background: #f8f9fa;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 16px;
-  overflow-x: auto;
-}
-
-.markdown-source pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
-.markdown-source code {
-  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-  font-size: 13px;
-  line-height: 1.6;
-  color: #333;
 }
 </style>

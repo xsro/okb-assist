@@ -3,10 +3,12 @@ import 'katex/dist/katex.min.css'
 
 export type MathMode = 'none' | 'katex' | 'mathjax'
 
-interface MathMatch {
+export interface MathMatch {
   id: string
   latex: string
   displayMode: boolean
+  /** 被占位符折叠掉的换行数（多行块级公式会跨多行），用于把行号还原回原始 md 文件 */
+  lineSpan?: number
 }
 
 /** 提取 markdown 中的数学公式，用占位符替换 */
@@ -113,17 +115,22 @@ export function extractMathPlaceholders(content: string): { text: string; matche
     /\$\$([\s\S]*?)\$\$/g,
     (_match: string, latex: string) => {
       const id = `@@MATH_BLOCK_${counter++}@@`
-      matches.push({ id, latex: latex.trim(), displayMode: true })
+      matches.push({
+        id,
+        latex: latex.trim(),
+        displayMode: true,
+        lineSpan: (latex.match(/\n/g) || []).length,
+      })
       return id
     }
   )
 
-  // 行内公式 $...$
+  // 行内公式 $...$（限定单行，不会折叠换行）
   const inlineReplaced = blockReplaced.replace(
     /(?<!\\)\$(?!\$)([^\n\$]+?)(?<!\\)\$(?!\$)/g,
     (_match: string, latex: string) => {
       const id = `@@MATH_INLINE_${counter++}@@`
-      matches.push({ id, latex: latex.trim(), displayMode: false })
+      matches.push({ id, latex: latex.trim(), displayMode: false, lineSpan: 0 })
       return id
     }
   )

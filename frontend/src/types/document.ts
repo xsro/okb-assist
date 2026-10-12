@@ -74,6 +74,20 @@ export interface MarkdownResponse {
   line_start: number
   line_count: number
   lines_returned: number
+  /** 文件版本（sha256），用于保存时的乐观并发校验 */
+  hash: string
+}
+
+/** 按行范围保存 Markdown 的响应 */
+export interface MarkdownLinesSaveResult {
+  detail: string
+  line_start: number
+  line_count: number
+  lines_written: number
+  total_lines: number
+  md_size: number | null
+  /** 写入后的文件 hash */
+  hash: string
 }
 
 /** Markdown 区块 */

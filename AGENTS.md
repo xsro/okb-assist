@@ -143,6 +143,9 @@ cargo build --release
    - 含批量控制器、暂停/恢复/重置、两级信号量并发限制：MinerU 解析使用独立 `Semaphore(max_tasks)`（按配置），extract/index 使用全局 `Semaphore(max_concurrent_tasks)`（`system.json`）。
    - **所有阶段均在后台执行**（见下方「后台任务」一节）—— 请求先返回，协程在事件循环继续；进度与状态机记录在 `Document` 上，可轮询查询。
 4. **文档管理**（`documents.rs`）：CRUD、上传、按路径登记、语义搜索 `/search`、全文搜索 `/grep-search`、`/assist/markdown` 读写、PDF/图片服务、去重。
+   - `GET /assist/api/documents/:id/markdown/?line_start&line_count&full&raw` —— 按行切片读取；`raw=1` 返回文件原始内容（不做图片路径重写），供源码面板保证无损读写；响应含 `hash`（文件真实字节的 sha256）。
+   - `PUT /assist/api/documents/:id/markdown/lines` —— 按行范围替换源码（admin）。语义：`line_start` 0-based 含端点，`line_count` 为被替换行数（0 = 纯插入），新行数 = `content.split('\n').count()`（与「切片 join('\n')」严格互逆），写入为原子写且不做图片路径还原（与 `raw=1` 配对）。删行必须显式传 `delete: true`（空字符串固定等于 1 个空行，不能表达删行）。
+   - **乐观并发控制**：`PUT .../markdown/` 与 `.../markdown/lines/` 都接受可选 `base_hash`（取自 GET 的 `hash`），不一致时返回 **409** `{code:"conflict", hash, detail}`；不传则跳过校验（向后兼容）。两个写接口的响应都返回写入后的 `hash`。
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、迁移、索引重置。
 6. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
 7. **MCP 服务**（`mcp_server.rs`）：Streamable HTTP 端点 `/assist/mcp/stream`，SSE 挂载在 `/assist/mcp`；Bearer token 用 `system.json` 的 `mcp_token` 校验。完整工具列表见 `document/mcp.md`。
@@ -198,7 +201,8 @@ cargo build --release
 | `SkeletonLoading.vue` | 骨架屏 |
 | `MarkdownViewer.vue` | Markdown 渲染（marked + KaTeX + DOMPurify） |
 | `QueryBuilder.vue` | 高级搜索构建器 + 列管理（双选项卡面板） |
-| `AceEditor.vue` | Markdown 编辑器（ace-builds 1.44.0），编辑+分屏预览+KaTeX |
+| `AceEditor.vue` | Markdown 编辑器（ace-builds 1.44.0），编辑+分屏预览+KaTeX；`showToolbar` / `showPreviewControls` / `readOnly` 可裁剪为纯源码编辑器 |
+| `SourcePanel.vue` | 阅读页右侧源码面板（按行范围读取/编辑/保存，`raw=1` 无损读写，admin 才可编辑） |
 | `McpConfigPanel.vue` | MCP 配置面板 |
 | `McpSkillPanel.vue` | MCP Skill 面板 |
 | `config/` | 配置子组件：`BaseUrlSection.vue`、`MineruConfigSection.vue`、`OllamaConfigSection.vue`、`VectorDbConfigSection.vue` |
@@ -211,7 +215,7 @@ cargo build --release
 |------|------|------|------|
 | `/assist` | `HomeView.vue` | 文献列表（桌面表格/移动卡片 + 列管理 + 高级搜索） | 全部 |
 | `/assist/detail/:id` | `DetailView.vue` | 文档详情 | 全部 |
-| `/assist/markdown/:id` | `MarkdownView.vue` | 只读 Markdown 查看（浮动设置按钮收纳全部工具） | 全部 |
+| `/assist/markdown/:id` | `MarkdownView.vue` | Markdown 阅读（浮动设置按钮收纳全部工具；行号默认开、移动端默认关；右侧源码面板按行就地编辑） | 全部 |
 | `/assist/markdown/:id/edit` | `MarkdownEditView.vue` | Markdown 编辑（AceEditor） | admin |
 | `/assist/upload` | `UploadView.vue` | 上传 PDF | admin / view-upload |
 | `/assist/doc/:id` | `DocManageView.vue` | 文档管理 | 全部 |
@@ -237,11 +241,11 @@ cargo build --release
 - **移动端**：工具栏横向滚动，状态栏三段式换行
 
 ### MarkdownViewer 渲染组件（`src/components/MarkdownViewer.vue`）
-- 使用 `marked` 解析 Markdown（GFM + 换行）
-- 通过 `renderMath()` 预处理 KaTeX 公式（`$$...$$` 块级、`$...$` 行内）
-- `DOMPurify.sanitize()` 净化 HTML，同时保留数学标签
-- 支持 `mathMode` 切换（`katex` / `mathjax` / `none`）
-- 支持 `loadImages` 开关控制图片加载
+- 按 chunk 增量渲染：`chunk.id` 不变则不重渲染（`renderedChunkIds`）
+- 公式：`extractMathPlaceholders()` 先把 `$..$` / `$$..$$` 换成占位符，再按**视口惰性**用 KaTeX 渲染；MathJax 模式按 chunk 增量 `typesetPromise`
+- 支持 `mathMode` / `loadImages` / `showLineNumbers` / `lazyMath` 等开关
+- **行号映射（`data-line`）**：行号为 1-based 且与原始 md 文件严格对应。实现方式是按 `marked` 的 top-level token 顺序累加 `token.raw` 的换行数；**多行块级公式被占位符折叠，必须用 `MathMatch.lineSpan` 把被吃掉的换行数补回**，否则每个跨 N 行的 `$$` 片段都会让后续行号漂移 N-1 行。逐块渲染用 `marked.parser([token])`，保证每个块能带上自己的起始行号
+- `data-line` 的消费方：阅读页行号栏、`?target_line=` 深链、搜索/TOC 跳转、源码面板保存后的回落定位（`scrollToEditedLine`）
 
 ### 状态管理
 - `useToast()`（`src/composables/useToast.ts`）：`showSuccess()` / `showError()` / `showInfo()` / `showToast()`
