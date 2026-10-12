@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="okb-favicon-title">
+  <title id="okb-favicon-title">OKB-Assist</title>
+  <desc>摊开的书与放大镜：本地文献库与语义检索</desc>
+
+  <defs>
+    <!-- 底板渐变：深靛蓝 -->
+    <linearGradient id="okbBg" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="64">
+      <stop offset="0" stop-color="#1e293b" />
+      <stop offset="1" stop-color="#141d2e" />
+    </linearGradient>
+
+    <!--
+      放大镜遮挡层：把镜片 + 手柄连同周围一圈从书页上挖掉，
+      保证青色圆环压过书角时仍留一道干净的暗色间隙（16px 下不糊）。
+    -->
+    <mask id="okbLensMask">
+      <rect width="64" height="64" fill="#fff" />
+      <circle cx="45.5" cy="41.5" r="12.5" fill="#000" />
+      <line x1="52.2" y1="48.2" x2="57" y2="53" stroke="#000" stroke-width="9" stroke-linecap="round" />
+    </mask>
+  </defs>
+
+  <!-- 底板：自带深色圆角底，浅色与深色标签栏下都清晰 -->
+  <rect width="64" height="64" rx="14" fill="url(#okbBg)" />
+
+  <!-- 摊开的书：外侧边矮、书脊高，中间留 1.8 单位书脊缝；右页略暗形成左右受光差异 -->
+  <g mask="url(#okbLensMask)">
+    <path fill="#e2e8f0" d="M22.6 10.5C15.8 11.7 9.2 14.8 3 18V31.8C9.2 32.4 15.8 32.7 22.6 33Z" />
+    <path fill="#cbd5e1" d="M24.4 10.5C31.2 11.7 37.8 14.8 44 18V31.8C37.8 32.4 31.2 32.7 24.4 33Z" />
+  </g>
+
+  <!-- 放大镜：青色高光 -->
+  <g stroke="#38bdf8" fill="none" stroke-linecap="round">
+    <circle cx="45.5" cy="41.5" r="9" stroke-width="4.6" />
+    <line x1="52.2" y1="48.2" x2="57" y2="53" stroke-width="5" />
+  </g>
+</svg>
