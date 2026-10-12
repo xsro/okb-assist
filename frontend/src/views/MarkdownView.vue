@@ -1001,13 +1001,19 @@ onBeforeUnmount(() => {
 
 .toolbar-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.2); z-index: 500;
-  display: flex; justify-content: flex-end; align-items: flex-end; padding: 24px;
+  /* 沿左下角浮动按钮展开：左侧对齐、从底部向上排列 */
+  display: flex; justify-content: flex-start; align-items: flex-end;
+  padding: 24px;
+  /* 让出左下角浮动按钮（bottom 24px + 48px 高 + 12px 间距）的位置 */
+  padding-bottom: 84px;
 }
 
 .toolbar-popover {
   background: #fff; border: 1px solid var(--border); border-radius: 12px;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.12); padding: 10px; min-width: 230px;
-  max-height: calc(100vh - 48px); overflow-y: auto;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.12); padding: 10px;
+  width: 230px; max-width: 100%;
+  max-height: 100%; overflow-y: auto;
+  transform-origin: left bottom;
 }
 
 .toolbar-item { padding: 2px 0; }
@@ -1084,8 +1090,12 @@ onBeforeUnmount(() => {
   transition: width 0.3s ease;
 }
 
-.popover-fade-enter-active, .popover-fade-leave-active { transition: opacity 0.15s; }
-.popover-fade-enter-from, .popover-fade-leave-to { opacity: 0; }
+.popover-fade-enter-active, .popover-fade-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.popover-fade-enter-from, .popover-fade-leave-to {
+  opacity: 0; transform: translate(-8px, 8px) scale(0.96);
+}
 
 /* ==========================================
    响应式
@@ -1094,10 +1104,14 @@ onBeforeUnmount(() => {
 @media (max-width: 768px) {
   .mdv-content { padding: 20px 20px 100px; }
   .mdv-floatbar { bottom: 16px; left: 12px; }
+  .toolbar-overlay { padding: 16px; padding-bottom: 76px; }
+  .toolbar-popover { width: 220px; }
 }
 
 @media (max-width: 480px) {
   .mdv-content { padding: 16px 14px 90px; }
   .mdv-floatbar { bottom: 12px; left: 8px; }
+  .toolbar-overlay { padding: 12px; padding-bottom: 72px; }
+  .toolbar-popover { width: calc(100vw - 24px); max-width: 280px; }
 }
 </style>
