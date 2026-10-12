@@ -11,7 +11,8 @@
  *
  * 核心优化：
  * 1. 接受 chunks 数组，每个 chunk 独立渲染后追加 DOM（不重绘已有内容）
- * 2. 公式渲染通过 requestIdleCallback 分片完成，不阻塞主线程
+ * 2. 公式「按需渲染」：占位符进入扩展视口并停留 ≥500ms 才用 KaTeX 渲染，
+ *    首屏/新追加 chunk 中已可见的公式立即渲染（仍按帧分片），不阻塞主线程
  * 3. chunk.id 不变则不重新渲染
  * 4. 保留 content 属性兼容旧用法
  */
@@ -21,7 +22,7 @@ import { marked, Renderer } from 'marked'
 import type { ChunkInfo } from '@/types/document'
 import { extractMathPlaceholders, loadMathJax, type MathMode } from '@/utils/mathRenderer'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   content?: string
   chunks?: ChunkInfo[]
   mathMode?: MathMode
@@ -31,7 +32,12 @@ const props = defineProps<{
   highlight?: string
   trusted?: boolean
   placeholderImages?: boolean
-}>()
+  /** 公式按需渲染（视口内停留后才渲染 KaTeX），默认开启 */
+  lazyMath?: boolean
+}>(), {
+  // 注意：布尔 prop 缺省时 Vue 会按 Boolean 转换规则变成 false，必须显式给默认值
+  lazyMath: true,
+})
 
 const viewerEl = ref<HTMLElement | null>(null)
 const renderedChunkIds = ref(new Set<number>())
@@ -44,16 +50,24 @@ const combinedContent = computed(() => {
 
 // ===== KaTeX 动态 import（只加载一次） =====
 let katexRender: ((latex: string, opts: any) => string) | null = null
+let katexLoading: Promise<void> | null = null
+let katexFailed = false
 
-async function ensureKatex() {
-  if (katexRender) return
-  try {
-    const mod = await import('katex')
-    const k = mod.default || mod
-    katexRender = (latex: string, opts: any) => k.renderToString(latex, opts)
-  } catch {
-    // KaTeX 加载失败，保留占位符
+function ensureKatex(): Promise<void> {
+  if (katexRender) return Promise.resolve()
+  if (!katexLoading) {
+    katexLoading = (async () => {
+      try {
+        const mod = await import('katex')
+        const k = mod.default || mod
+        katexRender = (latex: string, opts: any) => k.renderToString(latex, opts)
+      } catch {
+        // KaTeX 加载失败，保留占位符（公式以原始 LaTeX 呈现）
+        katexFailed = true
+      }
+    })()
   }
+  return katexLoading
 }
 
 // ===== 渲染单个 chunk =====
@@ -130,9 +144,13 @@ function renderChunk(content: string, chunkId: number, startLine?: number) {
   viewerEl.value.appendChild(container)
   renderedChunkIds.value.add(chunkId)
 
-  // ── Phase 3: 异步渲染公式 ──
-  if (mode === 'katex' && matches.length > 0) {
-    scheduleFormulaRender(container)
+  // ── Phase 3: 公式渲染调度 ──
+  if (matches.length > 0) {
+    if (mode === 'katex') {
+      scheduleFormulaRender(container)
+    } else if (mode === 'mathjax') {
+      typesetMathJaxChunk(container)
+    }
   }
 }
 
@@ -165,71 +183,265 @@ function replacePlaceholders(html: string, matches: { id: string; latex: string;
   return result
 }
 
-// ===== Idle Callback 公式渲染 =====
+// ===== 公式渲染调度（视口惰性 + 空闲分片） =====
+// 策略：
+//   - 占位符首次被观察且已在视口内（含 rootMargin 预取区）→ 立即入队渲染；
+//   - 已经在视口外、后续因滚动进入视口 → 停留满 MATH_DWELL_MS 才渲染；
+//   - 快速划过（未满停留时间）或重新离开视口 → 取消渲染；
+//   - 关闭惰性（props.lazyMath === false）→ 回退到全量空闲队列。
+const MATH_DWELL_MS = 500
+const MATH_ROOT_MARGIN = '400px 0px'
+
 interface PendingFormula {
-  el: HTMLElement | null
-  id: string
+  el: HTMLElement
   latex: string
   displayMode: boolean
 }
 
 const pendingQueue: PendingFormula[] = []
 let schedulerActive = false
+let mathObserver: IntersectionObserver | null = null
+const mathTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>()
+// 已经历过首个观察回调的元素（首个回调中可见的公式免停留）
+let mathSeen = new WeakSet<Element>()
+
+/** 空闲回调（无 requestIdleCallback 时退化为 setTimeout） */
+const idleCallback: (cb: (deadline: IdleDeadline) => void, opts?: { timeout: number }) => number =
+  typeof requestIdleCallback === 'function'
+    ? requestIdleCallback
+    : ((cb) => setTimeout(
+        () => cb({ didTimeout: true, timeRemaining: () => 8 } as IdleDeadline),
+        1
+      ) as unknown as number)
+
+function lazyMathEnabled(): boolean {
+  return props.lazyMath === true && typeof IntersectionObserver !== 'undefined'
+}
 
 function scheduleFormulaRender(container: HTMLElement) {
-  const placeholders = container.querySelectorAll<HTMLElement>('.math-placeholder[data-math-id]')
-  for (const el of placeholders) {
-    pendingQueue.push({
-      el,
-      id: el.dataset.mathId || '',
-      latex: el.dataset.mathLatex || '',
-      displayMode: el.dataset.mathDisplay === 'true',
-    })
-  }
+  const placeholders = Array.from(
+    container.querySelectorAll<HTMLElement>('.math-placeholder[data-math-id]')
+  )
+  if (placeholders.length === 0) return
 
-  if (!schedulerActive) {
-    schedulerActive = true
-    requestIdleCallback(processFormulas, { timeout: 3000 })
+  const observer = lazyMathEnabled() ? ensureMathObserver() : null
+  if (!observer) {
+    // 不支持 IntersectionObserver 或已关闭惰性渲染：全量空闲渲染
+    for (const el of placeholders) enqueueMath(el)
+    return
   }
+  for (const el of placeholders) observer.observe(el)
+}
+
+function ensureMathObserver(): IntersectionObserver {
+  if (mathObserver) return mathObserver
+  mathObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const el = entry.target as HTMLElement
+      const firstSeen = !mathSeen.has(el)
+      mathSeen.add(el)
+
+      if (!entry.isIntersecting) {
+        // 离开视口：取消停留计时，并撤销已入队的渲染
+        cancelMathTimer(el)
+        removePendingMath(el)
+        continue
+      }
+
+      // 首次出现即已在视口内（首屏 / 刚追加的 chunk）→ 不等停留
+      if (firstSeen) {
+        enqueueMath(el)
+        continue
+      }
+
+      if (mathTimers.has(el)) continue
+      mathTimers.set(el, setTimeout(() => {
+        mathTimers.delete(el)
+        enqueueMath(el)
+      }, MATH_DWELL_MS))
+    }
+  }, { rootMargin: MATH_ROOT_MARGIN })
+  return mathObserver
+}
+
+function cancelMathTimer(el: HTMLElement) {
+  const timer = mathTimers.get(el)
+  if (timer !== undefined) {
+    clearTimeout(timer)
+    mathTimers.delete(el)
+  }
+}
+
+function removePendingMath(el: HTMLElement) {
+  const idx = pendingQueue.findIndex(item => item.el === el)
+  if (idx >= 0) pendingQueue.splice(idx, 1)
+}
+
+function kickScheduler() {
+  if (schedulerActive || pendingQueue.length === 0) return
+  schedulerActive = true
+  idleCallback(processFormulas, { timeout: 3000 })
+}
+
+function enqueueMath(el: HTMLElement) {
+  if (!el.isConnected) return
+  if (pendingQueue.some(item => item.el === el)) return
+  pendingQueue.push({
+    el,
+    latex: el.dataset.mathLatex || '',
+    displayMode: el.dataset.mathDisplay === 'true',
+  })
+  kickScheduler()
 }
 
 function processFormulas(deadline: IdleDeadline) {
   const BUDGET_MS = 8
-  let rendered = 0
 
   while (pendingQueue.length > 0 && deadline.timeRemaining() > BUDGET_MS) {
     const item = pendingQueue.shift()!
-    if (!item.el || !item.el.isConnected) continue // DOM 中已不存在
+    if (!item.el.isConnected) continue // DOM 中已不存在
 
     if (!katexRender) {
-      // KaTeX 未就绪，跳过（保留占位符）
-      continue
+      // KaTeX 尚未就绪：放回队列，等加载完成后再继续
+      pendingQueue.unshift(item)
+      schedulerActive = false
+      if (katexFailed) {
+        pendingQueue.length = 0 // 加载失败：保留原始 LaTeX，不再重试
+        return
+      }
+      ensureKatex().then(kickScheduler)
+      return
     }
 
-    try {
-      const html = katexRender(item.latex, {
-        throwOnError: false,
-        displayMode: item.displayMode,
-      })
-      item.el.outerHTML = html
-      rendered++
-    } catch {
-      // 渲染失败，保留原始公式文本
-      const el = item.el
-      el.outerHTML = `<span class="math-fallback">${item.displayMode ? '$$' : '$'}${escapeAttr(item.latex)}${item.displayMode ? '$$' : '$'}</span>`
-    }
+    renderMathElement(item.el, item.latex, item.displayMode)
   }
 
   if (pendingQueue.length > 0) {
-    requestIdleCallback(processFormulas, { timeout: 3000 })
+    idleCallback(processFormulas, { timeout: 3000 })
   } else {
     schedulerActive = false
   }
 }
 
+/** 将单个占位符替换为 KaTeX 输出 */
+function renderMathElement(
+  el: HTMLElement,
+  latex: string,
+  displayMode: boolean,
+  compensateScroll = true
+) {
+  if (!el.isConnected || !katexRender) return
+
+  const beforeRect = el.getBoundingClientRect()
+  const parent = el.parentElement
+  const nextSibling = el.nextSibling
+
+  let html: string
+  try {
+    html = katexRender(latex, { throwOnError: false, displayMode })
+  } catch {
+    // 渲染失败，回退为原始公式文本
+    el.outerHTML = `<span class="math-fallback">${displayMode ? '$$' : '$'}${escapeAttr(latex)}${displayMode ? '$$' : '$'}</span>`
+    return
+  }
+
+  el.outerHTML = html
+
+  // 滚动补偿：已滚出视口上方的公式渲染后高度变化会把正文推下去。
+  // 若浏览器自身的 scroll anchoring 已处理，实测高度差会接近 0，不会重复补偿。
+  if (!compensateScroll || !parent || beforeRect.bottom > 0) return
+  const inserted = (nextSibling ? nextSibling.previousSibling : parent.lastChild) as HTMLElement | null
+  if (!inserted || typeof inserted.getBoundingClientRect !== 'function') return
+  const delta = inserted.getBoundingClientRect().bottom - beforeRect.bottom
+  if (Math.abs(delta) > 1) window.scrollBy(0, delta)
+}
+
 function escapeAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
+
+/** 渲染指定容器内的全部公式（同步） */
+function renderMathInContainer(container: HTMLElement) {
+  if (!katexRender) return
+  const placeholders = Array.from(
+    container.querySelectorAll<HTMLElement>('.math-placeholder[data-math-id]')
+  )
+  for (const el of placeholders) {
+    cancelMathTimer(el)
+    removePendingMath(el)
+    renderMathElement(el, el.dataset.mathLatex || '', el.dataset.mathDisplay === 'true', false)
+  }
+}
+
+/**
+ * 强制渲染位于 el 之前的全部公式（同步）。
+ * 用于目录/搜索跳转：只处理可能把落点推下去的公式，避免整段同步渲染。
+ */
+function forceRenderMathBefore(el: Element | null) {
+  const root = viewerEl.value
+  if (!root || !el || !katexRender) return
+  const placeholders = Array.from(
+    root.querySelectorAll<HTMLElement>('.math-placeholder[data-math-id]')
+  )
+  for (const ph of placeholders) {
+    if (!(el.compareDocumentPosition(ph) & Node.DOCUMENT_POSITION_PRECEDING)) continue
+    cancelMathTimer(ph)
+    removePendingMath(ph)
+    renderMathElement(ph, ph.dataset.mathLatex || '', ph.dataset.mathDisplay === 'true', false)
+  }
+}
+
+/** 强制渲染全部公式（打印 / 用户主动触发） */
+async function renderAllMath() {
+  await ensureKatex()
+  clearMathTimers()
+  pendingQueue.length = 0
+  const root = viewerEl.value
+  if (root) renderMathInContainer(root)
+}
+
+function clearMathTimers() {
+  for (const timer of mathTimers.values()) clearTimeout(timer)
+  mathTimers.clear()
+}
+
+/** 清空公式调度状态（DOM 重建时调用） */
+function resetMathRuntime() {
+  pendingQueue.length = 0
+  schedulerActive = false
+  clearMathTimers()
+  mathObserver?.disconnect()
+  mathObserver = null
+  mathSeen = new WeakSet<Element>()
+  mathjaxQueue.length = 0
+}
+
+// ===== MathJax（按 chunk 增量排版，不做惰性） =====
+const mathjaxQueue: HTMLElement[] = []
+let mathjaxRunning = false
+
+function typesetMathJaxChunk(container: HTMLElement) {
+  if (props.mathMode !== 'mathjax') return
+  mathjaxQueue.push(container)
+  void runMathJaxQueue()
+}
+
+async function runMathJaxQueue() {
+  if (mathjaxRunning || mathjaxQueue.length === 0) return
+  mathjaxRunning = true
+  try {
+    await loadMathJax()
+    const mj = (window as any).MathJax
+    while (mathjaxQueue.length > 0 && props.mathMode === 'mathjax') {
+      const batch = mathjaxQueue.splice(0, mathjaxQueue.length)
+      await mj?.typesetPromise?.(batch)
+    }
+  } finally {
+    mathjaxRunning = false
+  }
+}
+
+defineExpose({ renderAllMath, forceRenderMathBefore })
 
 // ===== 关键词高亮（DOM 操作，保留 KaTeX 结果） =====
 function applyHighlight(keyword: string) {
@@ -309,7 +521,25 @@ watch(() => props.content, (content) => {
   if (content === undefined || !viewerEl.value) return
   viewerEl.value.innerHTML = ''
   renderedChunkIds.value.clear()
+  resetMathRuntime()
   renderChunk(content, 0)
+})
+
+// ===== 源码/渲染视图切换后重建内容（v-if 会销毁 viewer 容器） =====
+watch(() => props.showSource, (show) => {
+  if (show) return
+  nextTick(() => {
+    if (!viewerEl.value) return
+    renderedChunkIds.value = new Set<number>()
+    viewerEl.value.innerHTML = ''
+    resetMathRuntime()
+    for (const chunk of props.chunks || []) {
+      renderChunk(chunk.content, chunk.id, chunk.start_line)
+    }
+    if (props.content !== undefined) renderChunk(props.content, 0)
+    const kw = props.highlight?.trim()
+    if (kw) nextTick(() => applyHighlight(kw))
+  })
 })
 
 // ===== 高亮 =====
@@ -319,19 +549,27 @@ watch(() => props.highlight, (kw) => {
   if (kw?.trim()) nextTick(() => applyHighlight(kw.trim()))
 }, { immediate: true })
 
-// ===== MathJax =====
-watch(() => [props.content, props.chunks, props.mathMode], async () => {
-  if (props.mathMode !== 'mathjax' || !viewerEl.value) return
-  await loadMathJax()
-  ;(window as any).MathJax?.typesetPromise?.([viewerEl.value])
-}, { immediate: true })
+// ===== MathJax：切换离开时丢弃未排版的队列 =====
+watch(() => props.mathMode, (mode) => {
+  if (mode !== 'mathjax') mathjaxQueue.length = 0
+})
+
+// ===== 关闭「公式按需渲染」时，把已存在的占位符补渲染 =====
+watch(() => props.lazyMath, (lazy) => {
+  if (lazy !== true && props.mathMode === 'katex') void renderAllMath()
+})
 
 // ===== 生命周期 =====
 onMounted(async () => {
   await ensureKatex()
   viewerEl.value?.addEventListener('click', onViewerClick)
-  // 处理初始 chunks（watch 可能在 mounted 前触发）
-  if (props.chunks && viewerEl.value) {
+  // 打印前强制渲染全部公式，避免打印出未渲染的 LaTeX 源码
+  window.addEventListener('beforeprint', onBeforePrint)
+  // 处理初始内容：props.content（编辑器预览）或 props.chunks（阅读器）
+  // 注意：watch 回调非 immediate，首次渲染必须在这里完成
+  if (props.content !== undefined) {
+    if (!renderedChunkIds.value.has(0)) renderChunk(props.content, 0)
+  } else if (props.chunks && viewerEl.value) {
     for (const chunk of props.chunks) {
       if (!renderedChunkIds.value.has(chunk.id)) {
         renderChunk(chunk.content, chunk.id, chunk.start_line)
@@ -345,10 +583,15 @@ onMounted(async () => {
   }
 })
 
+function onBeforePrint() {
+  if (props.mathMode !== 'katex') return
+  void renderAllMath()
+}
+
 onBeforeUnmount(() => {
   viewerEl.value?.removeEventListener('click', onViewerClick)
-  pendingQueue.length = 0
-  schedulerActive = false
+  window.removeEventListener('beforeprint', onBeforePrint)
+  resetMathRuntime()
 })
 </script>
 

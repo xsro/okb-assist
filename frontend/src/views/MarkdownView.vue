@@ -21,6 +21,7 @@
     <template v-else>
       <div class="mdv-content">
         <MarkdownViewer
+          ref="viewerRef"
           :key="viewerKey"
           :chunks="visibleChunks"
           :math-mode="mathMode"
@@ -29,6 +30,7 @@
           :show-line-numbers="showLineNumbers"
           :highlight="highlight"
           :placeholder-images="!loadImages"
+          :lazy-math="lazyMath"
           trusted
         />
         <!-- 底部哨兵元素（用于 IntersectionObserver） -->
@@ -151,7 +153,7 @@
             </div>
             <!-- 搜索 -->
             <div class="toolbar-item">
-              <button class="tb-action" @click="openSearch">
+              <button class="tb-action" @click="triggerSearch">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
                 </svg>
@@ -205,6 +207,21 @@
                 <input v-model="showLineNumbers" type="checkbox" @change="reloadViewer" />
                 显示行号
               </label>
+            </div>
+            <!-- 公式按需渲染 -->
+            <div class="toolbar-item">
+              <label class="tb-checkbox">
+                <input v-model="lazyMath" type="checkbox" />
+                公式按需渲染
+              </label>
+            </div>
+            <div class="toolbar-item">
+              <button class="tb-action" @click="renderAllMath">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                </svg>
+                渲染全部公式
+              </button>
             </div>
           </div>
         </div>
@@ -266,6 +283,21 @@ const mathMode = ref<'none' | 'katex' | 'mathjax'>('katex')
 const loadImages = ref(false)
 const showSource = ref(false)
 const showLineNumbers = ref(false)
+// 公式按需渲染：仅渲染视口内停留过的公式
+const lazyMath = ref(true)
+
+// ── MarkdownViewer 实例（用于强制渲染公式） ──
+type ViewerExposed = {
+  renderAllMath: () => Promise<void>
+  forceRenderMathBefore: (el: Element | null) => void
+}
+const viewerRef = ref<ViewerExposed | null>(null)
+
+/** 手动渲染全部公式（打印、截图等场景） */
+function renderAllMath() {
+  toolbarOpen.value = false
+  void viewerRef.value?.renderAllMath()
+}
 
 // ── 浮动 UI ──
 const tocOpen = ref(false)
@@ -381,7 +413,7 @@ function jumpToSearchResult(idx: number) {
     visibleCount.value = Math.min(chunkIdx + 1, allChunks.value.length)
   }
   
-  // 滚动到第 idx 个高亮元素
+  // 滚动前先渲染落点上方的公式，避免渲染引起二次位移
   nextTick(() => scrollToSearchHighlight(idx))
 }
 
@@ -391,6 +423,7 @@ function scrollToSearchHighlight(idx: number) {
   const highlights = viewer.querySelectorAll('.search-highlight')
   const target = highlights[idx]
   if (target) {
+    viewerRef.value?.forceRenderMathBefore(target)
     target.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }
 }
@@ -494,6 +527,8 @@ async function load() {
         }
 
         if (best) {
+          // 滚动前先渲染落点上方的公式，避免渲染引起二次位移
+          viewerRef.value?.forceRenderMathBefore(best)
           best.scrollIntoView({ behavior: 'instant', block: 'center' })
           return
         }
@@ -504,7 +539,10 @@ async function load() {
         )
         if (chunkIdx >= 0) {
           const chunkEl = viewer.querySelector('[data-chunk-id="' + chunkIdx + '"]') as HTMLElement
-          if (chunkEl) chunkEl.scrollIntoView({ behavior: 'instant', block: 'start' })
+          if (chunkEl) {
+            viewerRef.value?.forceRenderMathBefore(chunkEl)
+            chunkEl.scrollIntoView({ behavior: 'instant', block: 'start' })
+          }
         }
       }
       requestAnimationFrame(() => requestAnimationFrame(doScroll))
@@ -543,6 +581,8 @@ function scrollToHeading(title: string, behavior: ScrollBehavior = 'smooth') {
   if (!viewer) return
   const headings = viewer.querySelectorAll('h1, h2, h3, h4, h5, h6')
   const tryScroll = (h: Element) => {
+    // 滚动前先渲染落点上方的公式，避免渲染引起二次位移
+    viewerRef.value?.forceRenderMathBefore(h)
     h.scrollIntoView({ behavior, block: 'start' })
     activeTocLine.value = title
     return true
