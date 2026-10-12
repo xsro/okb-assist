@@ -18,6 +18,8 @@
       <button class="tb-btn" @click="insertMarkdown('image')" title="图片">🖼</button>
       <button class="tb-btn" @click="insertMarkdown('code')" title="行内代码">`代码`</button>
       <button class="tb-btn" @click="insertMarkdown('codeblock')" title="代码块">```</button>
+      <button class="tb-btn" @click="insertMarkdown('inline-math')" title="行内公式">$…$</button>
+      <button class="tb-btn" @click="insertMarkdown('block-math')" title="块级公式">$$…$$</button>
       <button class="tb-btn" @click="insertMarkdown('table')" title="表格">▦</button>
       <span class="tb-sep"></span>
       <button class="tb-btn" @click="insertMarkdown('hr')" title="分割线">—</button>
@@ -258,6 +260,8 @@ function insertMarkdown(type: string) {
     quote:      ['\n> ', '', -1],
     hr:         ['\n---\n', '', -1],
     codeblock:  ['\n```\n', '\n```\n', 0],
+    'inline-math': ['$', '$', 0],
+    'block-math':  ['\n$$\n', '\n$$', 0],
   }
 
   if (type === 'table') {
@@ -361,6 +365,14 @@ defineExpose({
     if (!editor) return null
     const r = editor.getSelectionRange()
     return { startRow: r.start.row, endRow: r.end.row }
+  },
+  /** 插入行内公式 $…$ */
+  insertInlineMath() {
+    if (editor) insertMarkdown('inline-math')
+  },
+  /** 插入块级公式 $$…$$ */
+  insertBlockMath() {
+    if (editor) insertMarkdown('block-math')
   },
 })
 

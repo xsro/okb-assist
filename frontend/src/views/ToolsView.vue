@@ -145,6 +145,11 @@
       </div>
     </div>
 
+    <!-- 公式编辑 -->
+    <div v-if="activeTab === 'formula'" class="tab-content">
+      <FormulaEditorView />
+    </div>
+
     <!-- MCP 配置 -->
     <div v-if="activeTab === 'mcp'" class="tab-content">
       <McpConfigPanel />
@@ -158,6 +163,7 @@ import { grepSearch, semanticSearch } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import McpConfigPanel from '@/components/McpConfigPanel.vue'
+import FormulaEditorView from '@/views/FormulaEditorView.vue'
 import type { SearchResult } from '@/types/document'
 
 const { showError, showSuccess } = useToast()
@@ -166,6 +172,7 @@ const { requireToken } = useRequireToken()
 const tabs = [
   { key: 'grep', label: '全文搜索' },
   { key: 'semantic', label: '语义搜索（暂未实现）' },
+  { key: 'formula', label: '公式编辑' },
   { key: 'mcp', label: 'MCP 配置' }
 ]
 const activeTab = ref('grep')
