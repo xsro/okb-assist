@@ -96,6 +96,7 @@ export async function grepSearch(
     journal?: string
     yearStart?: number
     yearEnd?: number
+    startAfterId?: number
   } = {}
 ) {
   const {
@@ -106,9 +107,10 @@ export async function grepSearch(
     regex = true,
     journal,
     yearStart,
-    yearEnd
+    yearEnd,
+    startAfterId
   } = options
-  const res = await apiGet<{ results: SearchResult[]; query: string }>(
+  const res = await apiGet<{ results: SearchResult[]; query: string; last_id: number | null }>(
     '/assist/api/documents/grep-search/',
     {
       q: pattern,
@@ -119,7 +121,8 @@ export async function grepSearch(
       regex,
       journal,
       year_start: yearStart,
-      year_end: yearEnd
+      year_end: yearEnd,
+      start_after_id: startAfterId
     }
   )
   res.results = res.results.map((r) => ({

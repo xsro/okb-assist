@@ -43,15 +43,14 @@ impl McpServer {
         vec![
             json!({
                 "name": "grep_search",
-                "description": "Full-text search of document content (grep-based, lightweight and fast). No vector database required, supports regex. Supports pagination via page/offset (alias: page/offset for backward compat; max_results is alias for limit) and context truncation.",
+                "description": "Full-text search of document content (grep-based, lightweight and fast). No vector database required, supports regex. Results are sorted by document ID ascending; use start_after_id for cursor-based pagination.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Search keywords (supports regex)"},
                         "limit": {"type": "integer", "default": 10, "description": "Results per page (alias: max_results)"},
                         "max_results": {"type": "integer", "default": 10, "description": "Results per page (alias for limit)"},
-                        "page": {"type": "integer", "default": 1, "description": "Page number (1-based). Use offset for precise control."},
-                        "offset": {"type": "integer", "default": 0, "description": "Zero-based result offset (overrides page when provided)"},
+                        "start_after_id": {"type": "integer", "default": 0, "description": "Cursor: start scanning from document IDs greater than this value. Use last_id from previous response for next page."},
                         "context": {"type": "integer", "default": 2, "description": "Number of context lines before/after each match"},
                         "max_context_chars": {"type": "integer", "default": 500, "description": "Maximum characters per result content (0 = no truncation)"},
                         "doc_ids": {"type": "string", "default": "", "description": "Document ID scope, supports commas and ranges (e.g. '1,2,5-100')"},
@@ -393,13 +392,18 @@ impl McpServer {
         let year_start = args["year_start"].as_i64().unwrap_or(0);
         let year_end = args["year_end"].as_i64().unwrap_or(0);
         let max_context_chars = args["max_context_chars"].as_i64().unwrap_or(500).max(0) as usize;
+        let start_after_id = args["start_after_id"].as_i64().filter(|v| *v > 0);
 
         // query 为空由前置校验拦截，这里保留冗余检查以防绕开
         if query.trim().is_empty() {
             return Self::err("invalid_argument", "查询不能为空");
         }
 
-        let (offset, limit) = Self::parse_pagination(args, 10, 100);
+        let limit = args["limit"]
+            .as_i64()
+            .or_else(|| args["max_results"].as_i64())
+            .unwrap_or(10)
+            .clamp(1, 100) as usize;
 
         let id_list = match parse_doc_ids(&doc_ids) {
             Ok(v) => v,
@@ -410,12 +414,10 @@ impl McpServer {
         let year_start_opt = if year_start > 0 { Some(year_start) } else { None };
         let year_end_opt = if year_end > 0 { Some(year_end) } else { None };
 
-        // 多取一条，用于判断是否还有下一页
-        let fetch_limit = offset.saturating_add(limit).saturating_add(1) as usize;
         let results = do_grep(
             query.trim(),
             context,
-            fetch_limit,
+            limit,
             id_list.as_deref(),
             &algorithm,
             regex,
@@ -424,14 +426,12 @@ impl McpServer {
             journal_opt,
             year_start_opt,
             year_end_opt,
+            start_after_id,
         )
         .await;
 
-        let has_more = results.len() as i64 > offset.saturating_add(limit);
-        let page_results = results.into_iter().skip(offset as usize).take(limit as usize);
-
         // 批量查询文档元数据（避免 N+1）
-        let all_results: Vec<Value> = page_results.collect();
+        let all_results: Vec<Value> = results;
         let ids: Vec<i64> = all_results.iter().filter_map(|hit| hit["id"].as_i64()).collect();
         let mut doc_map: std::collections::HashMap<i64, Document> = std::collections::HashMap::new();
         if !ids.is_empty() {
@@ -466,12 +466,16 @@ impl McpServer {
             enriched.push(info);
         }
 
+        // 计算 last_id（结果中最大的 doc_id）
+        let last_id = enriched.iter()
+            .filter_map(|r| r["id"].as_i64())
+            .max();
+
         Self::pretty(&json!({
             "query": query,
-            "offset": offset,
             "limit": limit,
             "returned": enriched.len(),
-            "has_more": has_more,
+            "last_id": last_id,
             "results": enriched,
         }))
     }

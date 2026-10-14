@@ -1537,6 +1537,7 @@ pub struct GrepSearchQuery {
     pub journal: Option<String>,
     pub year_start: Option<i64>,
     pub year_end: Option<i64>,
+    pub start_after_id: Option<i64>,
 }
 
 async fn grep_search(
@@ -1567,6 +1568,7 @@ async fn grep_search(
         params.journal.as_deref(),
         params.year_start,
         params.year_end,
+        params.start_after_id,
     )
     .await;
 
@@ -1604,7 +1606,11 @@ async fn grep_search(
         enriched.push(item);
     }
 
-    Json(json!({"results": enriched, "query": q})).into_response()
+    let last_id = results.iter()
+        .filter_map(|r| r["id"].as_i64())
+        .max();
+
+    Json(json!({"results": enriched, "query": q, "last_id": last_id})).into_response()
 }
 
 async fn by_hash(

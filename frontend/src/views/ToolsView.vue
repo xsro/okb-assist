@@ -114,6 +114,11 @@
           <p v-if="r.snippet" class="snippet" v-html="highlightSnippet(r.snippet, grepPattern)" />
         </div>
         <div v-if="grepResults.length === 0" class="empty-hint">无匹配结果</div>
+        <div v-if="grepHasMore" class="load-more">
+          <button class="btn" :disabled="grepSearching" @click="loadMore">
+            {{ grepSearching ? '加载中...' : '加载更多' }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -177,6 +182,8 @@ const grepDocIds = ref('')
 const grepJournal = ref('')
 const grepYearStart = ref<number | null>(null)
 const grepYearEnd = ref<number | null>(null)
+const grepLastId = ref<number | null>(null)
+const grepHasMore = ref(false)
 
 const semanticQuery = ref('')
 const semanticResults = ref<SearchResult[] | null>(null)
@@ -220,8 +227,37 @@ async function doGrepSearch() {
       yearEnd: grepYearEnd.value || undefined
     })
     grepResults.value = res.results
+    grepLastId.value = res.last_id ?? null
+    grepHasMore.value = res.last_id !== null && res.last_id !== undefined
   } catch {
     showError('搜索失败')
+  } finally {
+    grepSearching.value = false
+  }
+}
+
+async function loadMore() {
+  if (!requireToken() || grepLastId.value === null) return
+  grepSearching.value = true
+  try {
+    const res = await grepSearch(grepPattern.value.trim(), {
+      limit: grepLimit.value,
+      context: grepContext.value,
+      algorithm: grepAlgorithm.value,
+      regex: grepRegex.value,
+      docIds: parseDocIds(grepDocIds.value),
+      journal: grepJournal.value.trim() || undefined,
+      yearStart: grepYearStart.value || undefined,
+      yearEnd: grepYearEnd.value || undefined,
+      startAfterId: grepLastId.value
+    })
+    if (grepResults.value) {
+      grepResults.value = [...grepResults.value, ...res.results]
+    }
+    grepLastId.value = res.last_id ?? null
+    grepHasMore.value = res.last_id !== null && res.last_id !== undefined
+  } catch {
+    showError('加载更多失败')
   } finally {
     grepSearching.value = false
   }
@@ -381,6 +417,15 @@ async function doSemanticSearch() {
   padding: 40px;
   color: var(--text-secondary);
   font-size: 14px;
+}
+
+.load-more {
+  text-align: center;
+  margin-top: 16px;
+}
+
+.load-more .btn {
+  min-width: 120px;
 }
 
 @media (max-width: 768px) {

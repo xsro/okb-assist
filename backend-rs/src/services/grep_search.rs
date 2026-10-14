@@ -221,27 +221,38 @@ fn search_one_file(
 }
 
 /// 搜索多个文件，返回所有搜索结果（受 limit 限制）。
+///
+/// 文件按 doc_id 升序排列；若指定 start_after_id，则跳过 id <= start_after_id 的文件。
 fn search_files(
     paths: &[String],
     query: &str,
     context: usize,
     limit: usize,
+    start_after_id: Option<i64>,
     is_regex: bool,
     compiled_regex: Option<&regex::Regex>,
     case_folded_query: &str,
 ) -> Vec<serde_json::Value> {
+    // 1. 提取 doc_id 并按升序排列
+    let mut entries: Vec<(i64, String)> = paths
+        .iter()
+        .filter_map(|p| extract_doc_id(p).map(|id| (id, p.clone())))
+        .collect();
+    entries.sort_by_key(|(id, _)| *id);
+
+    // 2. 跳过 start_after_id 及之前的文档
+    if let Some(start_id) = start_after_id {
+        entries.retain(|(id, _)| *id > start_id);
+    }
+
+    // 3. 顺序扫描，直到达到 limit
     let mut results = Vec::new();
     let mut seen_docs: HashSet<i64> = HashSet::new();
-
-    for path in paths {
+    for (doc_id, path) in &entries {
         if results.len() >= limit {
             break;
         }
-        let doc_id = match extract_doc_id(path) {
-            Some(id) => id,
-            None => continue,
-        };
-        if seen_docs.contains(&doc_id) {
+        if seen_docs.contains(doc_id) {
             continue;
         }
         let blocks = search_one_file(path, query, context, is_regex, compiled_regex, case_folded_query);
@@ -249,11 +260,10 @@ fn search_files(
             if results.len() >= limit {
                 break;
             }
-            if seen_docs.contains(&doc_id) {
-                // 同一个文档的多个匹配块合并（只保留 doc_id 去重逻辑不变）
+            if seen_docs.contains(doc_id) {
                 continue;
             }
-            seen_docs.insert(doc_id);
+            seen_docs.insert(*doc_id);
             results.push(serde_json::json!({
                 "id": doc_id,
                 "content": block.lines.join("\n"),
@@ -266,18 +276,20 @@ fn search_files(
 }
 
 /// 递归搜索目录（仅扫 *.md 文件）。
+///
+/// 先收集所有 .md 文件 → 提取 doc_id → 按 ID 升序排列 → 顺序扫描。
+/// 若指定 start_after_id，则跳过 id <= start_after_id 的文件。
 fn search_dir(
     dir: &str,
     query: &str,
     context: usize,
     limit: usize,
+    start_after_id: Option<i64>,
     is_regex: bool,
     compiled_regex: Option<&regex::Regex>,
     case_folded_query: &str,
 ) -> Vec<serde_json::Value> {
-    let mut results = Vec::new();
-    let mut seen_docs: HashSet<i64> = HashSet::new();
-
+    // 1. 收集所有 .md 文件并提取 doc_id
     let walker = walkdir::WalkDir::new(dir)
         .follow_links(false)
         .into_iter()
@@ -287,27 +299,40 @@ fn search_dir(
             e.path().extension().map(|ext| ext == "md").unwrap_or(false)
         });
 
-    for entry in walker {
+    let mut entries: Vec<(i64, String)> = walker
+        .filter_map(|entry| {
+            let path_str = entry.path().to_string_lossy().to_string();
+            extract_doc_id(&path_str).map(|id| (id, path_str))
+        })
+        .collect();
+
+    // 2. 按 doc_id 升序排列
+    entries.sort_by_key(|(id, _)| *id);
+
+    // 3. 跳过 start_after_id 及之前的文档
+    if let Some(start_id) = start_after_id {
+        entries.retain(|(id, _)| *id > start_id);
+    }
+
+    // 4. 顺序扫描，直到达到 limit
+    let mut results = Vec::new();
+    let mut seen_docs: HashSet<i64> = HashSet::new();
+    for (doc_id, path_str) in &entries {
         if results.len() >= limit {
             break;
         }
-        let path_str = entry.path().to_string_lossy().to_string();
-        let doc_id = match extract_doc_id(&path_str) {
-            Some(id) => id,
-            None => continue,
-        };
-        if seen_docs.contains(&doc_id) {
+        if seen_docs.contains(doc_id) {
             continue;
         }
-        let blocks = search_one_file(&path_str, query, context, is_regex, compiled_regex, case_folded_query);
+        let blocks = search_one_file(path_str, query, context, is_regex, compiled_regex, case_folded_query);
         for block in blocks {
             if results.len() >= limit {
                 break;
             }
-            if seen_docs.contains(&doc_id) {
+            if seen_docs.contains(doc_id) {
                 continue;
             }
-            seen_docs.insert(doc_id);
+            seen_docs.insert(*doc_id);
             results.push(serde_json::json!({
                 "id": doc_id,
                 "content": block.lines.join("\n"),
@@ -335,6 +360,7 @@ pub async fn grep_search(
     journal: Option<&str>,
     year_start: Option<i64>,
     year_end: Option<i64>,
+    start_after_id: Option<i64>,
 ) -> Vec<serde_json::Value> {
     let mut doc_ids_owned: Option<Vec<i64>> = doc_ids.map(|v| v.to_vec());
 
@@ -383,13 +409,13 @@ pub async fn grep_search(
             // 无候选 → 回退全量目录扫描
             match markdown_parent_dir(settings) {
                 Some(dir) => tokio::task::spawn_blocking(move || {
-                    search_dir(&dir, &q_raw, context_lines, limit, is_regex, compiled_regex.as_ref(), &q_out)
+                    search_dir(&dir, &q_raw, context_lines, limit, start_after_id, is_regex, compiled_regex.as_ref(), &q_out)
                 }).await.unwrap_or_default(),
                 None => Vec::new(),
             }
         } else {
             tokio::task::spawn_blocking(move || {
-                search_files(&paths, &q_raw, context_lines, limit, is_regex, compiled_regex.as_ref(), &q_out)
+                search_files(&paths, &q_raw, context_lines, limit, start_after_id, is_regex, compiled_regex.as_ref(), &q_out)
             }).await.unwrap_or_default()
         }
     } else {
@@ -404,7 +430,7 @@ pub async fn grep_search(
                     Vec::new()
                 } else {
                     tokio::task::spawn_blocking(move || {
-                        search_files(&paths, &q_raw, context_lines, limit, is_regex, compiled_regex.as_ref(), &q_out)
+                        search_files(&paths, &q_raw, context_lines, limit, start_after_id, is_regex, compiled_regex.as_ref(), &q_out)
                     }).await.unwrap_or_default()
                 }
             }
@@ -412,7 +438,7 @@ pub async fn grep_search(
                 // 全量扫描 → 目录递归
                 match markdown_parent_dir(settings) {
                     Some(dir) => tokio::task::spawn_blocking(move || {
-                        search_dir(&dir, &q_raw, context_lines, limit, is_regex, compiled_regex.as_ref(), &q_out)
+                        search_dir(&dir, &q_raw, context_lines, limit, start_after_id, is_regex, compiled_regex.as_ref(), &q_out)
                     }).await.unwrap_or_default(),
                     None => Vec::new(),
                 }
