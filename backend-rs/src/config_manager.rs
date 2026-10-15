@@ -321,10 +321,16 @@ impl ConfigManager {
     /// - `{id}` — 文档 ID
     /// - `{env:VAR_NAME}` — 环境变量 VAR_NAME 的值
     pub fn substitute_path_variables(template: &str, doc_id: i64) -> String {
+        Self::substitute_path_variables_str(template, &doc_id.to_string())
+    }
+
+    /// 同 [`Self::substitute_path_variables`]，但 `{id}` 为任意字符串
+    /// （用于非数字 ID 的路径，例如问答会话文件 `data/chat_sessions/{id}.json`）。
+    pub fn substitute_path_variables_str(template: &str, id: &str) -> String {
         let mut result = template.to_string();
 
         // 替换 {id}
-        result = result.replace("{id}", &doc_id.to_string());
+        result = result.replace("{id}", id);
 
         // 替换 {env:VAR_NAME}
         Self::substitute_env_vars(&result)

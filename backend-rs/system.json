@@ -10,6 +10,7 @@
   "markdown_path": "data/markdowns/{id}.md",
   "markdown_asset_path": "data/pdfs/{id}/{id}.zip",
   "pdf_path": "data/pdfs/{id}/{id}.pdf",
+  "chat_session_path": "data/chat_sessions/{id}.json",
   "uploads_folder": "data/_uploads",
   "mcp_token": "change-me",
   "trusted_subnets": [

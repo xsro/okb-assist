@@ -499,6 +499,14 @@ impl Settings {
             .to_string()
     }
 
+    /// 问答会话文件路径模板（`{id}` 为会话 ID，字符串）
+    pub fn chat_session_path_template(&self) -> String {
+        self.get_system_config()["chat_session_path"]
+            .as_str()
+            .unwrap_or("data/chat_sessions/{id}.json")
+            .to_string()
+    }
+
     pub fn mutool_path(&self) -> String {
         self.get_system_config()["mutool_path"]
             .as_str()

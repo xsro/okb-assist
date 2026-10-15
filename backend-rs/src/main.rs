@@ -329,6 +329,10 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
         return next.run(req).await;
     }
 
+    // 会话归属：默认按免鉴权处理，拿到有效 token 后再覆盖为 token 派生值。
+    // 该信息供「会话历史」按人/角色归属使用，不参与鉴权判定。
+    req.extensions_mut().insert(auth::OwnerKey::local());
+
     // 图片 URL 放行（免 token，但注入 ViewOnly 角色以便后续处理）
     if path.contains("/image/") {
         req.extensions_mut().insert(auth::Role::ViewOnly);
@@ -381,6 +385,7 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
             // 匹配角色：admin → view-only → view-upload
             let perm_tokens = settings.permission_tokens();
             if let Some(perm) = auth::match_role(&provided, &admin_token, &perm_tokens) {
+                req.extensions_mut().insert(auth::OwnerKey::from_token(&provided));
                 req.extensions_mut().insert(perm.role);
                 return next.run(req).await;
             }

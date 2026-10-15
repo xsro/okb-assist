@@ -68,7 +68,7 @@ cargo build --release
 | `backend-rs/src/auth.rs` | 鉴权与角色匹配（Admin/ViewOnly/ViewUpload） |
 | `backend-rs/src/logger.rs` | 双日志初始化（文件 + 控制台） |
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`openapi.rs`、`mod.rs` |
-| `backend-rs/src/services/` | 后端适配器：`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`vector_db.rs`、`datalab.rs`、`query_parser.rs` |
+| `backend-rs/src/services/` | 后端适配器：`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
@@ -139,7 +139,23 @@ cargo build --release
   - 取值来源：请求参数 `tool_mode` > 模型条目的 `llm.models[].tool_mode` > `auto`。**注意：没有充分系统提示词时，部分模型（如 dots3-note-prev）不会主动发起工具调用。**
 - **认证与权限**：`GET/POST /assist/api/*` 仍是全局 Token/子网鉴权；chat 本身允许全部已认证角色（含 `view-only`），工具集均为只读查询，不超出只读用户的已有权限。
 - **非流式**：一次请求返回完整回答（前端 axios 超时单独放大到 300s，支持「停止」中止）。前端把 `delta`（含 `assistant.tool_calls` 与 `tool` 结果）追加到本地 transcript 并回传，以保留跨轮工具上下文（裁剪时不能把 `tool` 消息与其前置 `assistant.tool_calls` 拆开）。
-- 前端：`ChatView.vue` + `api/chat.ts` + `types/chat.ts`，导航项「问答」；展示工具调用卡片（工具名/参数/结果预览/失败标记）、本轮协议与降级提示；状态存 `localStorage`（`okb_chat_messages` 展示条目、`okb_chat_history` transcript、`okb_chat_model`、`okb_chat_tools`、`okb_chat_tool_mode`）。
+- 前端：`ChatView.vue` + `api/chat.ts` + `types/chat.ts`，导航项「问答」；展示工具调用卡片（工具名/参数/结果预览/失败标记）、本轮协议与降级提示；本地状态存 `localStorage`（`okb_chat_messages` 展示条目、`okb_chat_history` transcript、`okb_chat_model`、`okb_chat_tools`、`okb_chat_tool_mode`、`okb_chat_session` 当前会话绑定）。
+
+### 问答会话历史（显式保存，一个会话一个文件）
+
+**只有用户在前端点击「保存会话」才会落盘**；对话过程中后端不写任何东西（`localStorage` 只是前端草稿）。
+
+- **存储**：`services/chat_store.rs`，一个会话一个 JSON 文件，路径模板 `system.json` 的 `chat_session_path`（默认 `data/chat_sessions/{id}.json`，`{id}` 为**字符串**，走 `ConfigManager::substitute_path_variables_str`）。会话 ID 形如 `20261015T081515912-523019`（UTC 时间到毫秒 + 随机后缀，字典序即时间序），写入为**原子写**（`*.tmp` + rename）。
+- **文件内容**：`version`/`id`/`title`/`owner_key`/`role`/`model`/`tool_mode`/`message_count`/`created_at`/`updated_at`/`items`（展示条目）/`transcript`（完整对话，含 `assistant.tool_calls` 与 `tool` 结果，重新打开后可继续对话）。
+- **按角色/人归属（复用现有 permissions 机制）**：`owner_key` 由访问 token 派生（`auth::OwnerKey::from_token` = sha256 前 32 位 hex；免鉴权的如 `token=change-me`、受信任子网代理请求归为 `local`），**只在服务端比对、绝不在 API 响应里回传**；列表只返回 `mine` 与保存时的 `role`。规则：**admin 可看/可删全部，其余只能看自己的**（同一角色不同 token 相互不可见）。归属与 `created_at` 在更新时保持文件原值，客户端无法改写归属。
+- **接口**（均在 `/assist/api/chat/*`，角色限制与 chat 一致）：
+  - `GET /assist/api/chat/sessions` —— 列表（`{count, sessions:[{id,title,role,model,tool_mode,message_count,created_at,updated_at,mine}]}`，默认最多 200 条，按 `updated_at` 倒序）；
+  - `GET /assist/api/chat/sessions/:id` —— 读取（额外含 `items`/`transcript`）；
+  - `POST /assist/api/chat/sessions` —— 新建（显式保存）；
+  - `PUT /assist/api/chat/sessions/:id` —— 覆盖保存（归属人或 admin）；
+  - `DELETE /assist/api/chat/sessions/:id` —— 删除（归属人或 admin）。
+- **校验/限制**：ID 白名单 `[A-Za-z0-9_-]` 且 ≤64 字符（防路径穿越，非法 ID 一律 404）；`items` ≤ 200 条、`transcript` ≤ 300 条、各自序列化后 ≤ 2MB，否则 400。标题缺省时取首条用户消息首行（截断 40 字）。
+- **前端**：工具栏「保存会话 / 更新会话」+ 状态行（`已保存：<标题>` / `未保存`，有修改时提示）+「历史会话」面板（标题、归属徽标（我 / 角色名 / 他人会话标记）、条数、模型、时间、打开/删除）；打开会覆盖当前对话（有未保存内容时先确认），清空对话会解除会话绑定。
 
 ### 工作目录与路径解析
 
@@ -162,6 +178,7 @@ cargo build --release
 | `database_url` | SQLite 连接串 | `sqlite:///data/okb_assist.db` |
 | `markdown_path` | Markdown 文件路径模板 | `data/markdowns/{id}.md` |
 | `info_path` | 元信息 JSON 路径模板 | `data/markdowns/{id}.json` |
+| `chat_session_path` | 问答会话文件路径模板（`{id}` 为会话 ID，字符串） | `data/chat_sessions/{id}.json` |
 | `crossref_path` | Crossref 数据路径模板 | `data/markdowns/{id}_crossref.json` |
 | `markdown_asset_path` | Markdown 资产包路径模板 | `data/pdfs/{id}/{id}.zip` |
 | `pdf_path` | PDF 文件路径模板 | `data/pdfs/{id}/{id}.pdf` |

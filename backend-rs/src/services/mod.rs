@@ -1,5 +1,6 @@
 //! 服务适配器模块。
 
+pub mod chat_store;
 pub mod crossref;
 pub mod grep_search;
 pub mod datalab;

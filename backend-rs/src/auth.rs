@@ -93,6 +93,34 @@ pub fn match_role(
     None
 }
 
+/// 会话归属标识。
+///
+/// 由访问 token 派生（sha256 前 32 位 hex），**不回传给前端**，仅用于归属比对：
+/// - 同一个 token 的请求共享同一归属（同一人换浏览器仍能看到自己的会话）；
+/// - 不同 token 即使角色相同也互不可见（避免同一角色的两个人互相看到对话）；
+/// - 免鉴权（`token=change-me`、受信任子网代理、图片 URL 等）的请求归为 `local`。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnerKey(String);
+
+impl OwnerKey {
+    /// 由 token 派生归属标识
+    pub fn from_token(token: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(token.as_bytes());
+        let hex = hex::encode(digest);
+        Self(format!("t:{}", &hex[..32]))
+    }
+
+    /// 免鉴权请求的归属标识
+    pub fn local() -> Self {
+        Self("local".to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// 检查 token 是否具有 MCP 访问权限（admin 或 permissions 中 mcp: true）
 pub fn has_mcp_access(
     token: &str,
@@ -119,4 +147,29 @@ pub fn has_mcp_access(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_key_is_stable_and_token_specific() {
+        let a = OwnerKey::from_token("token-a");
+        let b = OwnerKey::from_token("token-a");
+        let c = OwnerKey::from_token("token-b");
+
+        // 同一 token 稳定（同一人换浏览器仍能看到自己的会话）
+        assert_eq!(a, b);
+        // 不同 token 即使角色相同也不同归属
+        assert_ne!(a, c);
+        // 免鉴权请求单独一档
+        assert_ne!(a, OwnerKey::local());
+        assert_eq!(OwnerKey::local().as_str(), "local");
+
+        // t: + 32 位 hex，不包含原始 token
+        assert!(a.as_str().starts_with("t:"));
+        assert_eq!(a.as_str().len(), 34);
+        assert!(!a.as_str().contains("token-a"));
+    }
 }

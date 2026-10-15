@@ -56,3 +56,24 @@ pub fn get_asset_path_buf(settings: &Settings, doc_id: i64) -> PathBuf {
 pub fn get_crossref_path_buf(settings: &Settings, doc_id: i64) -> PathBuf {
     PathBuf::from(get_crossref_path(settings, doc_id))
 }
+
+/// 问答会话文件路径（`{id}` 为会话 ID，字符串）
+pub fn get_chat_session_path(settings: &Settings, session_id: &str) -> String {
+    crate::config_manager::ConfigManager::substitute_path_variables_str(
+        &settings.chat_session_path_template(),
+        session_id,
+    )
+}
+
+pub fn get_chat_session_path_buf(settings: &Settings, session_id: &str) -> PathBuf {
+    PathBuf::from(get_chat_session_path(settings, session_id))
+}
+
+/// 会话文件所在目录（从模板推导：把 `{id}` 换成占位名后取父目录）
+pub fn get_chat_session_dir(settings: &Settings) -> Option<PathBuf> {
+    let template = crate::config_manager::ConfigManager::substitute_path_variables_str(
+        &settings.chat_session_path_template(),
+        "id",
+    );
+    PathBuf::from(template).parent().map(|p| p.to_path_buf())
+}

@@ -28,10 +28,66 @@
         <button class="btn btn-sm btn-outline" @click="showSystem = !showSystem">
           {{ showSystem ? '收起系统提示词' : '系统提示词' }}
         </button>
+        <button class="btn btn-sm btn-outline" @click="toggleHistory">
+          历史会话{{ sessions.length ? `（${sessions.length}）` : '' }}
+        </button>
+        <button
+          class="btn btn-sm"
+          :disabled="!items.length || saving"
+          @click="save"
+        >
+          {{ saving ? '保存中…' : sessionId ? '更新会话' : '保存会话' }}
+        </button>
         <button class="btn btn-sm btn-outline" :disabled="!items.length" @click="clearChat">
           清空对话
         </button>
       </div>
+    </div>
+
+    <div class="session-bar">
+      <span class="session-chip" :class="sessionId ? 'saved' : 'unsaved'">
+        {{ sessionId ? `已保存：${sessionTitle}` : '未保存（点击「保存会话」写入服务端文件）' }}
+      </span>
+      <span v-if="dirty && sessionId" class="session-dirty">有未保存的修改</span>
+    </div>
+
+    <div v-if="historyOpen" class="history-panel">
+      <div class="history-head">
+        <span class="history-head-title">历史会话</span>
+        <span class="history-hint">仅列出你有权访问的会话（admin 可看到全部）</span>
+        <button class="btn btn-sm btn-outline" @click="loadSessions">刷新</button>
+        <button class="btn btn-sm btn-outline" @click="historyOpen = false">收起</button>
+      </div>
+      <div v-if="historyLoading" class="history-empty">加载中…</div>
+      <div v-else-if="!sessions.length" class="history-empty">暂无保存的会话</div>
+      <ul v-else class="history-list">
+        <li
+          v-for="s in sessions"
+          :key="s.id"
+          class="history-item"
+          :class="{ current: s.id === sessionId }"
+        >
+          <button class="history-main" @click="openSession(s.id)" :title="`打开：${s.title}`">
+            <span class="history-title">{{ s.title }}</span>
+            <span class="history-meta">
+              <span class="history-badge" :class="`role-${s.role}`">
+                {{ s.mine ? '我' : roleLabel(s.role) }}
+              </span>
+              <span>{{ s.message_count }} 条</span>
+              <span v-if="s.model">{{ s.model }}</span>
+              <span>{{ formatTime(s.updated_at) }}</span>
+              <span v-if="!s.mine" class="history-other">他人会话</span>
+            </span>
+          </button>
+          <button
+            class="btn btn-sm btn-outline-danger"
+            @click="removeSession(s)"
+            :title="s.mine ? '删除该会话' : 'admin 删除他人会话'"
+          >
+            删除
+          </button>
+        </li>
+      </ul>
     </div>
 
     <div v-if="showSystem" class="system-editor">
@@ -120,12 +176,28 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import MarkdownViewer from '@/components/MarkdownViewer.vue'
-import { listChatModels, listChatTools, sendChat } from '@/api/chat'
-import type { ChatMessage, ChatModelInfo, ChatToolInfo, ChatToolMode, ToolStep } from '@/types/chat'
+import {
+  createChatSession,
+  deleteChatSession,
+  getChatSession,
+  listChatModels,
+  listChatSessions,
+  listChatTools,
+  sendChat,
+  updateChatSession
+} from '@/api/chat'
+import type {
+  ChatDisplayItem,
+  ChatMessage,
+  ChatModelInfo,
+  ChatSessionMeta,
+  ChatToolInfo,
+  ChatToolMode
+} from '@/types/chat'
 import { useToast } from '@/composables/useToast'
 import { useTokenStore } from '@/stores/token'
 
-const { showError, showInfo } = useToast()
+const { showError, showInfo, showSuccess } = useToast()
 const tokenStore = useTokenStore()
 
 const MODELS_KEY = 'okb_chat_model'
@@ -133,20 +205,14 @@ const HISTORY_KEY = 'okb_chat_messages'
 const TRANSCRIPT_KEY = 'okb_chat_history'
 const TOOLS_KEY = 'okb_chat_tools'
 const TOOL_MODE_KEY = 'okb_chat_tool_mode'
+const SESSION_KEY = 'okb_chat_session'
 /** 本地保留的最大展示条数 */
 const MAX_ITEMS = 50
 /** 发给后端的最大 transcript 消息数（工具调用会额外占用条数） */
 const MAX_TRANSCRIPT = 60
 
 /** 展示用条目（文本 + 本轮工具调用记录） */
-interface DisplayItem {
-  role: 'user' | 'assistant'
-  content: string
-  steps: ToolStep[]
-  /** 本轮实际使用的工具协议与流程说明 */
-  mode?: string
-  notes?: string[]
-}
+type DisplayItem = ChatDisplayItem
 
 const models = ref<ChatModelInfo[]>([])
 const tools = ref<ChatToolInfo[]>([])
@@ -162,6 +228,15 @@ const loading = ref(false)
 const showSystem = ref(false)
 const loadError = ref('')
 const listEl = ref<HTMLElement | null>(null)
+
+// 会话历史（显式保存）
+const sessionId = ref('')
+const sessionTitle = ref('')
+const dirty = ref(false)
+const saving = ref(false)
+const historyOpen = ref(false)
+const historyLoading = ref(false)
+const sessions = ref<ChatSessionMeta[]>([])
 
 let controller: AbortController | null = null
 
@@ -268,8 +343,150 @@ function trimTranscript(msgs: ChatMessage[]): ChatMessage[] {
 function clearChat() {
   items.value = []
   transcript.value = []
+  sessionId.value = ''
+  sessionTitle.value = ''
+  dirty.value = false
+  persistSession()
   localStorage.removeItem(HISTORY_KEY)
   localStorage.removeItem(TRANSCRIPT_KEY)
+}
+
+// ── 会话历史（显式保存到后端文件）──────────────────────
+
+function restoreSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY)
+    if (!raw) return
+    const parsed = JSON.parse(raw) as { id?: string; title?: string }
+    sessionId.value = parsed.id || ''
+    sessionTitle.value = parsed.title || ''
+  } catch {
+    localStorage.removeItem(SESSION_KEY)
+  }
+}
+
+function persistSession() {
+  if (sessionId.value) {
+    localStorage.setItem(
+      SESSION_KEY,
+      JSON.stringify({ id: sessionId.value, title: sessionTitle.value })
+    )
+  } else {
+    localStorage.removeItem(SESSION_KEY)
+  }
+}
+
+function roleLabel(role: string): string {
+  const labels: Record<string, string> = {
+    admin: '管理员',
+    'view-only': '只读',
+    'view-upload': '查看+上传'
+  }
+  return labels[role] || role || '未知'
+}
+
+function formatTime(iso: string): string {
+  if (!iso) return ''
+  const d = new Date(iso.replace(' ', 'T') + (iso.includes('Z') ? '' : 'Z'))
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString()
+}
+
+async function loadSessions() {
+  historyLoading.value = true
+  try {
+    const res = await listChatSessions()
+    sessions.value = res.sessions
+  } catch (e) {
+    const err = e as { response?: { data?: { detail?: string } }; message?: string }
+    showError(err.response?.data?.detail || err.message || '加载会话列表失败')
+    sessions.value = []
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function toggleHistory() {
+  historyOpen.value = !historyOpen.value
+  if (historyOpen.value) await loadSessions()
+}
+
+/** 保存当前会话（首次为新建，之后为覆盖保存） */
+async function save() {
+  if (!items.value.length || saving.value) return
+  saving.value = true
+  try {
+    const payload = {
+      title: sessionTitle.value || undefined,
+      model: selectedModel.value || undefined,
+      tool_mode: toolMode.value || undefined,
+      items: items.value,
+      transcript: transcript.value
+    }
+    const res = sessionId.value
+      ? await updateChatSession(sessionId.value, payload)
+      : await createChatSession(payload)
+    sessionId.value = res.id
+    sessionTitle.value = res.title
+    dirty.value = false
+    persistSession()
+    showSuccess(res.created ? `会话已保存（${res.message_count} 条）` : '会话已更新')
+    if (historyOpen.value) await loadSessions()
+  } catch (e) {
+    const err = e as { response?: { data?: { detail?: string } }; message?: string }
+    showError(err.response?.data?.detail || err.message || '保存会话失败')
+  } finally {
+    saving.value = false
+  }
+}
+
+/** 打开历史会话（覆盖当前对话） */
+async function openSession(id: string) {
+  if (
+    dirty.value &&
+    items.value.length &&
+    !confirm('当前对话有未保存的内容，确定打开历史会话并覆盖吗？')
+  ) {
+    return
+  }
+  try {
+    const detail = await getChatSession(id)
+    items.value = Array.isArray(detail.items) ? detail.items : []
+    transcript.value = Array.isArray(detail.transcript) ? detail.transcript : []
+    sessionId.value = detail.id
+    sessionTitle.value = detail.title
+    dirty.value = false
+    persistSession()
+    persistHistory()
+    historyOpen.value = false
+    await scrollToBottom()
+    showInfo(`已打开会话：${detail.title}`)
+  } catch (e) {
+    const err = e as { response?: { data?: { detail?: string }; status?: number }; message?: string }
+    showError(
+      err.response?.status === 403
+        ? '无权访问该会话'
+        : err.response?.data?.detail || err.message || '打开会话失败'
+    )
+  }
+}
+
+async function removeSession(s: ChatSessionMeta) {
+  if (!confirm(`确定删除会话「${s.title}」？此操作不可恢复。`)) return
+  try {
+    await deleteChatSession(s.id)
+    if (sessionId.value === s.id) {
+      // 只解除绑定，保留当前界面上的对话内容（标记为未保存）
+      sessionId.value = ''
+      sessionTitle.value = ''
+      persistSession()
+    }
+    await loadSessions()
+    showInfo('会话已删除')
+  } catch (e) {
+    const err = e as { response?: { data?: { detail?: string } }; message?: string }
+    showError(err.response?.data?.detail || err.message || '删除会话失败')
+  }
 }
 
 // ── 展示辅助 ────────────────────────────────────────────
@@ -305,6 +522,7 @@ async function send() {
   items.value.push({ role: 'user', content, steps: [] })
   transcript.value.push({ role: 'user', content })
   draft.value = ''
+  dirty.value = true
   loading.value = true
   await scrollToBottom()
 
@@ -330,6 +548,7 @@ async function send() {
       notes: res.notes || []
     })
     if (items.value.length > MAX_ITEMS) items.value = items.value.slice(-MAX_ITEMS)
+    dirty.value = true
     persistHistory()
   } catch (e) {
     const err = e as { code?: string; response?: { data?: { detail?: string } }; message?: string }
@@ -351,6 +570,7 @@ function abort() {
 
 onMounted(async () => {
   restoreHistory()
+  restoreSession()
   await loadModels()
   await loadTools()
   await scrollToBottom()
@@ -418,6 +638,137 @@ onMounted(async () => {
 
 .system-editor {
   margin-bottom: 12px;
+}
+
+/* ── 会话保存状态 + 历史面板 ── */
+.session-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.session-chip {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--bg-muted);
+  color: var(--text-secondary);
+}
+
+.session-chip.saved {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+
+.session-dirty {
+  color: var(--warning-text);
+}
+
+.history-panel {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-white);
+  padding: 8px 10px;
+}
+
+.history-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.history-head-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.history-hint {
+  flex: 1;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.history-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-top: 1px solid var(--border);
+}
+
+.history-item.current {
+  background: var(--primary-light);
+}
+
+.history-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: none;
+  background: none;
+  padding: 4px;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.history-title {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.history-badge {
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--bg-muted);
+  color: var(--text-secondary);
+}
+
+.history-badge.role-admin {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.history-badge.role-view-upload {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.history-other {
+  color: var(--warning-text);
 }
 
 .system-editor textarea {

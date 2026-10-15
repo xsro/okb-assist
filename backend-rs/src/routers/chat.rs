@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -31,6 +32,7 @@ use crate::auth;
 use crate::config::Settings;
 use crate::database::Database;
 use crate::mcp_server::McpServer;
+use crate::services::chat_store;
 use crate::services::llm::{parse_text_tool_calls, text_tool_prompt, ChatMessage, LlmClient, ToolCall, ToolMode};
 
 /// 允许使用问答功能的角色（只读角色也可提问）
@@ -87,7 +89,21 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/chat/tools", get(list_tools))
         .route("/assist/api/chat/", post(chat))
         .route("/assist/api/chat", post(chat))
+        // 会话历史（仅用户显式保存的对话）
+        .route("/assist/api/chat/sessions/", get(list_sessions).post(create_session))
+        .route("/assist/api/chat/sessions", get(list_sessions).post(create_session))
+        .route("/assist/api/chat/sessions/:id/", get(get_session).put(update_session).delete(delete_session))
+        .route("/assist/api/chat/sessions/:id", get(get_session).put(update_session).delete(delete_session))
 }
+
+/// 单个会话允许的最大展示条目数
+const SESSION_MAX_ITEMS: usize = 200;
+/// 单个会话允许的最大 transcript 消息数
+const SESSION_MAX_TRANSCRIPT: usize = 300;
+/// items / transcript 各自的序列化上限（防止误存超大内容把 SQLite 撐爆）
+const SESSION_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// 列表返回的最大条数
+const SESSION_LIST_LIMIT: usize = 200;
 
 #[derive(Deserialize)]
 struct ChatRequest {
@@ -638,6 +654,318 @@ fn bad_request(detail: &str) -> Response {
 fn bad_gateway(detail: String) -> Response {
     (StatusCode::BAD_GATEWAY, Json(json!({"detail": detail}))).into_response()
 }
+// ── 会话历史（显式保存，一个会话一个文件）──────────────────
+//
+// 存储细节见 `services::chat_store`：默认 `data/chat_sessions/{id}.json`
+// （模板来自 `system.json` 的 `chat_session_path`），写入为原子写。
+// `owner_key` 由访问 token 派生（`auth::OwnerKey`），只做归属比对，绝不回传。
+
+#[derive(Deserialize)]
+struct SessionPayload {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    tool_mode: Option<String>,
+    /// 前端展示条目（数组，结构由前端定义，后端原样存储）
+    #[serde(default)]
+    items: Value,
+    /// 发送给模型的完整 transcript（数组，含工具调用与结果）
+    #[serde(default)]
+    transcript: Value,
+}
+
+#[derive(Deserialize)]
+struct SessionListQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `GET /assist/api/chat/sessions` —— 会话列表
+///
+/// 权限：admin 可看全部（带 `mine` 标记与归属角色），其余角色只能看自己的。
+/// 响应不含 `owner_key`（token 派生值不回传）。
+async fn list_sessions(
+    Extension(role): Extension<auth::Role>,
+    Extension(owner): Extension<auth::OwnerKey>,
+    Extension(settings): Extension<Arc<Settings>>,
+    Query(query): Query<SessionListQuery>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, CHAT_ROLES) {
+        return resp;
+    }
+
+    let limit = query.limit.unwrap_or(SESSION_LIST_LIMIT).clamp(1, SESSION_LIST_LIMIT);
+    let is_admin = role == auth::Role::Admin;
+
+    // 目录里可能有多个会话文件，放到阻塞线程读取，避免占用 tokio worker
+    let settings_for_io = settings.clone();
+    let all = match tokio::task::spawn_blocking(move || chat_store::list(&settings_for_io)).await {
+        Ok(Ok(list)) => list,
+        Ok(Err(e)) => return server_error(format!("读取会话目录失败: {}", e)),
+        Err(_) => return server_error("读取会话目录失败: 任务异常".to_string()),
+    };
+
+    let sessions: Vec<Value> = all
+        .iter()
+        .filter(|s| is_admin || s.owner_key == owner.as_str())
+        .take(limit)
+        .map(|s| s.meta(owner.as_str()))
+        .collect();
+
+    Json(json!({ "count": sessions.len(), "sessions": sessions })).into_response()
+}
+
+/// `GET /assist/api/chat/sessions/:id` —— 读取单个会话（含 items / transcript）
+async fn get_session(
+    Extension(role): Extension<auth::Role>,
+    Extension(owner): Extension<auth::OwnerKey>,
+    Extension(settings): Extension<Arc<Settings>>,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, CHAT_ROLES) {
+        return resp;
+    }
+
+    let session = match load_session(&settings, &id) {
+        Ok(Some(s)) => s,
+        Ok(None) => return not_found("会话不存在"),
+        Err(e) => return server_error(format!("读取会话失败: {}", e)),
+    };
+    if !can_access(&role, owner.as_str(), &session.owner_key) {
+        return forbidden();
+    }
+
+    let mut value = session.meta(owner.as_str());
+    value["items"] = session.items;
+    value["transcript"] = session.transcript;
+    Json(value).into_response()
+}
+
+/// `POST /assist/api/chat/sessions` —— 新建会话（前端点击「保存」时调用）
+async fn create_session(
+    Extension(role): Extension<auth::Role>,
+    Extension(owner): Extension<auth::OwnerKey>,
+    Extension(settings): Extension<Arc<Settings>>,
+    Json(payload): Json<SessionPayload>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, CHAT_ROLES) {
+        return resp;
+    }
+
+    let (count, title) = match validate_payload(&payload) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    let now = chat_store::now_iso();
+    let session = chat_store::StoredSession {
+        version: chat_store::SESSION_FORMAT_VERSION,
+        id: chat_store::new_id(),
+        title,
+        owner_key: owner.as_str().to_string(),
+        role: role.as_str().to_string(),
+        model: payload.model.clone().unwrap_or_default(),
+        tool_mode: payload.tool_mode.clone().unwrap_or_default(),
+        message_count: count as i64,
+        created_at: now.clone(),
+        updated_at: now,
+        items: payload.items.clone(),
+        transcript: payload.transcript.clone(),
+    };
+
+    if let Err(e) = chat_store::save(&settings, &session) {
+        return server_error(format!("保存会话失败: {}", e));
+    }
+    tracing::info!(
+        session_id = %session.id,
+        role = %session.role,
+        messages = count,
+        "问答会话已保存为文件"
+    );
+
+    let mut value = session.meta(owner.as_str());
+    value["created"] = json!(true);
+    Json(value).into_response()
+}
+
+/// `PUT /assist/api/chat/sessions/:id` —— 覆盖保存已有会话
+async fn update_session(
+    Extension(role): Extension<auth::Role>,
+    Extension(owner): Extension<auth::OwnerKey>,
+    Extension(settings): Extension<Arc<Settings>>,
+    Path(id): Path<String>,
+    Json(payload): Json<SessionPayload>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, CHAT_ROLES) {
+        return resp;
+    }
+
+    let (count, derived_title) = match validate_payload(&payload) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    let mut session = match load_session(&settings, &id) {
+        Ok(Some(s)) => s,
+        Ok(None) => return not_found("会话不存在"),
+        Err(e) => return server_error(format!("读取会话失败: {}", e)),
+    };
+    if !can_access(&role, owner.as_str(), &session.owner_key) {
+        return forbidden();
+    }
+
+    // 标题：显式传入优先 > 原标题 > 从首条用户消息推导
+    let explicit = payload
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    session.title = match explicit {
+        Some(t) => truncate_chars(t, 60),
+        None => {
+            let kept = session.title.trim();
+            if kept.is_empty() {
+                derived_title
+            } else {
+                kept.to_string()
+            }
+        }
+    };
+    // 归属与创建时间保持文件原值：客户端无法通过更新改写归属
+    session.model = payload.model.clone().unwrap_or_default();
+    session.tool_mode = payload.tool_mode.clone().unwrap_or_default();
+    session.message_count = count as i64;
+    session.items = payload.items.clone();
+    session.transcript = payload.transcript.clone();
+    session.updated_at = chat_store::now_iso();
+    if session.version == 0 {
+        session.version = chat_store::SESSION_FORMAT_VERSION;
+    }
+
+    if let Err(e) = chat_store::save(&settings, &session) {
+        return server_error(format!("更新会话失败: {}", e));
+    }
+
+    let mut value = session.meta(owner.as_str());
+    value["created"] = json!(false);
+    Json(value).into_response()
+}
+
+/// `DELETE /assist/api/chat/sessions/:id` —— 删除会话（归属人或 admin）
+async fn delete_session(
+    Extension(role): Extension<auth::Role>,
+    Extension(owner): Extension<auth::OwnerKey>,
+    Extension(settings): Extension<Arc<Settings>>,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, CHAT_ROLES) {
+        return resp;
+    }
+
+    let session = match load_session(&settings, &id) {
+        Ok(Some(s)) => s,
+        Ok(None) => return not_found("会话不存在"),
+        Err(e) => return server_error(format!("读取会话失败: {}", e)),
+    };
+    if !can_access(&role, owner.as_str(), &session.owner_key) {
+        return forbidden();
+    }
+
+    match chat_store::delete(&settings, &id) {
+        Ok(true) => Json(json!({"detail": "会话已删除", "id": id})).into_response(),
+        Ok(false) => not_found("会话不存在"),
+        Err(e) => server_error(format!("删除会话失败: {}", e)),
+    }
+}
+
+/// 读取会话文件，并把 IO 错误转成可读文本
+fn load_session(
+    settings: &Settings,
+    id: &str,
+) -> Result<Option<chat_store::StoredSession>, String> {
+    chat_store::load(settings, id).map_err(|e| e.to_string())
+}
+
+/// 归属校验：admin 可访问全部；其余只能访问自己 token 对应的会话
+fn can_access(role: &auth::Role, owner: &str, session_owner: &str) -> bool {
+    *role == auth::Role::Admin || owner == session_owner
+}
+
+/// 校验保存内容：必须是数组、不超限；返回（条目数, 推导标题）
+fn validate_payload(payload: &SessionPayload) -> Result<(usize, String), Response> {
+    let items = payload
+        .items
+        .as_array()
+        .ok_or_else(|| bad_request("items 必须是数组"))?;
+    let transcript = payload
+        .transcript
+        .as_array()
+        .ok_or_else(|| bad_request("transcript 必须是数组"))?;
+
+    if items.len() > SESSION_MAX_ITEMS {
+        return Err(bad_request("对话条目过多，请拆分或清空后保存"));
+    }
+    if transcript.len() > SESSION_MAX_TRANSCRIPT {
+        return Err(bad_request("transcript 过长，请拆分或清空后保存"));
+    }
+
+    let items_json = serde_json::to_string(&payload.items).unwrap_or_else(|_| "[]".to_string());
+    let transcript_json =
+        serde_json::to_string(&payload.transcript).unwrap_or_else(|_| "[]".to_string());
+    if items_json.len() > SESSION_MAX_BYTES || transcript_json.len() > SESSION_MAX_BYTES {
+        return Err(bad_request("对话内容过大（超过 2MB），请清空部分内容后保存"));
+    }
+
+    Ok((items.len(), session_title(None, &payload.items)))
+}
+
+/// 会话标题：优先用显式标题，否则从首条用户消息推导（截断到 40 字符）
+fn session_title(explicit: Option<&str>, items: &Value) -> String {
+    if let Some(t) = explicit.map(str::trim).filter(|t| !t.is_empty()) {
+        return truncate_chars(t, 60);
+    }
+    let first_user = items
+        .as_array()
+        .and_then(|arr| {
+            arr.iter().find_map(|item| {
+                if item["role"].as_str() == Some("user") {
+                    item["content"].as_str()
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or("");
+    let first_line = first_user.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let title = truncate_chars(first_line.trim(), 40);
+    if title.is_empty() {
+        "未命名会话".to_string()
+    } else {
+        title
+    }
+}
+
+fn forbidden() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"detail": "无权访问该会话"})),
+    )
+        .into_response()
+}
+
+fn not_found(detail: &str) -> Response {
+    (StatusCode::NOT_FOUND, Json(json!({"detail": detail}))).into_response()
+}
+
+fn server_error(detail: String) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"detail": detail})),
+    )
+        .into_response()
+}
 
 #[cfg(test)]
 mod tests {
@@ -674,5 +1002,82 @@ mod tests {
         assert_eq!(truncate_chars("abc", 10), "abc");
         assert!(truncate_chars("abcdef", 3).starts_with("abc"));
         assert!(truncate_chars("abcdef", 3).contains("已截断"));
+    }
+
+    #[test]
+    fn session_title_prefers_explicit_then_first_user_message() {
+        let items = json!([
+            {"role": "assistant", "content": "hi"},
+            {"role": "user", "content": "库里有多少篇文献？\n第二行不要"},
+        ]);
+        // 显式标题优先
+        assert_eq!(session_title(Some("  我的标题  "), &items), "我的标题");
+        // 空标题回退到首条用户消息的第一行
+        assert_eq!(session_title(Some("   "), &items), "库里有多少篇文献？");
+        assert_eq!(session_title(None, &items), "库里有多少篇文献？");
+        // 没有用户消息时兜底
+        assert_eq!(session_title(None, &json!([])), "未命名会话");
+        // 超长标题截断（保留前 40 字 + 截断标记）
+        let long = json!([{"role": "user", "content": "字".repeat(100)}]);
+        let title = session_title(None, &long);
+        assert!(title.starts_with(&"字".repeat(40)));
+        assert!(title.contains("已截断"));
+    }
+
+    #[test]
+    fn can_access_allows_admin_or_owner_only() {
+        let owner = auth::OwnerKey::from_token("token-a");
+        let other = auth::OwnerKey::from_token("token-b");
+        assert!(can_access(&auth::Role::Admin, other.as_str(), owner.as_str()));
+        assert!(can_access(&auth::Role::ViewOnly, owner.as_str(), owner.as_str()));
+        assert!(!can_access(&auth::Role::ViewOnly, other.as_str(), owner.as_str()));
+        assert!(!can_access(&auth::Role::ViewUpload, other.as_str(), owner.as_str()));
+        assert!(!can_access(
+            &auth::Role::ViewOnly,
+            auth::OwnerKey::local().as_str(),
+            owner.as_str()
+        ));
+    }
+
+    #[test]
+    fn validate_payload_rejects_bad_shapes() {
+        let ok = SessionPayload {
+            title: None,
+            model: None,
+            tool_mode: None,
+            items: json!([{"role": "user", "content": "库里有多少篇文献？"}]),
+            transcript: json!([{"role": "user", "content": "库里有多少篇文献？"}]),
+        };
+        let (count, title) = validate_payload(&ok).expect("应当通过校验");
+        assert_eq!(count, 1);
+        // 标题从首条用户消息推导
+        assert_eq!(title, "库里有多少篇文献？");
+
+        // items 不是数组
+        let bad = SessionPayload {
+            items: json!({"a": 1}),
+            ..ok_payload()
+        };
+        assert!(validate_payload(&bad).is_err());
+
+        // transcript 超长
+        let many = SessionPayload {
+            transcript: Value::Array(
+                vec![json!({"role": "user", "content": "x"}); SESSION_MAX_TRANSCRIPT + 1],
+            ),
+            ..ok_payload()
+        };
+        assert!(validate_payload(&many).is_err());
+    }
+
+    /// 构造一份最小合法 payload（供校验测试复用）
+    fn ok_payload() -> SessionPayload {
+        SessionPayload {
+            title: None,
+            model: None,
+            tool_mode: None,
+            items: json!([]),
+            transcript: json!([]),
+        }
     }
 }

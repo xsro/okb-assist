@@ -1,8 +1,12 @@
-import { apiGet, apiPost } from './client'
+import { apiDelete, apiGet, apiPost, apiPut } from './client'
 import type {
   ChatModelsResponse,
   ChatRequest,
   ChatResponse,
+  ChatSessionDetail,
+  ChatSessionListResponse,
+  ChatSessionSaveRequest,
+  ChatSessionSaveResponse,
   ChatToolsResponse
 } from '@/types/chat'
 
@@ -25,4 +29,36 @@ export function listChatTools() {
  */
 export function sendChat(payload: ChatRequest, signal?: AbortSignal) {
   return apiPost<ChatResponse>('/assist/api/chat', payload, { timeout: 300000, signal })
+}
+
+// ── 会话历史（历史记录只在前端点击「保存」时写入后端文件）──
+
+/** 会话列表：admin 可看到全部（带 mine 标记），其余角色只看得到自己的 */
+export function listChatSessions() {
+  return apiGet<ChatSessionListResponse>('/assist/api/chat/sessions')
+}
+
+/** 打开某个会话（含展示条目与 transcript） */
+export function getChatSession(id: string) {
+  return apiGet<ChatSessionDetail>(`/assist/api/chat/sessions/${encodeURIComponent(id)}`)
+}
+
+/** 保存为新会话 */
+export function createChatSession(payload: ChatSessionSaveRequest) {
+  return apiPost<ChatSessionSaveResponse>('/assist/api/chat/sessions', payload)
+}
+
+/** 覆盖保存已有会话 */
+export function updateChatSession(id: string, payload: ChatSessionSaveRequest) {
+  return apiPut<ChatSessionSaveResponse>(
+    `/assist/api/chat/sessions/${encodeURIComponent(id)}`,
+    payload
+  )
+}
+
+/** 删除会话（归属人或 admin） */
+export function deleteChatSession(id: string) {
+  return apiDelete<{ detail: string; id: string }>(
+    `/assist/api/chat/sessions/${encodeURIComponent(id)}`
+  )
 }

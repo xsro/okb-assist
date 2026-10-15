@@ -97,3 +97,55 @@ export interface ChatResponse {
   /** 实际执行的工具轮数 */
   tool_rounds: number
 }
+
+// ── 会话历史（显式保存，一个会话一个后端文件）──────────────
+
+/** 展示用条目（本地渲染结构，原样存入会话文件） */
+export interface ChatDisplayItem {
+  role: 'user' | 'assistant'
+  content: string
+  steps: ToolStep[]
+  /** 本轮实际使用的工具协议 */
+  mode?: string
+  /** 流程说明（如自动降级） */
+  notes?: string[]
+}
+
+/** 会话元信息（列表用；后端不回传 owner_key，只用 mine 标记） */
+export interface ChatSessionMeta {
+  id: string
+  title: string
+  /** 保存时的角色 */
+  role: string
+  model: string
+  tool_mode: string
+  message_count: number
+  created_at: string
+  updated_at: string
+  /** 是否属于当前 token（admin 列表里可能有别人的会话） */
+  mine: boolean
+}
+
+export interface ChatSessionListResponse {
+  count: number
+  sessions: ChatSessionMeta[]
+}
+
+/** 打开会话时返回的完整内容 */
+export interface ChatSessionDetail extends ChatSessionMeta {
+  items: ChatDisplayItem[]
+  transcript: ChatMessage[]
+}
+
+export interface ChatSessionSaveRequest {
+  title?: string
+  model?: string
+  tool_mode?: string
+  items: ChatDisplayItem[]
+  transcript: ChatMessage[]
+}
+
+export interface ChatSessionSaveResponse extends ChatSessionMeta {
+  /** true = 新建，false = 覆盖保存 */
+  created: boolean
+}
