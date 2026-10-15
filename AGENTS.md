@@ -17,7 +17,7 @@ OKB-Assist 是一个**本地学术文献库管理系统**（论文与专著）�
 - **前端**：TypeScript + Vue 3（Vite 8 构建），位于 `frontend/`
 - **数据**：SQLx + SQLite（`okb_assist.db`）
 - **向量库**：Qdrant（默认），适配器层同时支持 Milvus / Chroma
-- **外部服务**：MinerU（解析）、Ollama（LLM/嵌入）、Qdrant（向量）、Fastembed（嵌入服务）、OpenWebUI（可选前端）、mutool（PDF 元数据提取，未启用 mupdf feature 时使用）
+- **外部服务**：MinerU（解析）、LLM（Ollama 原生 / OpenAI 兼容协议，模型池 + 信息补全模型）、Embedding 服务（各向量库独立配置，默认 Ollama 原生协议）、Qdrant（向量）、Fastembed（嵌入服务）、OpenWebUI（可选前端）、mutool（PDF 元数据提取，未启用 mupdf feature 时使用）
 - **客户端工具**：`client-rs/` — Zotero CSV 导入工具（Rust）
 
 ## 包管理与常用命令
@@ -68,13 +68,13 @@ cargo build --release
 | `backend-rs/src/auth.rs` | 鉴权与角色匹配（Admin/ViewOnly/ViewUpload） |
 | `backend-rs/src/logger.rs` | 双日志初始化（文件 + 控制台） |
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`admin.rs`、`config.rs`、`openapi.rs`、`mod.rs` |
-| `backend-rs/src/services/` | 后端适配器：`qdrant.rs`、`ollama.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`vector_db.rs`、`datalab.rs`、`query_parser.rs` |
+| `backend-rs/src/services/` | 后端适配器：`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`vector_db.rs`、`datalab.rs`、`query_parser.rs` |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
 | `backend-rs/src/mcp_server.rs` | MCP 服务 |
 | `backend-rs/src/settings.rs`、`backend-rs/src/utils.rs` | 全局 Settings 单例、工具函数 |
-| `backend-rs/config.json` | 服务配置（MinerU/Ollama/向量库），可由 UI 编辑 |
+| `backend-rs/config.json` | 服务配置（MinerU/LLM/向量库），可由 UI 编辑 |
 | `backend-rs/system.json` | 系统配置（token、MCP token、白名单、DB URL、上传路径、路径模板），需手动改 |
 | `client-rs/` | Zotero CSV 导入客户端（Rust） |
 | `frontend/src/components/` | Vue 组件 — 见下方「前端架构 → 组件一览」 |
@@ -92,12 +92,33 @@ cargo build --release
 
 ## 配置（JSON 文件，非环境变量）
 
-- `backend-rs/config.json`：服务配置（MinerU/Ollama/向量库），运行时改后需调用 `reload_config()` 或 `/assist/api/config/reload` 端点才生效。
+- `backend-rs/config.json`：服务配置（MinerU/LLM/向量库），运行时改后需调用 `reload_config()` 或 `/assist/api/config/reload` 端点才生效。
 - `backend-rs/system.json`：系统配置，改后**必须重启进程**才生效（进程内缓存）。
 - 配置读取层：`backend-rs/src/config_manager.rs`（带锁 + 进程内缓存）；`backend-rs/src/config.rs:Settings` 是单例代理，属性每次从 JSON 实时读取。
 - 添加新配置字段时：在 `config_manager.rs` 的默认值中加默认值；若是敏感字段，扩展脱敏函数。
 - `config.json` 中 MinerU 配置支持多配置数组，通过 `active_mineru` 按 `name` 选择当前使用的配置。每个配置的 `max_tasks` 控制该 MinerU 服务的并发解析数（对应 `pipeline.rs` 中独立的 `MINERU_SEMAPHORE`），`task_timeout` 控制单任务超时，`token` 为 API 认证凭据。
 - 文件路径来自 `system.json` 的路径模板（含 `{id}` 占位符），在 `backend-rs/src/paths.rs` 解析，**不要**在 `Document` 模型里加路径列。
+
+### LLM / 信息补全 / Embedding 配置（`config.json`）
+
+三套模型配置相互独立，互不影响：
+
+- `llm.models`：**LLM 模型池**（数组，每项 `{name, protocol, url, key, model}`）。预留给后续问答系统，当前仅作配置载体，不参与任何处理。`name` 用于其他配置引用。
+- `llm_extract`：**信息补全（元数据抽取）专用模型**，字段 `{from, protocol, url, key, model}`。**留空的字段从 `from` 指定的模型池条目继承**（`from` 为空或未命中则取第一项）；`model` 也可留空继承。
+- `vector_dbs[].embedding`：**Embedding 配置**，字段 `{protocol, url, key, model}`，每个向量库各自一份。缺省字段回退到模型池第一项（兼容旧行为），但 `model` 不回退（缺省为 `nomic-embed-text`，二者语义不同）。
+- 解析入口（`backend-rs/src/config.rs`）：`Settings::llm_models()`、`Settings::llm_extract_config()`、`Settings::extract_client()`、`Settings::embedding_config_for(vdb)`；均返回 `ModelEndpoint`（可 `.client()` 得到 `LlmClient`）。
+- **协议差异由 `LlmClient`（`backend-rs/src/services/llm.rs`）内部处理**，调用方无需关心：
+  - Ollama 原生：`/api/generate`、`/api/embed`、`/api/tags`；生成结果取 `response`，向量取 `embeddings`（**元素是裸数组**）。
+  - OpenAI 兼容：`/v1/chat/completions`、`/v1/embeddings`、`/v1/models`；生成结果取 `choices[0].message.content`，向量取 `data[].embedding`（按 `index` 排序）。
+  - OpenAI 协议的 `url` 未以 `/v1` 结尾时自动补全（如 `http://127.0.0.1:11434` → `http://127.0.0.1:11434/v1`）。
+- **旧配置自动迁移**（`ConfigManager::load_service_config()` → `migrate_legacy_service_config()`，作用于磁盘原始内容、与默认值合并之前，幂等）：
+  - 旧的 `ollama` 对象 / 旧的单对象 `llm`（`{protocol,url,key,model}`）→ 包装为 `llm.models` 的单元素数组（`name` = `default`）；`ollama` 键被移除。
+  - `llm.models` 每项补齐 `name`（`model-N`）与 `protocol`（`ollama`）。
+  - 文件未提供 `llm` 时不凭空创建空池，否则会盖掉默认模型池（`deep_merge` 对数组是整体替换）。
+  - 各向量库 `embedding` 的 `protocol` 依次回退 `embedding.source` → `llm.models[0].protocol`；`url`/`key` 回退 `llm.models[0]`；`model` 缺失补 `nomic-embed-text`。
+- 前端对应组件：`LlmConfigSection.vue`（模型池增删/排序/单项连接测试）、`LlmExtractConfigSection.vue`（`from` 选择 + 继承占位符 + 生效值预览）、`VectorDbConfigSection.vue`（每个向量库的嵌入协议/URL/Key/模型）。连接测试走 `/assist/api/config/test`：`type=llm` 用请求体参数（表单实时测试），`type=llm_extract` 由服务端按已保存配置（含继承）解析。
+- 服务状态端点键为 `llm`（不再是 `ollama`），如 `/assist/api/admin/services/status` 返回 `{mineru, llm, fastembed, vector_dbs, qdrant}`；其中 `llm` 探测的是**信息补全所用的端点**（含 `protocol`/`url`/`model`/`models`）。
+- `PUT /assist/api/config` 会校验 `llm.models` 每项都有非空 `url` 与 `model`，否则返回 400。`llm_extract` 不做校验（空值即继承）。
 
 ### 工作目录与路径解析
 
@@ -138,7 +159,7 @@ cargo build --release
 2. **数据模型**：`Document`（主记录 + 状态）、`DocumentVectorIndex`（每个向量库的索引状态，唯一键 `(document_id, vector_db_id)`）。状态机用 `DocStatus` / `IndexStatus` 枚举（`backend-rs/src/models.rs`）。
 3. **摄取流水线**（`backend-rs/src/routers/pipeline.rs`，核心状态机）：
    - parse（MinerU）→ `parsing` → `markdown_done`
-   - extract（Ollama）→ `extracting` → `meta_done`
+   - extract（信息补全模型，`llm_extract`）→ `extracting` → `meta_done`
    - index（向量库）→ `indexing` → `indexed`
    - 含批量控制器、暂停/恢复/重置、两级信号量并发限制：MinerU 解析使用独立 `Semaphore(max_tasks)`（按配置），extract/index 使用全局 `Semaphore(max_concurrent_tasks)`（`system.json`）。
    - **所有阶段均在后台执行**（见下方「后台任务」一节）—— 请求先返回，协程在事件循环继续；进度与状态机记录在 `Document` 上，可轮询查询。
@@ -205,7 +226,7 @@ cargo build --release
 | `SourcePanel.vue` | 阅读页右侧源码面板（按行范围读取/编辑/保存，`raw=1` 无损读写，admin 才可编辑） |
 | `McpConfigPanel.vue` | MCP 配置面板 |
 | `McpSkillPanel.vue` | MCP Skill 面板 |
-| `config/` | 配置子组件：`BaseUrlSection.vue`、`MineruConfigSection.vue`、`OllamaConfigSection.vue`、`VectorDbConfigSection.vue` |
+| `config/` | 配置子组件：`BaseUrlSection.vue`、`MineruConfigSection.vue`、`LlmConfigSection.vue`、`LlmExtractConfigSection.vue`、`VectorDbConfigSection.vue` |
 
 ### 路由与视图（`src/router/index.ts` + `src/views/`）
 

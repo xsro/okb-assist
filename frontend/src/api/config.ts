@@ -31,7 +31,7 @@ export function getSystemConfig() {
 // ── 连接测试 ────────────────────────────────────────────
 
 /** 测试服务连接（使用当前配置） */
-export function testConnection(service: 'mineru' | 'ollama' | 'qdrant') {
+export function testConnection(service: 'mineru' | 'llm' | 'qdrant') {
   return apiPost<ConnectionTestResult>(
     '/assist/api/config/test-connection',
     { service }
@@ -44,6 +44,8 @@ export function testService(params: {
   url?: string
   key?: string
   model?: string
+  /** LLM 协议（"ollama" | "openai"），仅 LLM 测试使用 */
+  protocol?: string
   embed_model?: string
   collection?: string
 }) {

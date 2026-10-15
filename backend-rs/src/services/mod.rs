@@ -3,8 +3,8 @@
 pub mod crossref;
 pub mod grep_search;
 pub mod datalab;
+pub mod llm;
 pub mod mineru;
-pub mod ollama;
 pub mod pdf_meta;
 pub mod qdrant;
 pub mod query_parser;

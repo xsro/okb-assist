@@ -31,10 +31,23 @@
       "url": "https://www.datalab.to"
     }
   ],
-  "ollama": {
-    "key": "***",
-    "model": "qwen3.5:9b",
-    "url": "http://127.0.0.1:11434"
+  "llm": {
+    "models": [
+      {
+        "name": "default",
+        "key": "***",
+        "model": "qwen3.5:9b",
+        "protocol": "ollama",
+        "url": "http://127.0.0.1:11434"
+      }
+    ]
+  },
+  "llm_extract": {
+    "from": "",
+    "protocol": "",
+    "url": "",
+    "key": "",
+    "model": ""
   },
   "permissions": {
     "60b8be6583ac41abb3af63e01151bd86": {
@@ -46,8 +59,10 @@
     {
       "collection": "documents",
       "embedding": {
-        "model": "nomic-embed-text",
-        "source": "ollama"
+        "protocol": "ollama",
+        "url": "http://127.0.0.1:11434",
+        "key": "",
+        "model": "nomic-embed-text"
       },
       "enabled": true,
       "id": "default",

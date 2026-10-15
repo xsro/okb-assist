@@ -244,30 +244,24 @@ async fn check_mineru(settings: &Settings) -> Value {
     json!({"mineru": items})
 }
 
-/// 检查 Ollama 健康
-async fn check_ollama(settings: &Settings) -> Value {
-    let url = settings.ollama_url();
-    let mut item = json!({"status": "unknown", "url": url});
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
-    match client.get(format!("{}/api/tags", url)).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            if let Ok(data) = resp.json::<Value>().await {
-                item["status"] = json!("connected");
-                item["models"] = data.get("models").cloned().unwrap_or(json!([]));
-            } else {
-                item["status"] = json!("connected");
-            }
-        }
-        Ok(resp) => {
-            item["status"] = json!("error");
-            item["error"] = json!(format!("HTTP {}", resp.status()));
+/// 检查 LLM 服务健康（探测信息补全所用的模型端点，支持 Ollama 原生 / OpenAI 兼容协议）
+async fn check_llm(settings: &Settings) -> Value {
+    let extract = settings.llm_extract_config();
+    let mut item = json!({
+        "status": "unknown",
+        "url": &extract.url,
+        "protocol": &extract.protocol,
+        "model": &extract.model,
+    });
+    match extract.client().probe(5).await {
+        Ok(models) => {
+            item["status"] = json!("connected");
+            item["models"] = json!(models);
         }
         Err(e) => {
-            item["status"] = json!("disconnected");
-            item["error"] = json!(e.to_string());
+            let (status, detail) = e.status_and_detail();
+            item["status"] = json!(status);
+            item["error"] = json!(detail);
         }
     }
     item
@@ -313,15 +307,15 @@ async fn services_status(
     let cm = crate::config_manager::ConfigManager::new("system.json");
     let cfg = cm.get_config();
 
-    let (mineru, ollama, fastembed) = tokio::join!(
+    let (mineru, llm, fastembed) = tokio::join!(
         check_mineru(&settings),
-        check_ollama(&settings),
+        check_llm(&settings),
         check_fastembed(&settings),
     );
 
     let mut result = json!({
         "mineru": mineru,
-        "ollama": ollama,
+        "llm": llm,
         "fastembed": fastembed,
     });
 

@@ -1459,13 +1459,14 @@ async fn semantic_search(
 
     let settings = crate::settings::get_settings();
 
-    // 获取 embedding
-    let ollama = crate::services::ollama::OllamaClient::new(
-        &settings.ollama_url(),
-        Some(&settings.ollama_key()),
-        &settings.embedding_model(),
-    );
-    let embedding = match ollama.get_embedding(q.trim()).await {
+    // 获取 embedding：使用目标向量库自己的 embedding 配置（独立于 LLM 配置）
+    let manager = crate::config_manager::ConfigManager::new("system.json");
+    let vdb_config = match params.vector_db_id.as_deref() {
+        Some(id) => manager.get_vector_db_by_id(id),
+        None => manager.get_active_vector_db(),
+    };
+    let embed_client = settings.embedding_config_for(vdb_config.as_ref()).client();
+    let embedding = match embed_client.get_embedding(q.trim()).await {
         Ok(e) => e,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": format!("Embedding 失败: {}", e)}))).into_response(),
     };

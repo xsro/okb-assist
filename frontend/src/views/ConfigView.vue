@@ -13,9 +13,15 @@
         @update:active-key="onActiveMineruKeyChange"
       />
 
-      <OllamaConfigSection
-        ref="ollamaSectionRef"
-        :ollama="config.ollama"
+      <LlmConfigSection
+        :models="config.llm.models"
+        @update="onConfigUpdate"
+      />
+
+      <LlmExtractConfigSection
+        ref="llmExtractSectionRef"
+        :extract="config.llm_extract"
+        :models="config.llm.models"
         @update="onConfigUpdate"
       />
 
@@ -80,10 +86,11 @@ import { ref, computed, onMounted } from 'vue'
 import { getServiceConfig, updateServiceConfig, reloadConfig } from '@/api/config'
 import { getServiceStatus, getPermissionTokens, addPermissionToken, deletePermissionToken } from '@/api/admin'
 import { useToast } from '@/composables/useToast'
-import type { ServiceConfig } from '@/types/config'
+import type { LlmModelEntry, ServiceConfig } from '@/types/config'
 import BaseUrlSection from '@/components/config/BaseUrlSection.vue'
 import MineruConfigSection from '@/components/config/MineruConfigSection.vue'
-import OllamaConfigSection from '@/components/config/OllamaConfigSection.vue'
+import LlmConfigSection from '@/components/config/LlmConfigSection.vue'
+import LlmExtractConfigSection from '@/components/config/LlmExtractConfigSection.vue'
 import VectorDbConfigSection from '@/components/config/VectorDbConfigSection.vue'
 
 const { showSuccess, showError } = useToast()
@@ -92,7 +99,7 @@ const config = ref<ServiceConfig | null>(null)
 const originalConfig = ref<ServiceConfig | null>(null)
 
 const mineruSectionRef = ref<InstanceType<typeof MineruConfigSection> | null>(null)
-const ollamaSectionRef = ref<InstanceType<typeof OllamaConfigSection> | null>(null)
+const llmExtractSectionRef = ref<InstanceType<typeof LlmExtractConfigSection> | null>(null)
 const vectorDbSectionRef = ref<InstanceType<typeof VectorDbConfigSection> | null>(null)
 
 function onConfigUpdate() {
@@ -112,9 +119,40 @@ async function load() {
       raw.mineru = [raw.mineru]
     }
     config.value = raw
+    // 兼容旧配置：llm 模型池、抽取模型、各向量库 embedding 缺失字段时按默认值补齐
+    const rawLlm = raw.llm as { models?: LlmModelEntry[] } & Partial<LlmModelEntry>
+    if (!rawLlm || typeof rawLlm !== 'object') {
+      raw.llm = { models: [] }
+    } else if (!Array.isArray(rawLlm.models)) {
+      // 单对象 llm（{protocol, url, key, model}）→ 模型池单项
+      raw.llm = rawLlm.model !== undefined || rawLlm.url !== undefined
+        ? { models: [{ name: 'default', protocol: rawLlm.protocol || 'ollama', url: rawLlm.url || '', key: rawLlm.key || '', model: rawLlm.model || '' }] }
+        : { models: [] }
+    }
+    for (const model of config.value.llm.models) {
+      model.name = model.name || ''
+      model.protocol = model.protocol || 'ollama'
+      model.url = model.url || ''
+      model.key = model.key || ''
+      model.model = model.model || ''
+    }
+    if (!config.value.llm_extract || typeof config.value.llm_extract !== 'object') {
+      config.value.llm_extract = { from: '', protocol: '', url: '', key: '', model: '' }
+    } else {
+      config.value.llm_extract.from = config.value.llm_extract.from || ''
+      config.value.llm_extract.protocol = config.value.llm_extract.protocol || ''
+      config.value.llm_extract.url = config.value.llm_extract.url || ''
+      config.value.llm_extract.key = config.value.llm_extract.key || ''
+      config.value.llm_extract.model = config.value.llm_extract.model || ''
+    }
     for (const db of config.value.vector_dbs || []) {
-      if (!db.embedding) {
-        db.embedding = { source: 'ollama', model: 'nomic-embed-text' }
+      if (!db.embedding || typeof db.embedding !== 'object') {
+        db.embedding = { protocol: 'ollama', url: '', key: '', model: 'nomic-embed-text' }
+      } else {
+        db.embedding.protocol = db.embedding.protocol || 'ollama'
+        db.embedding.url = db.embedding.url || ''
+        db.embedding.key = db.embedding.key || ''
+        db.embedding.model = db.embedding.model || 'nomic-embed-text'
       }
     }
     originalConfig.value = JSON.parse(JSON.stringify(config.value))
@@ -136,11 +174,11 @@ async function syncServiceStatus() {
         detail: item.error || item.url || item.status || '-'
       })
     }
-    // Ollama
-    if (sv.ollama) {
-      ollamaSectionRef.value?.syncStatus({
-        status: sv.ollama.status,
-        detail: sv.ollama.error || sv.ollama.url || sv.ollama.status || '-'
+    // 信息补全模型（服务状态探测的就是它）
+    if (sv.llm) {
+      llmExtractSectionRef.value?.syncStatus({
+        status: sv.llm.status,
+        detail: sv.llm.error || sv.llm.url || sv.llm.status || '-'
       })
     }
     // 向量库

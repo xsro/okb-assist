@@ -72,14 +72,37 @@
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label>嵌入源</label>
-            <input v-model="db.embedding.source" type="text" @input="emitUpdate" />
+            <label>嵌入协议</label>
+            <select v-model="ensureEmbedding(db).protocol" @change="emitUpdate">
+              <option value="ollama">Ollama（原生协议）</option>
+              <option value="openai">OpenAI（兼容协议）</option>
+            </select>
           </div>
           <div class="form-group">
             <label>嵌入模型</label>
-            <input v-model="db.embedding.model" type="text" @input="emitUpdate" />
+            <input v-model="ensureEmbedding(db).model" type="text" @input="emitUpdate" />
           </div>
         </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>嵌入 URL</label>
+            <input v-model="ensureEmbedding(db).url" type="text" @input="emitUpdate" />
+          </div>
+          <div class="form-group">
+            <label>嵌入 API Key</label>
+            <div class="input-with-toggle">
+              <input v-model="ensureEmbedding(db).key" :type="embedKeyVisible[idx] ? 'text' : 'password'" @input="emitUpdate" />
+              <button class="toggle-visibility" type="button" @click="toggleEmbedKey(idx)" :title="embedKeyVisible[idx] ? '隐藏 Key' : '显示 Key'">
+                <svg v-if="embedKeyVisible[idx]" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+        <p class="form-hint">
+          嵌入配置独立于 LLM 与信息补全模型；留空的字段会从 LLM 模型池第一项继承。
+          向量库与嵌入模型必须保持一致，否则查询向量无法匹配已有索引。
+        </p>
         <div class="status-test-row">
           <span class="status-dot" :class="getStatusClass(idx)"></span>
           <span class="status-text">{{ getStatusText(idx) }}</span>
@@ -97,7 +120,7 @@
 
 <script setup lang="ts">
 import { reactive } from 'vue'
-import type { VectorDbConfig } from '@/types/config'
+import type { ModelEndpoint, VectorDbConfig } from '@/types/config'
 import { testService } from '@/api/config'
 import { useToast } from '@/composables/useToast'
 
@@ -125,9 +148,33 @@ function toggle(idx: number) {
 const testing = reactive<Record<number, boolean>>({})
 const statuses = reactive<Record<number, { status: string; detail: string }>>({})
 const keyVisible = reactive<Record<number, boolean>>({})
+const embedKeyVisible = reactive<Record<number, boolean>>({})
 
 function toggleKey(idx: number) {
   keyVisible[idx] = !keyVisible[idx]
+}
+
+function toggleEmbedKey(idx: number) {
+  embedKeyVisible[idx] = !embedKeyVisible[idx]
+}
+
+/** 兼容旧配置：embedding 段缺失字段时按默认值补齐（后端也会做同样处理） */
+function ensureEmbedding(db: VectorDbConfig): ModelEndpoint {
+  if (!db.embedding || typeof db.embedding !== 'object') {
+    db.embedding = defaultEmbedding()
+  } else {
+    // 旧字段 source（"ollama"/"openai"）作为 protocol 的回退
+    const legacy = db.embedding as ModelEndpoint & { source?: string }
+    legacy.protocol = legacy.protocol || (legacy.source === 'openai' ? 'openai' : 'ollama')
+    legacy.url = legacy.url || ''
+    legacy.key = legacy.key || ''
+    legacy.model = legacy.model || 'nomic-embed-text'
+  }
+  return db.embedding
+}
+
+function defaultEmbedding(): ModelEndpoint {
+  return { protocol: 'ollama', url: '', key: '', model: 'nomic-embed-text' }
 }
 
 function defaultVectorDb(): VectorDbConfig {
@@ -139,7 +186,7 @@ function defaultVectorDb(): VectorDbConfig {
     url: '',
     collection: 'documents',
     api_key: '',
-    embedding: { source: 'ollama', model: 'nomic-embed-text' }
+    embedding: defaultEmbedding()
   }
 }
 
@@ -212,6 +259,12 @@ defineExpose({ syncStatus })
 }
 
 /* 折叠头 */
+.form-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
 .card-header-collapsible {
   display: flex;
   justify-content: space-between;

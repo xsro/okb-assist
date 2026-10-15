@@ -8,10 +8,32 @@ export interface VectorDbConfig {
   url: string
   collection: string
   api_key?: string
-  embedding: {
-    source: string
-    model: string
-  }
+  embedding: ModelEndpoint
+}
+
+/** LLM / Embedding 协议：ollama 原生协议 或 openai 兼容协议 */
+export type LlmProtocol = 'ollama' | 'openai'
+
+/**
+ * 单个模型端点（协议 + 地址 + 凭据 + 模型名）。
+ * 同时用于 LLM 模型池、抽取专用模型、各向量库的 embedding 段。
+ */
+export interface ModelEndpoint {
+  protocol: LlmProtocol
+  url: string
+  key: string
+  model: string
+}
+
+/** LLM 模型池中的一项（预留给后续问答系统） */
+export interface LlmModelEntry extends ModelEndpoint {
+  name: string
+}
+
+/** 信息补全（元数据抽取）使用的模型；字段留空表示从模型池继承 */
+export interface LlmExtractConfig extends ModelEndpoint {
+  /** 继承来源：模型池中的 name，空 = 第一项 */
+  from: string
 }
 
 export interface MinerUConfig {
@@ -30,11 +52,10 @@ export interface ServiceConfig {
   base_url: string
   active_mineru?: string
   mineru: MinerUConfig[]
-  ollama: {
-    url: string
-    key: string
-    model: string
-  }
+  /** LLM 模型池（预留给后续问答系统） */
+  llm: { models: LlmModelEntry[] }
+  /** 信息补全（元数据抽取）使用的模型 */
+  llm_extract: LlmExtractConfig
   vector_dbs: VectorDbConfig[]
 }
 
@@ -54,7 +75,7 @@ export interface ServiceStatusItem {
 
 export interface ServiceStatus {
   mineru: ServiceStatusItem | ServiceStatusItem[]
-  ollama: ServiceStatusItem
+  llm: ServiceStatusItem
   fastembed: ServiceStatusItem
   vector_dbs: ServiceStatusItem[]
   qdrant: ServiceStatusItem

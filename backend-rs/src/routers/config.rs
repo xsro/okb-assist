@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use crate::config::Settings;
 use crate::auth;
 use crate::config_manager::ConfigManager;
+use crate::services::llm::{LlmClient, Protocol};
 use crate::services::mineru::MineruType;
 
 pub fn router() -> axum::Router<()> {
@@ -99,16 +100,48 @@ async fn update_config(
         config["mineru"] = Value::Array(mineru.clone());
     }
 
-    if let Some(ollama) = body.get("ollama").and_then(|v| v.as_object()) {
+    // LLM 模型池：新键 `llm`（含 models 数组），同时兼容前端仍提交旧键 `ollama` 的情况
+    let llm_payload = body
+        .get("llm")
+        .and_then(|v| v.as_object())
+        .or_else(|| body.get("ollama").and_then(|v| v.as_object()));
+    if let Some(llm) = llm_payload {
+        // 校验模型池中每一项都可用（缺 url 或 model 的项无法用于任何调用）
+        if let Some(models) = llm.get("models").and_then(|v| v.as_array()) {
+            for (i, model) in models.iter().enumerate() {
+                let url = model.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let name = model.get("model").and_then(|v| v.as_str()).unwrap_or("");
+                if url.trim().is_empty() || name.trim().is_empty() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"detail": format!("LLM 模型 #{} 缺少 url 或 model 字段", i + 1)})),
+                    )
+                        .into_response();
+                }
+            }
+        }
         let base = config
-            .get("ollama")
+            .get("llm")
             .and_then(|v| v.as_object())
             .cloned()
             .unwrap_or_default();
         let mut merged = serde_json::Map::new();
         merged.extend(base);
-        merged.extend(ollama.clone());
-        config["ollama"] = Value::Object(merged);
+        merged.extend(llm.clone());
+        config["llm"] = Value::Object(merged);
+    }
+
+    // 信息补全（抽取）专用模型：字段留空表示从模型池继承
+    if let Some(extract) = body.get("llm_extract").and_then(|v| v.as_object()) {
+        let base = config
+            .get("llm_extract")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let mut merged = serde_json::Map::new();
+        merged.extend(base);
+        merged.extend(extract.clone());
+        config["llm_extract"] = Value::Object(merged);
     }
 
     if let Some(vector_dbs) = body.get("vector_dbs").and_then(|v| v.as_array()) {
@@ -191,6 +224,8 @@ pub struct TestServiceRequest {
     pub url: Option<String>,
     pub key: Option<String>,
     pub model: Option<String>,
+    /// LLM 协议（"ollama" | "openai"），仅 test 端点使用
+    pub protocol: Option<String>,
     pub embed_model: Option<String>,
     pub collection: Option<String>,
 }
@@ -202,6 +237,7 @@ pub struct TestConnectionRequest {
 
 async fn test_service(
     Extension(role): Extension<auth::Role>,
+    Extension(settings): Extension<Arc<Settings>>,
     Json(req): Json<TestServiceRequest>,
 ) -> Response {
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
@@ -216,9 +252,17 @@ async fn test_service(
             // 前端提交的 TestServiceRequest 中 key 字段实际存储的是 mineru type
             Json(test_mineru(&url, "", &mineru_type).await).into_response()
         }
-        "ollama" => {
+        "llm" | "ollama" => {
             let url = req.url.unwrap_or_default().trim_end_matches('/').to_string();
-            Json(test_ollama(&url, req.model.unwrap_or_default().as_str()).await).into_response()
+            let protocol = req.protocol.clone().unwrap_or_else(|| "ollama".to_string());
+            let key = req.key.clone().unwrap_or_default();
+            Json(test_llm(&url, &key, req.model.unwrap_or_default().as_str(), &protocol).await)
+                .into_response()
+        }
+        "llm_extract" => {
+            // 服务端按已保存配置（含模型池继承）解析，不接受前端字段
+            let cfg = settings.llm_extract_config();
+            Json(test_llm(&cfg.url, &cfg.key, &cfg.model, &cfg.protocol).await).into_response()
         }
         "qdrant" => {
             let url = req.url.unwrap_or_default().trim_end_matches('/').to_string();
@@ -252,7 +296,10 @@ async fn test_connection(
             let mineru_type = settings.mineru_type();
             Json(test_mineru(&url, &key, &mineru_type).await).into_response()
         }
-        "ollama" => Json(test_ollama(&settings.ollama_url(), &settings.ollama_model()).await).into_response(),
+        "llm" | "ollama" | "llm_extract" => {
+            let cfg = settings.llm_extract_config();
+            Json(test_llm(&cfg.url, &cfg.key, &cfg.model, &cfg.protocol).await).into_response()
+        }
         "qdrant" => Json(test_qdrant(&settings.qdrant_url()).await).into_response(),
         "fastembed" => Json(test_fastembed(&settings.fastembed_url()).await).into_response(),
         other => (
@@ -338,32 +385,29 @@ async fn test_mineru(url: &str, key: &str, mineru_type: &str) -> Value {
     }
 }
 
-async fn test_ollama(url: &str, model: &str) -> Value {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
-    match client.get(format!("{}/api/tags", url)).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let data = resp.json::<Value>().await.unwrap_or(json!({}));
-            let models: Vec<String> = data["models"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|m| m["name"].as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let model_found = model.is_empty() || models.iter().any(|m| m.contains(model));
+/// 测试 LLM 连接（支持 Ollama 原生 / OpenAI 兼容协议）
+async fn test_llm(url: &str, key: &str, model: &str, protocol: &str) -> Value {
+    let parsed = Protocol::parse(protocol);
+    let client = LlmClient::new(parsed, url, Some(key), model);
+    match client.probe(5).await {
+        Ok(models) => {
+            let model_found = model.is_empty() || models.iter().any(|m| m == model || m.contains(model));
             json!({
                 "status": "connected",
-                "detail": "Ollama 连接成功",
+                "detail": format!("{} 协议连接成功", parsed.as_str()),
+                "protocol": parsed.as_str(),
                 "models": models,
                 "model_available": model_found,
             })
         }
-        Ok(resp) => json!({"status": "error", "detail": format!("HTTP {}", resp.status())}),
-        Err(e) => json!({"status": "disconnected", "detail": format!("无法连接到 {}: {}", url, e)}),
+        Err(e) => {
+            let (status, detail) = e.status_and_detail();
+            json!({
+                "status": status,
+                "detail": format!("【{}】{}", parsed.as_str(), detail),
+                "protocol": parsed.as_str(),
+            })
+        }
     }
 }
 

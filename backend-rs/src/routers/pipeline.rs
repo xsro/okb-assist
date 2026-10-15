@@ -25,7 +25,6 @@ use crate::models::{Document, DocStatus, DocumentVectorIndex};
 use crate::paths;
 use crate::services::crossref::CrossrefClient;
 use crate::services::mineru::MinerUClient;
-use crate::services::ollama::OllamaClient;
 use crate::services::pdf_meta::{extract_pdf_metadata_async, looks_like_placeholder, normalize_doi};
 use crate::services::vector_db::{chunk_text_by_markdown, get_vector_db};
 use crate::utils::{absolute_path, now_iso};
@@ -526,14 +525,7 @@ async fn do_extract_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64
         Err(_) => return,
     };
 
-    let ollama_key = settings.ollama_key();
-    let ollama = OllamaClient::new(
-        &settings.ollama_url(),
-        if ollama_key.is_empty() { None } else { Some(&ollama_key) },
-        &settings.ollama_model(),
-    );
-
-    let metadata = match ollama.extract_metadata(&markdown_content).await {
+    let metadata = match settings.extract_client().extract_metadata(&markdown_content).await {
         Ok(m) => m,
         Err(_) => return,
     };
@@ -692,16 +684,10 @@ async fn do_index_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64, 
         return;
     }
 
-    // embedding 模型来自 vdb_config 而非全局 settings
-    let embed_model = vdb_config["embedding"]["model"].as_str().unwrap_or("nomic-embed-text").to_string();
-    let ollama_key = settings.ollama_key();
-    let ollama = OllamaClient::new(
-        &settings.ollama_url(),
-        if ollama_key.is_empty() { None } else { Some(&ollama_key) },
-        &embed_model,
-    );
+    // embedding 配置来自 vdb_config 的 embedding 段（独立于 LLM 配置）
+    let embed_client = settings.embedding_config_for(Some(&vdb_config)).client();
 
-    let embeddings = match ollama.get_embeddings_batch(&chunks).await {
+    let embeddings = match embed_client.get_embeddings_batch(&chunks).await {
         Ok(e) => e,
         Err(e) => {
             set_index_error(&db, doc_id, &vector_db_id, &e.to_string()).await;

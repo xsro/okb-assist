@@ -1,13 +1,145 @@
 //! JSON 配置文件管理模块。
 //!
 //! 配置分为两个文件：
-//! - config.json: 服务配置（MinerU、Ollama、向量数据库），可通过前端修改
+//! - config.json: 服务配置（MinerU、LLM、向量数据库），可通过前端修改
 //! - system.json: 系统配置（token、并发数、数据库、上传目录），仅限手动修改
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+
+/// 归一化并迁移服务配置的旧格式，使其符合“LLM 模型池 + 抽取专用模型”的新结构。
+///
+/// 支持的历史格式：
+///
+/// 1. 最早版本（≤ 0.9）——单一 Ollama 配置：
+/// ```json
+/// { "ollama": { "url": "...", "key": "...", "model": "..." } }
+/// ```
+/// 2. 中间版本——单一 LLM 配置 + 向量库 `embedding.source`：
+/// ```json
+/// { "llm": { "protocol": "ollama|openai", "url": "...", "key": "...", "model": "..." },
+///   "vector_dbs": [{ "embedding": { "source": "ollama", "model": "..." } }] }
+/// ```
+///
+/// 目标格式：
+/// ```json
+/// { "llm": { "models": [{ "name": "...", "protocol": "...", "url": "...", "key": "...", "model": "..." }] },
+///   "llm_extract": { "from": "", "protocol": "", "url": "", "key": "", "model": "" },
+///   "vector_dbs": [{ "embedding": { "protocol": "...", "url": "...", "key": "...", "model": "..." } }] }
+/// ```
+///
+/// 补齐规则：
+/// - `llm` 的旧单对象形式被包装为 `llm.models` 的单元素数组（`name` = "default"）。
+/// - `llm.models` 每项补齐 `name`（`model-N`）与 `protocol`（`ollama`）。
+/// - `llm_extract` 的字段留空即表示“从 `from` 指定的模型项继承”（`from` 为空则取第一项），
+///   因此迁移时保持全空，不复制取值。
+/// - `vector_dbs[].embedding` 的 `protocol` 依次回退到 `embedding.source`、`llm.models[0].protocol`；
+///   `url`/`key` 回退到 `llm.models[0]`；`model` 缺失时回退 `nomic-embed-text`。
+///
+/// 该函数作用于磁盘原始内容（与默认值合并之前），因此文件中的旧取值优先于默认值；
+/// 迁移后旧的 `ollama` 键被移除。函数是幂等的。
+fn migrate_legacy_service_config(mut raw: serde_json::Value) -> serde_json::Value {
+    // 1) 归一化 llm：ollama 对象 / 单对象 llm → llm.models 数组
+    let legacy_llm = match raw.get("llm") {
+        // 新格式（已含 models 数组）无需处理
+        Some(llm) if llm.get("models").is_some() => None,
+        Some(llm) if llm.is_object() => Some(llm.clone()),
+        _ => raw.get("ollama").cloned(),
+    };
+    if let Some(old) = legacy_llm {
+        let mut entry = old.as_object().cloned().unwrap_or_default();
+        entry
+            .entry("name".to_string())
+            .or_insert_with(|| serde_json::json!("default"));
+        entry
+            .entry("protocol".to_string())
+            .or_insert_with(|| serde_json::json!("ollama"));
+        raw["llm"] = serde_json::json!({ "models": [serde_json::Value::Object(entry)] });
+    }
+    if let Some(obj) = raw.as_object_mut() {
+        obj.remove("ollama");
+    }
+
+    // 保证 llm.models 是数组且每项有 name / protocol。
+    // 注意：文件未提供 llm 时不要凭空创建空池，否则会盖掉默认模型池
+    // （deep_merge 对数组是整体替换）。
+    if let Some(models) = raw.get_mut("llm").and_then(|l| l.get_mut("models")) {
+        if !models.is_array() {
+            *models = serde_json::json!([]);
+        }
+        if let Some(arr) = models.as_array_mut() {
+            for (i, entry) in arr.iter_mut().enumerate() {
+                if !entry.is_object() {
+                    *entry = serde_json::json!({});
+                }
+                let obj = entry.as_object_mut().unwrap();
+                obj.entry("name".to_string())
+                    .or_insert_with(|| serde_json::json!(format!("model-{}", i + 1)));
+                obj.entry("protocol".to_string())
+                    .or_insert_with(|| serde_json::json!("ollama"));
+            }
+        }
+    }
+
+    // 2) embedding 段补齐：缺失的字段回退到 llm.models 的第一项
+    //    （旧版本 embedding 完全依赖 Ollama 配置）
+    let first_llm = raw
+        .get("llm")
+        .and_then(|l| l.get("models"))
+        .and_then(|m| m.as_array())
+        .and_then(|arr| arr.first())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let llm_protocol = first_llm["protocol"].as_str().unwrap_or("ollama").to_string();
+    let llm_url = first_llm["url"].as_str().unwrap_or("").to_string();
+    let llm_key = first_llm["key"].as_str().unwrap_or("").to_string();
+
+    if let Some(dbs) = raw.get_mut("vector_dbs").and_then(|v| v.as_array_mut()) {
+        for db in dbs.iter_mut() {
+            if !db.get("embedding").map(|e| e.is_object()).unwrap_or(false) {
+                db["embedding"] = serde_json::json!({});
+            }
+            let emb = match db.get_mut("embedding").and_then(|e| e.as_object_mut()) {
+                Some(e) => e,
+                None => continue,
+            };
+            // 旧字段 source（"ollama"/"openai"）作为 protocol 的回退
+            let legacy_protocol = emb
+                .get("source")
+                .and_then(|v| v.as_str())
+                .filter(|s| *s == "ollama" || *s == "openai")
+                .map(String::from);
+            if !emb.contains_key("protocol") {
+                emb.insert(
+                    "protocol".to_string(),
+                    serde_json::json!(legacy_protocol.unwrap_or_else(|| llm_protocol.clone())),
+                );
+            }
+            if !emb.contains_key("url") && !llm_url.is_empty() {
+                emb.insert("url".to_string(), serde_json::json!(llm_url.clone()));
+            }
+            if !emb.contains_key("key") && !llm_key.is_empty() {
+                emb.insert("key".to_string(), serde_json::json!(llm_key.clone()));
+            }
+            // model 无法从 LLM 段回退（语义不同），缺失时补默认值
+            let model_missing = emb
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true);
+            if model_missing {
+                emb.insert(
+                    "model".to_string(),
+                    serde_json::json!("nomic-embed-text"),
+                );
+            }
+        }
+    }
+
+    raw
+}
 
 /// 默认服务配置
 pub fn default_config() -> serde_json::Value {
@@ -25,10 +157,23 @@ pub fn default_config() -> serde_json::Value {
                 "tier": "standard"
             }
         ],
-        "ollama": {
-            "url": "http://127.0.0.1:11434",
+        "llm": {
+            "models": [
+                {
+                    "name": "default",
+                    "protocol": "ollama",
+                    "url": "http://127.0.0.1:11434",
+                    "key": "",
+                    "model": "qwen3.5:9b"
+                }
+            ]
+        },
+        "llm_extract": {
+            "from": "",
+            "protocol": "",
+            "url": "",
             "key": "",
-            "model": "qwen3.5:9b"
+            "model": ""
         },
         "vector_dbs": [
             {
@@ -39,7 +184,9 @@ pub fn default_config() -> serde_json::Value {
                 "url": "http://127.0.0.1:6333",
                 "collection": "documents",
                 "embedding": {
-                    "source": "ollama",
+                    "protocol": "ollama",
+                    "url": "http://127.0.0.1:11434",
+                    "key": "",
                     "model": "nomic-embed-text"
                 }
             }
@@ -149,6 +296,18 @@ impl ConfigManager {
         self.system_file.to_string_lossy().to_string()
     }
 
+    /// 测试用构造器：直接指定两个配置文件路径，不做 cwd / 路径推导处理。
+    #[cfg(test)]
+    pub fn for_tests(config_file: PathBuf, system_file: PathBuf) -> Self {
+        Self {
+            config_file,
+            system_file,
+            cwd: ".".to_string(),
+            cache: Arc::new(RwLock::new(None)),
+            system_cache: Arc::new(RwLock::new(None)),
+        }
+    }
+
     /// 返回解析后的工作目录（绝对路径）。
     pub fn cwd(&self) -> String {
         self.cwd.clone()
@@ -249,9 +408,32 @@ impl ConfigManager {
         }
         let mut cache = self.cache.write().unwrap();
         if cache.is_none() {
-            *cache = Some(Self::load_json_file(&self.config_file, &default_config()));
+            *cache = Some(Self::load_service_config(&self.config_file));
         }
         cache.as_ref().unwrap().clone()
+    }
+
+    /// 读取 config.json：先对磁盘原始内容做旧格式迁移，再与默认值深合并。
+    ///
+    /// 迁移内容见 [`migrate_legacy_service_config`]（`ollama` → `llm`、
+    /// 向量库 `embedding` 段补齐独立字段）。
+    fn load_service_config(filepath: &PathBuf) -> serde_json::Value {
+        let defaults = default_config();
+        if !filepath.exists() {
+            if let Some(parent) = filepath.parent() {
+                fs::create_dir_all(parent).ok();
+            }
+            let defaults_str = serde_json::to_string_pretty(&defaults).unwrap_or_default();
+            fs::write(filepath, defaults_str).ok();
+            return defaults;
+        }
+        match fs::read_to_string(filepath)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        {
+            Some(raw) => Self::deep_merge(&defaults, &migrate_legacy_service_config(raw)),
+            None => defaults,
+        }
     }
 
     pub fn load_system_config(&self) -> serde_json::Value {
@@ -362,5 +544,142 @@ impl ConfigManager {
 impl Default for ConfigManager {
     fn default() -> Self {
         Self::new("system.json")
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn defaults() -> serde_json::Value {
+        default_config()
+    }
+
+    #[test]
+    fn default_config_has_model_pool_and_extract_section() {
+        let d = defaults();
+        assert!(d.get("ollama").is_none(), "默认配置不应再含 ollama 键");
+        // LLM 模型池
+        let models = d["llm"]["models"].as_array().expect("llm.models 应为数组");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["protocol"], "ollama");
+        assert_eq!(models[0]["url"], "http://127.0.0.1:11434");
+        // 抽取专用配置：默认全空 = 继承模型池第一项
+        for key in ["from", "protocol", "url", "key", "model"] {
+            assert_eq!(d["llm_extract"][key], "", "llm_extract.{} 默认应为空", key);
+        }
+        // embedding 独立配置
+        assert_eq!(d["vector_dbs"][0]["embedding"]["protocol"], "ollama");
+        assert!(d["vector_dbs"][0]["embedding"].get("url").is_some());
+    }
+
+    #[test]
+    fn migrates_earliest_ollama_shape() {
+        let raw = serde_json::json!({
+            "ollama": {"url": "http://custom:11434", "key": "k1", "model": "m1"},
+            "vector_dbs": [
+                {"id": "default", "embedding": {"source": "ollama", "model": "nomic-embed-text"}}
+            ]
+        });
+        let out = migrate_legacy_service_config(raw);
+        assert!(out.get("ollama").is_none(), "旧键应被移除");
+        let models = out["llm"]["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["name"], "default");
+        assert_eq!(models[0]["protocol"], "ollama");
+        assert_eq!(models[0]["url"], "http://custom:11434");
+        assert_eq!(models[0]["key"], "k1");
+        assert_eq!(models[0]["model"], "m1");
+        // embedding 段按模型池第一项补齐
+        assert_eq!(out["vector_dbs"][0]["embedding"]["protocol"], "ollama");
+        assert_eq!(out["vector_dbs"][0]["embedding"]["url"], "http://custom:11434");
+        assert_eq!(out["vector_dbs"][0]["embedding"]["key"], "k1");
+        assert_eq!(out["vector_dbs"][0]["embedding"]["model"], "nomic-embed-text");
+    }
+
+    #[test]
+    fn migrates_single_llm_object_into_model_pool() {
+        let raw = serde_json::json!({
+            "llm": {"protocol": "openai", "url": "https://api.openai.com", "key": "sk-x", "model": "gpt-4o-mini"},
+            "vector_dbs": [{"embedding": {"protocol": "openai", "model": "text-embedding-3-small"}}]
+        });
+        let out = migrate_legacy_service_config(raw);
+        let models = out["llm"]["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["protocol"], "openai");
+        assert_eq!(models[0]["model"], "gpt-4o-mini");
+        // embedding 未显式配置的 url/key 由模型池第一项补齐
+        assert_eq!(out["vector_dbs"][0]["embedding"]["protocol"], "openai");
+        assert_eq!(out["vector_dbs"][0]["embedding"]["url"], "https://api.openai.com");
+        assert_eq!(out["vector_dbs"][0]["embedding"]["key"], "sk-x");
+        assert_eq!(
+            out["vector_dbs"][0]["embedding"]["model"],
+            "text-embedding-3-small"
+        );
+    }
+
+    #[test]
+    fn keeps_existing_model_pool_untouched() {
+        let raw = serde_json::json!({
+            "llm": {"models": [
+                {"name": "本地", "protocol": "ollama", "url": "http://a:11434", "key": "", "model": "qwen"},
+                {"name": "云端", "protocol": "openai", "url": "https://api.openai.com", "key": "sk", "model": "gpt"}
+            ]},
+            "llm_extract": {"from": "云端", "model": "gpt-4o-mini"}
+        });
+        let out = migrate_legacy_service_config(raw);
+        let models = out["llm"]["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["model"], "qwen");
+        assert_eq!(models[1]["name"], "云端");
+        // 已有的 llm_extract 不被覆盖（未提供的字段留给默认值合并）
+        assert_eq!(out["llm_extract"]["from"], "云端");
+        assert_eq!(out["llm_extract"]["model"], "gpt-4o-mini");
+        assert!(out["llm_extract"].get("url").is_none());
+    }
+
+    #[test]
+    fn fills_model_pool_entry_defaults() {
+        let raw = serde_json::json!({
+            "llm": {"models": [{"model": "qwen"}, {"url": "http://b:11434", "model": "llama"}]}
+        });
+        let out = migrate_legacy_service_config(raw);
+        let models = out["llm"]["models"].as_array().unwrap();
+        assert_eq!(models[0]["name"], "model-1");
+        assert_eq!(models[0]["protocol"], "ollama");
+        assert_eq!(models[1]["name"], "model-2");
+        assert_eq!(models[1]["protocol"], "ollama");
+    }
+
+    #[test]
+    fn migration_uses_legacy_embedding_source_as_protocol() {
+        let raw = serde_json::json!({
+            "ollama": {"url": "http://h:11434", "key": "", "model": "m"},
+            "vector_dbs": [{"embedding": {"source": "openai", "model": "e"}}]
+        });
+        let out = migrate_legacy_service_config(raw);
+        assert_eq!(out["vector_dbs"][0]["embedding"]["protocol"], "openai");
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let raw = serde_json::json!({
+            "ollama": {"url": "http://h:11434", "key": "", "model": "m"},
+            "vector_dbs": [{"embedding": {"source": "ollama", "model": "e"}}]
+        });
+        let once = migrate_legacy_service_config(raw);
+        let twice = migrate_legacy_service_config(once.clone());
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn deep_merge_fills_missing_sections_from_defaults() {
+        let raw = migrate_legacy_service_config(serde_json::json!({
+            "vector_dbs": [{"id": "default"}]
+        }));
+        let merged = ConfigManager::deep_merge(&defaults(), &raw);
+        // 文件未提供 llm 时，由默认值提供模型池
+        assert_eq!(merged["llm"]["models"][0]["protocol"], "ollama");
+        assert_eq!(merged["llm_extract"]["model"], "");
+        assert_eq!(merged["vector_dbs"][0]["embedding"]["model"], "nomic-embed-text");
     }
 }

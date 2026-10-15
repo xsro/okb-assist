@@ -8,6 +8,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::config_manager::ConfigManager;
+use crate::services::llm::{LlmClient, Protocol};
 
 /// MinerU 配置项（V1 API）
 ///
@@ -23,6 +24,70 @@ pub struct MinerUConfig {
     pub tier: String,
     pub task_timeout: u64,
     pub max_tasks: usize,
+}
+
+/// 单个模型端点配置（协议 + 地址 + 凭据 + 模型名）。
+///
+/// 同时用于三类场景：
+/// - `llm.models`（LLM 模型池，预留给后续问答系统）
+/// - `llm_extract`（信息补全 / 元数据抽取专用模型）
+/// - 各向量库的 `embedding` 段（向量化，与 LLM 完全独立）
+#[derive(Debug, Clone)]
+pub struct ModelEndpoint {
+    /// 展示名（仅 `llm.models` 中的项使用，其余场景为空）
+    pub name: String,
+    /// "ollama"（原生）或 "openai"
+    pub protocol: String,
+    pub url: String,
+    pub key: String,
+    pub model: String,
+}
+
+impl Default for ModelEndpoint {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            protocol: "ollama".to_string(),
+            url: "http://127.0.0.1:11434".to_string(),
+            key: String::new(),
+            model: "qwen3.5:9b".to_string(),
+        }
+    }
+}
+
+impl ModelEndpoint {
+    /// 按 JSON 字段构造（非字符串/空白字段使用 fallback 中的同名属性）
+    fn from_value(value: &serde_json::Value, fallback: &ModelEndpoint) -> Self {
+        Self {
+            name: non_empty_str(&value["name"]).unwrap_or_else(|| fallback.name.clone()),
+            protocol: non_empty_str(&value["protocol"])
+                .unwrap_or_else(|| fallback.protocol.clone()),
+            url: non_empty_str(&value["url"])
+                .map(|u| u.trim_end_matches('/').to_string())
+                .unwrap_or_else(|| fallback.url.clone()),
+            key: non_empty_str(&value["key"]).unwrap_or_else(|| fallback.key.clone()),
+            model: non_empty_str(&value["model"]).unwrap_or_else(|| fallback.model.clone()),
+        }
+    }
+
+    /// 构造客户端（LLM 生成 / embedding 均使用同一实现）
+    pub fn client(&self) -> LlmClient {
+        LlmClient::new(
+            Protocol::parse(&self.protocol),
+            &self.url,
+            if self.key.is_empty() { None } else { Some(&self.key) },
+            &self.model,
+        )
+    }
+}
+
+/// 取出非空字符串字段（去首尾空白）
+fn non_empty_str(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
 }
 
 #[derive(Clone)]
@@ -147,27 +212,70 @@ impl Settings {
             .unwrap_or_else(|| "standard".to_string())
     }
 
-    // ── Ollama ──
-    pub fn ollama_url(&self) -> String {
-        self.get_config()["ollama"]["url"]
-            .as_str()
-            .unwrap_or("http://127.0.0.1:11434")
-            .trim_end_matches('/')
-            .to_string()
+    // ── LLM ──
+    //
+    // `llm.models` 是 LLM 模型池（预留给后续问答系统，当前仅作配置载体）；
+    // `llm_extract` 是信息补全（元数据抽取）实际使用的模型配置，字段留空
+    // 即从模型池中 `from` 指定的项（为空取第一项）继承。
+
+    /// `llm.models` 原始数组（缺失时回退到旧的单对象 `llm` / `ollama`）
+    fn llm_models_value(&self) -> Vec<serde_json::Value> {
+        let config = self.get_config();
+        if let Some(models) = config["llm"]["models"].as_array() {
+            return models.clone();
+        }
+        // 兼容未经迁移的内存配置：单对象 llm / 旧的 ollama 键
+        match config.get("llm") {
+            Some(llm) if llm.is_object() => vec![llm.clone()],
+            _ => match config.get("ollama") {
+                Some(old) if old.is_object() => vec![old.clone()],
+                _ => Vec::new(),
+            },
+        }
     }
 
-    pub fn ollama_key(&self) -> String {
-        self.get_config()["ollama"]["key"]
-            .as_str()
-            .unwrap_or("")
-            .to_string()
+    /// LLM 模型池（预留给后续问答系统）
+    pub fn llm_models(&self) -> Vec<ModelEndpoint> {
+        self.llm_models_value()
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let fallback = ModelEndpoint {
+                    name: format!("model-{}", i + 1),
+                    ..Default::default()
+                };
+                ModelEndpoint::from_value(v, &fallback)
+            })
+            .collect()
     }
 
-    pub fn ollama_model(&self) -> String {
-        self.get_config()["ollama"]["model"]
-            .as_str()
-            .unwrap_or("qwen3.5:9b")
-            .to_string()
+    /// 模型池的第一项（无任何配置时返回内置默认值）
+    fn first_llm_model(&self) -> ModelEndpoint {
+        self.llm_models()
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    }
+
+    /// 信息补全（元数据抽取）使用的模型配置
+    pub fn llm_extract_config(&self) -> ModelEndpoint {
+        let config = self.get_config();
+        let section = config.get("llm_extract").cloned().unwrap_or_else(|| json!({}));
+
+        // 选择继承来源：按 from 指定的名字匹配，未命中则取第一项
+        let models = self.llm_models();
+        let from = non_empty_str(&section["from"]) ;
+        let base = from
+            .and_then(|name| models.iter().find(|m| m.name == name).cloned())
+            .or_else(|| models.into_iter().next())
+            .unwrap_or_default();
+
+        ModelEndpoint::from_value(&section, &base)
+    }
+
+    /// 构造信息补全（抽取）客户端
+    pub fn extract_client(&self) -> LlmClient {
+        self.llm_extract_config().client()
     }
 
     // ── FastEmbed ──
@@ -182,28 +290,34 @@ impl Settings {
     }
 
     // ── Embedding ──
-    pub fn embedding_source(&self) -> String {
-        self.manager
-            .get_active_vector_db()
-            .and_then(|db| {
-                db.get("embedding")
-                    .and_then(|e| e.get("source"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            })
-            .unwrap_or_else(|| "ollama".to_string())
-    }
+    //
+    // embedding 配置完全独立于 LLM：位于各向量库的 `embedding` 段。
+    // `vdb` 为 None 时使用当前启用中的向量库；字段缺失时回退到模型池第一项
+    // （兼容旧版本 embedding 复用 Ollama 配置的行为）。
 
-    pub fn embedding_model(&self) -> String {
-        self.manager
-            .get_active_vector_db()
-            .and_then(|db| {
-                db.get("embedding")
-                    .and_then(|e| e.get("model"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            })
-            .unwrap_or_else(|| "nomic-embed-text".to_string())
+    /// 解析指定向量库的 embedding 配置
+    pub fn embedding_config_for(&self, vdb: Option<&serde_json::Value>) -> ModelEndpoint {
+        let db = vdb.cloned().or_else(|| self.manager.get_active_vector_db());
+        let emb = db.as_ref().and_then(|d| d.get("embedding")).cloned().unwrap_or_else(|| json!({}));
+        let base = self.first_llm_model();
+
+        // 旧字段 source（"ollama"/"openai"）作为 protocol 的回退
+        let protocol_field = non_empty_str(&emb["protocol"]).or_else(|| non_empty_str(&emb["source"]));
+        let mut resolved = ModelEndpoint::from_value(
+            &json!({
+                "protocol": protocol_field,
+                "url": emb.get("url"),
+                "key": emb.get("key"),
+                "model": emb.get("model"),
+            }),
+            &base,
+        );
+        resolved.name = String::new();
+        // embedding 模型语义与 LLM 不同，缺失时用固有默认值而非 LLM 模型名
+        if non_empty_str(&emb["model"]).is_none() {
+            resolved.model = "nomic-embed-text".to_string();
+        }
+        resolved
     }
 
     // ── Qdrant (兼容旧代码) ──
@@ -403,5 +517,137 @@ impl Settings {
     /// 解析路径模板中的变量（仅 {id} 和 {env:VAR}）。
     pub fn substitute_path(&self, template: &str, doc_id: i64) -> String {
         crate::config_manager::ConfigManager::substitute_path_variables(template, doc_id)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config_manager::ConfigManager;
+
+    /// 用临时目录构造一个 Settings，写入指定 config.json 内容
+    fn settings_with(config_body: serde_json::Value) -> Settings {
+        let dir = std::env::temp_dir().join(format!(
+            "okb-cfg-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.json"),
+            serde_json::to_string(&config_body).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("system.json"), "{}").unwrap();
+        // ConfigManager::new 接受相对路径，先切换进程 cwd 会污染其它测试，
+        // 因此这里直接构造 manager 并写入其内部路径对应的文件
+        let manager = ConfigManager::for_tests(dir.join("config.json"), dir.join("system.json"));
+        Settings::new(std::sync::Arc::new(manager))
+    }
+
+    #[test]
+    fn extract_config_inherits_from_named_model() {
+        let s = settings_with(serde_json::json!({
+            "llm": { "models": [
+                {"name": "a", "protocol": "ollama", "url": "http://a:11434", "key": "ka", "model": "qa-model"},
+                {"name": "b", "protocol": "openai", "url": "https://api.example.com/v1", "key": "kb", "model": "qb-model"}
+            ]},
+            "llm_extract": {"from": "b", "model": "extract-model"},
+            "vector_dbs": []
+        }));
+        let cfg = s.llm_extract_config();
+        assert_eq!(cfg.protocol, "openai"); // 继承自 b
+        assert_eq!(cfg.url, "https://api.example.com/v1"); // 继承自 b
+        assert_eq!(cfg.key, "kb"); // 继承自 b
+        assert_eq!(cfg.model, "extract-model"); // 显式覆盖
+    }
+
+    #[test]
+    fn extract_config_defaults_to_first_model() {
+        let s = settings_with(serde_json::json!({
+            "llm": { "models": [
+                {"name": "a", "protocol": "openai", "url": "http://a:11434", "key": "ka", "model": "qa-model"}
+            ]},
+            "llm_extract": {"from": "", "protocol": "", "url": "", "key": "", "model": ""},
+            "vector_dbs": []
+        }));
+        let cfg = s.llm_extract_config();
+        assert_eq!(cfg.protocol, "openai");
+        assert_eq!(cfg.url, "http://a:11434");
+        assert_eq!(cfg.key, "ka");
+        assert_eq!(cfg.model, "qa-model");
+    }
+
+    #[test]
+    fn extract_config_falls_back_when_no_models_configured() {
+        let s = settings_with(serde_json::json!({
+            "llm": { "models": [] },
+            "llm_extract": {},
+            "vector_dbs": []
+        }));
+        let cfg = s.llm_extract_config();
+        assert_eq!(cfg.protocol, "ollama");
+        assert_eq!(cfg.url, "http://127.0.0.1:11434");
+        assert_eq!(cfg.model, "qwen3.5:9b");
+    }
+
+    #[test]
+    fn embedding_is_independent_from_llm() {
+        let s = settings_with(serde_json::json!({
+            "llm": { "models": [
+                {"name": "qa", "protocol": "openai", "url": "https://api.openai.com/v1", "key": "sk-llm", "model": "gpt-4o"}
+            ]},
+            "llm_extract": {"from": "qa", "model": "gpt-4o-mini"},
+            "vector_dbs": [{
+                "id": "default", "type": "qdrant", "enabled": true,
+                "embedding": {"protocol": "ollama", "url": "http://embed:11434", "key": "k-embed", "model": "bge-m3"}
+            }]
+        }));
+        let cfg = s.embedding_config_for(None);
+        assert_eq!(cfg.protocol, "ollama");
+        assert_eq!(cfg.url, "http://embed:11434");
+        assert_eq!(cfg.key, "k-embed");
+        assert_eq!(cfg.model, "bge-m3");
+        // LLM 与抽取配置不受 embedding 影响
+        assert_eq!(s.llm_extract_config().model, "gpt-4o-mini");
+        assert_eq!(s.llm_models().len(), 1);
+    }
+
+    #[test]
+    fn embedding_inherits_first_model_when_fields_empty() {
+        let s = settings_with(serde_json::json!({
+            "llm": { "models": [
+                {"name": "a", "protocol": "openai", "url": "https://api.openai.com", "key": "sk", "model": "gpt"}
+            ]},
+            "llm_extract": {},
+            "vector_dbs": [{"id": "default", "enabled": true, "embedding": {}}]
+        }));
+        let cfg = s.embedding_config_for(None);
+        assert_eq!(cfg.protocol, "openai");
+        assert_eq!(cfg.url, "https://api.openai.com");
+        assert_eq!(cfg.key, "sk");
+        // model 不回退到 LLM 模型名（语义不同）
+        assert_eq!(cfg.model, "nomic-embed-text");
+        // name 对 embedding 无意义，保持为空
+        assert_eq!(cfg.name, "");
+    }
+
+    #[test]
+    fn llm_models_returns_pool_in_order() {
+        let s = settings_with(serde_json::json!({
+            "llm": { "models": [
+                {"name": "a", "protocol": "ollama", "url": "http://a:11434", "key": "", "model": "m1"},
+                {"name": "b", "protocol": "openai", "url": "http://b:1234", "key": "kb", "model": "m2"}
+            ]},
+            "llm_extract": {},
+            "vector_dbs": []
+        }));
+        let models = s.llm_models();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].name, "a");
+        assert_eq!(models[1].model, "m2");
+        assert_eq!(models[1].protocol, "openai");
     }
 }
