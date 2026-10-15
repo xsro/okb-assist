@@ -26,7 +26,7 @@ use crate::paths;
 use crate::services::crossref::CrossrefClient;
 use crate::services::mineru::MinerUClient;
 use crate::services::ollama::OllamaClient;
-use crate::services::pdf_meta::{extract_pdf_metadata, looks_like_placeholder, normalize_doi};
+use crate::services::pdf_meta::{extract_pdf_metadata_async, looks_like_placeholder, normalize_doi};
 use crate::services::vector_db::{chunk_text_by_markdown, get_vector_db};
 use crate::utils::{absolute_path, now_iso};
 
@@ -941,6 +941,15 @@ async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id
         None => return,
     };
 
+    // 如果已有完整元数据（title + authors + year），跳过提取
+    // 避免与 Ollama extract 阶段的重复劳动
+    if doc.title.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+        && doc.authors.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+        && doc.year.is_some()
+    {
+        return;
+    }
+
     // 如果当前标题是占位符（如 "Entire document"），先清空以便后续更新
     if doc.title.as_deref().map_or(false, |t| looks_like_placeholder(t)) {
         let _ = sqlx::query("UPDATE documents SET title = '' WHERE id = ?")
@@ -955,7 +964,7 @@ async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id
         Err(_) => return,
     };
 
-    let meta = extract_pdf_metadata(&content, Some(&doc.filename), Some(doc_id));
+    let meta = extract_pdf_metadata_async(content, Some(doc.filename.clone()), Some(doc_id)).await;
 
     // 调试：打印提取的元数据
     tracing::debug!("PDF 元数据提取结果 (doc_id={}): title={:?}, authors={:?}, year={:?}, journal={:?}, doi={:?}, volume={:?}, issue={:?}, pages={:?}",
@@ -1008,6 +1017,20 @@ where
     let _permit = sem.acquire().await.expect("task semaphore closed");
     RUNNING_TASKS.fetch_add(1, Ordering::SeqCst);
     track_task_start(doc_id, task_type, None);
+    fut.await;
+    track_task_end(doc_id);
+    RUNNING_TASKS.fetch_sub(1, Ordering::SeqCst);
+}
+
+/// 用于 PDF 元数据提取的跟踪包装器，与 run_tracked 共用 TASK_SEMAPHORE。
+async fn run_pdf_meta_tracked<F>(doc_id: i64, fut: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let sem = task_semaphore();
+    let _permit = sem.acquire().await.expect("task semaphore closed");
+    RUNNING_TASKS.fetch_add(1, Ordering::SeqCst);
+    track_task_start(doc_id, "extract_pdf_meta", None);
     fut.await;
     track_task_end(doc_id);
     RUNNING_TASKS.fetch_sub(1, Ordering::SeqCst);
@@ -1736,7 +1759,7 @@ async fn extract_pdf_meta(
     if fetch_doc(&db, id).await.is_none() {
         return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response();
     }
-    tokio::spawn(run_extract_pdf_meta(db, settings, id));
+    tokio::spawn(run_pdf_meta_tracked(id, run_extract_pdf_meta(db, settings, id)));
     Json(json!({"detail": "从 PDF 元数据提取任务已提交", "status": "extract_pdf_meta"})).into_response()
 }
 
