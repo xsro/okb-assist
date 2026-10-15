@@ -84,6 +84,143 @@ impl Protocol {
     }
 }
 
+/// 工具调用方式
+///
+/// - `Auto`：先按原生 function calling 发；若服务商根本不支持（报错含 tool/function）
+///   或模型该轮不动手（回答里表示自己无法访问文献库），自动降级为提示词协议
+/// - `Native`：只用原生 `tools`（Ollama / OpenAI 兼容函数调用）
+/// - `Prompt`：只用提示词协议（模型输出 `{"tool_calls":[...]}` JSON），
+///   适用于不支持 function calling 的模型（如部分国内网关/思考型模型）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolMode {
+    Auto,
+    Native,
+    Prompt,
+}
+
+impl ToolMode {
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "native" | "function" | "tools" => ToolMode::Native,
+            "prompt" | "text" | "json" => ToolMode::Prompt,
+            _ => ToolMode::Auto,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolMode::Auto => "auto",
+            ToolMode::Native => "native",
+            ToolMode::Prompt => "prompt",
+        }
+    }
+}
+
+/// 对话消息（OpenAI 风格的角色 + 内容，Ollama 原生协议也使用同一结构）
+///
+/// 带工具的对话需要三种附加字段：
+/// - `tool_calls`：assistant 消息发起的工具调用
+/// - `tool_call_id` / `tool_name`：tool 角色消息回传的结果归属（OpenAI / Ollama 各用一个）
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ChatMessage {
+    /// "system" / "user" / "assistant" / "tool"
+    pub role: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// OpenAI 协议：工具结果消息需带 `tool_call_id`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Ollama 原生协议：工具结果消息需带 `tool_name`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+}
+
+/// 模型请求的一次工具调用
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolCall {
+    /// 调用 id：OpenAI 协议必须回传；Ollama 通常不返回，缺失时由本模块生成
+    #[serde(default)]
+    pub id: String,
+    pub name: String,
+    /// 调用参数（统一为 JSON 对象；OpenAI 返回的 JSON 字符串在解析时已展开）
+    #[serde(default)]
+    pub arguments: Value,
+}
+
+/// 一次对话生成的结果（可能包含工具调用请求）
+#[derive(Debug, Clone, Default)]
+pub struct ChatReply {
+    /// 文本回答（发起工具调用时通常为空）
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+    /// 结束原因（OpenAI 的 `finish_reason` / Ollama 的 `done_reason`），
+    /// 用于诊断“content 为空”是不是被 max_tokens 截断
+    pub finish_reason: Option<String>,
+}
+
+impl ChatMessage {
+    pub fn new(role: &str, content: &str) -> Self {
+        Self {
+            role: role.to_string(),
+            content: content.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// assistant 消息：携带工具调用请求
+    pub fn assistant_tool_calls(content: &str, tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            tool_calls,
+            ..Default::default()
+        }
+    }
+
+    /// tool 消息：回传工具执行结果
+    pub fn tool_result(call: &ToolCall, content: &str) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: content.to_string(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(call.id.clone()),
+            tool_name: Some(call.name.clone()),
+        }
+    }
+
+    /// 是否为 LLM 支持的对话角色
+    pub fn is_valid_role(&self) -> bool {
+        matches!(self.role.as_str(), "system" | "user" | "assistant" | "tool")
+    }
+
+    /// 是否携带实质内容（不能因为 content 为空就丢弃带工具调用的 assistant 消息）
+    pub fn is_meaningful(&self) -> bool {
+        !self.content.trim().is_empty() || !self.tool_calls.is_empty() || self.role == "tool"
+    }
+}
+
+/// 把工具参数统一成 JSON 对象
+///
+/// - OpenAI 协议返回的是 JSON 字符串，需要展开
+/// - Ollama 返回的是对象，直接使用
+/// - 解析失败时退化为空对象（不因参数不合法而放弃整轮对话）
+fn normalize_arguments(raw: &Value) -> Value {
+    match raw {
+        Value::String(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str::<Value>(s).unwrap_or_else(|_| json!({}))
+            }
+        }
+        Value::Object(_) => raw.clone(),
+        _ => json!({}),
+    }
+}
+
 pub struct LlmClient {
     protocol: Protocol,
     base_url: String,
@@ -194,6 +331,17 @@ impl LlmClient {
     fn parse_generate_text(&self, data: &Value) -> String {
         match self.protocol {
             Protocol::Ollama => data["response"].as_str().unwrap_or("").to_string(),
+            Protocol::OpenAi => self.parse_chat_text(data),
+        }
+    }
+
+    /// 从对话响应中取出文本
+    ///
+    /// - Ollama 原生：`{"message": {"content": "..."}}`
+    /// - OpenAI 兼容：`{"choices": [{"message": {"content": "..."}}]}`
+    fn parse_chat_text(&self, data: &Value) -> String {
+        match self.protocol {
+            Protocol::Ollama => data["message"]["content"].as_str().unwrap_or("").to_string(),
             Protocol::OpenAi => data["choices"]
                 .as_array()
                 .and_then(|choices| choices.first())
@@ -203,7 +351,199 @@ impl LlmClient {
         }
     }
 
-    /// 从 Markdown 内容提取元数据
+    /// 多轮对话生成（非流式，可携带工具）。
+    ///
+    /// `tools` 为 MCP 风格的工具定义（`{name, description, inputSchema}`），
+    /// 内部转换为两种协议的 `tools[].function.{name, description, parameters}`。
+    /// 返回文本回答与（可能的）工具调用请求。
+    pub async fn chat_with_tools(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Value],
+        temperature: f64,
+        max_tokens: u32,
+    ) -> anyhow::Result<ChatReply> {
+        let msgs = self.messages_to_value(messages);
+
+        let (path, mut body) = match self.protocol {
+            // Ollama 原生：参数嵌在 options 中，num_predict 等价于 max_tokens
+            Protocol::Ollama => (
+                "/api/chat",
+                json!({
+                    "model": self.model,
+                    "messages": msgs,
+                    "stream": false,
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": max_tokens,
+                    }
+                }),
+            ),
+            // OpenAI 兼容：参数平铺在顶层
+            Protocol::OpenAi => (
+                "/chat/completions",
+                json!({
+                    "model": self.model,
+                    "messages": msgs,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "stream": false
+                }),
+            ),
+        };
+
+        // 两种协议的工具定义结构一致（MCP 的 inputSchema → function.parameters）
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(self.tool_specs(tools));
+        }
+
+        let data = self.send_json(self.post(path).json(&body)).await?;
+
+        Ok(self.parse_chat_reply(&data))
+    }
+
+    /// MCP 工具定义 → 两种协议的 `tools` 数组
+    fn tool_specs(&self, tools: &[Value]) -> Vec<Value> {
+        tools
+            .iter()
+            .filter_map(|t| {
+                let name = t["name"].as_str()?;
+                Some(json!({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": t["description"].as_str().unwrap_or(""),
+                        "parameters": t
+                            .get("inputSchema")
+                            .cloned()
+                            .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+                    }
+                }))
+            })
+            .collect()
+    }
+
+    /// 消息列表 → 协议专属的 `messages` 数组
+    ///
+    /// 带工具的会话里，assistant 的工具调用与 tool 结果消息结构不同：
+    /// - Ollama：assistant `{tool_calls:[{function:{name,arguments}}]}`，tool 消息带 `tool_name`
+    /// - OpenAI：assistant `{tool_calls:[{id,type,function:{name,arguments(json 字符串)}}]}`，
+    ///   tool 消息带 `tool_call_id`
+    fn messages_to_value(&self, messages: &[ChatMessage]) -> Vec<Value> {
+        messages
+            .iter()
+            .map(|m| match self.protocol {
+                Protocol::Ollama => {
+                    let mut v = json!({"role": m.role, "content": m.content});
+                    if !m.tool_calls.is_empty() {
+                        v["tool_calls"] = Value::Array(
+                            m.tool_calls
+                                .iter()
+                                .map(|c| {
+                                    json!({
+                                        "function": {
+                                            "name": c.name,
+                                            "arguments": c.arguments,
+                                        }
+                                    })
+                                })
+                                .collect(),
+                        );
+                    }
+                    if m.role == "tool" {
+                        if let Some(name) = m.tool_name.as_deref() {
+                            v["tool_name"] = json!(name);
+                        }
+                    }
+                    v
+                }
+                Protocol::OpenAi => {
+                    let mut v = json!({"role": m.role, "content": m.content});
+                    if !m.tool_calls.is_empty() {
+                        v["tool_calls"] = Value::Array(
+                            m.tool_calls
+                                .iter()
+                                .map(|c| {
+                                    json!({
+                                        "id": c.id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": c.name,
+                                            // OpenAI 要求 arguments 是 JSON 字符串
+                                            "arguments": c.arguments.to_string(),
+                                        }
+                                    })
+                                })
+                                .collect(),
+                        );
+                    }
+                    if m.role == "tool" {
+                        if let Some(id) = m.tool_call_id.as_deref() {
+                            v["tool_call_id"] = json!(id);
+                        }
+                    }
+                    v
+                }
+            })
+            .collect()
+    }
+
+    /// 解析对话响应：文本 + 工具调用请求
+    fn parse_chat_reply(&self, data: &Value) -> ChatReply {
+        ChatReply {
+            content: self.parse_chat_text(data),
+            tool_calls: self.parse_tool_calls(data),
+            finish_reason: self.parse_finish_reason(data),
+        }
+    }
+
+    /// 结束原因（Ollama `done_reason` / OpenAI `choices[0].finish_reason`）
+    fn parse_finish_reason(&self, data: &Value) -> Option<String> {
+        match self.protocol {
+            Protocol::Ollama => data["done_reason"].as_str().map(String::from),
+            Protocol::OpenAi => data["choices"]
+                .as_array()
+                .and_then(|choices| choices.first())
+                .and_then(|c| c["finish_reason"].as_str())
+                .map(String::from),
+        }
+    }
+
+    /// 取出响应中的工具调用请求（Ollama 的 `message` / OpenAI 的 `choices[0].message`）
+    fn parse_tool_calls(&self, data: &Value) -> Vec<ToolCall> {
+        let message = match self.protocol {
+            Protocol::Ollama => data.get("message"),
+            Protocol::OpenAi => data["choices"]
+                .as_array()
+                .and_then(|choices| choices.first())
+                .and_then(|c| c.get("message")),
+        };
+        let Some(items) = message.and_then(|m| m["tool_calls"].as_array()) else {
+            return Vec::new();
+        };
+
+        items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tc)| {
+                let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+                if name.is_empty() {
+                    return None;
+                }
+                Some(ToolCall {
+                    // Ollama 多数版本不返回 id，补一个以便回传 tool 结果
+                    id: tc["id"]
+                        .as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| format!("call_{}", i + 1)),
+                    name,
+                    arguments: normalize_arguments(&tc["function"]["arguments"]),
+                })
+            })
+            .collect()
+    }
+
+/// 从 Markdown 内容提取元数据
     pub async fn extract_metadata(&self, markdown_content: &str) -> anyhow::Result<Value> {
         let truncated: String = markdown_content.chars().take(4000).collect();
         let prompt = EXTRACT_PROMPT.replace("{content}", &truncated);
@@ -349,6 +689,168 @@ impl ProbeError {
             ProbeError::Unreachable(msg) => ("disconnected", msg.clone()),
         }
     }
+}
+
+    /// 提示词工具协议：把工具清单与调用格式写入 system 提示词
+///
+/// 用于不支持原生 function calling 的模型（它们不会返回 `tool_calls`，
+/// 只能按提示词约定输出 JSON）。
+pub fn text_tool_prompt(tools: &[Value]) -> String {
+    let schemas: Vec<Value> = tools
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t
+                    .get("inputSchema")
+                    .cloned()
+                    .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+            })
+        })
+        .collect();
+    let list = serde_json::to_string_pretty(&schemas).unwrap_or_else(|_| "[]".to_string());
+
+    format!(
+        "你可以调用下列工具查询本地文献库（均为只读查询）。工具清单（JSON Schema）：\n{}\n\n\
+调用格式：需要调用工具时，**只输出一行 JSON**，不要输出其他文字：\n\
+{{\"tool_calls\":[{{\"name\":\"工具名\",\"arguments\":{{\"参数名\":值}}}}]}}\n\
+可以一次请求多个调用；参数为空时写 {{}}。\n\
+工具执行结果会以【工具结果】的形式返回给你。信息足够后，请用自然语言直接作答，不要再输出 JSON。",
+        list
+    )
+}
+
+/// 从模型文本中解析提示词工具协议的调用请求
+///
+/// 容忍以下形态：
+/// - `{"tool_calls":[{"name":"a","arguments":{}}]}`（推荐格式，可在代码块/噪声文本中）
+/// - `{"tool":"a","arguments":{}}` / `{"name":"a","arguments":{}}`（单个调用）
+/// - `arguments` 为 JSON 字符串（部分模型会这么输出）
+pub fn parse_text_tool_calls(text: &str) -> Vec<ToolCall> {
+    let mut candidates = vec![text.trim().to_string()];
+    candidates.extend(json_object_candidates(text));
+
+    for candidate in candidates {
+        let cleaned = fix_trailing_commas(&candidate);
+        let Ok(value) = serde_json::from_str::<Value>(&cleaned) else {
+            continue;
+        };
+        let calls = text_tool_calls_from_value(&value);
+        if !calls.is_empty() {
+            return calls;
+        }
+    }
+    Vec::new()
+}
+
+/// 把一个人工构造/模型输出的 JSON 值转成工具调用列表
+fn text_tool_calls_from_value(value: &Value) -> Vec<ToolCall> {
+    let mut calls = Vec::new();
+
+    // 推荐格式：tool_calls 数组
+    if let Some(items) = value["tool_calls"].as_array() {
+        for (i, item) in items.iter().enumerate() {
+            let name = item["name"]
+                .as_str()
+                .or_else(|| item["function"]["name"].as_str())
+                .unwrap_or("")
+                .trim();
+            if name.is_empty() {
+                continue;
+            }
+            let raw = item
+                .get("arguments")
+                .or_else(|| item.get("args"))
+                .or_else(|| item.get("parameters"))
+                .or_else(|| item["function"].get("arguments"))
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            calls.push(ToolCall {
+                id: format!("text_call_{}", i + 1),
+                name: name.to_string(),
+                arguments: normalize_arguments(&raw),
+            });
+        }
+        if !calls.is_empty() {
+            return calls;
+        }
+    }
+
+    // 单调用格式：{"tool":"x",...} 或 {"name":"x","arguments":{...}}
+    let solo = value["tool"].as_str().or_else(|| value["name"].as_str()).unwrap_or("");
+    if !solo.trim().is_empty() {
+        let raw = value
+            .get("arguments")
+            .or_else(|| value.get("args"))
+            .or_else(|| value.get("parameters"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        calls.push(ToolCall {
+            id: "text_call_1".to_string(),
+            name: solo.trim().to_string(),
+            arguments: normalize_arguments(&raw),
+        });
+    }
+
+    calls
+}
+
+/// 列出文本中所有顶层平衡的 `{...}` 片段（字符串内部的括号被正确跳过）
+fn json_object_candidates(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '{' {
+            i += 1;
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut in_str = false;
+        let mut escaped = false;
+        let mut j = i;
+        while j < chars.len() {
+            let c = chars[j];
+            if in_str {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_str = false;
+                }
+            } else {
+                match c {
+                    '"' => in_str = true,
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            out.push(chars[i..=j].iter().collect());
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            j += 1;
+        }
+        i = if j > i { j + 1 } else { i + 1 };
+    }
+    out
+}
+
+/// 容忍模型输出中的尾随逗号
+fn fix_trailing_commas(text: &str) -> String {
+    let text = text.trim();
+    let text = text.strip_prefix("```json").unwrap_or(text);
+    let text = text.strip_prefix("```").unwrap_or(text);
+    let text = text.trim_end_matches("```").trim();
+    let re_obj = regex::Regex::new(r",\s*}").unwrap();
+    let re_arr = regex::Regex::new(r",\s*]").unwrap();
+    let fixed = re_obj.replace_all(text, "}");
+    re_arr.replace_all(&fixed, "]").to_string()
 }
 
 /// 将 JSON 数组转为 f64 向量
@@ -513,5 +1015,154 @@ mod tests {
             vec![vec![1.0, 2.0], vec![3.0, 4.0]]
         );
         assert!(c.parse_embeddings(&json!({"data": [{"index": 0}]})).is_err());
+    }
+
+    #[test]
+    fn parses_chat_text_both_protocols() {
+        let ollama = LlmClient::new(Protocol::Ollama, "http://h", None, "m");
+        assert_eq!(
+            ollama.parse_chat_text(&json!({"message": {"role": "assistant", "content": "hi"}})),
+            "hi"
+        );
+        // Ollama /api/chat 与 /api/generate 的响应结构不同，不能混用
+        assert_eq!(ollama.parse_chat_text(&json!({"response": "hi"})), "");
+
+        let openai = LlmClient::new(Protocol::OpenAi, "http://h", None, "m");
+        assert_eq!(
+            openai.parse_chat_text(&json!({"choices": [{"message": {"content": "hi"}}]})),
+            "hi"
+        );
+    }
+
+    #[test]
+    fn chat_message_role_validation() {
+        assert!(ChatMessage::new("system", "s").is_valid_role());
+        assert!(ChatMessage::new("user", "u").is_valid_role());
+        assert!(ChatMessage::new("assistant", "a").is_valid_role());
+        assert!(ChatMessage::new("tool", "t").is_valid_role());
+        assert!(!ChatMessage::new("", "x").is_valid_role());
+        assert!(!ChatMessage::new("function", "x").is_valid_role());
+    }
+
+    #[test]
+    fn messages_to_value_adapts_tool_calls_per_protocol() {
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: "get_stats".to_string(),
+            arguments: json!({"foo": 1}),
+        };
+        let msgs = vec![
+            ChatMessage::assistant_tool_calls("", vec![call.clone()]),
+            ChatMessage::tool_result(&call, "总文献数 3"),
+        ];
+
+        let ollama = LlmClient::new(Protocol::Ollama, "http://h", None, "m");
+        let v = ollama.messages_to_value(&msgs);
+        // Ollama：arguments 保持对象，tool 结果消息带 tool_name
+        assert_eq!(v[0]["tool_calls"][0]["function"]["arguments"], json!({"foo": 1}));
+        assert_eq!(v[1]["role"], "tool");
+        assert_eq!(v[1]["tool_name"], "get_stats");
+        assert!(v[1].get("tool_call_id").is_none());
+
+        let openai = LlmClient::new(Protocol::OpenAi, "http://h", None, "m");
+        let v = openai.messages_to_value(&msgs);
+        // OpenAI：arguments 是 JSON 字符串，tool 结果消息带 tool_call_id
+        assert_eq!(v[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(v[0]["tool_calls"][0]["type"], "function");
+        assert_eq!(v[0]["tool_calls"][0]["function"]["arguments"], "{\"foo\":1}");
+        assert_eq!(v[1]["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn parses_tool_calls_from_both_protocols() {
+        let ollama = LlmClient::new(Protocol::Ollama, "http://h", None, "m");
+        // Ollama 不返回 id、arguments 为对象
+        let calls = ollama.parse_tool_calls(&json!({
+            "message": {"content": "", "tool_calls": [
+                {"function": {"name": "search_info", "arguments": {"query": "钠离子"}}}
+            ]}
+        }));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "search_info");
+        assert_eq!(calls[0].arguments["query"], "钠离子");
+
+        let openai = LlmClient::new(Protocol::OpenAi, "http://h", None, "m");
+        // OpenAI 返回 id、arguments 为 JSON 字符串
+        let calls = openai.parse_tool_calls(&json!({
+            "choices": [{"message": {"content": null, "tool_calls": [
+                {"id": "call_abc", "type": "function", "function": {"name": "read_markdown", "arguments": "{\"id\":7,\"section\":\"Introduction\"}"}}
+            ]}}]
+        }));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_abc");
+        assert_eq!(calls[0].name, "read_markdown");
+        assert_eq!(calls[0].arguments["id"], 7);
+
+        // 无 tool_calls / 参数非法时不报错
+        assert!(ollama.parse_tool_calls(&json!({"message": {"content": "hi"}})).is_empty());
+        assert_eq!(normalize_arguments(&json!("not-json")), json!({}));
+    }
+
+    #[test]
+    fn tool_specs_map_input_schema_to_parameters() {
+        let c = LlmClient::new(Protocol::OpenAi, "http://h", None, "m");
+        let specs = c.tool_specs(&[json!({
+            "name": "get_stats",
+            "description": "统计",
+            "inputSchema": {"type": "object", "properties": {}}
+        })]);
+        assert_eq!(specs[0]["type"], "function");
+        assert_eq!(specs[0]["function"]["name"], "get_stats");
+        assert_eq!(specs[0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn text_tool_prompt_lists_tools_and_format() {
+        let prompt = text_tool_prompt(&[json!({
+            "name": "get_stats",
+            "description": "统计",
+            "inputSchema": {"type": "object", "properties": {}}
+        })]);
+        assert!(prompt.contains("get_stats"));
+        assert!(prompt.contains("tool_calls"));
+        assert!(prompt.contains("parameters"));
+    }
+
+    #[test]
+    fn parses_text_tool_calls_in_various_shapes() {
+        // 推荐格式：裸 JSON
+        let calls = parse_text_tool_calls(r#"{"tool_calls":[{"name":"get_stats","arguments":{}}]}"#);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_stats");
+
+        // 代码块 + 前后噪声 + 多调用
+        let calls = parse_text_tool_calls(
+            "好的，我先查一下：\n```json\n{\"tool_calls\":[{\"name\":\"get_stats\",\"arguments\":{}},{\"name\":\"read_markdown\",\"arguments\":{\"id\":3,\"line_count\":20}}]}\n```",
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].name, "read_markdown");
+        assert_eq!(calls[1].arguments["id"], 3);
+
+        // 单调用写法与 arguments 为字符串的写法
+        let calls = parse_text_tool_calls(r#"{"tool":"get_stats","arguments":"{}"}"#);
+        assert_eq!(calls[0].name, "get_stats");
+        let calls = parse_text_tool_calls(r#"{"name":"get_stats","arguments":{}}"#);
+        assert_eq!(calls[0].name, "get_stats");
+        // 尾随逗号容错
+        let calls = parse_text_tool_calls(r#"{"tool_calls":[{"name":"get_stats","arguments":{},},],}"#);
+        assert_eq!(calls[0].name, "get_stats");
+
+        // 普通自然语言回答不应被误判为工具调用
+        assert!(parse_text_tool_calls("库里共有 3 篇文献 [id=12]。").is_empty());
+        assert!(parse_text_tool_calls("{\"total\": 3}").is_empty());
+    }
+
+    #[test]
+    fn json_object_candidates_skips_braces_inside_strings() {
+        let text = r#"{"a": "} 不是结束", "b": {"c": 1}}"#;
+        let found = json_object_candidates(text);
+        assert_eq!(found.len(), 1);
+        assert!(serde_json::from_str::<Value>(&found[0]).is_ok());
     }
 }

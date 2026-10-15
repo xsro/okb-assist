@@ -215,3 +215,26 @@ pub fn ip_matches_subnets(ip: &str, subnets: &[String]) -> bool {
         false
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `!cat <path>` 应直接读文件并去掉首尾空白（LLM 密钥等敏感配置用这种写法）
+    #[test]
+    fn resolve_token_reads_file_reference() {
+        let path = std::env::temp_dir().join("okb_resolve_token_test.txt");
+        std::fs::write(&path, "  secret-value\n").unwrap();
+
+        let resolved = resolve_token(&format!("!cat {}", path.display()));
+        assert_eq!(resolved, "secret-value");
+
+        // 文件不存在时保持原样（便于在日志/配置回显中看出未解析）
+        let missing = format!("!cat {}", path.with_extension("missing").display());
+        assert_eq!(resolve_token(&missing), missing);
+
+        // 非 `!` 前缀的普通值原样返回
+        assert_eq!(resolve_token("plain-key"), "plain-key");
+        let _ = std::fs::remove_file(&path);
+    }
+}

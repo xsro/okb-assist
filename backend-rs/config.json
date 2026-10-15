@@ -39,6 +39,14 @@
         "model": "qwen3.5:9b",
         "protocol": "ollama",
         "url": "http://127.0.0.1:11434"
+      },
+      {
+        "name": "dots",
+        "protocol": "openai",
+        "url": "https://note3-prev-api.askdiandian.com/v1",
+        "key": "!cat ./data/tokens/model-dot_ai",
+        "model": "dots3-note-prev",
+        "tool_mode": "auto"
       }
     ]
   },

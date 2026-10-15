@@ -203,6 +203,7 @@ fn create_app(
         .merge(routers::pipeline::router())
         .merge(routers::admin::router())
         .merge(routers::config::router())
+        .merge(routers::chat::router())
         .merge(routers::openapi::router())
         .route("/assist/mcp/stream", post(mcp_server::mcp_stream_handler).options(mcp_server::mcp_options_handler))
         .route("/assist/file/:filename", get(serve_file_alias))

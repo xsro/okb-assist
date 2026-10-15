@@ -388,7 +388,9 @@ async fn test_mineru(url: &str, key: &str, mineru_type: &str) -> Value {
 /// 测试 LLM 连接（支持 Ollama 原生 / OpenAI 兼容协议）
 async fn test_llm(url: &str, key: &str, model: &str, protocol: &str) -> Value {
     let parsed = Protocol::parse(protocol);
-    let client = LlmClient::new(parsed, url, Some(key), model);
+    // 与 ModelEndpoint::client() 一致：支持 `!cat <path>` 形式的密钥引用
+    let key = crate::utils::resolve_token(key);
+    let client = LlmClient::new(parsed, url, Some(&key), model);
     match client.probe(5).await {
         Ok(models) => {
             let model_found = model.is_empty() || models.iter().any(|m| m == model || m.contains(model));

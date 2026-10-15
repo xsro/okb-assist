@@ -29,7 +29,7 @@ pub struct MinerUConfig {
 /// 单个模型端点配置（协议 + 地址 + 凭据 + 模型名）。
 ///
 /// 同时用于三类场景：
-/// - `llm.models`（LLM 模型池，预留给后续问答系统）
+/// - `llm.models`（LLM 模型池，用于「问答」tab 与抽取的回退来源）
 /// - `llm_extract`（信息补全 / 元数据抽取专用模型）
 /// - 各向量库的 `embedding` 段（向量化，与 LLM 完全独立）
 #[derive(Debug, Clone)]
@@ -41,6 +41,8 @@ pub struct ModelEndpoint {
     pub url: String,
     pub key: String,
     pub model: String,
+    /// 工具调用方式："" / "auto" / "native" / "prompt"（仅 `llm.models` 中的项使用）
+    pub tool_mode: String,
 }
 
 impl Default for ModelEndpoint {
@@ -51,6 +53,7 @@ impl Default for ModelEndpoint {
             url: "http://127.0.0.1:11434".to_string(),
             key: String::new(),
             model: "qwen3.5:9b".to_string(),
+            tool_mode: String::new(),
         }
     }
 }
@@ -67,15 +70,21 @@ impl ModelEndpoint {
                 .unwrap_or_else(|| fallback.url.clone()),
             key: non_empty_str(&value["key"]).unwrap_or_else(|| fallback.key.clone()),
             model: non_empty_str(&value["model"]).unwrap_or_else(|| fallback.model.clone()),
+            tool_mode: non_empty_str(&value["tool_mode"])
+                .unwrap_or_else(|| fallback.tool_mode.clone()),
         }
     }
 
     /// 构造客户端（LLM 生成 / embedding 均使用同一实现）
+    ///
+    /// `key` 支持 `!cat <path>` 形式（由 [`crate::utils::resolve_token`] 在构造时解析），
+    /// 因此配置里可以只存文件引用，不把密钥写进 `config.json`。
     pub fn client(&self) -> LlmClient {
+        let key = crate::utils::resolve_token(&self.key);
         LlmClient::new(
             Protocol::parse(&self.protocol),
             &self.url,
-            if self.key.is_empty() { None } else { Some(&self.key) },
+            if key.is_empty() { None } else { Some(&key) },
             &self.model,
         )
     }
@@ -214,7 +223,7 @@ impl Settings {
 
     // ── LLM ──
     //
-    // `llm.models` 是 LLM 模型池（预留给后续问答系统，当前仅作配置载体）；
+    // `llm.models` 是 LLM 模型池（被「问答」tab 用于选模型，也是抽取/embedding 的回退来源）；
     // `llm_extract` 是信息补全（元数据抽取）实际使用的模型配置，字段留空
     // 即从模型池中 `from` 指定的项（为空取第一项）继承。
 
@@ -234,7 +243,7 @@ impl Settings {
         }
     }
 
-    /// LLM 模型池（预留给后续问答系统）
+    /// LLM 模型池（「问答」tab 的可选模型）
     pub fn llm_models(&self) -> Vec<ModelEndpoint> {
         self.llm_models_value()
             .iter()
@@ -254,6 +263,19 @@ impl Settings {
         self.llm_models()
             .into_iter()
             .next()
+            .unwrap_or_default()
+    }
+
+    /// 按名称从模型池取一项（`name` 为空或未命中时取第一项）
+    ///
+    /// 供对话等交互场景选择模型；与 `llm_extract_config` 的字段继承逻辑不同，
+    /// 这里直接返回池中的那一项。
+    pub fn llm_model_config(&self, name: Option<&str>) -> ModelEndpoint {
+        let models = self.llm_models();
+        name.map(str::trim)
+            .filter(|n| !n.is_empty())
+            .and_then(|n| models.iter().find(|m| m.name == n).cloned())
+            .or_else(|| models.into_iter().next())
             .unwrap_or_default()
     }
 
@@ -649,5 +671,27 @@ mod tests {
         assert_eq!(models[0].name, "a");
         assert_eq!(models[1].model, "m2");
         assert_eq!(models[1].protocol, "openai");
+    }
+
+    #[test]
+    fn llm_model_config_picks_by_name_and_defaults_to_first() {
+        let s = settings_with(serde_json::json!({
+            "llm": { "models": [
+                {"name": "a", "protocol": "ollama", "url": "http://a:11434", "key": "", "model": "m1"},
+                {"name": "b", "protocol": "openai", "url": "http://b:1234", "key": "kb", "model": "m2"}
+            ]},
+            "llm_extract": {},
+            "vector_dbs": []
+        }));
+
+        // 命中指定名称
+        let b = s.llm_model_config(Some("b"));
+        assert_eq!(b.model, "m2");
+        assert_eq!(b.protocol, "openai");
+
+        // 未命中 / 空名称 / None 均回退第一项
+        assert_eq!(s.llm_model_config(Some("missing")).model, "m1");
+        assert_eq!(s.llm_model_config(Some("  ")).model, "m1");
+        assert_eq!(s.llm_model_config(None).model, "m1");
     }
 }

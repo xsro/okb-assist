@@ -32,7 +32,8 @@ use std::sync::{Arc, RwLock};
 ///
 /// 补齐规则：
 /// - `llm` 的旧单对象形式被包装为 `llm.models` 的单元素数组（`name` = "default"）。
-/// - `llm.models` 每项补齐 `name`（`model-N`）与 `protocol`（`ollama`）。
+/// - `llm.models` 每项补齐 `name`（`model-N`）与 `protocol`（`ollama`）；`tool_mode`
+///   缺省视为 `auto`（先试原生 function calling，不支持时自动降级为提示词工具协议）。
 /// - `llm_extract` 的字段留空即表示“从 `from` 指定的模型项继承”（`from` 为空则取第一项），
 ///   因此迁移时保持全空，不复制取值。
 /// - `vector_dbs[].embedding` 的 `protocol` 依次回退到 `embedding.source`、`llm.models[0].protocol`；
@@ -164,7 +165,8 @@ pub fn default_config() -> serde_json::Value {
                     "protocol": "ollama",
                     "url": "http://127.0.0.1:11434",
                     "key": "",
-                    "model": "qwen3.5:9b"
+                    "model": "qwen3.5:9b",
+                    "tool_mode": "auto"
                 }
             ]
         },

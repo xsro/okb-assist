@@ -25,9 +25,11 @@ export interface ModelEndpoint {
   model: string
 }
 
-/** LLM 模型池中的一项（预留给后续问答系统） */
+/** LLM 模型池中的一项（「问答」tab 的可选模型，也是抽取/embedding 的回退来源） */
 export interface LlmModelEntry extends ModelEndpoint {
   name: string
+  /** 工具调用方式：""/"auto"（默认，先原生后降级）、"native"、"prompt" */
+  tool_mode?: string
 }
 
 /** 信息补全（元数据抽取）使用的模型；字段留空表示从模型池继承 */
@@ -52,7 +54,7 @@ export interface ServiceConfig {
   base_url: string
   active_mineru?: string
   mineru: MinerUConfig[]
-  /** LLM 模型池（预留给后续问答系统） */
+  /** LLM 模型池（「问答」tab 的可选模型） */
   llm: { models: LlmModelEntry[] }
   /** 信息补全（元数据抽取）使用的模型 */
   llm_extract: LlmExtractConfig

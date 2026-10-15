@@ -67,13 +67,13 @@ cargo build --release
 | `backend-rs/src/main.rs` | **入口**：Axum app、路由/MCP/中间件 |
 | `backend-rs/src/auth.rs` | 鉴权与角色匹配（Admin/ViewOnly/ViewUpload） |
 | `backend-rs/src/logger.rs` | 双日志初始化（文件 + 控制台） |
-| `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`admin.rs`、`config.rs`、`openapi.rs`、`mod.rs` |
+| `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/` | 后端适配器：`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`vector_db.rs`、`datalab.rs`、`query_parser.rs` |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
 | `backend-rs/src/mcp_server.rs` | MCP 服务 |
-| `backend-rs/src/settings.rs`、`backend-rs/src/utils.rs` | 全局 Settings 单例、工具函数 |
+| `backend-rs/src/settings.rs`、`backend-rs/src/utils.rs` | 全局 Settings 单例、工具函数（含 `resolve_token`：解析 `!cat <path>` 形式的敏感值） |
 | `backend-rs/config.json` | 服务配置（MinerU/LLM/向量库），可由 UI 编辑 |
 | `backend-rs/system.json` | 系统配置（token、MCP token、白名单、DB URL、上传路径、路径模板），需手动改 |
 | `client-rs/` | Zotero CSV 导入客户端（Rust） |
@@ -84,10 +84,10 @@ cargo build --release
 | `frontend/src/composables/` | 组合式函数：`useToast.ts`、`useRequireToken.ts`、`useResponsive.ts`、`usePagination.ts`、`useDebounce.ts` |
 | `frontend/src/types/` | TypeScript 类型定义：`document.ts`、`config.ts`、`pipeline.ts` |
 | `frontend/src/utils/` | 工具：`mathRenderer.ts`（KaTeX/MathJax 公式渲染）、`searchParser.ts`（搜索语法解析） |
-| `frontend/src/api/` | API 客户端：`client.ts`、`documents.ts`、`pipeline.ts`、`admin.ts`、`config.ts` |
+| `frontend/src/api/` | API 客户端：`client.ts`、`documents.ts`、`pipeline.ts`、`chat.ts`、`admin.ts`、`config.ts` |
 | `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 8 构建，输出到 `frontend/dist/`，包管理器 `pnpm`） |
 | `frontend/dist/` | 前端构建产物（`index.html`、`assets/`），由后端 serving |
-| `data/` | 运行时数据（`okb_assist.db`、`_uploads/` 等），由 `system.json` 模板决定路径 |
+| `data/` | 运行时数据（`okb_assist.db`、`_uploads/`、`tokens/` 等），由 `system.json` 模板决定路径；实际位置为 `backend-rs/data/`，已被 `backend-rs/.gitignore` 忽略 |
 | `document/` | 参考文档：`mcp.md`（MCP 工具列表）、`build.md`（部署构建）、`search.md`（搜索语法）、`datalab.to.md`、`mineru4/`、`skills/`、`openwebui.md`、`qdrant.md`、`udisks2-automount.md` |
 
 ## 配置（JSON 文件，非环境变量）
@@ -103,7 +103,7 @@ cargo build --release
 
 三套模型配置相互独立，互不影响：
 
-- `llm.models`：**LLM 模型池**（数组，每项 `{name, protocol, url, key, model}`）。预留给后续问答系统，当前仅作配置载体，不参与任何处理。`name` 用于其他配置引用。
+- `llm.models`：**LLM 模型池**（数组，每项 `{name, protocol, url, key, model, tool_mode?}`）。前端「问答」tab（`/assist/chat`）用它在池中选择模型对话（见下方「问答（Chat）」）。`name` 用于其他配置引用；`tool_mode`（`auto`/`native`/`prompt`，缺省 `auto`）控制该模型的工具调用协议。
 - `llm_extract`：**信息补全（元数据抽取）专用模型**，字段 `{from, protocol, url, key, model}`。**留空的字段从 `from` 指定的模型池条目继承**（`from` 为空或未命中则取第一项）；`model` 也可留空继承。
 - `vector_dbs[].embedding`：**Embedding 配置**，字段 `{protocol, url, key, model}`，每个向量库各自一份。缺省字段回退到模型池第一项（兼容旧行为），但 `model` 不回退（缺省为 `nomic-embed-text`，二者语义不同）。
 - 解析入口（`backend-rs/src/config.rs`）：`Settings::llm_models()`、`Settings::llm_extract_config()`、`Settings::extract_client()`、`Settings::embedding_config_for(vdb)`；均返回 `ModelEndpoint`（可 `.client()` 得到 `LlmClient`）。
@@ -117,8 +117,29 @@ cargo build --release
   - 文件未提供 `llm` 时不凭空创建空池，否则会盖掉默认模型池（`deep_merge` 对数组是整体替换）。
   - 各向量库 `embedding` 的 `protocol` 依次回退 `embedding.source` → `llm.models[0].protocol`；`url`/`key` 回退 `llm.models[0]`；`model` 缺失补 `nomic-embed-text`。
 - 前端对应组件：`LlmConfigSection.vue`（模型池增删/排序/单项连接测试）、`LlmExtractConfigSection.vue`（`from` 选择 + 继承占位符 + 生效值预览）、`VectorDbConfigSection.vue`（每个向量库的嵌入协议/URL/Key/模型）。连接测试走 `/assist/api/config/test`：`type=llm` 用请求体参数（表单实时测试），`type=llm_extract` 由服务端按已保存配置（含继承）解析。
+- **敏感字段写 `!cat <path>` 引用，不要把密钥写进 JSON**：`system.json` 的 `token`/`mcp_token`、`mineru[].token` 以及 `llm.models[].key` 都支持以 `!` 开头的值 —— `resolve_token()`（`backend-rs/src/utils.rs`）会读取 `!cat <path>` 指向的文件（路径相对进程 `cwd`，即 `backend-rs/`）并去首尾空白，结果进程内缓存。**LLM 密钥的解析发生在 `ModelEndpoint::client()` 与连接测试的 `test_llm()`**，因此 `config.json` 与 `/assist/api/config` 里只会出现 `!cat ./data/tokens/xxx` 这样的引用，不回显真实密钥；密钥文件放在 `backend-rs/data/tokens/`（已被 git 忽略）。
 - 服务状态端点键为 `llm`（不再是 `ollama`），如 `/assist/api/admin/services/status` 返回 `{mineru, llm, fastembed, vector_dbs, qdrant}`；其中 `llm` 探测的是**信息补全所用的端点**（含 `protocol`/`url`/`model`/`models`）。
 - `PUT /assist/api/config` 会校验 `llm.models` 每项都有非空 `url` 与 `model`，否则返回 400。`llm_extract` 不做校验（空值即继承）。
+
+### 问答（Chat，`/assist/chat`）
+
+基于 `llm.models` 模型池的**对话 + MCP 工具调用**（非 RAG：不自动向量检索，改由模型自己选工具查库）。
+
+- `backend-rs/src/routers/chat.rs`：
+  - `GET /assist/api/chat/models` —— 返回模型池列表 `{models:[{name,protocol,model,tool_mode}], count, default}`（**不返回 key**）。
+  - `GET /assist/api/chat/tools` —— 可被模型调用的 MCP 工具清单 `{count, tools:[{name,description}]}`。
+  - `POST /assist/api/chat` —— 请求 `{model?, messages, system?, temperature?, max_tokens?, tools?, tool_mode?, max_tool_rounds?}`，返回 `{content, steps, delta, notes, name, protocol, model, tool_mode, tool_rounds}`。
+- 模型选择：`Settings::llm_model_config(name)`（`backend-rs/src/config.rs`）按 `name` 取池中一项，未命中/留空回退第一项。
+- 对话生成：`LlmClient::chat_with_tools()`（`backend-rs/src/services/llm.rs`），Ollama 走 `/api/chat`，OpenAI 兼容走 `/chat/completions`；消息 role 允许 `system`/`user`/`assistant`/`tool`，无 `system` 时自动补默认系统提示词（开工具时再追加工具规则）；`max_tokens` 上限 8192、`temperature` 限幅 0-2。
+- **MCP 工具接入**：直接复用 `McpServer`（`backend-rs/src/mcp_server.rs`）的 9 个只读工具（`list_tools()` / `call_tool()`，与 `/assist/mcp` 同一套实现），服务端在**本请求内**完成「模型 → 工具 → 模型」循环（默认最多 5 轮、可用 `max_tool_rounds` 调整至 8），单条工具结果截断 12k 字符，重复的相同调用复用结果。
+- **两种工具协议（`tool_mode`）**：
+  - `native`：原生 function calling（请求带 `tools`，响应取 `tool_calls`）；
+  - `prompt`：提示词协议（system 里给出工具 JSON Schema，模型输出 `{"tool_calls":[{"name","arguments"}]}`，解析后以 `user` 消息回传结果）——适用于不支持 function calling 的网关/思考型模型；
+  - `auto`（默认）：先试 native，服务商报错含 tool/function 或模型首轮不动手反而声称自己“无法访问文献库”时，自动降级为 prompt（响应里的 `notes` 会说明）。
+  - 取值来源：请求参数 `tool_mode` > 模型条目的 `llm.models[].tool_mode` > `auto`。**注意：没有充分系统提示词时，部分模型（如 dots3-note-prev）不会主动发起工具调用。**
+- **认证与权限**：`GET/POST /assist/api/*` 仍是全局 Token/子网鉴权；chat 本身允许全部已认证角色（含 `view-only`），工具集均为只读查询，不超出只读用户的已有权限。
+- **非流式**：一次请求返回完整回答（前端 axios 超时单独放大到 300s，支持「停止」中止）。前端把 `delta`（含 `assistant.tool_calls` 与 `tool` 结果）追加到本地 transcript 并回传，以保留跨轮工具上下文（裁剪时不能把 `tool` 消息与其前置 `assistant.tool_calls` 拆开）。
+- 前端：`ChatView.vue` + `api/chat.ts` + `types/chat.ts`，导航项「问答」；展示工具调用卡片（工具名/参数/结果预览/失败标记）、本轮协议与降级提示；状态存 `localStorage`（`okb_chat_messages` 展示条目、`okb_chat_history` transcript、`okb_chat_model`、`okb_chat_tools`、`okb_chat_tool_mode`）。
 
 ### 工作目录与路径解析
 
@@ -168,8 +189,9 @@ cargo build --release
    - `PUT /assist/api/documents/:id/markdown/lines` —— 按行范围替换源码（admin）。语义：`line_start` 0-based 含端点，`line_count` 为被替换行数（0 = 纯插入），新行数 = `content.split('\n').count()`（与「切片 join('\n')」严格互逆），写入为原子写且不做图片路径还原（与 `raw=1` 配对）。删行必须显式传 `delete: true`（空字符串固定等于 1 个空行，不能表达删行）。
    - **乐观并发控制**：`PUT .../markdown/` 与 `.../markdown/lines/` 都接受可选 `base_hash`（取自 GET 的 `hash`），不一致时返回 **409** `{code:"conflict", hash, detail}`；不传则跳过校验（向后兼容）。两个写接口的响应都返回写入后的 `hash`。
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、迁移、索引重置。
-6. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
-7. **MCP 服务**（`mcp_server.rs`）：Streamable HTTP 端点 `/assist/mcp/stream`，SSE 挂载在 `/assist/mcp`；Bearer token 用 `system.json` 的 `mcp_token` 校验。完整工具列表见 `document/mcp.md`。
+6. **问答**（`chat.rs`）：`GET /assist/api/chat/models`、`GET /assist/api/chat/tools` 列出模型池与可调用的 MCP 工具，`POST /assist/api/chat` 基于 `llm.models` 做多轮对话，并可在本请求内循环调用 MCP 工具（非流式）。见下方「问答（Chat）」。
+7. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
+8. **MCP 服务**（`mcp_server.rs`）：Streamable HTTP 端点 `/assist/mcp/stream`，SSE 挂载在 `/assist/mcp`；Bearer token 用 `system.json` 的 `mcp_token` 校验。完整工具列表见 `document/mcp.md`。
 
 ## 后台任务（异步执行）
 
@@ -179,13 +201,13 @@ cargo build --release
 - **并发限制**：两级信号量独立控制。**全局** `Semaphore(max_concurrent_tasks)`（`system.json` 默认 `3`）限制 extract（Ollama 元数据抽取）和 index（向量索引）的并发。**MinerU 专用** `Semaphore(max_tasks)`（每个配置独立，默认 `3`）限制 PDF 解析并发。两者互不抢占，避免 MinerU 慢解析阻塞其他文档的抽取/索引。
 - **批量进度 / 暂停状态存于进程内存**：模块级全局变量，**进程重启即丢失**。重启后需手动重新触发。
 - **真·fire-and-forget**：删除文档时，SQLite 记录与本地文件先同步删除，而 Qdrant 中对应向量点的删除通过 `tokio::spawn` 异步执行，**请求不等待、失败也不可见**。
-- **前台（非后台）操作**：连接测试、服务状态、语义/全文搜索、上传均在前端 `await` 内同步完成。MCP 端点是唯一的流式长连接通道，但工具函数内部检索仍是同步 await。
+- **前台（非后台）操作**：连接测试、服务状态、语义/全文搜索、上传、问答（`/assist/api/chat`）均在前端 `await` 内同步完成。MCP 端点是唯一的流式长连接通道，但工具函数内部检索仍是同步 await。
 - **无定时任务**：没有 `APScheduler`/`schedule`/守护线程；后台仅为 Tokio 协程。
 
 ## 路由前缀
 
 - 前端 SPA：`/assist/*` → fallback 到 `frontend/dist/index.html`（由 Vue Router 处理客户端路由）
-- API：`/assist/api/documents`、`/assist/api/pipeline`、`/assist/api/admin`、`/assist/api/config`、`/assist/api/auth/check`、`/assist/openapi`
+- API：`/assist/api/documents`、`/assist/api/pipeline`、`/assist/api/chat`、`/assist/api/admin`、`/assist/api/config`、`/assist/api/auth/check`、`/assist/openapi`
 - 文件别名（免 token）：`/assist/file/{filename}`
 - MCP：`/assist/mcp/stream`（Streamable HTTP）、`/assist/mcp`（SSE）
 - 上传文件：`/assist/uploads/`（由后端直接 serving）
@@ -246,6 +268,7 @@ cargo build --release
 | `/assist/point` | `PointView.vue` | 向量库管理 | admin |
 | `/assist/mcp-setup` | `McpSetupView.vue` | MCP 配置引导 | admin |
 | `/assist/tools` | `ToolsView.vue` | 工具面板 | 全部 |
+| `/assist/chat` | `ChatView.vue` | 简易问答（LLM 模型池 + Markdown/KaTeX 渲染） | 全部 |
 | `/assist/logs` | `LogViewer.vue` | 日志查看 | admin |
 
 ### AceEditor 编辑器组件（`src/components/AceEditor.vue`）
@@ -285,6 +308,7 @@ cargo build --release
 
 ### 类型定义
 - `src/types/document.ts` — `Document`、`DocStatus`、`SearchResult`、`SearchResultList`、`TocItem`、`MarkdownResponse`、`ChunkResponse`
+- `src/types/chat.ts` — `ChatMessage`、`ChatModelInfo`、`ChatModelsResponse`、`ChatRequest`、`ChatResponse`
 - `src/types/config.ts` — `ServiceConfig`、`SystemConfig`
 - `src/types/pipeline.ts` — `PipelineState`、`BatchProgress`
 

@@ -57,6 +57,14 @@
             </div>
           </div>
           <div class="form-group">
+            <label>工具协议</label>
+            <select v-model="model.tool_mode" @change="emitUpdate" title="「问答」tab 中该模型的工具调用方式：自动会先试原生 function calling，不被支持时降级为提示词 JSON">
+              <option value="">自动（先原生，不支持时降级）</option>
+              <option value="native">仅原生 tools</option>
+              <option value="prompt">仅提示词 JSON</option>
+            </select>
+          </div>
+          <div class="form-group">
             <label>连接测试</label>
             <button class="btn btn-sm btn-outline btn-block" @click="test(idx)" :disabled="testing[idx]">
               {{ testing[idx] ? '测试中...' : '测试该模型' }}
@@ -121,7 +129,14 @@ function statusClass(status: string): string {
 }
 
 function defaultModel(): LlmModelEntry {
-  return { name: '', protocol: 'ollama', url: 'http://127.0.0.1:11434', key: '', model: '' }
+  return {
+    name: '',
+    protocol: 'ollama',
+    url: 'http://127.0.0.1:11434',
+    key: '',
+    model: '',
+    tool_mode: ''
+  }
 }
 
 function add() {

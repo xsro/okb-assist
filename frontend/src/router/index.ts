@@ -31,6 +31,12 @@ const routes = [
     meta: { title: '工具面板' }
   },
   {
+    path: '/assist/chat',
+    name: 'chat',
+    component: () => import('@/views/ChatView.vue'),
+    meta: { title: 'AI 问答' }
+  },
+  {
     path: '/assist/admin',
     name: 'admin',
     component: () => import('@/views/AdminView.vue'),
