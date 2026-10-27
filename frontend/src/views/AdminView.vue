@@ -28,6 +28,18 @@
         <span class="stat-value">{{ formatSize(stats?.total_size || 0) }}</span>
         <span class="stat-label">总大小</span>
       </div>
+      <div class="stat-card">
+        <span class="stat-value">{{ formatSize(stats?.pdf_size || 0) }}</span>
+        <span class="stat-label">PDF 大小</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">{{ formatSize(stats?.md_size || 0) }}</span>
+        <span class="stat-label">Markdown 大小</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">{{ formatSize(stats?.zip_size || 0) }}</span>
+        <span class="stat-label">资源包大小</span>
+      </div>
     </div>
 
     <!-- 维护操作 -->

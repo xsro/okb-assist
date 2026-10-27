@@ -414,23 +414,20 @@ async fn stats(
     let indexed_count = status_counts.get("indexed").and_then(|v| v.as_i64()).unwrap_or(0);
     let error_count = status_counts.get("error").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    // 计算 PDF 总大小（后台线程，不阻塞 async 运行时）
-    let total_size: i64 = {
-        let docs: Vec<(i64,)> = sqlx::query_as("SELECT id FROM documents")
-            .fetch_all(db.pool())
-            .await
-            .unwrap_or_default();
-        let paths: Vec<String> = docs.iter().map(|(id,)| paths::get_pdf_path(&settings, *id)).collect();
-        tokio::task::spawn_blocking(move || {
-            let mut total: i64 = 0;
-            for p in &paths {
-                if let Ok(meta) = std::fs::metadata(p) {
-                    total += meta.len() as i64;
-                }
-            }
-            total
-        }).await.unwrap_or(0)
-    };
+    // 从数据库直接汇总文件大小（避免遍历文件系统）
+    let total_pdf_size: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(pdf_size), 0) FROM documents")
+        .fetch_one(db.pool())
+        .await
+        .unwrap_or(0);
+    let total_md_size: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(md_size), 0) FROM documents")
+        .fetch_one(db.pool())
+        .await
+        .unwrap_or(0);
+    let total_zip_size: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(zip_size), 0) FROM documents")
+        .fetch_one(db.pool())
+        .await
+        .unwrap_or(0);
+    let total_size: i64 = total_pdf_size + total_md_size + total_zip_size;
 
     // Qdrant 状态
     let mut qdrant_status = "connected".to_string();
@@ -454,6 +451,9 @@ async fn stats(
         "indexed_count": indexed_count,
         "error_count": error_count,
         "total_size": total_size,
+        "pdf_size": total_pdf_size,
+        "md_size": total_md_size,
+        "zip_size": total_zip_size,
     }))
 }
 

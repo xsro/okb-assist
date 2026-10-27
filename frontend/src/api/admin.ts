@@ -8,6 +8,9 @@ export interface SystemStats {
   indexed_count: number
   error_count: number
   total_size: number
+  pdf_size: number
+  md_size: number
+  zip_size: number
   status_counts: Record<string, number>
 }
 
