@@ -9,6 +9,7 @@ okb-version-manager.py — 管理 OKB-Assist 多版本
   {script} install latest-release|lr [选项]     从 GitHub Release 安装最新版
   {script} install --frontend latest-release|lr [选项]  从 GitHub Release 安装前端资源
   {script} bin [版本]                            列出/查询已安装版本
+  {script} bin --latest                         仅输出最新版本二进制的绝对路径
   {script} self-update|su                       从 GitHub 更新自身脚本
 
 选项:
@@ -502,8 +503,24 @@ def get_installed_versions() -> list[dict]:
 
 # ── 命令: bin ──
 
-def cmd_bin(version: str | None):
+def cmd_bin(version: str | None, latest: bool = False):
     versions = get_installed_versions()
+
+    if latest:
+        # 只输出最新（按 mtime）且含二进制的版本的绝对路径，便于 `$(...)` 直接取用
+        for v in versions:
+            if v["binary"]:
+                print(Path(v["binary"]).resolve())
+                return
+        if not versions:
+            print("没有已安装的版本。", file=sys.stderr)
+            print("使用 `install latest-artifact|la` 或 "
+                  "`install latest-release|lr` 下载。", file=sys.stderr)
+        else:
+            print(f"未找到可执行文件: {versions[0]['version']} "
+                  f"({versions[0]['path']})", file=sys.stderr)
+        sys.exit(1)
+
     if not versions:
         info("没有已安装的版本。")
         info("使用 `install latest-artifact|la` 或 `install latest-release|lr` 下载。")
@@ -789,6 +806,9 @@ def main():
     bin_parser.add_argument(
         "version", nargs="?",
         help="版本标识 (留空则列出所有已安装版本)")
+    bin_parser.add_argument(
+        "--latest", action="store_true",
+        help="仅输出最新版本二进制的绝对路径 (忽略 version 参数)")
 
     subparsers.add_parser(
         "self-update", aliases=["su"],
@@ -809,7 +829,7 @@ def main():
         elif args.source in ("latest-release", "lr"):
             cmd_install_release()
     elif args.command == "bin":
-        cmd_bin(args.version)
+        cmd_bin(args.version, getattr(args, "latest", False))
     elif args.command in ("self-update", "su"):
         cmd_self_update()
 
