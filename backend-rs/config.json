@@ -55,7 +55,11 @@
     "protocol": "",
     "url": "",
     "key": "",
-    "model": ""
+    "model": "",
+    "prompt": "",
+    "max_input_chars": 6000,
+    "max_tokens": 2048,
+    "overwrite": true
   },
   "permissions": {
     "60b8be6583ac41abb3af63e01151bd86": {

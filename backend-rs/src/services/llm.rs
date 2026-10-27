@@ -12,43 +12,110 @@
 
 use serde_json::{json, Value};
 
-const EXTRACT_PROMPT: &str = r#"Extract metadata from the following academic document content. Return strictly in JSON format without any additional text.
+/// 元数据抽取的默认提示词模板。
+///
+/// 占位符：
+/// - `{metadata}`：已有的元数据（JSON，用于纠错；无则为“（空）”）
+/// - `{content}`：Markdown 正文（按 `max_input_chars` 截断）
+///
+/// 可在 `config.json` 的 `llm_extract.prompt` 中整体替换。
+pub const DEFAULT_EXTRACT_PROMPT: &str = r#"你是学术文献元数据校对助手。下面给出「已有元数据」与「Markdown 正文」，
+请以正文为唯一事实来源，输出校对后的完整元数据。
 
-Important Rules:
-1. First determine the primary language of the document (language field) using ISO 639-1 codes:
-   - en = English
-   - zh = Chinese
-   - ja = Japanese
-   - fr = French
-   - ru = Russian
-   - de = German
-   - ko = Korean
-   - es = Spanish
-   - pt = Portuguese
-   - ar = Arabic
-   - Use the corresponding ISO 639-1 code for other languages
+校对规则（逐字段执行）：
+1. 正文明确定义了该字段 → 以正文为准，即使与已有元数据不同也要覆盖。
+2. 已有值明显不对（与正文矛盾、格式错误如年份不是数字、DOI 不合法、标题里混进期刊名或模板文字、
+   作者里混进单位、乱码等）→ 正文中能找到正确取值则改正；**正文里也找不到就留空**
+   （字符串填 ""，列表填 []，year 填 null）。禁止猜测、禁止沿用错误值凑数。
+3. 已有值正确、正文未涉及该字段 → 原样保留。
+4. 已有值为空 → 尽量从正文补全；正文确实没有该信息时保持为空。
+5. 严禁编造。宁可留空，也不要凭常识、文件名或模板臆测。
 
-2. For non-English documents (language != "en"), provide both original and English versions:
-   - title: Original title
-   - title_en: English title
-   - authors: Original author names (list)
-   - authors_en: English author names (romanized or translated)
-   - abstract: Original abstract
-   - abstract_en: English abstract
-   - journal: Original journal/conference name
-   - journal_en: English journal/conference name
-   - keywords: Original keywords (list)
-   - keywords_en: English keywords (list)
+语言规则：
+- language 使用 ISO 639-1 代码（en/zh/ja/fr/ru/de/ko/es/pt/ar 等），按正文判断。
+- language 不是 "en" 时，同时给出 *_en 字段（英文译名/罗马化）；language 为 "en" 时 *_en 字段留空。
 
-3. For English documents (language="en"), leave *_en fields empty
+type 必须是 Zotero 类型之一：
+journalArticle|book|conferencePaper|thesis|report|preprint|bookSection|webpage|document|patent|review|manuscript|presentation
+（期刊论文用 journalArticle，会议论文用 conferencePaper）
 
-Return the following JSON format:
-{{"language": "language_code", "type": "journalArticle|book|conferencePaper|thesis|report|preprint|bookSection|webpage|document|patent|review|manuscript|presentation", "title": "Title (original)", "title_en": "English title (required for non-English)", "year": publication_year (integer), "authors": ["Author1", "Author2"], "authors_en": ["Author1", "Author2"], "abstract": "Abstract (original)", "abstract_en": "English abstract (required for non-English)", "doi": "DOI", "source": "Source", "journal": "Journal/Conference name (original)", "journal_en": "English journal/conference (required for non-English)", "keywords": ["keyword1", "keyword2"], "keywords_en": ["keyword1", "keyword2"], "category": "Category"}}
+只输出一个 JSON 对象，不要解释文字，不要 Markdown 代码块。结构如下：
+{"language": "", "type": "", "title": "", "title_en": "", "year": null, "authors": [], "authors_en": [],
+ "abstract": "", "abstract_en": "", "doi": "", "source": "", "journal": "", "journal_en": "",
+ "keywords": [], "keywords_en": [], "category": ""}
 
-Note: type must be one of the Zotero item types listed above. Use "journalArticle" for journal papers (not "article"), "conferencePaper" for conference papers (not "conference").
+已有元数据（可能为空或包含错误）：
+{metadata}
 
-Document Content:
+Markdown 正文（可能被截断）：
 {content}"#;
+
+/// 元数据抽取参数。
+#[derive(Debug, Clone)]
+pub struct ExtractOptions {
+    /// 自定义提示词模板（支持 `{content}` / `{metadata}`；空 = [`DEFAULT_EXTRACT_PROMPT`]）
+    pub prompt_template: String,
+    /// 已有元数据（用于纠错；`None` 表示没有）
+    pub existing: Option<Value>,
+    /// 送入模型的 Markdown 最大字符数
+    pub max_input_chars: usize,
+    /// 生成的最大 token 数（摘要较长时需要更大）
+    pub max_tokens: u32,
+}
+
+impl Default for ExtractOptions {
+    fn default() -> Self {
+        Self {
+            prompt_template: String::new(),
+            existing: None,
+            max_input_chars: 6000,
+            max_tokens: 2048,
+        }
+    }
+}
+
+/// 截断到指定字符数（按字符而非字节，避免切坏中文）
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 || text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    text.chars().take(max_chars).collect()
+}
+
+/// 构造元数据抽取提示词。
+///
+/// - `template` 为空时使用 [`DEFAULT_EXTRACT_PROMPT`]；
+/// - `{metadata}` 替换为已有元数据的 JSON（无则“（空）”），`{content}` 替换为截断后的正文；
+/// - 自定义模板漏写 `{content}` 时，自动在末尾补上正文，避免模型看不到内容。
+pub fn build_extract_prompt(
+    template: &str,
+    existing: Option<&Value>,
+    content: &str,
+    max_input_chars: usize,
+) -> String {
+    let template = if template.trim().is_empty() {
+        DEFAULT_EXTRACT_PROMPT
+    } else {
+        template
+    };
+
+    let metadata_text = match existing {
+        Some(v) if !v.is_null() && v.as_object().map(|o| !o.is_empty()).unwrap_or(false) => {
+            serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+        }
+        _ => "（空）".to_string(),
+    };
+
+    let body = truncate_chars(content, max_input_chars);
+
+    // 先替换 metadata（避免正文里出现 {metadata} 时被二次替换），正文最后替换
+    let prompt = template.replace("{metadata}", &metadata_text);
+    if prompt.contains("{content}") {
+        prompt.replace("{content}", &body)
+    } else {
+        format!("{}\n\nMarkdown 正文（可能被截断）：\n{}", prompt, body)
+    }
+}
 
 /// LLM 协议类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,12 +610,26 @@ impl LlmClient {
             .collect()
     }
 
-/// 从 Markdown 内容提取元数据
-    pub async fn extract_metadata(&self, markdown_content: &str) -> anyhow::Result<Value> {
-        let truncated: String = markdown_content.chars().take(4000).collect();
-        let prompt = EXTRACT_PROMPT.replace("{content}", &truncated);
+    /// 从 Markdown 内容提取元数据。
+    ///
+    /// `options.prompt_template` 为空时使用内置默认提示词；`options.existing`
+    /// 为已有元数据，会作为纠错依据一并送入模型。返回模型输出的原始 JSON
+    /// （未与已有元数据合并，合并由调用方按 `overwrite` 策略完成）。
+    pub async fn extract_metadata(
+        &self,
+        markdown_content: &str,
+        options: &ExtractOptions,
+    ) -> anyhow::Result<Value> {
+        let prompt = build_extract_prompt(
+            &options.prompt_template,
+            options.existing.as_ref(),
+            markdown_content,
+            options.max_input_chars,
+        );
 
-        let response_text = self.generate(&prompt, 0.1, 1024).await?;
+        let response_text = self
+            .generate(&prompt, 0.1, options.max_tokens.max(256))
+            .await?;
         if response_text.trim().is_empty() {
             return Ok(empty_metadata());
         }
@@ -947,6 +1028,39 @@ fn parse_json_from_text(text: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_prompt_uses_default_template_and_placeholders() {
+        let existing = json!({"title": "旧标题", "year": 1999});
+        let prompt = build_extract_prompt("", Some(&existing), "正文内容", 100);
+        // 默认模板：占位符被替换，且不再残留
+        assert!(!prompt.contains("{content}"));
+        assert!(!prompt.contains("{metadata}"));
+        assert!(prompt.contains("正文内容"));
+        assert!(prompt.contains("旧标题"));
+        // 纠错规则（正文找不到依据时留空）写在提示词里
+        assert!(prompt.contains("留空"));
+    }
+
+    #[test]
+    fn extract_prompt_custom_template_and_truncation() {
+        let prompt = build_extract_prompt(
+            "元数据={metadata}",
+            None,
+            &"字".repeat(50),
+            10,
+        );
+        // 自定义模板缺少 {content} 时，自动在末尾补正文
+        assert!(prompt.starts_with("元数据=（空）"));
+        assert!(prompt.contains(&"字".repeat(10)));
+        assert!(!prompt.contains(&"字".repeat(11)));
+    }
+
+    #[test]
+    fn extract_prompt_keeps_body_when_template_has_content_placeholder() {
+        let prompt = build_extract_prompt("前\n{content}\n后", None, "BODY", 100);
+        assert_eq!(prompt, "前\nBODY\n后");
+    }
 
     #[test]
     fn protocol_parse_falls_back_to_ollama() {

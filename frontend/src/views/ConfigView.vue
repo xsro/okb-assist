@@ -137,13 +137,17 @@ async function load() {
       model.model = model.model || ''
     }
     if (!config.value.llm_extract || typeof config.value.llm_extract !== 'object') {
-      config.value.llm_extract = { from: '', protocol: '', url: '', key: '', model: '' }
+      config.value.llm_extract = { from: '', protocol: '', url: '', key: '', model: '', prompt: '', max_input_chars: 6000, max_tokens: 2048, overwrite: true }
     } else {
       config.value.llm_extract.from = config.value.llm_extract.from || ''
       config.value.llm_extract.protocol = config.value.llm_extract.protocol || ''
       config.value.llm_extract.url = config.value.llm_extract.url || ''
       config.value.llm_extract.key = config.value.llm_extract.key || ''
       config.value.llm_extract.model = config.value.llm_extract.model || ''
+      config.value.llm_extract.prompt = config.value.llm_extract.prompt || ''
+      config.value.llm_extract.max_input_chars = config.value.llm_extract.max_input_chars || 6000
+      config.value.llm_extract.max_tokens = config.value.llm_extract.max_tokens || 2048
+      config.value.llm_extract.overwrite = config.value.llm_extract.overwrite !== false
     }
     for (const db of config.value.vector_dbs || []) {
       if (!db.embedding || typeof db.embedding !== 'object') {

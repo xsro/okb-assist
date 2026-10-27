@@ -69,6 +69,40 @@
             {{ testing ? '测试中...' : '测试' }}
           </button>
         </div>
+
+        <!-- 抽取策略：提示词模板与纠错开关 -->
+        <div class="prompt-block">
+          <div class="prompt-header">
+            <label>提示词模板</label>
+            <button class="btn btn-sm btn-ghost" @click="resetPrompt">恢复默认</button>
+          </div>
+          <p class="form-hint">
+            留空则使用内置默认提示词。支持占位符 <code>{content}</code>（Markdown 正文）与
+            <code>{metadata}</code>（当前已有元数据）。默认流程是：正文明确定义的以正文为准；
+            原值明显不对且正文里也没有正确取值时置空（留空）；正文未涉及的保持原值。
+          </p>
+          <textarea
+            v-model="extract.prompt"
+            class="prompt-textarea"
+            rows="8"
+            placeholder="留空 = 使用内置默认提示词"
+            @input="emitUpdate"
+          ></textarea>
+          <div class="form-row">
+            <div class="form-group">
+              <label>正文最大字符数</label>
+              <input v-model.number="extract.max_input_chars" type="number" min="500" step="500" placeholder="6000" @input="emitUpdate" />
+            </div>
+            <div class="form-group">
+              <label>最大 token 数</label>
+              <input v-model.number="extract.max_tokens" type="number" min="256" step="256" placeholder="2048" @input="emitUpdate" />
+            </div>
+          </div>
+          <label class="checkbox-row">
+            <input v-model="extract.overwrite" type="checkbox" @change="emitUpdate" />
+            允许用抽取结果覆盖/清空已有元数据（关闭后只补空字段）
+          </label>
+        </div>
       </div>
     </div>
   </div>
@@ -175,6 +209,11 @@ async function test() {
   } finally {
     testing.value = false
   }
+}
+
+function resetPrompt() {
+  props.extract.prompt = ''
+  emitUpdate()
 }
 
 function syncStatus(status: { status: string; detail: string }) {
@@ -324,6 +363,47 @@ defineExpose({ syncStatus })
 .status-dot-small.ok { background: var(--success); }
 .status-dot-small.error { background: var(--danger); }
 .status-dot-small.warning { background: var(--warning); }
+
+.prompt-block {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.prompt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.prompt-textarea {
+  width: 100%;
+  min-height: 120px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  resize: vertical;
+}
+.prompt-block code {
+  padding: 0 3px;
+  font-size: 11px;
+  border-radius: 3px;
+  background: var(--bg-hover, rgba(0,0,0,0.05));
+}
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
 
 .input-with-toggle {
   display: flex;

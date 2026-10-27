@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::config_manager::ConfigManager;
-use crate::services::llm::{LlmClient, Protocol};
+use crate::services::llm::{ExtractOptions, LlmClient, Protocol};
 
 /// MinerU 配置项（V1 API）
 ///
@@ -298,6 +298,63 @@ impl Settings {
     /// 构造信息补全（抽取）客户端
     pub fn extract_client(&self) -> LlmClient {
         self.llm_extract_config().client()
+    }
+
+    // ── 信息补全（元数据抽取）策略 ──
+    //
+    // 与模型端点无关的四项策略同样存放在 `llm_extract` 段（由用户按需修改）：
+    // - `prompt`：提示词模板（空 = 内置 `DEFAULT_EXTRACT_PROMPT`，支持 `{content}` / `{metadata}`）
+    // - `max_input_chars`：送入模型的 Markdown 最大字符数
+    // - `max_tokens`：生成上限（摘要较长时需调大）
+    // - `overwrite`：是否允许用抽取结果覆盖/清空已有元数据
+
+    fn llm_extract_section(&self) -> serde_json::Value {
+        self.get_config()
+            .get("llm_extract")
+            .cloned()
+            .unwrap_or_else(|| json!({}))
+    }
+
+    /// 元数据抽取使用的提示词模板（空字符串 = 内置默认模板）
+    pub fn extract_prompt_template(&self) -> String {
+        self.llm_extract_section()["prompt"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// 送入模型的 Markdown 最大字符数（默认 6000，0/负数视为默认值）
+    pub fn extract_max_input_chars(&self) -> usize {
+        match self.llm_extract_section()["max_input_chars"].as_u64() {
+            Some(n) if n > 0 => n as usize,
+            _ => 6000,
+        }
+    }
+
+    /// 抽取生成的最大 token 数（默认 2048，最小 256）
+    pub fn extract_max_tokens(&self) -> u32 {
+        match self.llm_extract_section()["max_tokens"].as_u64() {
+            Some(n) if n >= 256 => n as u32,
+            _ => 2048,
+        }
+    }
+
+    /// 是否允许用抽取结果覆盖/清空已有元数据（默认 true）
+    ///
+    /// - `true`：模型返回空值即清空该字段（用于“明显不对且正文也没有”的情况）；
+    /// - `false`：只补空字段（旧行为）。
+    pub fn extract_overwrite(&self) -> bool {
+        self.llm_extract_section()["overwrite"].as_bool().unwrap_or(true)
+    }
+
+    /// 组装元数据抽取参数（`existing` 由调用方填入已有元数据）
+    pub fn extract_options(&self, existing: Option<serde_json::Value>) -> ExtractOptions {
+        ExtractOptions {
+            prompt_template: self.extract_prompt_template(),
+            existing,
+            max_input_chars: self.extract_max_input_chars(),
+            max_tokens: self.extract_max_tokens(),
+        }
     }
 
     // ── FastEmbed ──

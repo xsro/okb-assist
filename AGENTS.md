@@ -105,8 +105,9 @@ cargo build --release
 
 - `llm.models`：**LLM 模型池**（数组，每项 `{name, protocol, url, key, model, tool_mode?}`）。前端「问答」tab（`/assist/chat`）用它在池中选择模型对话（见下方「问答（Chat）」）。`name` 用于其他配置引用；`tool_mode`（`auto`/`native`/`prompt`，缺省 `auto`）控制该模型的工具调用协议。
 - `llm_extract`：**信息补全（元数据抽取）专用模型**，字段 `{from, protocol, url, key, model}`。**留空的字段从 `from` 指定的模型池条目继承**（`from` 为空或未命中则取第一项）；`model` 也可留空继承。
+  同一段还存放与模型无关的**抽取策略**：`prompt`（自定义提示词模板，空 = 内置默认，支持 `{content}` / `{metadata}` 占位符）、`max_input_chars`（送入模型的正文最大字符数，默认 6000）、`max_tokens`（默认 2048）、`overwrite`（默认 `true`；`false` = 只补空字段，旧行为）。
 - `vector_dbs[].embedding`：**Embedding 配置**，字段 `{protocol, url, key, model}`，每个向量库各自一份。缺省字段回退到模型池第一项（兼容旧行为），但 `model` 不回退（缺省为 `nomic-embed-text`，二者语义不同）。
-- 解析入口（`backend-rs/src/config.rs`）：`Settings::llm_models()`、`Settings::llm_extract_config()`、`Settings::extract_client()`、`Settings::embedding_config_for(vdb)`；均返回 `ModelEndpoint`（可 `.client()` 得到 `LlmClient`）。
+- 解析入口（`backend-rs/src/config.rs`）：`Settings::llm_models()`、`Settings::llm_extract_config()`、`Settings::extract_client()`、`Settings::extract_options(existing)`（提示词模板 + 截断长度 + `overwrite`）、`Settings::embedding_config_for(vdb)`；模型类均返回 `ModelEndpoint`（可 `.client()` 得到 `LlmClient`）。
 - **协议差异由 `LlmClient`（`backend-rs/src/services/llm.rs`）内部处理**，调用方无需关心：
   - Ollama 原生：`/api/generate`、`/api/embed`、`/api/tags`；生成结果取 `response`，向量取 `embeddings`（**元素是裸数组**）。
   - OpenAI 兼容：`/v1/chat/completions`、`/v1/embeddings`、`/v1/models`；生成结果取 `choices[0].message.content`，向量取 `data[].embedding`（按 `index` 排序）。
@@ -116,10 +117,23 @@ cargo build --release
   - `llm.models` 每项补齐 `name`（`model-N`）与 `protocol`（`ollama`）。
   - 文件未提供 `llm` 时不凭空创建空池，否则会盖掉默认模型池（`deep_merge` 对数组是整体替换）。
   - 各向量库 `embedding` 的 `protocol` 依次回退 `embedding.source` → `llm.models[0].protocol`；`url`/`key` 回退 `llm.models[0]`；`model` 缺失补 `nomic-embed-text`。
-- 前端对应组件：`LlmConfigSection.vue`（模型池增删/排序/单项连接测试）、`LlmExtractConfigSection.vue`（`from` 选择 + 继承占位符 + 生效值预览）、`VectorDbConfigSection.vue`（每个向量库的嵌入协议/URL/Key/模型）。连接测试走 `/assist/api/config/test`：`type=llm` 用请求体参数（表单实时测试），`type=llm_extract` 由服务端按已保存配置（含继承）解析。
+- 前端对应组件：`LlmConfigSection.vue`（模型池增删/排序/单项连接测试）、`LlmExtractConfigSection.vue`（`from` 选择 + 继承占位符 + 生效值预览 + 提示词模板/截断长度/`overwrite` 开关）、`VectorDbConfigSection.vue`（每个向量库的嵌入协议/URL/Key/模型）。连接测试走 `/assist/api/config/test`：`type=llm` 用请求体参数（表单实时测试），`type=llm_extract` 由服务端按已保存配置（含继承）解析。
 - **敏感字段写 `!cat <path>` 引用，不要把密钥写进 JSON**：`system.json` 的 `token`/`mcp_token`、`mineru[].token` 以及 `llm.models[].key` 都支持以 `!` 开头的值 —— `resolve_token()`（`backend-rs/src/utils.rs`）会读取 `!cat <path>` 指向的文件（路径相对进程 `cwd`，即 `backend-rs/`）并去首尾空白，结果进程内缓存。**LLM 密钥的解析发生在 `ModelEndpoint::client()` 与连接测试的 `test_llm()`**，因此 `config.json` 与 `/assist/api/config` 里只会出现 `!cat ./data/tokens/xxx` 这样的引用，不回显真实密钥；密钥文件放在 `backend-rs/data/tokens/`（已被 git 忽略）。
 - 服务状态端点键为 `llm`（不再是 `ollama`），如 `/assist/api/admin/services/status` 返回 `{mineru, llm, fastembed, vector_dbs, qdrant}`；其中 `llm` 探测的是**信息补全所用的端点**（含 `protocol`/`url`/`model`/`models`）。
 - `PUT /assist/api/config` 会校验 `llm.models` 每项都有非空 `url` 与 `model`，否则返回 400。`llm_extract` 不做校验（空值即继承）。
+
+### 元数据抽取（信息补全）的校对语义
+
+实现在 `backend-rs/src/routers/pipeline.rs` 的 `do_extract_impl` + `backend-rs/src/services/llm.rs` 的 `extract_metadata` / `build_extract_prompt`。
+
+- **提示词可配置**：`config.json` 的 `llm_extract.prompt` 为空时用内置 `DEFAULT_EXTRACT_PROMPT`；否则整体替换。占位符：`{content}`（按 `max_input_chars` 截断的 Markdown 正文）、`{metadata}`（数据库里已有元数据的 JSON）。自定义模板漏写 `{content}` 时自动在末尾补正文。
+- **输入包含原元数据**：`MetaRecord::from_doc` 把数据库中的 16 个字段拍成 JSON 一起送入模型，由模型逐字段校对。
+- **输出是纠错结果而非只填空**：`MetaRecord::apply` 按 `overwrite` 合并 ——
+  - `overwrite = true`（默认）：模型返回的字段以模型为准；返回 `""` / `[]` / `null` 表示“请清空”（对应“原值明显不对且正文里也没有”的情况）；模型未返回的字段保持原值。
+  - `overwrite = false`：只补空字段（旧行为）。
+  - `type` 走 `normalize_doc_type()` 的 Zotero 标准映射；`year` 只接受 1000–2200。
+- **安全阀**：模型输出全空（`metadata_is_blank`）直接放弃写入；合并后标题与作者同时为空也放弃写入。旧的“已有标题/作者/年份则跳过提取”判断已移除，因此可以对同一文档反复抽取以纠正旧值。
+- **日志**：`info!` 依次输出“原元数据 → 模型输出 → 字段变化清单（`字段: 旧 → 新`）→ 更新后元数据”，失败/放弃路径用 `warn!`。
 
 ### 问答（Chat，`/assist/chat`）
 

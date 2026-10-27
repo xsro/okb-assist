@@ -36,6 +36,14 @@ export interface LlmModelEntry extends ModelEndpoint {
 export interface LlmExtractConfig extends ModelEndpoint {
   /** 继承来源：模型池中的 name，空 = 第一项 */
   from: string
+  /** 自定义提示词模板（支持 {content} / {metadata}；空 = 内置默认模板） */
+  prompt?: string
+  /** 送入模型的 Markdown 最大字符数（默认 6000） */
+  max_input_chars?: number
+  /** 生成的最大 token 数（默认 2048） */
+  max_tokens?: number
+  /** 是否允许用抽取结果覆盖/清空已有元数据（默认 true） */
+  overwrite?: boolean
 }
 
 export interface MinerUConfig {

@@ -26,7 +26,8 @@ use std::sync::{Arc, RwLock};
 /// 目标格式：
 /// ```json
 /// { "llm": { "models": [{ "name": "...", "protocol": "...", "url": "...", "key": "...", "model": "..." }] },
-///   "llm_extract": { "from": "", "protocol": "", "url": "", "key": "", "model": "" },
+///   "llm_extract": { "from": "", "protocol": "", "url": "", "key": "", "model": "",
+///                    "prompt": "", "max_input_chars": 6000, "max_tokens": 2048, "overwrite": true },
 ///   "vector_dbs": [{ "embedding": { "protocol": "...", "url": "...", "key": "...", "model": "..." } }] }
 /// ```
 ///
@@ -35,7 +36,9 @@ use std::sync::{Arc, RwLock};
 /// - `llm.models` 每项补齐 `name`（`model-N`）与 `protocol`（`ollama`）；`tool_mode`
 ///   缺省视为 `auto`（先试原生 function calling，不支持时自动降级为提示词工具协议）。
 /// - `llm_extract` 的字段留空即表示“从 `from` 指定的模型项继承”（`from` 为空则取第一项），
-///   因此迁移时保持全空，不复制取值。
+///   因此迁移时保持全空，不复制取值。该段还承载与模型无关的抽取策略：
+///   `prompt`（自定义提示词模板，空 = 内置默认）、`max_input_chars`、`max_tokens`、
+///   `overwrite`（是否允许用抽取结果覆盖/清空已有元数据）。
 /// - `vector_dbs[].embedding` 的 `protocol` 依次回退到 `embedding.source`、`llm.models[0].protocol`；
 ///   `url`/`key` 回退到 `llm.models[0]`；`model` 缺失时回退 `nomic-embed-text`。
 ///
@@ -175,7 +178,11 @@ pub fn default_config() -> serde_json::Value {
             "protocol": "",
             "url": "",
             "key": "",
-            "model": ""
+            "model": "",
+            "prompt": "",
+            "max_input_chars": 6000,
+            "max_tokens": 2048,
+            "overwrite": true
         },
         "vector_dbs": [
             {
@@ -572,9 +579,13 @@ mod tests {
         assert_eq!(models[0]["protocol"], "ollama");
         assert_eq!(models[0]["url"], "http://127.0.0.1:11434");
         // 抽取专用配置：默认全空 = 继承模型池第一项
-        for key in ["from", "protocol", "url", "key", "model"] {
+        for key in ["from", "protocol", "url", "key", "model", "prompt"] {
             assert_eq!(d["llm_extract"][key], "", "llm_extract.{} 默认应为空", key);
         }
+        // 抽取策略默认值
+        assert_eq!(d["llm_extract"]["max_input_chars"], 6000);
+        assert_eq!(d["llm_extract"]["max_tokens"], 2048);
+        assert_eq!(d["llm_extract"]["overwrite"], true);
         // embedding 独立配置
         assert_eq!(d["vector_dbs"][0]["embedding"]["protocol"], "ollama");
         assert!(d["vector_dbs"][0]["embedding"].get("url").is_some());

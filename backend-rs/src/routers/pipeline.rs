@@ -501,6 +501,343 @@ fn value_list_json(v: &Value, key: &str) -> Option<String> {
         .map(|a| serde_json::to_string(a).unwrap_or_else(|_| "[]".to_string()))
 }
 
+// ── 元数据抽取：解析 / 合并 / 落库 ──
+
+/// 元数据快照，字段与 `documents` 表一一对应。
+///
+/// 抽取前后都用它做快照：它既是送给模型的「已有元数据」，
+/// 也是合并结果与日志对比的依据。
+#[derive(Debug, Clone, Default, PartialEq)]
+struct MetaRecord {
+    title: String,
+    title_en: String,
+    authors: Vec<String>,
+    authors_en: Vec<String>,
+    year: Option<i64>,
+    doi: String,
+    source: String,
+    journal: String,
+    journal_en: String,
+    keywords: Vec<String>,
+    keywords_en: Vec<String>,
+    abstract_text: String,
+    abstract_en: String,
+    category: String,
+    doc_type: String,
+    language: String,
+}
+
+impl MetaRecord {
+    /// 从数据库记录构造快照
+    fn from_doc(doc: &Document) -> Self {
+        Self {
+            title: trim_opt(&doc.title),
+            title_en: trim_opt(&doc.title_en),
+            authors: parse_str_list(doc.authors.as_deref()),
+            authors_en: parse_str_list(doc.authors_en.as_deref()),
+            year: doc.year,
+            doi: trim_opt(&doc.doi),
+            source: trim_opt(&doc.source),
+            journal: trim_opt(&doc.journal),
+            journal_en: trim_opt(&doc.journal_en),
+            keywords: parse_str_list(doc.keywords.as_deref()),
+            keywords_en: parse_str_list(doc.keywords_en.as_deref()),
+            abstract_text: trim_opt(&doc.abstract_text),
+            abstract_en: trim_opt(&doc.abstract_en),
+            category: trim_opt(&doc.category),
+            doc_type: trim_opt(&doc.doc_type),
+            language: trim_opt(&doc.language),
+        }
+    }
+
+    /// 转为 JSON（送模型作为「已有元数据」，同时用于日志）
+    fn to_json(&self) -> Value {
+        json!({
+            "language": self.language,
+            "type": self.doc_type,
+            "title": self.title,
+            "title_en": self.title_en,
+            "year": self.year,
+            "authors": self.authors,
+            "authors_en": self.authors_en,
+            "abstract": self.abstract_text,
+            "abstract_en": self.abstract_en,
+            "doi": self.doi,
+            "source": self.source,
+            "journal": self.journal,
+            "journal_en": self.journal_en,
+            "keywords": self.keywords,
+            "keywords_en": self.keywords_en,
+            "category": self.category,
+        })
+    }
+
+    /// 合并模型输出，返回发生变化的字段描述（`字段: 旧值 → 新值`）。
+    ///
+    /// - `overwrite = true`：模型给出了该字段就以模型为准（返回空值 = 清空该字段，
+    ///   用于「原值明显不对且正文里也没有」的情况）；模型未返回的字段保持原值。
+    /// - `overwrite = false`：只补空字段，已有值一律不动（旧行为）。
+    ///
+    /// 例外：文档语言为英文时，`*_en` 字段本身没有意义，模型按提示词把它们留空，
+    /// 此时保留原值，不禁把已有的英文标题/摘要抹掉。
+    fn apply(&mut self, new: &Value, overwrite: bool) -> Vec<String> {
+        let mut changes: Vec<String> = Vec::new();
+
+        // 合并后的语言（模型未返回时用原值）：用于判断 `*_en` 字段是否无意义
+        let merged_language = meta_text(new, "language")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.language.clone());
+        let en_moot = merged_language.eq_ignore_ascii_case("en");
+
+        // `$moot`：该字段在本篇里是否无意义（为 true 时模型给空值 = 保留原值）
+        macro_rules! text_field {
+            ($field:ident, $key:expr) => {
+                text_field!($field, $key, false)
+            };
+            ($field:ident, $key:expr, $moot:expr) => {{
+                let old = self.$field.clone();
+                if let Some(fresh) = meta_text(new, $key) {
+                    let next = if overwrite || old.is_empty() {
+                        if $moot && fresh.is_empty() {
+                            old.clone()
+                        } else {
+                            fresh
+                        }
+                    } else {
+                        old.clone()
+                    };
+                    if next != old {
+                        changes.push(format!(
+                            "{}: {} → {}",
+                            $key,
+                            display_text(&old),
+                            display_text(&next)
+                        ));
+                    }
+                    self.$field = next;
+                }
+            }};
+        }
+
+        macro_rules! list_field {
+            ($field:ident, $key:expr) => {
+                list_field!($field, $key, false)
+            };
+            ($field:ident, $key:expr, $moot:expr) => {{
+                let old = self.$field.clone();
+                if let Some(fresh) = meta_list(new, $key) {
+                    let next = if overwrite || old.is_empty() {
+                        if $moot && fresh.is_empty() {
+                            old.clone()
+                        } else {
+                            fresh
+                        }
+                    } else {
+                        old.clone()
+                    };
+                    if next != old {
+                        changes.push(format!(
+                            "{}: {} → {}",
+                            $key,
+                            display_list(&old),
+                            display_list(&next)
+                        ));
+                    }
+                    self.$field = next;
+                }
+            }};
+        }
+
+        text_field!(title, "title");
+        text_field!(title_en, "title_en", en_moot);
+        list_field!(authors, "authors");
+        list_field!(authors_en, "authors_en", en_moot);
+        text_field!(doi, "doi");
+        text_field!(source, "source");
+        text_field!(journal, "journal");
+        text_field!(journal_en, "journal_en", en_moot);
+        list_field!(keywords, "keywords");
+        list_field!(keywords_en, "keywords_en", en_moot);
+        text_field!(abstract_text, "abstract");
+        text_field!(abstract_en, "abstract_en", en_moot);
+        text_field!(category, "category");
+        text_field!(language, "language");
+
+        // 年份单独处理：模型返回 null / 空串 / 非法值表示无法确定（清空）
+        if let Some(fresh) = meta_year(new, "year") {
+            let next = if overwrite || self.year.is_none() { fresh } else { self.year };
+            if next != self.year {
+                changes.push(format!(
+                    "year: {} → {}",
+                    display_year(self.year),
+                    display_year(next)
+                ));
+            }
+            self.year = next;
+        }
+
+        // 类型走 Zotero 标准映射（模型可能返回 `article` 之类）
+        if let Some(fresh) = meta_text(new, "type") {
+            let fresh = normalize_doc_type(&fresh);
+            let next = if overwrite || self.doc_type.is_empty() { fresh } else { self.doc_type.clone() };
+            if next != self.doc_type {
+                changes.push(format!(
+                    "type: {} → {}",
+                    display_text(&self.doc_type),
+                    display_text(&next)
+                ));
+            }
+            self.doc_type = next;
+        }
+
+        changes
+    }
+
+    /// 标题与作者是否都为空（这样的记录基本无用）
+    fn is_blank(&self) -> bool {
+        self.title.is_empty() && self.authors.is_empty()
+    }
+}
+
+/// 可空字符串列 → 去首尾空白的字符串
+fn trim_opt(v: &Option<String>) -> String {
+    v.as_deref().unwrap_or("").trim().to_string()
+}
+
+fn display_text(v: &str) -> String {
+    if v.is_empty() {
+        "（空）".to_string()
+    } else {
+        format!("\"{}\"", v)
+    }
+}
+
+fn display_list(v: &[String]) -> String {
+    if v.is_empty() {
+        "（空）".to_string()
+    } else {
+        serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string())
+    }
+}
+
+fn display_year(v: Option<i64>) -> String {
+    v.map(|y| y.to_string()).unwrap_or_else(|| "（空）".to_string())
+}
+
+/// 作者/关键词列 → 数组：优先按 JSON 数组解析，其次按分隔符切分
+fn parse_str_list(raw: Option<&str>) -> Vec<String> {
+    let raw = raw.unwrap_or("").trim();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(raw) {
+        return items
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
+    raw.split([';', ',', '、', '，'])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// 数组 → 数据库列（空数组写空串，与 `NULLIF(x, '')` 语义一致）
+fn list_to_db(items: &[String]) -> String {
+    if items.is_empty() {
+        String::new()
+    } else {
+        serde_json::to_string(items).unwrap_or_default()
+    }
+}
+
+/// 从模型输出取文本字段：字段缺失 → `None`（模型没表态）；
+/// 返回空串表示「确认留空」（原值明显不对且正文里也没有正确取值）。
+fn meta_text(v: &Value, key: &str) -> Option<String> {
+    let raw = v.get(key)?;
+    match raw {
+        Value::Null => Some(String::new()),
+        Value::String(s) => Some(s.trim().to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        // 模型把列表塞进字符串字段时保留可读形式
+        Value::Array(items) => Some(
+            items
+                .iter()
+                .filter_map(|x| x.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+        _ => None,
+    }
+}
+
+/// 从模型输出取列表字段：字段缺失 → `None`；空数组 → `Some(vec![])` 表示清空
+fn meta_list(v: &Value, key: &str) -> Option<Vec<String>> {
+    let raw = v.get(key)?;
+    match raw {
+        Value::Null => Some(Vec::new()),
+        Value::Array(items) => Some(
+            items
+                .iter()
+                .filter_map(|x| match x {
+                    Value::String(s) => Some(s.trim().to_string()),
+                    Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                })
+                .filter(|s| !s.is_empty())
+                .collect(),
+        ),
+        Value::String(s) => Some(parse_str_list(Some(s))),
+        _ => None,
+    }
+}
+
+/// 从模型输出取年份：`None` = 字段缺失；`Some(None)` = 明确留空
+fn meta_year(v: &Value, key: &str) -> Option<Option<i64>> {
+    let raw = v.get(key)?;
+    match raw {
+        Value::Null => Some(None),
+        Value::Number(n) => Some(n.as_i64().filter(|y| (1000..=2200).contains(y))),
+        Value::String(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                return Some(None);
+            }
+            let digits: String = s.chars().filter(|c| c.is_ascii_digit()).take(4).collect();
+            Some(digits.parse::<i64>().ok().filter(|y| (1000..=2200).contains(y)))
+        }
+        _ => None,
+    }
+}
+
+/// 模型输出是否完全没有可用内容（用于避免把已有元数据整体抹掉）
+fn metadata_is_blank(v: &Value) -> bool {
+    if v.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+        return true;
+    }
+    let texts = [
+        "title", "title_en", "abstract", "abstract_en", "doi", "source", "journal",
+        "journal_en", "category", "type", "language",
+    ];
+    let has_text = texts
+        .iter()
+        .any(|k| meta_text(v, k).map(|s| !s.is_empty()).unwrap_or(false));
+    let has_list = ["authors", "authors_en", "keywords", "keywords_en"]
+        .iter()
+        .any(|k| meta_list(v, k).map(|l| !l.is_empty()).unwrap_or(false));
+    // 没有任何可用值 → 视为空
+    !(has_text || has_list)
+}
+
+/// 信息补全（元数据抽取）主流程。
+///
+/// 与旧版的区别：把数据库里已有的元数据一并送给模型做校对，
+/// 模型可以改正与正文矛盾的取值，也可以在「正文里也没有正确值」时把它们清空；
+/// 同时把「原元数据 / 模型输出 / 字段变化 / 最终元数据」写入日志。
 async fn do_extract_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
     let doc = match fetch_doc(&db, doc_id).await {
         Some(d) => d,
@@ -509,95 +846,96 @@ async fn do_extract_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64
 
     let md_path = paths::get_markdown_path(&settings, doc_id);
     if !std::path::Path::new(&md_path).exists() {
-        return;
-    }
-
-    // 已有标题、作者、年份则跳过提取
-    if doc.title.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
-        && doc.authors.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
-        && doc.year.is_some()
-    {
+        warn!("文档 {} 提取元数据跳过：Markdown 文件不存在 ({})", doc_id, md_path);
         return;
     }
 
     let markdown_content = match std::fs::read_to_string(&md_path) {
         Ok(c) => c,
-        Err(_) => return,
+        Err(e) => {
+            warn!("文档 {} 提取元数据跳过：读取 Markdown 失败: {}", doc_id, e);
+            return;
+        }
     };
 
-    let metadata = match settings.extract_client().extract_metadata(&markdown_content).await {
+    let overwrite = settings.extract_overwrite();
+    let old = MetaRecord::from_doc(&doc);
+    info!(
+        "文档 {} 开始提取元数据 (model={}, overwrite={}): 原元数据={}",
+        doc_id,
+        settings.llm_extract_config().model,
+        overwrite,
+        old.to_json()
+    );
+
+    let options = settings.extract_options(Some(old.to_json()));
+    let metadata = match settings.extract_client().extract_metadata(&markdown_content, &options).await {
         Ok(m) => m,
-        Err(_) => return,
+        Err(e) => {
+            warn!("文档 {} 元数据抽取失败: {}", doc_id, e);
+            return;
+        }
     };
+    info!("文档 {} 模型输出的元数据: {}", doc_id, metadata);
 
-    let title = value_str(&metadata, "title").unwrap_or_default();
-    let authors = metadata.get("authors").and_then(|a| a.as_array()).cloned().unwrap_or_default();
-    let doc_type = normalize_doc_type(metadata.get("type").and_then(|t| t.as_str()).unwrap_or(""));
-
-    if title.is_empty() && authors.is_empty() {
+    // 模型什么都没给出来（输出被截断 / 返回空对象）时保持原样
+    if metadata_is_blank(&metadata) {
+        warn!("文档 {} 模型输出的元数据全为空, 保留原元数据", doc_id);
         return;
     }
 
-    // 仅填充空字段
-    let authors_json = serde_json::to_string(&authors).unwrap_or_else(|_| "[]".to_string());
-    let keywords_json = value_list_json(&metadata, "keywords");
-    let authors_en_json = value_list_json(&metadata, "authors_en");
-    let keywords_en_json = value_list_json(&metadata, "keywords_en");
+    let mut merged = old.clone();
+    let changes = merged.apply(&metadata, overwrite);
 
-    let language = value_str(&metadata, "language").unwrap_or_else(|| "en".to_string());
+    if changes.is_empty() {
+        info!("文档 {} 元数据无变化: {}", doc_id, merged.to_json());
+        return;
+    }
 
-    // 使用显式 UPDATE 仅填充空字段（用 COALESCE 语义）
+    // 标题与作者同时为空说明这次抽取不可信，放弃写入
+    if merged.is_blank() {
+        warn!(
+            "文档 {} 抽取结果会同时清空标题与作者, 已放弃本次更新: 模型输出={}",
+            doc_id, metadata
+        );
+        return;
+    }
+
+    let authors = list_to_db(&merged.authors);
+    let authors_en = list_to_db(&merged.authors_en);
+    let keywords = list_to_db(&merged.keywords);
+    let keywords_en = list_to_db(&merged.keywords_en);
+
     let _ = sqlx::query(
         "UPDATE documents SET \
-            title = COALESCE(NULLIF(title, ''), ?), \
-            authors = COALESCE(NULLIF(authors, ''), ?), \
-            year = COALESCE(year, ?), \
-            doi = COALESCE(NULLIF(doi, ''), ?), \
-            source = COALESCE(NULLIF(source, ''), ?), \
-            journal = COALESCE(NULLIF(journal, ''), ?), \
-            keywords = COALESCE(NULLIF(keywords, ''), ?), \
-            abstract = COALESCE(NULLIF(abstract, ''), ?), \
-            category = COALESCE(NULLIF(category, ''), ?), \
-            doc_type = COALESCE(NULLIF(doc_type, ''), ?), \
-            language = COALESCE(NULLIF(language, ''), ?), \
+            title = ?, title_en = ?, authors = ?, authors_en = ?, year = ?, doi = ?, \
+            source = ?, journal = ?, journal_en = ?, keywords = ?, keywords_en = ?, \
+            abstract = ?, abstract_en = ?, category = ?, doc_type = ?, language = ?, \
             updated_at = ? WHERE id = ?",
     )
-    .bind(&title)
-    .bind(&authors_json)
-    .bind(value_i64(&metadata, "year"))
-    .bind(value_str(&metadata, "doi").unwrap_or_default())
-    .bind(value_str(&metadata, "source").unwrap_or_default())
-    .bind(value_str(&metadata, "journal").unwrap_or_default())
-    .bind(keywords_json.unwrap_or_default())
-    .bind(value_str(&metadata, "abstract").unwrap_or_default())
-    .bind(value_str(&metadata, "category").unwrap_or_default())
-    .bind(&doc_type)
-    .bind(&language)
+    .bind(&merged.title)
+    .bind(&merged.title_en)
+    .bind(&authors)
+    .bind(&authors_en)
+    .bind(merged.year)
+    .bind(&merged.doi)
+    .bind(&merged.source)
+    .bind(&merged.journal)
+    .bind(&merged.journal_en)
+    .bind(&keywords)
+    .bind(&keywords_en)
+    .bind(&merged.abstract_text)
+    .bind(&merged.abstract_en)
+    .bind(&merged.category)
+    .bind(&merged.doc_type)
+    .bind(&merged.language)
     .bind(now_iso())
     .bind(doc_id)
     .execute(db.pool())
     .await;
 
-    // English fields for non-English documents
-    if language != "en" {
-        let _ = sqlx::query(
-            "UPDATE documents SET \
-                title_en = COALESCE(NULLIF(title_en, ''), ?), \
-                authors_en = COALESCE(NULLIF(authors_en, ''), ?), \
-                keywords_en = COALESCE(NULLIF(keywords_en, ''), ?), \
-                abstract_en = COALESCE(NULLIF(abstract_en, ''), ?), \
-                journal_en = COALESCE(NULLIF(journal_en, ''), ?) \
-                WHERE id = ?",
-        )
-        .bind(value_str(&metadata, "title_en").unwrap_or_default())
-        .bind(authors_en_json.unwrap_or_default())
-        .bind(keywords_en_json.unwrap_or_default())
-        .bind(value_str(&metadata, "abstract_en").unwrap_or_default())
-        .bind(value_str(&metadata, "journal_en").unwrap_or_default())
-        .bind(doc_id)
-        .execute(db.pool())
-        .await;
-    }
+    info!("文档 {} 元数据字段更新: {}", doc_id, changes.join(" | "));
+    info!("文档 {} 更新后的元数据: {}", doc_id, merged.to_json());
 }
 
 async fn do_index_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64, vector_db_id: String) {
@@ -1979,4 +2317,94 @@ async fn stop(
         track_task_end(id);
     }
     Json(json!({"detail": "任务停止请求已处理", "status": doc.status})).into_response()
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::*;
+
+    fn record() -> MetaRecord {
+        MetaRecord {
+            title: "错误的标题".to_string(),
+            authors: vec!["张三".to_string()],
+            year: Some(1999),
+            doc_type: "article".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn overwrite_corrects_wrong_values() {
+        let mut rec = record();
+        let changes = rec.apply(
+            &json!({"title": "正确的标题", "year": 2020, "type": "conference"}),
+            true,
+        );
+        assert_eq!(rec.title, "正确的标题");
+        assert_eq!(rec.year, Some(2020));
+        // type 走标准映射
+        assert_eq!(rec.doc_type, "conferencePaper");
+        assert_eq!(changes.len(), 3);
+    }
+
+    #[test]
+    fn overwrite_clears_field_missing_in_markdown() {
+        let mut rec = record();
+        // 模型判定原值不对但正文里也没有 → 返回空值
+        rec.apply(&json!({"title": "", "authors": [], "year": null}), true);
+        assert!(rec.title.is_empty());
+        assert!(rec.authors.is_empty());
+        assert_eq!(rec.year, None);
+        assert!(rec.is_blank());
+    }
+
+    #[test]
+    fn missing_keys_keep_original_values() {
+        let mut rec = record();
+        let changes = rec.apply(&json!({"doi": "10.1000/x"}), true);
+        assert_eq!(rec.title, "错误的标题");
+        assert_eq!(rec.doi, "10.1000/x");
+        assert_eq!(changes, vec!["doi: （空） → \"10.1000/x\"".to_string()]);
+    }
+
+    #[test]
+    fn fill_only_mode_never_touches_existing_values() {
+        let mut rec = record();
+        rec.apply(&json!({"title": "新标题", "journal": "某期刊", "authors": ["李四"]}), false);
+        assert_eq!(rec.title, "错误的标题");
+        assert_eq!(rec.authors, vec!["张三".to_string()]);
+        assert_eq!(rec.journal, "某期刊");
+    }
+
+    #[test]
+    fn blank_model_output_is_detected() {
+        assert!(metadata_is_blank(&json!({})));
+        assert!(metadata_is_blank(&json!({"title": "", "authors": [], "year": null})));
+        assert!(!metadata_is_blank(&json!({"authors": ["A"]})));
+        assert!(!metadata_is_blank(&json!({"title": "T"})));
+    }
+
+    #[test]
+    fn english_docs_keep_existing_en_fields() {
+        let mut rec = record();
+        rec.title_en = "Title EN".to_string();
+        rec.language = "en".to_string();
+        // 英文文档的 *_en 字段模型会给空（无意义），此时保留原值
+        rec.apply(&json!({"title": "T", "title_en": "", "language": "en"}), true);
+        assert_eq!(rec.title_en, "Title EN");
+        // 非英文文档则按模型结果清空
+        let mut zh = record();
+        zh.title_en = "Title EN".to_string();
+        zh.apply(&json!({"language": "zh", "title_en": ""}), true);
+        assert!(zh.title_en.is_empty());
+    }
+
+    #[test]
+    fn list_columns_round_trip() {
+        assert_eq!(parse_str_list(Some("[\"A\", \"B\"]")), vec!["A", "B"]);
+        assert_eq!(parse_str_list(Some("A; B，C")), vec!["A", "B", "C"]);
+        assert!(parse_str_list(Some("")).is_empty());
+        assert_eq!(list_to_db(&["A".to_string()]), "[\"A\"]");
+        assert_eq!(list_to_db(&[]), "");
+    }
 }
