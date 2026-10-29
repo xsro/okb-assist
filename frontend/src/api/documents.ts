@@ -51,8 +51,51 @@ export function deleteDocument(id: number) {
 
 // ── 上传与登记 ──────────────────────────────────────────
 
-/** 上传 PDF */
-export function uploadPdf(file: File, force = false) {
+/**
+ * 计算文件 SHA-256 哈希（浏览器 Web Crypto API）
+ */
+export async function computeFileHash(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer()
+  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer)
+  const hashArray = Array.from(new Uint8Array(hashBuffer))
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * 查询某个 hash 是否已存在于数据库中。
+ * 200 → 存在并返回文档；404 → 不存在。
+ */
+export async function checkHashExists(hash: string) {
+  try {
+    const doc = await apiGet<Document>(`/assist/api/documents/by-hash/${hash}/`)
+    return { exists: true as const, doc }
+  } catch (e: any) {
+    if (e?.response?.status === 404) {
+      return { exists: false as const }
+    }
+    throw e
+  }
+}
+
+/** 上传 PDF（上传前先本地算 hash 查重，force 可跳过） */
+export async function uploadPdf(file: File, force = false) {
+  // 非强制模式：先算 hash、先查重，命中则直接拒绝，不上传
+  if (!force) {
+    const hash = await computeFileHash(file)
+    const check = await checkHashExists(hash)
+    if (check.exists) {
+      throw {
+        response: {
+          status: 409,
+          data: {
+            error: 'duplicate',
+            message: `文件已存在 (hash: ${hash.slice(0, 16)}...)`,
+            existing_id: check.doc.id,
+          },
+        },
+    }
+  }
+
   const fd = new FormData()
   fd.append('file', file)
   fd.append('force', String(force))

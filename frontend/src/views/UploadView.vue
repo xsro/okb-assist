@@ -137,7 +137,8 @@ function statusText(item: QueueItem) {
     case 'pending':
       return '等待上传'
     case 'uploading':
-      return item.progress > 0 ? `上传中 ${item.progress}%` : '上传中...'
+      if (item.progress > 0) return `上传中 ${item.progress}%`
+      return '查重中...'
     case 'done':
       return '完成'
     case 'error':
