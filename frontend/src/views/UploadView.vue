@@ -66,6 +66,13 @@
         </div>
         <div class="file-actions">
           <button
+            v-if="item.status === 'error' && item.existingId"
+            class="btn btn-sm btn-primary"
+            @click="viewExisting(item)"
+          >
+            查看已有文献
+          </button>
+          <button
             v-if="item.status === 'error'"
             class="btn btn-sm btn-outline"
             @click="retryItem(item)"
@@ -107,6 +114,7 @@ interface QueueItem {
   status: 'pending' | 'uploading' | 'done' | 'error'
   progress: number
   error?: string
+  existingId?: number
 }
 
 const isDragover = ref(false)
@@ -183,6 +191,12 @@ function removeItem(item: QueueItem) {
   queue.value = queue.value.filter((i) => i.id !== item.id)
 }
 
+function viewExisting(item: QueueItem) {
+  if (item.existingId) {
+    window.location.href = `/assist/detail/${item.existingId}`
+  }
+}
+
 function clearCompleted() {
   queue.value = queue.value.filter((i) => i.status !== 'done')
 }
@@ -211,7 +225,8 @@ async function uploadItem(item: QueueItem) {
     item.progress = 0
     const data = e?.response?.data
     if (data?.error === 'duplicate') {
-      item.error = `${data.message}（文档 ID: ${data.existing_id}）`
+      item.error = data.message
+      item.existingId = data.existing_id ?? undefined
     } else {
       item.error = data?.detail || '上传失败'
     }

@@ -93,6 +93,7 @@ export async function uploadPdf(file: File, force = false) {
             existing_id: check.doc.id,
           },
         },
+      }
     }
   }
 
