@@ -25,7 +25,15 @@
         <tr><th>期刊</th><td>{{ doc.journal || '-' }}</td></tr>
         <tr><th>年份</th><td>{{ doc.year || '-' }}</td></tr>
         <tr><th>文档类型</th><td>{{ doc.doc_type || '-' }}</td></tr>
-        <tr><th>DOI</th><td>{{ doc.doi || '-' }}</td></tr>
+        <tr>
+          <th>DOI</th>
+          <td>
+            {{ doc.doi || '-' }}
+            <a v-if="doiUrl" :href="doiUrl" target="_blank" rel="noopener noreferrer" class="doi-link" title="在 doi.org 打开">
+              打开 ↗
+            </a>
+          </td>
+        </tr>
         <tr><th>关键词</th><td>{{ doc.keywords || '-' }}</td></tr>
         <tr><th>文件名</th><td>{{ doc.filename }}</td></tr>
         <tr><th>文件哈希</th><td>{{ doc.file_hash || '-' }}</td></tr>
@@ -82,7 +90,12 @@
         </div>
         <div class="info-row">
           <span class="info-label">DOI</span>
-          <span class="info-value">{{ doc.doi || '-' }}</span>
+          <span class="info-value">
+            {{ doc.doi || '-' }}
+            <a v-if="doiUrl" :href="doiUrl" target="_blank" rel="noopener noreferrer" class="doi-link" title="在 doi.org 打开">
+              打开 ↗
+            </a>
+          </span>
         </div>
         <div class="info-row">
           <span class="info-label">关键词</span>
@@ -149,7 +162,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { getDocument, getFileAlias } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
@@ -169,6 +182,19 @@ const tokenStore = useTokenStore()
 const doc = ref<Document | null>(null)
 
 const openingPdf = ref(false)
+
+/** 由 DOI 生成 doi.org 跳转地址；无法识别时返回空字符串 */
+const doiUrl = computed(() => {
+  const raw = (doc.value?.doi || '').trim()
+  if (!raw) return ''
+  // 去掉常见前缀：https://doi.org/、http://dx.doi.org/、doi: 等
+  const cleaned = raw
+    .replace(/^https?:\/\/(dx\.)?doi\.org\//i, '')
+    .replace(/^doi:\s*/i, '')
+    .trim()
+  if (!cleaned) return ''
+  return 'https://doi.org/' + cleaned
+})
 
 function formatSize(bytes: number | null): string {
   if (!bytes) return '-'
@@ -275,6 +301,23 @@ onMounted(() => {
   font-size: 14px;
   color: var(--text);
   word-break: break-word;
+}
+.doi-link {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-hover);
+  color: var(--primary);
+  font-size: 12px;
+  line-height: 1.6;
+  text-decoration: none;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.doi-link:hover {
+  background: var(--border);
 }
 .abstract-text {
   margin-top: 8px;
