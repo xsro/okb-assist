@@ -64,7 +64,7 @@ const routes = [
     path: '/assist/markdown/:id/edit',
     name: 'markdownEdit',
     component: () => import('@/views/MarkdownEditView.vue'),
-    meta: { title: 'Markdown 编辑', requiresAdmin: true }
+    meta: { title: 'Markdown 编辑', requiresAdmin: true, bare: true }
   },
   {
     path: '/assist/duplicates',

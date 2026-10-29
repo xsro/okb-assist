@@ -62,7 +62,7 @@
         <span class="status-cursor">第 {{ cursorRow }} 行, 第 {{ cursorCol }} 列</span>
         <span v-if="selectedLen > 0" class="status-select">已选 {{ selectedLen }} 字符</span>
         <span class="status-wordcount">{{ wordCount }} 字</span>
-        <button class="stat-btn" @click="toggleFullscreen" title="全屏">
+        <button v-if="showFullscreenButton" class="stat-btn" @click="toggleFullscreen" title="全屏">
           {{ fullscreen ? '⛶ 还原' : '⛶ 全屏' }}
         </button>
       </div>
@@ -79,6 +79,11 @@ import MarkdownViewer from '@/components/MarkdownViewer.vue'
 // ===== 静态预加载 Ace 核心模块（theme/mode 无自引用，静态 import 安全） =====
 import 'ace-builds/src-noconflict/theme-monokai'
 import 'ace-builds/src-noconflict/mode-markdown'
+// 静态预注册 snippets：生产构建里没有可推断的 basePath，
+// 一旦走动态加载就会拼出相对 URL（如 /assist/markdown/1/snippets/markdown.js）
+// 请求回 index.html → "Unexpected token '<'"。本项目只用 markdown/text，直接预注册。
+import 'ace-builds/src-noconflict/snippets/markdown'
+import 'ace-builds/src-noconflict/snippets/text'
 
 
 
@@ -92,10 +97,16 @@ const props = withDefaults(defineProps<{
   showPreviewControls?: boolean
   /** 只读模式 */
   readOnly?: boolean
+  /** 行号列起始行号（编辑行切片时用于显示真实文件行号） */
+  firstLineNumber?: number
+  /** 是否显示状态栏的全屏切换按钮（页面本身已占满视口时可关闭） */
+  showFullscreenButton?: boolean
 }>(), {
   showToolbar: true,
   showPreviewControls: true,
   readOnly: false,
+  firstLineNumber: 1,
+  showFullscreenButton: true,
 })
 
 const emit = defineEmits(['update:modelValue'])
@@ -149,6 +160,7 @@ function initEditor() {
     mode: `ace/mode/${props.mode || 'markdown'}`,
     theme: `ace/theme/${props.theme || 'monokai'}`,
     fontSize: currentFontSize.value,
+    firstLineNumber: props.firstLineNumber,
     showPrintMargin: false,
     showGutter: true,
     highlightActiveLine: true,
@@ -217,7 +229,8 @@ function initEditor() {
 function updateCursor() {
   if (!editor) return
   const pos = editor.getCursorPosition()
-  cursorRow.value = pos.row + 1
+  // 行号加上 firstLineNumber 偏移，切片编辑时与文件真实行号一致
+  cursorRow.value = pos.row + (props.firstLineNumber || 1)
   cursorCol.value = pos.column + 1
   const sel = editor.selection.getRange()
   selectedLen.value = Math.abs(
@@ -401,6 +414,10 @@ watch(() => props.modelValue, (newVal) => {
 
 watch(() => props.readOnly, (ro) => {
   if (editor) editor.setReadOnly(!!ro)
+})
+
+watch(() => props.firstLineNumber, (n) => {
+  if (editor) editor.setOptions({ firstLineNumber: n || 1 })
 })
 
 watch(() => props.theme, (newTheme) => {

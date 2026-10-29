@@ -1,22 +1,24 @@
 <template>
   <div id="app">
-    <AppHeader />
-    <MobileMenu v-if="showMobileMenu" @close="showMobileMenu = false" />
+    <!-- bare 路由（如全屏 Markdown 编辑）隐藏全局导航与页脚，把整块视口交给页面 -->
+    <AppHeader v-if="!isBareRoute" />
+    <MobileMenu v-if="showMobileMenu && !isBareRoute" @close="showMobileMenu = false" />
     <Toast />
-    <main class="main-content">
+    <main class="main-content" :class="{ 'main-content-bare': isBareRoute }">
       <ErrorBoundary>
         <router-view />
       </ErrorBoundary>
     </main>
     <TokenModal />
-    <footer class="app-footer">
+    <footer v-if="!isBareRoute" class="app-footer">
       <span>OKB-Assist</span>
     </footer>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, provide } from 'vue'
+import { computed, onMounted, onUnmounted, ref, provide } from 'vue'
+import { useRoute } from 'vue-router'
 import { useTokenStore } from '@/stores/token'
 import { useErrorStore } from '@/stores/error'
 import { apiGet } from '@/api/client'
@@ -28,6 +30,10 @@ import ErrorBoundary from '@/components/ErrorBoundary.vue'
 
 const tokenStore = useTokenStore()
 const showMobileMenu = ref(false)
+
+const route = useRoute()
+/** 全屏路由：隐藏 AppHeader / 页脚 / 内边距（路由 meta.bare = true） */
+const isBareRoute = computed(() => route.meta?.bare === true)
 
 // 向子组件提供菜单控制函数
 provide('toggleMobileMenu', () => {
@@ -76,6 +82,16 @@ onUnmounted(() => {
   padding: 20px 24px;
   max-width: 1400px;
   margin: 0 auto;
+}
+.main-content-bare {
+  height: 100vh;
+  min-height: 0;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 .app-footer {
   text-align: center;
