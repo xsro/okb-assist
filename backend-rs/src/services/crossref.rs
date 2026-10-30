@@ -101,7 +101,7 @@ pub fn normalize_doi(raw: &str) -> Option<String> {
 }
 
 /// 去除 HTML 标记
-fn strip_markup(text: &str) -> String {
+pub(crate) fn strip_markup(text: &str) -> String {
     use regex::Regex;
     let t = Regex::new(r"<tex-math[^>]*>(.*?)</tex-math>")
         .unwrap().replace_all(text, " $1 ");
@@ -154,8 +154,8 @@ fn doc_type_map(crossref_type: &str) -> &'static str {
     }
 }
 
-/// 解析 Crossref 条目
-fn parse_crossref_item(message: &Value) -> Option<Value> {
+/// 解析 Crossref 条目（供 Crossref 记录展示与引用生成复用）
+pub(crate) fn parse_crossref_item(message: &Value) -> Option<Value> {
     let raw_title = message.get("title");
     let title = if let Some(arr) = raw_title.and_then(|v| v.as_array()) {
         strip_markup(arr.first().and_then(|v| v.as_str()).unwrap_or(""))

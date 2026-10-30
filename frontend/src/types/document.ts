@@ -115,3 +115,49 @@ export interface SimilarTitleGroup {
   total_groups: number
   total_documents: number
 }
+// ── PDF 元信息 / Crossref / 引用条目 ──────────────────────
+
+/** PDF 元信息报告（后端 /pdf-info） */
+export interface PdfInfoReport {
+  file_size: number | null
+  pdf_version: string | null
+  page_count: number | null
+  encrypted: boolean | null
+  /** PDF Info 字典原始键值 */
+  info: Record<string, string>
+  /** 启发式抽取结果（标题/作者/DOI/卷期页等） */
+  heuristics: Record<string, unknown>
+  /** 仅在解析失败时出现 */
+  error?: string
+}
+
+export interface PdfInfoResponse {
+  id: number
+  filename: string
+  pdf: PdfInfoReport
+}
+
+/** Crossref 记录响应（后端 /crossref） */
+export interface CrossrefRecordResponse {
+  id: number
+  exists: boolean
+  path: string
+  /** 原始 JSON（Crossref API 应答） */
+  raw: Record<string, unknown> | null
+  /** 解析后的摘要（字段与元数据补全一致） */
+  parsed: Record<string, unknown> | null
+  /** 记录文件修改时间（≈ 抓取时间） */
+  modified_at: string | null
+}
+
+export type CitationFormat = 'bibtex' | 'gbt7714'
+
+/** 引用条目响应（后端 /citation） */
+export interface CitationResponse {
+  id: number
+  format: CitationFormat
+  /** 数据来源：crossref 记录，或退化为文档元数据 */
+  source: 'crossref' | 'document'
+  key: string
+  content: string
+}

@@ -149,6 +149,13 @@
       </div>
     </div>
 
+    <!-- PDF 元信息 / Crossref / 引用条目（懒加载折叠区） -->
+    <div class="section extras-section" v-if="doc">
+      <DocumentPdfInfoPanel :doc-id="doc.id" />
+      <DocumentCrossrefPanel :doc-id="doc.id" />
+      <DocumentCitationPanel :doc-id="doc.id" />
+    </div>
+
     <!-- 摘要 -->
     <div v-if="doc.abstract" class="section">
       <h3>摘要</h3>
@@ -170,6 +177,9 @@ import { useRequireToken } from '@/composables/useRequireToken'
 import { useResponsive } from '@/composables/useResponsive'
 import { useTokenStore } from '@/stores/token'
 import StatusBadge from '@/components/StatusBadge.vue'
+import DocumentPdfInfoPanel from '@/components/detail/DocumentPdfInfoPanel.vue'
+import DocumentCrossrefPanel from '@/components/detail/DocumentCrossrefPanel.vue'
+import DocumentCitationPanel from '@/components/detail/DocumentCitationPanel.vue'
 import type { Document } from '@/types/document'
 
 const route = useRoute()
@@ -323,6 +333,13 @@ onMounted(() => {
   margin-top: 8px;
   line-height: 1.8;
   color: var(--text-secondary);
+}
+
+/* PDF 元信息 / Crossref / 引用条目折叠区 */
+.extras-section {
+  background: transparent;
+  border: none;
+  padding: 0;
 }
 
 .index-dbs {

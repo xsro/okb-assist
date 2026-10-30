@@ -68,7 +68,7 @@ cargo build --release
 | `backend-rs/src/auth.rs` | 鉴权与角色匹配（Admin/ViewOnly/ViewUpload） |
 | `backend-rs/src/logger.rs` | 双日志初始化（文件 + 控制台） |
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`openapi.rs`、`mod.rs` |
-| `backend-rs/src/services/` | 后端适配器：`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取） |
+| `backend-rs/src/services/` | 后端适配器：`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
@@ -219,6 +219,9 @@ cargo build --release
    - `GET /assist/api/documents/:id/markdown/?line_start&line_count&full&raw` —— 按行切片读取；`raw=1` 返回文件原始内容（不做图片路径重写），供 Markdown 编辑器保证无损读写；响应含 `hash`（文件真实字节的 sha256）。
    - `PUT /assist/api/documents/:id/markdown/lines` —— 按行范围替换源码（admin）。语义：`line_start` 0-based 含端点，`line_count` 为被替换行数（0 = 纯插入），新行数 = `content.split('\n').count()`（与「切片 join('\n')」严格互逆），写入为原子写且不做图片路径还原（与 `raw=1` 配对）。删行必须显式传 `delete: true`（空字符串固定等于 1 个空行，不能表达删行）。
    - **乐观并发控制**：`PUT .../markdown/` 与 `.../markdown/lines/` 都接受可选 `base_hash`（取自 GET 的 `hash`），不一致时返回 **409** `{code:"conflict", hash, detail}`；不传则跳过校验（向后兼容）。两个写接口的响应都返回写入后的 `hash`。
+   - `GET /assist/api/documents/:id/pdf-info` —— PDF 元信息报告：`{pdf: {file_size, pdf_version, page_count, encrypted, info, heuristics}}`。`info` 为 PDF Info 字典原始键值（mupdf feature 下只有标准字段；否则由 `mutool show trailer.Info` 解析，含自定义键如 `/doi`），`heuristics` 复用 `pdf_meta` 的启发式抽取结果。页数取 `trailer/Root/Pages/Count`，回退 `mutool pages` 计数；加密判断取 trailer 的 `/Encrypt`。
+   - `GET /assist/api/documents/:id/crossref` —— 读取 `crossref_path` 模板对应的已保存 Crossref 记录，返回 `{exists, path, raw, parsed, modified_at}`（`raw` 为 Crossref API 完整应答，`parsed` 与元数据补全同源）。
+   - `GET /assist/api/documents/:id/citation?format=bibtex|gbt7714&source=auto|crossref|document` —— 生成引用条目，返回 `{format, source, key, content}`。默认 `source=auto`：有 Crossref 记录就用它，否则退化为数据库元数据（`source=document`，卷期页会缺失）；`source=crossref` 且无记录时返回 404。引用键为「第一作者姓 + 年份 + 标题首个实词」。
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、迁移、索引重置。
 6. **问答**（`chat.rs`）：`GET /assist/api/chat/models`、`GET /assist/api/chat/tools` 列出模型池与可调用的 MCP 工具，`POST /assist/api/chat` 基于 `llm.models` 做多轮对话，并可在本请求内循环调用 MCP 工具（非流式）。见下方「问答（Chat）」。
 7. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
@@ -274,6 +277,10 @@ cargo build --release
 | `ErrorBoundary.vue` | 错误边界（catch 渲染异常） |
 | `SkeletonLoading.vue` | 骨架屏 |
 | `MarkdownViewer.vue` | Markdown 渲染（marked + KaTeX + DOMPurify） |
+| `CollapsiblePanel.vue` | 通用折叠面板（默认收起，首次展开才触发 `open` 事件，供懒加载使用） |
+| `detail/DocumentPdfInfoPanel.vue` | 详情页「PDF 元信息」折叠面板（页数/Info 字典/启发式抽取） |
+| `detail/DocumentCrossrefPanel.vue` | 详情页「Crossref 记录」折叠面板（摘要 + 原始 JSON，可触发抓取） |
+| `detail/DocumentCitationPanel.vue` | 详情页「引用条目」折叠面板（BibTeX / GB/T 7714，可复制/下载） |
 | `QueryBuilder.vue` | 高级搜索构建器 + 列管理（双选项卡面板） |
 | `AceEditor.vue` | Markdown 编辑器（ace-builds 1.44.0），编辑+自适应分屏预览+KaTeX（桌面左右 / 移动上下，可拖拽比例）；`showToolbar` / `showPreviewControls` / `readOnly` 可裁剪为纯源码编辑器 |
 | `McpConfigPanel.vue` | MCP 配置面板 |
@@ -287,7 +294,7 @@ cargo build --release
 | 路由 | 视图 | 说明 | 权限 |
 |------|------|------|------|
 | `/assist` | `HomeView.vue` | 文献列表（桌面表格/移动卡片 + 列管理 + 高级搜索） | 全部 |
-| `/assist/detail/:id` | `DetailView.vue` | 文档详情 | 全部 |
+| `/assist/detail/:id` | `DetailView.vue` | 文档详情（元信息 + PDF 元信息 / Crossref 记录 / 引用条目三个懒加载折叠区） | 全部 |
 | `/assist/markdown/:id` | `MarkdownView.vue` | Markdown 阅读（浮动设置按钮收纳全部工具；行号默认开、移动端默认关；设置面板的「源码编辑」跳到编辑器并从当前阅读行开始载入） | 全部 |
 | `/assist/markdown/:id/edit` | `MarkdownEditView.vue` | Markdown 编辑（AceEditor）；支持 `?line=a-b` 只载入指定行范围，阅读页「源码编辑」即跳到这里 | admin |
 | `/assist/upload` | `UploadView.vue` | 上传 PDF | admin / view-upload |

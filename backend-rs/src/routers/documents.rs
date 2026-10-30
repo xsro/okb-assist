@@ -17,7 +17,8 @@ use crate::config::Settings;
 use crate::database::Database;
 use crate::models::Document;
 use crate::paths;
-use crate::services::pdf_meta::{extract_pdf_metadata_async, normalize_doi};
+use crate::services::pdf_meta::{extract_pdf_metadata_async, extract_pdf_report_async, normalize_doi};
+use crate::services::citation::{self, CitationRecord};
 use crate::auth;
 use crate::routers::pipeline::run_crossref_override;
 
@@ -164,6 +165,12 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/:id/replace-asset", post(replace_asset))
         .route("/assist/api/documents/:id/chunks/", get(get_markdown_chunks))
         .route("/assist/api/documents/:id/chunks", get(get_markdown_chunks))
+        .route("/assist/api/documents/:id/pdf-info/", get(get_pdf_info))
+        .route("/assist/api/documents/:id/pdf-info", get(get_pdf_info))
+        .route("/assist/api/documents/:id/crossref/", get(get_crossref_record))
+        .route("/assist/api/documents/:id/crossref", get(get_crossref_record))
+        .route("/assist/api/documents/:id/citation/", get(get_citation))
+        .route("/assist/api/documents/:id/citation", get(get_citation))
         .layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024))
 }
 
@@ -2528,6 +2535,196 @@ async fn get_document_info(
         },
         _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "读取信息文件失败"}))).into_response(),
     }
+}
+
+/// GET /assist/api/documents/{id}/pdf-info —— PDF Info 字典 + 页数 + 启发式抽取结果
+async fn get_pdf_info(
+    axum::Extension(role): axum::Extension<auth::Role>,
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return resp;
+    }
+    let doc = match fetch_doc(&db, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    };
+
+    let pdf_path = std::path::PathBuf::from(paths::get_pdf_path(&settings, id));
+    let content = match tokio::task::spawn_blocking(move || std::fs::read(&pdf_path)).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(_)) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"detail": "PDF 文件不存在"}))).into_response()
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
+                .into_response()
+        }
+    };
+
+    let report = extract_pdf_report_async(content, Some(doc.filename.clone()), Some(id)).await;
+    Json(json!({
+        "id": id,
+        "filename": doc.filename,
+        "pdf": report,
+    }))
+    .into_response()
+}
+
+/// 读取 Crossref 原始记录（文件中的 `message` 部分）
+fn read_crossref_message(settings: &Settings, id: i64) -> Option<Value> {
+    let path = paths::get_crossref_path(settings, id);
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    // 文件内容为 Crossref API 的完整应答（含 message），也兼容仅保存 message 的情况
+    if value.get("message").is_some() {
+        Some(value["message"].clone())
+    } else if value.get("DOI").is_some() {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+/// GET /assist/api/documents/{id}/crossref —— 读取已保存的 Crossref 记录
+async fn get_crossref_record(
+    axum::Extension(role): axum::Extension<auth::Role>,
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return resp;
+    }
+    match fetch_doc(&db, id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    }
+
+    let crossref_path = paths::get_crossref_path(&settings, id);
+    let path_buf = std::path::PathBuf::from(&crossref_path);
+    if !path_buf.exists() {
+        return Json(json!({
+            "id": id,
+            "exists": false,
+            "path": crossref_path,
+            "raw": Value::Null,
+            "parsed": Value::Null,
+            "modified_at": Value::Null,
+        }))
+        .into_response();
+    }
+
+    // 文件修改时间（即抓取时间）
+    let modified_at = std::fs::metadata(&path_buf)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(|t| {
+            let dt: DateTime<Utc> = t.into();
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        });
+
+    let path_clone = path_buf.clone();
+    let raw_text = match tokio::task::spawn_blocking(move || std::fs::read_to_string(&path_clone)).await {
+        Ok(Ok(t)) => t,
+        _ => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "读取 Crossref 记录失败"})))
+                .into_response()
+        }
+    };
+
+    let raw: Value = match serde_json::from_str(&raw_text) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": format!("Crossref 记录不是合法 JSON: {e}")})),
+            )
+                .into_response()
+        }
+    };
+
+    // 解析后的摘要（字段与元数据补全保持一致）
+    let message = raw.get("message").cloned().unwrap_or_else(|| raw.clone());
+    let parsed = crate::services::crossref::parse_crossref_item(&message).unwrap_or(Value::Null);
+
+    Json(json!({
+        "id": id,
+        "exists": true,
+        "path": crossref_path,
+        "raw": raw,
+        "parsed": parsed,
+        "modified_at": modified_at,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CitationQuery {
+    /// 输出格式：bibtex（默认）/ gbt7714
+    pub format: Option<String>,
+    /// 数据来源：auto（默认）/ crossref / document
+    pub source: Option<String>,
+}
+
+/// GET /assist/api/documents/{id}/citation —— 由 Crossref 记录（或文档元数据）生成引用条目
+async fn get_citation(
+    axum::Extension(role): axum::Extension<auth::Role>,
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+    Query(query): Query<CitationQuery>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return resp;
+    }
+    let doc = match fetch_doc(&db, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    };
+
+    let format_arg = query.format.as_deref().unwrap_or("");
+    let format = match citation::normalize_format(format_arg) {
+        Some(f) => f,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"detail": "不支持的引用格式，可选 bibtex / gbt7714"})),
+            )
+                .into_response()
+        }
+    };
+
+    let source_arg = query.source.as_deref().unwrap_or("auto").trim().to_lowercase();
+    let crossref_message = if source_arg == "document" {
+        None
+    } else {
+        read_crossref_message(&settings, id)
+    };
+
+    let record = match (source_arg.as_str(), crossref_message) {
+        ("crossref", None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"detail": "该文献暂无 Crossref 记录"})))
+                .into_response()
+        }
+        (_, Some(message)) => CitationRecord::from_crossref(&message, "crossref"),
+        (_, None) => CitationRecord::from_document(&doc, "document"),
+    };
+
+    let content = citation::render(&record, format);
+    Json(json!({
+        "id": id,
+        "format": format,
+        "source": record.source,
+        "key": citation::citation_key(&record),
+        "content": content,
+    }))
+    .into_response()
 }
 
 fn image_mime(filename: &str) -> &'static str {

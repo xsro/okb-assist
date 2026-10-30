@@ -6,7 +6,9 @@
 #[cfg(feature = "mupdf")]
 use mupdf::{Document, MetadataName, TextExtractOptions};
 
+#[cfg(not(feature = "mupdf"))]
 use std::process::Command;
+#[cfg(not(feature = "mupdf"))]
 use tempfile::TempDir;
 
 // ── 公共 API ──────────────────────────────────────────────
@@ -88,6 +90,154 @@ pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>, doc_id: Opti
     serde_json::Value::Object(result)
 }
 
+// ── PDF 元信息报告（Info 字典 + 页数 + 启发式结果） ────────
+
+/// 异步生成 PDF 元信息报告（在后台线程执行）
+pub async fn extract_pdf_report_async(
+    content: Vec<u8>,
+    filename: Option<String>,
+    doc_id: Option<i64>,
+) -> serde_json::Value {
+    tokio::task::spawn_blocking(move || {
+        extract_pdf_report(&content, filename.as_deref(), doc_id)
+    })
+    .await
+    .unwrap_or_else(|_| serde_json::json!({"error": "PDF 元信息提取任务崩溃"}))
+}
+
+/// 生成 PDF 元信息报告，结构：
+/// ```json
+/// {
+///   "file_size": 123456,
+///   "pdf_version": "1.7",
+///   "page_count": 17,
+///   "encrypted": false,
+///   "info": { "Title": "...", "Author": "..." },
+///   "heuristics": { "doi": "...", "volume": "..." },
+///   "error": "仅在解析失败时出现"
+/// }
+/// ```
+/// `info` 为 PDF Info 字典原始键值；`heuristics` 为现有启发式抽取结果。
+#[cfg(feature = "mupdf")]
+pub fn extract_pdf_report(content: &[u8], filename: Option<&str>, doc_id: Option<i64>) -> serde_json::Value {
+    let mut report = base_report(content);
+
+    let doc = match Document::from_bytes(content, "pdf") {
+        Ok(d) => d,
+        Err(e) => {
+            report.insert("error".to_string(), serde_json::json!(e.to_string()));
+            return serde_json::Value::Object(report);
+        }
+    };
+
+    report.insert("page_count".to_string(), serde_json::json!(doc.page_count().ok()));
+    report.insert("encrypted".to_string(), serde_json::json!(doc.needs_password().unwrap_or(false)));
+
+    // Info 字典（mupdf 只能取到标准字段）
+    let mut info = serde_json::Map::new();
+    for (name, key) in [
+        (MetadataName::Format, "Format"),
+        (MetadataName::Encryption, "Encryption"),
+        (MetadataName::Title, "Title"),
+        (MetadataName::Author, "Author"),
+        (MetadataName::Subject, "Subject"),
+        (MetadataName::Keywords, "Keywords"),
+        (MetadataName::Creator, "Creator"),
+        (MetadataName::Producer, "Producer"),
+        (MetadataName::CreationDate, "CreationDate"),
+        (MetadataName::ModDate, "ModDate"),
+    ] {
+        if let Ok(val) = doc.metadata(name) {
+            let val = val.trim().to_string();
+            if !val.is_empty() {
+                info.insert(key.to_string(), serde_json::Value::String(val));
+            }
+        }
+    }
+    report.insert("info".to_string(), serde_json::Value::Object(info));
+
+    // 启发式抽取（复用既有逻辑）
+    let mut heuristic = serde_json::Map::new();
+    extract_from_info_dict(&doc, filename, &mut heuristic);
+    if let Some(text) = extract_full_text(&doc, doc_id) {
+        extract_from_text(&normalize_fullwidth(&text), filename, &mut heuristic);
+    }
+    report.insert("heuristics".to_string(), serde_json::Value::Object(heuristic));
+
+    serde_json::Value::Object(report)
+}
+
+/// 生成 PDF 元信息报告（回退方案：调用外部 mutool）
+#[cfg(not(feature = "mupdf"))]
+pub fn extract_pdf_report(content: &[u8], filename: Option<&str>, doc_id: Option<i64>) -> serde_json::Value {
+    let mut report = base_report(content);
+
+    let temp_dir = match TempDir::new() {
+        Ok(d) => d,
+        Err(e) => {
+            report.insert("error".to_string(), serde_json::json!(format!("无法创建临时目录: {e}")));
+            return serde_json::Value::Object(report);
+        }
+    };
+    let temp_path = temp_dir.path().join("report.pdf");
+    if let Err(e) = std::fs::write(&temp_path, content) {
+        report.insert("error".to_string(), serde_json::json!(format!("无法写入临时文件: {e}")));
+        return serde_json::Value::Object(report);
+    }
+
+    // Info 字典原始键值
+    let entries = mutool_show(&temp_path, &["trailer.Info"])
+        .map(|out| parse_pdf_dict_entries(&out))
+        .unwrap_or_default();
+
+    let mut info = serde_json::Map::new();
+    for (k, v) in &entries {
+        info.insert(k.clone(), serde_json::Value::String(v.clone()));
+    }
+    report.insert("info".to_string(), serde_json::Value::Object(info));
+    report.insert("page_count".to_string(), serde_json::json!(mutool_page_count(&temp_path)));
+    report.insert("encrypted".to_string(), serde_json::json!(mutool_encrypted(&temp_path)));
+
+    // 启发式抽取（复用既有逻辑）
+    let mut heuristic = serde_json::Map::new();
+    if let Some(parsed) = info_dict_from_entries(&entries) {
+        extract_from_info_dict_parsed(&parsed, filename, &mut heuristic);
+    }
+    if let Some(text) = extract_full_text_via_mutool(content, doc_id) {
+        extract_from_text(&normalize_fullwidth(&text), filename, &mut heuristic);
+    }
+    report.insert("heuristics".to_string(), serde_json::Value::Object(heuristic));
+
+    serde_json::Value::Object(report)
+}
+
+/// 报告公共字段：文件大小与 PDF 版本
+fn base_report(content: &[u8]) -> serde_json::Map<String, serde_json::Value> {
+    let mut report = serde_json::Map::new();
+    report.insert("file_size".to_string(), serde_json::json!(content.len()));
+    report.insert(
+        "pdf_version".to_string(),
+        serde_json::json!(pdf_version_from_header(content)),
+    );
+    report
+}
+
+/// 从文件头读取 PDF 版本号（如 `1.7`）
+fn pdf_version_from_header(content: &[u8]) -> Option<String> {
+    let head = &content[..content.len().min(1024)];
+    let text = String::from_utf8_lossy(head);
+    let pos = text.find("%PDF-")?;
+    let ver: String = text[pos + 5..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    if ver.is_empty() {
+        None
+    } else {
+        Some(ver)
+    }
+}
+
 // ── mupdf 路径：Info 字典提取 ─────────────────────────────
 
 #[cfg(feature = "mupdf")]
@@ -154,119 +304,330 @@ fn extract_info_dict_via_mutool(content: &[u8]) -> Option<InfoDict> {
     let temp_path = temp_dir.path().join("extract_info.pdf");
     std::fs::write(&temp_path, content).ok()?;
 
+    let stdout = mutool_show(&temp_path, &["trailer.Info"])?;
+    let entries = parse_pdf_dict_entries(&stdout);
+    info_dict_from_entries(&entries)
+}
+
+/// 调用 `mutool show <pdf> <path...>` 并返回 stdout
+#[cfg(not(feature = "mupdf"))]
+fn mutool_show(path: &std::path::Path, args: &[&str]) -> Option<String> {
     let mutool_path = crate::settings::get_settings().mutool_path();
     let output = Command::new(&mutool_path)
-        .args(["show", temp_path.to_str()?, "trailer.Info"])
+        .arg("show")
+        .arg(path.to_str()?)
+        .args(args)
         .output()
         .ok()?;
-
     if !output.status.success() {
         return None;
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_mutool_info(&stdout)
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// 读取 PDF 页数（优先 Page tree 的 /Count，回退到 `mutool pages` 计数）
 #[cfg(not(feature = "mupdf"))]
-fn parse_mutool_info(output: &str) -> Option<InfoDict> {
-    let mut title = None;
-    let mut author = None;
-    let mut subject = None;
-    let mut keywords = None;
-    let mut creation_date = None;
-
-    for line in output.lines() {
-        let line = line.trim();
-        if let Some(val) = line.strip_prefix("/Title") {
-            title = parse_pdf_string(val);
-        } else if let Some(val) = line.strip_prefix("/Author") {
-            author = parse_pdf_string(val);
-        } else if let Some(val) = line.strip_prefix("/Subject") {
-            subject = parse_pdf_string(val);
-        } else if let Some(val) = line.strip_prefix("/Keywords") {
-            keywords = parse_pdf_string(val);
-        } else if let Some(val) = line.strip_prefix("/CreationDate") {
-            creation_date = parse_pdf_string(val);
+fn mutool_page_count(path: &std::path::Path) -> Option<i64> {
+    if let Some(out) = mutool_show(path, &["trailer/Root/Pages/Count"]) {
+        if let Ok(n) = out.trim().parse::<i64>() {
+            if n >= 0 {
+                return Some(n);
+            }
         }
     }
-
-    Some(InfoDict { title, author, subject, keywords, creation_date })
-}
-
-#[cfg(not(feature = "mupdf"))]
-fn parse_pdf_string(s: &str) -> Option<String> {
-    let s = s.trim();
-    if s.starts_with('(') && s.ends_with(')') {
-        // 字面量字符串
-        let inner = &s[1..s.len() - 1];
-        Some(unescape_pdf_string(inner))
-    } else if s.starts_with('<') && s.ends_with('>') {
-        // 十六进制字符串
-        let hex = &s[1..s.len() - 1];
-        decode_hex_string(hex)
+    let mutool_path = crate::settings::get_settings().mutool_path();
+    let output = Command::new(&mutool_path)
+        .arg("pages")
+        .arg(path.to_str()?)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let n = text.lines().filter(|l| l.trim_start().starts_with("<page ")).count() as i64;
+    if n > 0 {
+        Some(n)
     } else {
         None
     }
 }
 
-/// 解析 PDF 字面量字符串中的转义字符
+/// 是否加密（trailer 中存在 /Encrypt）
 #[cfg(not(feature = "mupdf"))]
-fn unescape_pdf_string(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => result.push('\n'),
-                Some('r') => result.push('\r'),
-                Some('t') => result.push('\t'),
-                Some('b') => result.push('\u{08}'),
-                Some('f') => result.push('\u{0C}'),
-                Some('(') => result.push('('),
-                Some(')') => result.push(')'),
-                Some('\\') => result.push('\\'),
-                Some(d) if d.is_ascii_digit() => {
-                    // 八进制转义（最多 3 位数字）
-                    let mut octal = String::new();
-                    octal.push(d);
-                    for _ in 0..2 {
-                        if let Some(next) = chars.clone().next() {
-                            if next.is_ascii_digit() {
-                                octal.push(chars.next().unwrap());
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    if let Ok(code) = u32::from_str_radix(&octal, 8) {
-                        if let Some(uc) = char::from_u32(code) {
-                            result.push(uc);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        } else {
-            result.push(c);
+fn mutool_encrypted(path: &std::path::Path) -> bool {
+    match mutool_show(path, &["trailer/Encrypt"]) {
+        Some(out) => {
+            let t = out.trim();
+            !t.is_empty() && t != "null"
         }
+        None => false,
     }
-    result
 }
 
-/// 解码 PDF 十六进制字符串
+/// 从解析出的 Info 字典条目构造结构化 `InfoDict`（键名大小写不敏感）
 #[cfg(not(feature = "mupdf"))]
-fn decode_hex_string(hex: &str) -> Option<String> {
-    let hex: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
-    if hex.len() % 2 != 0 {
+fn info_dict_from_entries(entries: &[(String, String)]) -> Option<InfoDict> {
+    if entries.is_empty() {
         return None;
     }
-    let bytes: Result<Vec<u8>, _> = (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+    let get = |name: &str| {
+        entries
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+    };
+    Some(InfoDict {
+        title: get("Title"),
+        author: get("Author"),
+        subject: get("Subject"),
+        keywords: get("Keywords"),
+        creation_date: get("CreationDate"),
+    })
+}
+
+// ── PDF 字典 / 字符串解析（mutool 路径共用） ──────────────
+
+#[allow(dead_code)]
+fn is_pdf_delimiter(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '/' | '(' | ')' | '<' | '>' | '[' | ']' | '{' | '}' | '%'
+        )
+}
+
+/// 解析 `mutool show` 输出的 PDF 字典，返回 (键, 解码后的值) 列表。
+///
+/// 支持字面量字符串 `(..)`、十六进制字符串 `<..>`、名字 `/Name`、
+/// 数字与布尔字面量；嵌套字典的键值会被跳过（Info 字典里极少出现）。
+#[cfg(not(feature = "mupdf"))]
+fn parse_pdf_dict_entries(output: &str) -> Vec<(String, String)> {
+    let chars: Vec<char> = output.chars().collect();
+    let n = chars.len();
+    let mut entries = Vec::new();
+    let mut i = 0usize;
+
+    while i < n {
+        if chars[i] != '/' {
+            i += 1;
+            continue;
+        }
+        // 键名
+        i += 1;
+        let key_start = i;
+        while i < n && !is_pdf_delimiter(chars[i]) {
+            i += 1;
+        }
+        let key: String = chars[key_start..i].iter().collect();
+        if key.is_empty() {
+            continue;
+        }
+        // 跳过空白后读取值
+        while i < n && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= n {
+            break;
+        }
+        let (value, next) = read_pdf_value(&chars, i);
+        i = next;
+        if let Some(v) = value {
+            entries.push((key, v));
+        }
+    }
+
+    entries
+}
+
+/// 读取一个 PDF 值，返回 (解码后的字符串, 下一个位置)
+#[cfg(not(feature = "mupdf"))]
+#[allow(dead_code)]
+fn read_pdf_value(chars: &[char], start: usize) -> (Option<String>, usize) {
+    let n = chars.len();
+    let mut i = start;
+
+    match chars[i] {
+        // 字面量字符串
+        '(' => {
+            let mut depth = 0i32;
+            let mut raw = String::new();
+            while i < n {
+                let c = chars[i];
+                if c == '\\' {
+                    raw.push(c);
+                    i += 1;
+                    if i < n {
+                        raw.push(chars[i]);
+                        i += 1;
+                    }
+                    continue;
+                }
+                if c == '(' {
+                    depth += 1;
+                    if depth == 1 {
+                        i += 1;
+                        continue;
+                    }
+                }
+                if c == ')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                raw.push(c);
+                i += 1;
+            }
+            let bytes = unescape_pdf_literal(raw.as_bytes());
+            (Some(decode_pdf_bytes(&bytes)), i)
+        }
+        // 嵌套字典：跳过（不展示）
+        '<' if i + 1 < n && chars[i + 1] == '<' => {
+            let mut depth = 0i32;
+            while i + 1 < n {
+                if chars[i] == '<' && chars[i + 1] == '<' {
+                    depth += 1;
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == '>' && chars[i + 1] == '>' {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                i += 1;
+            }
+            (None, i)
+        }
+        // 十六进制字符串
+        '<' => {
+            i += 1;
+            let hex_start = i;
+            while i < n && chars[i] != '>' {
+                i += 1;
+            }
+            let hex: String = chars[hex_start..i].iter().collect();
+            if i < n {
+                i += 1;
+            }
+            (Some(decode_pdf_bytes(&decode_pdf_hex(&hex))), i)
+        }
+        // 名字 / 数字 / 布尔
+        _ => {
+            let token_start = i;
+            while i < n && !is_pdf_delimiter(chars[i]) {
+                i += 1;
+            }
+            let token: String = chars[token_start..i].iter().collect();
+            (Some(token), i)
+        }
+    }
+}
+
+/// 解析 PDF 字面量字符串的转义字符，返回原始字节
+#[allow(dead_code)]
+fn unescape_pdf_literal(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0usize;
+    while i < raw.len() {
+        let b = raw[i];
+        if b != b'\\' {
+            out.push(b);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if i >= raw.len() {
+            break;
+        }
+        match raw[i] {
+            b'n' => {
+                out.push(b'\n');
+                i += 1;
+            }
+            b'r' => {
+                out.push(b'\r');
+                i += 1;
+            }
+            b't' => {
+                out.push(b'\t');
+                i += 1;
+            }
+            b'b' => {
+                out.push(8);
+                i += 1;
+            }
+            b'f' => {
+                out.push(12);
+                i += 1;
+            }
+            b'(' | b')' | b'\\' => {
+                out.push(raw[i]);
+                i += 1;
+            }
+            // 续行：反斜杠 + 换行
+            b'\r' => {
+                i += 1;
+                if i < raw.len() && raw[i] == b'\n' {
+                    i += 1;
+                }
+            }
+            b'\n' => {
+                i += 1;
+            }
+            d if (b'0'..=b'7').contains(&d) => {
+                // 八进制转义（最多 3 位）
+                let mut code: u32 = 0;
+                let mut count = 0;
+                while count < 3 && i < raw.len() && (b'0'..=b'7').contains(&raw[i]) {
+                    code = code * 8 + (raw[i] - b'0') as u32;
+                    i += 1;
+                    count += 1;
+                }
+                out.push((code & 0xFF) as u8);
+            }
+            _ => {
+                out.push(raw[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// 解码 PDF 十六进制字符串为字节
+#[allow(dead_code)]
+fn decode_pdf_hex(hex: &str) -> Vec<u8> {
+    let nibbles: Vec<u8> = hex
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .filter_map(|c| c.to_digit(16).map(|d| d as u8))
         .collect();
-    let bytes = bytes.ok()?;
-    String::from_utf8(bytes).ok()
+    nibbles
+        .chunks(2)
+        .map(|pair| if pair.len() == 2 { (pair[0] << 4) | pair[1] } else { pair[0] << 4 })
+        .collect()
+}
+
+/// 解码 PDF 字符串字节：优先 UTF-16BE（带 BOM），否则按 UTF-8 / Latin-1 处理
+#[allow(dead_code)]
+fn decode_pdf_bytes(bytes: &[u8]) -> String {
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        return String::from_utf16_lossy(&units);
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => bytes.iter().map(|&b| b as char).collect(),
+    }
 }
 
 #[cfg(not(feature = "mupdf"))]

@@ -7,7 +7,11 @@ import type {
   TocItem,
   MarkdownResponse,
   MarkdownLinesSaveResult,
-  ChunkResponse
+  ChunkResponse,
+  PdfInfoResponse,
+  CrossrefRecordResponse,
+  CitationFormat,
+  CitationResponse
 } from '@/types/document'
 
 // ── 文档 CRUD ───────────────────────────────────────────
@@ -313,4 +317,24 @@ export function mergeDocuments(targetId: number, sourceIds: number[]) {
     '/assist/api/documents/merge/',
     { target_id: targetId, source_ids: sourceIds }
   )
+}
+// ── PDF 元信息 / Crossref / 引用条目 ─────────────────────
+
+/** PDF 元信息（Info 字典 + 页数 + 启发式抽取结果） */
+export function getPdfInfo(id: number) {
+  return apiGet<PdfInfoResponse>(`/assist/api/documents/${id}/pdf-info/`)
+}
+
+/** 已保存的 Crossref 原始记录 */
+export function getCrossrefRecord(id: number) {
+  return apiGet<CrossrefRecordResponse>(`/assist/api/documents/${id}/crossref/`)
+}
+
+/** 生成引用条目（BibTeX / GB/T 7714） */
+export function getCitation(
+  id: number,
+  format: CitationFormat = 'bibtex',
+  source: 'auto' | 'crossref' | 'document' = 'auto'
+) {
+  return apiGet<CitationResponse>(`/assist/api/documents/${id}/citation/`, { format, source })
 }
