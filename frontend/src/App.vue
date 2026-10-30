@@ -93,6 +93,14 @@ onUnmounted(() => {
   flex-direction: column;
   overflow: hidden;
 }
+/* 全屏（bare）路由：错误边界外壳必须是纵向 flex 容器，
+   否则内部 height:100% / flex:1 的页面（如 Markdown 编辑器）会塌陷成内容高度 */
+.main-content-bare :deep(.error-boundary-wrap) {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
 .app-footer {
   text-align: center;
   padding: 16px;

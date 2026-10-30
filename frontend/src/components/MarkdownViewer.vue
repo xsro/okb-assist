@@ -314,7 +314,9 @@ function processFormulas(deadline: IdleDeadline) {
       pendingQueue.unshift(item)
       schedulerActive = false
       if (katexFailed) {
-        pendingQueue.length = 0 // 加载失败：保留原始 LaTeX，不再重试
+        // 加载失败：所有公式改为错误提示（保留原始 LaTeX 会让人误以为是公式内容）
+        pendingQueue.length = 0
+        markAllMathErrors(viewerEl.value, 'KaTeX 未能加载，请检查网络或构建产物')
         return
       }
       ensureKatex().then(kickScheduler)
@@ -346,10 +348,10 @@ function renderMathElement(
 
   let html: string
   try {
-    html = katexRender(latex, { throwOnError: false, displayMode })
-  } catch {
-    // 渲染失败，回退为原始公式文本
-    el.outerHTML = `<span class="math-fallback">${displayMode ? '$$' : '$'}${escapeAttr(latex)}${displayMode ? '$$' : '$'}</span>`
+    // throwOnError: true —— 让解析失败抛错，由我们自己渲染「错误信息」而不是 KaTeX 的红色源码
+    html = katexRender(latex, { throwOnError: true, displayMode, strict: 'ignore' })
+  } catch (err) {
+    el.outerHTML = mathErrorHtml(latex, displayMode, err)
     return
   }
 
@@ -368,9 +370,37 @@ function escapeAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+/**
+ * 公式渲染失败的展示：只显示错误信息，不展示 LaTeX 源码
+ * （LaTeX 原文只放在 title 里，悬停可查）
+ */
+function mathErrorHtml(latex: string, displayMode: boolean, err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err || '公式渲染失败')
+  const msg = raw.replace(/^KaTeX parse error:\s*/i, '').replace(/\s+/g, ' ').trim() || '公式渲染失败'
+  const cls = displayMode ? 'math-error math-error-block' : 'math-error'
+  return `<span class="${cls}" title="LaTeX：${escapeAttr(latex)}">`
+    + `<span class="math-error-icon">⚠</span>`
+    + `<span class="math-error-text">公式渲染失败：${escapeAttr(msg)}</span>`
+    + `</span>`
+}
+
+/** KaTeX 未能加载 / 不可用时，把所有占位符统一换成错误提示 */
+function markAllMathErrors(root: HTMLElement | null, message: string) {
+  if (!root) return
+  root.querySelectorAll<HTMLElement>('.math-placeholder[data-math-id]').forEach((el) => {
+    cancelMathTimer(el)
+    removePendingMath(el)
+    el.outerHTML = mathErrorHtml(el.dataset.mathLatex || '', el.dataset.mathDisplay === 'true', new Error(message))
+  })
+}
+
 /** 渲染指定容器内的全部公式（同步） */
 function renderMathInContainer(container: HTMLElement) {
-  if (!katexRender) return
+  if (!katexRender) {
+    // KaTeX 加载失败：直接给出错误提示，不留下 LaTeX 源码
+    if (katexFailed) markAllMathErrors(container, 'KaTeX 未能加载，请检查网络或构建产物')
+    return
+  }
   const placeholders = Array.from(
     container.querySelectorAll<HTMLElement>('.math-placeholder[data-math-id]')
   )
@@ -629,6 +659,40 @@ onBeforeUnmount(() => {
   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
   font-size: 0.85em;
   color: #c00;
+}
+
+/* ===== 公式渲染失败（只显示错误信息，不显示 LaTeX 源码） ===== */
+.markdown-viewer :deep(.math-error) {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 6px;
+  border: 1px solid #f3c2c0;
+  border-radius: 4px;
+  background: #fdf2f2;
+  color: #b42318;
+  font-family: inherit;
+  font-size: 0.92em;
+  line-height: 1.6;
+  vertical-align: baseline;
+  cursor: help;
+}
+
+.markdown-viewer :deep(.math-error-block) {
+  display: flex;
+  margin: 12px 0;
+  padding: 8px 12px;
+}
+
+.markdown-viewer :deep(.math-error-icon) {
+  flex: none;
+  font-size: 0.95em;
+}
+
+.markdown-viewer :deep(.math-error-text) {
+  word-break: break-word;
+  font-size: 0.9em;
 }
 
 /* ===== 图片占位符 ===== */

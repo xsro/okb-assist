@@ -52,20 +52,6 @@
           </svg>
         </button>
       </div>
-
-      <!-- 右侧源码面板 -->
-      <Transition name="panel-slide">
-        <SourcePanel
-          v-if="sourceOpen"
-          :doc-id="docId"
-          :start-line="sourceRange.start"
-          :end-line="sourceRange.end"
-          :can-edit="canEdit"
-          @locate="locateSourceRange"
-          @saved="onSourceSaved"
-          @close="sourceOpen = false"
-        />
-      </Transition>
     </template>
 
     <!-- 目录抽屉 -->
@@ -214,13 +200,13 @@
                 显示行号
               </label>
             </div>
-            <!-- 源码面板 -->
-            <div class="toolbar-item">
-              <button class="tb-action" @click="openSourcePanel">
+            <!-- 源码编辑：跳转到对应的 Markdown 编辑器（从当前阅读位置开始） -->
+            <div v-if="canEdit" class="toolbar-item">
+              <button class="tb-action" title="在 Markdown 编辑器中打开（从当前阅读位置开始）" @click="openSourceEditor">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
                 </svg>
-                源码
+                源码编辑
               </button>
             </div>
             <!-- 公式按需渲染 -->
@@ -267,9 +253,6 @@ import type { TocItem, ChunkInfo } from '@/types/document'
 const MarkdownViewer = defineAsyncComponent(() =>
   import('@/components/MarkdownViewer.vue')
 )
-const SourcePanel = defineAsyncComponent(() =>
-  import('@/components/SourcePanel.vue')
-)
 
 const INITIAL_CHUNKS = 2  // 初始加载前 2 个 chunk
 
@@ -280,9 +263,9 @@ const { requireToken } = useRequireToken()
 const { isSmallMobile } = useResponsive()
 const tokenStore = useTokenStore()
 
-// 当前文档 ID（源码面板等子组件用）
+// 当前文档 ID
 const docId = computed(() => parseInt(route.params.id as string))
-// 是否可编辑（admin）
+// 是否可编辑（admin）——源码编辑入口仅对 admin 展示
 const canEdit = computed(() => tokenStore.canEdit)
 
 // ── 状态 ──
@@ -313,10 +296,9 @@ const showLineNumbers = ref(!isSmallMobile.value)
 // 公式按需渲染：仅渲染视口内停留过的公式
 const lazyMath = ref(true)
 
-// ── 源码面板 ──
-const sourceOpen = ref(false)
-// 面板初始行范围（0-based 含端点）
-const sourceRange = ref<{ start: number; end: number }>({ start: 0, end: 0 })
+// ── 源码编辑（跳转 Markdown 编辑器）──
+/** 一次「源码编辑」打开的默认行数窗口 */
+const SOURCE_EDIT_WINDOW = 200
 
 // ── MarkdownViewer 实例（用于强制渲染公式） ──
 type ViewerExposed = {
@@ -331,9 +313,9 @@ function renderAllMath() {
   void viewerRef.value?.renderAllMath()
 }
 
-// ── 源码面板 ──
+// ── 源码编辑（跳转编辑器）──
 
-/** 取「当前阅读位置」所在 chunk 的行范围（0-based 含端点）作为面板默认范围 */
+/** 取「当前阅读位置」所在 chunk 的行范围（0-based 含端点），作为行号的回退依据 */
 function currentVisibleChunkRange(): { start: number; end: number } | null {
   const viewer = document.querySelector('.markdown-viewer')
   if (!viewer) return null
@@ -354,75 +336,38 @@ function currentVisibleChunkRange(): { start: number; end: number } | null {
   return chunk ? { start: chunk.start_line, end: chunk.end_line } : null
 }
 
-function openSourcePanel() {
-  toolbarOpen.value = false
-  const range = currentVisibleChunkRange()
-  if (range) sourceRange.value = range
-  sourceOpen.value = true
-}
-
-/** 面板内「定位」：更新为目标 chunk 的范围（面板 watch 到后会重新加载） */
-function locateSourceRange() {
-  const range = currentVisibleChunkRange()
-  if (range) sourceRange.value = range
-}
-
-/** 保存后：重新拉取 chunks/TOC，重建渲染，并回落到编辑起点行 */
-async function onSourceSaved(info: { lineStart: number }) {
-  const id = docId.value
-  try {
-    const [chunkRes, tocRes] = await Promise.all([
-      getChunks(id),
-      getTOC(id).catch(() => null)
-    ])
-    allChunks.value = chunkRes.chunks
-    totalLines.value = chunkRes.total_lines
-    if (tocRes) toc.value = tocRes.toc
-
-    const idx = allChunks.value.findIndex(c =>
-      info.lineStart >= c.start_line && info.lineStart <= c.end_line
-    )
-    if (idx >= 0) {
-      visibleCount.value = Math.min(Math.max(visibleCount.value, idx + 1), allChunks.value.length)
-    }
-    // 行号已变化，必须重建
-    viewerKey.value++
-    await nextTick()
-    requestAnimationFrame(() => requestAnimationFrame(() => scrollToEditedLine(info.lineStart + 1)))
-  } catch (err: any) {
-    showError(err?.message || '刷新内容失败，请手动重新加载')
-  }
-}
-
-/** 滚动到指定 1-based 行（优先按行号元素，退化到 chunk 开头） */
-function scrollToEditedLine(line: number) {
+/** 当前阅读位置对应的文件行号（1-based），用于决定编辑器从哪里开始 */
+function currentReadingLine(): number {
   const viewer = document.querySelector('.markdown-viewer')
-  if (!viewer) return
+  if (viewer) {
+    // 参考线：视口上部（大约正文开始处）
+    const refY = Math.max(80, window.innerHeight * 0.18)
+    let cand = 0
+    viewer.querySelectorAll<HTMLElement>('[data-line]').forEach((el) => {
+      const r = el.getBoundingClientRect()
+      if (r.top <= refY && r.bottom > 0) {
+        const n = parseInt(el.dataset.line || '', 10)
+        if (!Number.isNaN(n) && n > cand) cand = n
+      }
+    })
+    if (cand > 0) return cand
+  }
+  // 行号未开启（无 data-line）时的回退：当前 chunk 的起始行
+  const range = currentVisibleChunkRange()
+  return range ? range.start + 1 : 1
+}
 
-  let best: HTMLElement | null = null
-  let bestDiff = Infinity
-  viewer.querySelectorAll<HTMLElement>('[data-line]').forEach((el) => {
-    const n = parseInt(el.getAttribute('data-line') || '', 10)
-    if (Number.isNaN(n)) return
-    const diff = Math.abs(n - line)
-    if (diff < bestDiff) {
-      bestDiff = diff
-      best = el
-    }
+/** 「源码编辑」：跳转到对应的 Markdown 编辑器，并从当前阅读行开始载入一段窗口 */
+function openSourceEditor() {
+  toolbarOpen.value = false
+  const start = Math.max(1, currentReadingLine())
+  const startLimit = totalLines.value > 0 ? totalLines.value : start
+  const end = Math.min(startLimit, start + SOURCE_EDIT_WINDOW - 1)
+  router.push({
+    name: 'markdownEdit',
+    params: { id: String(docId.value) },
+    query: { line: end > start ? `${start}-${end}` : `${start}` },
   })
-  if (best) {
-    ;(best as HTMLElement).scrollIntoView({ behavior: 'instant', block: 'center' })
-    return
-  }
-
-  // 行号未开启时的回退：按包含该行的 chunk 定位
-  const idx = allChunks.value.findIndex(c =>
-    line - 1 >= c.start_line && line - 1 <= c.end_line
-  )
-  if (idx >= 0) {
-    const el = viewer.querySelector<HTMLElement>(`[data-chunk-id="${allChunks.value[idx].id}"]`)
-    el?.scrollIntoView({ behavior: 'instant', block: 'start' })
-  }
 }
 
 // ── 浮动 UI ──
@@ -846,17 +791,6 @@ onBeforeUnmount(() => {
   color: var(--text-tertiary);
   font-size: 13px;
   padding: 10px;
-}
-
-/* ── 右侧源码面板过渡 ── */
-.panel-slide-enter-active,
-.panel-slide-leave-active {
-  transition: transform 0.2s ease, opacity 0.2s ease;
-}
-.panel-slide-enter-from,
-.panel-slide-leave-to {
-  transform: translateX(100%);
-  opacity: 0.6;
 }
 
 /* ── 右下角浮动按钮 ── */

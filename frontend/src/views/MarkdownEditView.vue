@@ -653,11 +653,19 @@ onBeforeUnmount(() => {
 
 /* ── 移动端 ── */
 @media (max-width: 768px) {
-  .me-bar { padding: 6px 8px; }
-  .me-bar-main { gap: 6px; }
-  .me-title { font-size: 13px; }
-  .me-input { width: 110px; }
-  .me-actions { margin-left: 0; width: 100%; justify-content: flex-end; }
-  .me-status { order: 10; }
+  /* 顶栏压缩到 1–2 行：把垂直空间尽量留给编辑器与预览 */
+  .me-bar { padding: 4px 6px; }
+  .me-bar-main { gap: 4px; row-gap: 4px; }
+  .me-icon-btn { width: 26px; height: 26px; font-size: 13px; }
+  .me-title { font-size: 12px; }
+  .me-doc-id { font-size: 11px; padding: 0 4px; }
+  .me-label { display: none; }
+  .me-range { gap: 3px; }
+  .me-input { width: 72px; padding: 3px 5px; font-size: 12px; }
+  .me-btn { padding: 3px 7px; font-size: 12px; }
+  .me-btn-nav { padding: 3px 5px; }
+  .me-status { order: 10; width: 100%; font-size: 11px; gap: 6px; }
+  .me-actions { margin-left: auto; gap: 4px; }
+  .me-hint { margin-top: 3px; font-size: 11px; }
 }
 </style>

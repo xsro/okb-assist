@@ -216,7 +216,7 @@ cargo build --release
    - 含批量控制器、暂停/恢复/重置、两级信号量并发限制：MinerU 解析使用独立 `Semaphore(max_tasks)`（按配置），extract/index 使用全局 `Semaphore(max_concurrent_tasks)`（`system.json`）。
    - **所有阶段均在后台执行**（见下方「后台任务」一节）—— 请求先返回，协程在事件循环继续；进度与状态机记录在 `Document` 上，可轮询查询。
 4. **文档管理**（`documents.rs`）：CRUD、上传、按路径登记、语义搜索 `/search`、全文搜索 `/grep-search`、`/assist/markdown` 读写、PDF/图片服务、去重。
-   - `GET /assist/api/documents/:id/markdown/?line_start&line_count&full&raw` —— 按行切片读取；`raw=1` 返回文件原始内容（不做图片路径重写），供源码面板保证无损读写；响应含 `hash`（文件真实字节的 sha256）。
+   - `GET /assist/api/documents/:id/markdown/?line_start&line_count&full&raw` —— 按行切片读取；`raw=1` 返回文件原始内容（不做图片路径重写），供 Markdown 编辑器保证无损读写；响应含 `hash`（文件真实字节的 sha256）。
    - `PUT /assist/api/documents/:id/markdown/lines` —— 按行范围替换源码（admin）。语义：`line_start` 0-based 含端点，`line_count` 为被替换行数（0 = 纯插入），新行数 = `content.split('\n').count()`（与「切片 join('\n')」严格互逆），写入为原子写且不做图片路径还原（与 `raw=1` 配对）。删行必须显式传 `delete: true`（空字符串固定等于 1 个空行，不能表达删行）。
    - **乐观并发控制**：`PUT .../markdown/` 与 `.../markdown/lines/` 都接受可选 `base_hash`（取自 GET 的 `hash`），不一致时返回 **409** `{code:"conflict", hash, detail}`；不传则跳过校验（向后兼容）。两个写接口的响应都返回写入后的 `hash`。
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、迁移、索引重置。
@@ -275,8 +275,7 @@ cargo build --release
 | `SkeletonLoading.vue` | 骨架屏 |
 | `MarkdownViewer.vue` | Markdown 渲染（marked + KaTeX + DOMPurify） |
 | `QueryBuilder.vue` | 高级搜索构建器 + 列管理（双选项卡面板） |
-| `AceEditor.vue` | Markdown 编辑器（ace-builds 1.44.0），编辑+分屏预览+KaTeX；`showToolbar` / `showPreviewControls` / `readOnly` 可裁剪为纯源码编辑器 |
-| `SourcePanel.vue` | 阅读页右侧源码面板（按行范围读取/编辑/保存，`raw=1` 无损读写，admin 才可编辑） |
+| `AceEditor.vue` | Markdown 编辑器（ace-builds 1.44.0），编辑+自适应分屏预览+KaTeX（桌面左右 / 移动上下，可拖拽比例）；`showToolbar` / `showPreviewControls` / `readOnly` 可裁剪为纯源码编辑器 |
 | `McpConfigPanel.vue` | MCP 配置面板 |
 | `McpSkillPanel.vue` | MCP Skill 面板 |
 | `config/` | 配置子组件：`BaseUrlSection.vue`、`MineruConfigSection.vue`、`LlmConfigSection.vue`、`LlmExtractConfigSection.vue`、`VectorDbConfigSection.vue` |
@@ -289,8 +288,8 @@ cargo build --release
 |------|------|------|------|
 | `/assist` | `HomeView.vue` | 文献列表（桌面表格/移动卡片 + 列管理 + 高级搜索） | 全部 |
 | `/assist/detail/:id` | `DetailView.vue` | 文档详情 | 全部 |
-| `/assist/markdown/:id` | `MarkdownView.vue` | Markdown 阅读（浮动设置按钮收纳全部工具；行号默认开、移动端默认关；右侧源码面板按行就地编辑） | 全部 |
-| `/assist/markdown/:id/edit` | `MarkdownEditView.vue` | Markdown 编辑（AceEditor） | admin |
+| `/assist/markdown/:id` | `MarkdownView.vue` | Markdown 阅读（浮动设置按钮收纳全部工具；行号默认开、移动端默认关；设置面板的「源码编辑」跳到编辑器并从当前阅读行开始载入） | 全部 |
+| `/assist/markdown/:id/edit` | `MarkdownEditView.vue` | Markdown 编辑（AceEditor）；支持 `?line=a-b` 只载入指定行范围，阅读页「源码编辑」即跳到这里 | admin |
 | `/assist/upload` | `UploadView.vue` | 上传 PDF | admin / view-upload |
 | `/assist/doc/:id` | `DocManageView.vue` | 文档管理 | 全部 |
 | `/assist/config` | `ConfigView.vue` | 服务配置 | admin |
@@ -305,7 +304,11 @@ cargo build --release
 ### AceEditor 编辑器组件（`src/components/AceEditor.vue`）
 基于 `ace-builds@1.44.0` 封装的 Markdown 编辑器，内置完整编辑工具栏：
 - **Markdown 快捷插入**：加粗/斜体/删除线/H1-H3/列表/引用/链接/图片/行内代码/代码块/表格/分割线
-- **分屏预览**：编辑+预览并排，预览仅渲染编辑器**视口可见行**
+- **分屏预览（自适应）**：`showPreviewControls` 为真时默认开启分屏 —— **桌面端（>768px）左编辑器 / 右预览**，**移动端（≤768px）上编辑器 / 下预览**；中间分隔条可拖拽（`--split-ratio` CSS 变量，20%–80%）或双击复位 50:50
+- **视口跟随的实现要点**：Ace 没有 `scroll` 事件，`session` 的 `changeScrollTop` 只覆盖程序化滚动，鼠标滚轮/拖动滚动条必须监听 renderer 里原生可滚动的 `.ace_scrollbar-v` 的 `scroll`；**`editor.getFirstVisibleRow()` / `getLastVisibleRow()` 返回的已经是文档行号**（`$computeLayerConfig` 内部已做过 screen→document 转换），**不能再调 `screenToDocumentRow()` 二次转换**（否则自动换行时会算错、预览只覆盖部分可见行）；容器尺寸变化靠 `ResizeObserver` 触发 `editor.resize()` + 重新计算可见行
+- **预览行范围由用户设定（不再跟随滚动）**：头部两个输入框即渲染范围（`第 [起] – [止] 行`，文件行号 1-based、已加 `firstLineNumber` 偏移，回车/失焦生效）；编辑器滚动**不再**改变预览，预览面板可独立上下滚动；同一范围内编辑时保留预览滚动位置，范围变化时回到顶部。
+- **「同步可见」按钮**：把渲染范围设为编辑器当前可视范围（`getFirstVisibleRow()/getLastVisibleRow()`，不足 6 行时自动补足）。首次挂载自动同步一次（`initialRangeSynced`），之后完全由用户控制。
+- **范围约束**：单次最多渲染 `MAX_PREVIEW_LINES = 1000` 行；边界落在 `$$` 块级公式中间时会自动向外吸附到完整公式块（`snapRangeToMathBlocks`），避免预览里出现半截 `$$`。全屏预览（`⛶`）仍渲染本段全文。
 - **全屏模式**：固定定位铺满窗口
 - **搜索替换**：Ctrl+F / Ctrl+H（`ext-searchbox`）
 - **字体缩放**：Ctrl+滚轮 / A+ A− 按钮（范围 8-30px）
@@ -313,14 +316,15 @@ cargo build --release
 - **光标/选中信息**：行号列号 + 选中字符数 + 总字数
 - **数学公式**：预览通过 `MarkdownViewer` 组件渲染 KaTeX（`katex@0.18.4`）
 - **模块加载**：核心模块静态 import；`ext-searchbox` 和 `ext-language_tools` 动态 import
-- **移动端**：工具栏横向滚动，状态栏三段式换行
+- **移动端**：工具栏横向滚动，状态栏自动折行（桌面左右分栏 ⇄ 移动上下堆叠由 `useResponsive()` 的 `isMobile` 驱动）
 
 ### MarkdownViewer 渲染组件（`src/components/MarkdownViewer.vue`）
 - 按 chunk 增量渲染：`chunk.id` 不变则不重渲染（`renderedChunkIds`）
 - 公式：`extractMathPlaceholders()` 先把 `$..$` / `$$..$$` 换成占位符，再按**视口惰性**用 KaTeX 渲染；MathJax 模式按 chunk 增量 `typesetPromise`
+- **公式渲染出错时只显示错误信息**：KaTeX 用 `throwOnError: true, strict: 'ignore'`，解析失败替换为 `.math-error`（`⚠ 公式渲染失败：<KaTeX 错误信息>`），**不显示 LaTeX 源码**（原文只放在 `title` 里供悬停查看）；KaTeX 整体加载失败时统一转为 `.math-error`（`markAllMathErrors`）。`mathMode: 'none'` 属于用户选择，仍显示原始 LaTeX。
 - 支持 `mathMode` / `loadImages` / `showLineNumbers` / `lazyMath` 等开关
 - **行号映射（`data-line`）**：行号为 1-based 且与原始 md 文件严格对应。实现方式是按 `marked` 的 top-level token 顺序累加 `token.raw` 的换行数；**多行块级公式被占位符折叠，必须用 `MathMatch.lineSpan` 把被吃掉的换行数补回**，否则每个跨 N 行的 `$$` 片段都会让后续行号漂移 N-1 行。逐块渲染用 `marked.parser([token])`，保证每个块能带上自己的起始行号
-- `data-line` 的消费方：阅读页行号栏、`?target_line=` 深链、搜索/TOC 跳转、源码面板保存后的回落定位（`scrollToEditedLine`）
+- `data-line` 的消费方：阅读页行号栏、`?target_line=` 深链、搜索/TOC 跳转、「源码编辑」定位起点行（`currentReadingLine`）
 
 ### 状态管理
 - `useToast()`（`src/composables/useToast.ts`）：`showSuccess()` / `showError()` / `showInfo()` / `showToast()`
@@ -399,6 +403,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 12. **SQLx 编译时检查**：`sqlx` 默认在 `debug` 模式下会校验 SQL 查询，如果迁移了数据库结构需运行 `cargo sqlx prepare`（需安装 `sqlx-cli`）。
 13. **MinerU Markdown 图片处理**（`backend-rs/src/services/mineru.rs`）：`get_task_result()` 必须优先从 ZIP 输出提取 Markdown（含本地图片引用），而非从独立 Markdown 输出（含 data URI）。`finish_parse_result()` 在 `pipeline.rs` 中还需**复制独立图片文件**到目标目录，否则 Markdown 中的相对路径引用会失效。
 14. **MinerU API 的 output_formats 顺序无关**：`submit_job()` 必须同时请求 `"markdown"` 和 `"zip"` 两个格式。`zip` 格式包含解析结果的完整输出（Markdown + 图片），而 `markdown` 格式是自包含的 data URI 版本。两套输出分别下载后合并处理。
+15. **全屏（`meta.bare`）路由的高度链**：`main-content-bare` → `.error-boundary-wrap` → 页面容器 → `AceEditor` 每一层都必须是纵向 flex（`flex:1; min-height:0`）。`App.vue` 用 `.main-content-bare :deep(.error-boundary-wrap)` 补了这一层；漏掉就会让内部 `height:100%/flex:1` 的编辑器塌陷成内容高度（表现为编辑区只有 200px 高、下方一大片空白）。
 
 ## 入口与关键文件速查
 
