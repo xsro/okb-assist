@@ -4,6 +4,7 @@ import type {
   ApiTokenMeta,
   Role,
   TokenIssueResponse,
+  TokenScope,
   User,
   UsersListResponse,
   UsersSettings,
@@ -63,8 +64,11 @@ export function listUserTokens(id: string): Promise<{ tokens: ApiTokenMeta[] }> 
   return apiGet(`/assist/api/admin/users/${encodeURIComponent(id)}/tokens`)
 }
 
-export function issueUserToken(id: string, label: string, mcp: boolean): Promise<TokenIssueResponse> {
-  return apiPost(`/assist/api/admin/users/${encodeURIComponent(id)}/tokens`, { label, mcp })
+export function issueUserToken(
+  id: string,
+  payload: { label: string; scope: TokenScope; token?: string }
+): Promise<TokenIssueResponse> {
+  return apiPost(`/assist/api/admin/users/${encodeURIComponent(id)}/tokens`, payload)
 }
 
 export function revokeUserToken(id: string, tokenId: string): Promise<{ ok: boolean }> {

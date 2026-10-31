@@ -21,13 +21,25 @@
           <span>默认配额（MB，0 = 不限）</span>
           <input v-model.number="settings.default_quota_mb" type="number" min="0" />
         </div>
+        <div class="setting setting-root">
+          <span>存储根目录</span>
+          <code class="root-path" :title="settings.root || ''">{{ settings.root || '—' }}</code>
+        </div>
       </div>
       <div class="settings-actions">
         <button class="btn btn-sm" :disabled="settingsBusy" @click="saveSettings">
           {{ settingsBusy ? '保存中…' : '保存设置' }}
         </button>
-        <span class="form-hint">修改单文件上限后，上传接口的请求体上限会在服务重启后生效。</span>
+        <span class="form-hint">
+          修改单文件上限后，上传接口的请求体上限会在服务重启后生效。
+        </span>
       </div>
+      <p class="form-hint root-hint">
+        存储根目录由 <code>system.json</code> 的 <code>drive_root</code> 指定（支持绝对路径、
+        <code>env:</code> 环境变量与 <code>system_dir</code> 变量），修改后需重启进程；
+        私有目录为 <code>drive_root/users/&lt;user_id&gt;</code>，公有文件夹为
+        <code>drive_root/_public/&lt;folder_id&gt;</code>。
+      </p>
     </section>
 
     <!-- 公有文件夹 -->
@@ -379,6 +391,21 @@ onMounted(loadAll)
 .form-hint {
   font-size: 12px;
   color: var(--text-muted);
+}
+.setting-root {
+  grid-column: 1 / -1;
+}
+.root-path {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--bg-subtle, rgba(127, 127, 127, 0.12));
+  word-break: break-all;
+}
+.root-hint {
+  margin-top: 6px;
+  line-height: 1.7;
 }
 .create-row {
   display: flex;

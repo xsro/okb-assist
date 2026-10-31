@@ -352,9 +352,10 @@ impl DriveService {
         serde_json::from_value(self.cm.get_service_config()["drive"].clone()).unwrap_or_default()
     }
 
-    /// 网盘根目录（相对 `cwd`，进程启动时已 chdir）
+    /// 网盘根目录（`system.json` 的 `drive_root`，已展开 `{system_dir}` / `{env:VAR}`
+    /// 并按 `cwd` 解析为实际路径）
     pub fn root(&self) -> PathBuf {
-        PathBuf::from(self.settings.drive_root())
+        self.settings.drive_root()
     }
 
     /// 私有目录：`{drive_root}/users/{user_id}`
@@ -619,6 +620,7 @@ mod tests {
             username: user.to_string(),
             role,
             mcp: false,
+            api: true,
             via: crate::auth::CredentialKind::Session,
             token_id: None,
         }

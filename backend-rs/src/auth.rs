@@ -6,7 +6,10 @@
 //!    `Extension<Role>` 判定权限，升级用户体系后签名与语义均未变化。
 //! 2. **凭证解析**（新模型）：[`extract_token`] 取凭证，[`resolve_principal`] 解析成
 //!    [`Principal`]（服务端会话 `sess_...` → 用户 API token `okb_...`）。
-//! 3. **首次启动引导**：[`is_initialized`] / [`ensure_bootstrap`]。
+//! 3. **初始化判定**：[`is_initialized`]（是否存在启用中的管理员）。
+//!
+//! 首个管理员由前端初始化页调用 `POST /assist/api/auth/bootstrap` 创建；
+//! 不再从 `system.json` 接管任何全局 token。
 //!
 //! 用户数据与会话分别由 [`crate::users`] 与 [`crate::session`] 管理。
 
@@ -100,9 +103,9 @@ impl OwnerKey {
 pub enum CredentialKind {
     /// 密码登录签发的服务端会话 token（`sess_...`）
     Session,
-    /// 用户长期凭证（`okb_...`，含引导期接管的 `system.json` token）
+    /// 用户长期凭证（`okb_...`，在「账户」页签发）
     ApiToken,
-    /// 受信任子网 / 全局 MCP token 这类「非用户」主体
+    /// 受信任子网这类「非用户」主体
     LocalSubnet,
 }
 
@@ -125,21 +128,24 @@ pub struct Principal {
     pub user_id: String,
     pub username: String,
     pub role: Role,
-    /// 是否允许访问 MCP（已按「用户 mcp 布尔 × token mcp」算好的最终值）
+    /// 是否允许访问 MCP（已按「用户 mcp 布尔 × 令牌作用域」算好的最终值）
     pub mcp: bool,
+    /// 是否允许访问 `/assist/api/*`（MCP 专属令牌为 false）
+    pub api: bool,
     pub via: CredentialKind,
     /// 通过 API token 认证时的 token id
     pub token_id: Option<String>,
 }
 
 impl Principal {
-    /// 受信任子网 / 全局 MCP token 这类「非用户」主体
+    /// 受信任子网这类「非用户」主体（同时允许 API 与 MCP）
     pub fn local(role: Role, mcp: bool) -> Self {
         Self {
             user_id: "local".to_string(),
             username: "local".to_string(),
             role,
             mcp,
+            api: true,
             via: CredentialKind::LocalSubnet,
             token_id: None,
         }
@@ -230,7 +236,9 @@ pub fn resolve_principal(
                     user_id: user.id,
                     username: user.username,
                     role,
+                    // 会话（密码登录）等同于完整权限：API 可用，MCP 看用户开关
                     mcp: user.mcp,
+                    api: true,
                     via: CredentialKind::Session,
                     token_id: None,
                 })
@@ -253,8 +261,10 @@ pub fn resolve_principal(
         user_id: user.id,
         username: user.username,
         role,
-        // MCP 需要「用户允许」且「该 token 允许」同时成立
-        mcp: user.mcp && api_token.mcp,
+        // 令牌作用域严格互斥：`api` 只能调 API，`mcp` 只能调 MCP；
+        // MCP 还需用户本人开启 mcp。
+        mcp: user.mcp && api_token.scope.allows_mcp(),
+        api: api_token.scope.allows_api(),
         via: CredentialKind::ApiToken,
         token_id: Some(api_token.id),
     })
@@ -265,71 +275,6 @@ pub fn resolve_principal(
 /// 未初始化时除 `/assist/api/auth/{status,check,bootstrap}` 以外的接口一律拒绝。
 pub fn is_initialized(users: &crate::users::UserStore) -> bool {
     users.active_admin_count() > 0
-}
-
-/// 首次启动引导。
-///
-/// 若系统还没有任何管理员，且 `system.json` 的 admin `token` 已配置（非空且不是
-/// `change-me`）→ 自动创建一个无密码的 `admin` 账号，并把该 token 登记为它的
-/// `bootstrap` API token：过渡期内旧 token 仍可登录，管理员设置密码后该 token
-/// 自动吊销（见 `UserStore::set_password`）。
-///
-/// 未配置 token 时保持「未初始化」状态，由前端初始化页调用
-/// `POST /assist/api/auth/bootstrap` 创建首个管理员。
-///
-/// 返回 `true` 表示本次调用创建了引导账号。
-pub fn ensure_bootstrap(
-    users: &crate::users::UserStore,
-    settings: &crate::config::Settings,
-) -> bool {
-    if users.active_admin_count() > 0 {
-        return false;
-    }
-
-    let token = settings.token();
-    // 占位值（空 / change-me / token-change-me / your-token…）一律视为「未配置」，
-    // 避免用仓库里带的示例 token 自动创建出一个人人皆知密码的 admin 账号。
-    let normalized = token.trim().to_lowercase();
-    let has_token = !normalized.is_empty() && !normalized.contains("change-me");
-
-    if !has_token {
-        tracing::warn!(
-            "尚未配置管理员：请在前端初始化页创建首个管理员账号，或把 system.json 的 token 指向一把可用的引导凭据"
-        );
-        return false;
-    }
-
-    let new_user = crate::users::NewUser {
-        username: "admin".to_string(),
-        password: None,
-        display_name: "管理员".to_string(),
-        role: "admin".to_string(),
-        status: crate::users::STATUS_ACTIVE.to_string(),
-        mcp: true,
-        must_set_password: true,
-    };
-
-    match users.create(new_user) {
-        Ok(user) => {
-            match users.register_api_token(
-                &user.id,
-                &token,
-                crate::users::BOOTSTRAP_TOKEN_LABEL,
-                true,
-            ) {
-                Ok(_) => tracing::warn!(
-                    user = %user.username,
-                    "首次启动：已根据 system.json.token 创建 admin 账号并把该 token 接管为引导凭证，请尽快登录并设置密码"
-                ),
-                Err(e) => tracing::error!(error = %e, "引导 token 登记失败"),
-            }
-            true
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "首次启动引导失败");
-            false
-        }
-    }
 }
 
 // ── 限流 ────────────────────────────────────────────────
@@ -467,30 +412,41 @@ mod tests {
         assert_eq!(principal.username, "alice");
         assert_eq!(principal.role, Role::ViewUpload);
         assert!(principal.mcp);
+        // 会话（密码登录）等同完整权限
+        assert!(principal.api);
         assert_eq!(principal.via, CredentialKind::Session);
         assert_eq!(principal.owner_key().as_str(), format!("u:{}", user.id));
     }
 
     #[test]
-    fn resolve_principal_via_api_token_requires_mcp_flag() {
+    fn resolve_principal_respects_token_scope() {
         let (_dir, users, sessions) = stores();
-        let user = make_user(&users, "bob", "view-only", false);
-        let (plain, _) = users.issue_api_token(&user.id, "zotero", true).unwrap();
+        // 作用域严格互斥：mcp 令牌不能调 API，api 令牌不能调 MCP
+        let user = make_user(&users, "bob", "view-only", true);
+        let (api_plain, _) = users
+            .issue_api_token(&user.id, "zotero", crate::users::TokenScope::Api)
+            .unwrap();
+        let api_principal = resolve_principal(&api_plain, &users, &sessions).expect("token 应能解析");
+        assert_eq!(api_principal.via, CredentialKind::ApiToken);
+        assert!(api_principal.token_id.is_some());
+        assert!(api_principal.api, "api 令牌可用于 /assist/api/*");
+        assert!(!api_principal.mcp, "api 令牌不能用于 MCP");
 
-        let principal = resolve_principal(&plain, &users, &sessions).expect("token 应能解析");
-        assert_eq!(principal.via, CredentialKind::ApiToken);
-        assert!(principal.token_id.is_some());
-        // 用户 mcp = false，即使 token mcp = true 也不能访问 MCP
-        assert!(!principal.mcp);
+        let (mcp_plain, _) = users
+            .issue_api_token(&user.id, "mcp", crate::users::TokenScope::Mcp)
+            .unwrap();
+        let mcp_principal = resolve_principal(&mcp_plain, &users, &sessions).unwrap();
+        assert!(!mcp_principal.api, "mcp 令牌不能用于 /assist/api/*");
+        assert!(mcp_principal.mcp);
 
-        // 用户 mcp = true 但 token 未授权 mcp → 仍然不行
-        let user2 = make_user(&users, "carol", "view-only", true);
-        let (plain2, _) = users.issue_api_token(&user2.id, "web", false).unwrap();
-        assert!(!resolve_principal(&plain2, &users, &sessions).unwrap().mcp);
-
-        // 两边都为 true 才放行
-        let (plain3, _) = users.issue_api_token(&user2.id, "mcp", true).unwrap();
-        assert!(resolve_principal(&plain3, &users, &sessions).unwrap().mcp);
+        // mcp 令牌仍受用户级开关约束：用户 mcp = false → 拒绝访问 MCP
+        let user2 = make_user(&users, "carol", "view-only", false);
+        let (plain2, _) = users
+            .issue_api_token(&user2.id, "agent", crate::users::TokenScope::Mcp)
+            .unwrap();
+        let p2 = resolve_principal(&plain2, &users, &sessions).unwrap();
+        assert!(!p2.mcp);
+        assert!(!p2.api);
     }
 
     #[test]
@@ -498,7 +454,9 @@ mod tests {
         let (_dir, users, sessions) = stores();
         let user = make_user(&users, "dave", "view-only", true);
         let token = issue_for(&sessions, &user);
-        let (plain, _) = users.issue_api_token(&user.id, "t", true).unwrap();
+        let (plain, _) = users
+            .issue_api_token(&user.id, "t", crate::users::TokenScope::Mcp)
+            .unwrap();
 
         users
             .update(
@@ -544,61 +502,6 @@ mod tests {
             )
             .unwrap();
         assert!(is_initialized(&users));
-    }
-
-    #[test]
-    fn bootstrap_skips_placeholder_tokens() {
-        for placeholder in ["", "  ", "change-me", "token-change-me", "CHANGE-ME"] {
-            let dir = tempfile::tempdir().unwrap();
-            let system = dir.path().join("system.json");
-            std::fs::write(
-                &system,
-                serde_json::json!({ "token": placeholder }).to_string(),
-            )
-            .unwrap();
-            let cm = Arc::new(ConfigManager::for_tests(
-                dir.path().join("config.json"),
-                system,
-            ));
-            let users = UserStore::new(cm.clone());
-            let settings = crate::config::Settings::new(cm);
-            assert!(
-                !ensure_bootstrap(&users, &settings),
-                "占位 token {:?} 不应触发引导建号",
-                placeholder
-            );
-            assert_eq!(users.user_count(), 0);
-            assert!(!is_initialized(&users));
-        }
-    }
-
-    #[test]
-    fn bootstrap_creates_admin_with_bootstrap_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let system = dir.path().join("system.json");
-        std::fs::write(
-            &system,
-            serde_json::json!({ "token": "real-admin-token" }).to_string(),
-        )
-        .unwrap();
-        let cm = Arc::new(ConfigManager::for_tests(
-            dir.path().join("config.json"),
-            system,
-        ));
-        let users = UserStore::new(cm.clone());
-        let settings = crate::config::Settings::new(cm);
-
-        assert!(ensure_bootstrap(&users, &settings));
-        assert!(is_initialized(&users));
-        let admin = users.find_by_username("admin").expect("应创建 admin");
-        assert!(admin.must_set_password);
-        assert!(admin.password_hash.is_none());
-        // 旧 token 作为 bootstrap 令牌可用
-        let (_, token) = users.find_by_api_token("real-admin-token").expect("bootstrap 令牌应可用");
-        assert_eq!(token.label, crate::users::BOOTSTRAP_TOKEN_LABEL);
-        // 幂等：再次调用不会重复建号
-        assert!(!ensure_bootstrap(&users, &settings));
-        assert_eq!(users.user_count(), 1);
     }
 
     #[test]

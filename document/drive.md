@@ -94,7 +94,11 @@
 {drive_root}/_public/{folder_id}/...   # 公有
 ```
 
-- `drive_root` 在 `system.json` 中配置（默认 `data/drive`，相对 `cwd`），改后需重启；
+- `drive_root` 在 `system.json` 中配置（默认 `data/drive`），改后需重启。解析规则：
+  - 相对路径按 `cwd` 解析；
+  - **可直接写绝对路径**（如 `/mnt/disk/okb-drive`），把网盘放到独立磁盘/挂载点；
+  - 支持 `{system_dir}`（system.json 所在目录）与 `{env:VAR}` 变量，例如 `"{env:OKB_DRIVE_ROOT}"`。
+  - 实际生效路径可在「网盘管理」页的「存储根目录」看到（只读，来自 `system.json`）；
 - 目录会在首次使用时自动创建；
 - 备份：直接备份 `{drive_root}` 目录即可（文件内容与目录结构就是全部数据）；
 - 策略（开关 / 上限 / 配额 / 公有文件夹定义）存在 `config.json` 的 `drive` 段，

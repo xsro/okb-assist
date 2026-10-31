@@ -1098,22 +1098,16 @@ pub async fn mcp_stream_handler(
 
     // MCP 鉴权。
     //
-    // 允许三类调用方：
-    // 1. `system.json.mcp_token`（全局通用入口，视为本地 admin 主体）；
-    // 2. 已完成认证且 `Principal.mcp == true` 的用户凭证：
+    // 允许两类调用方：
+    // 1. 已完成认证且 `Principal.mcp == true` 的用户凭证：
     //    - 密码登录签发的会话 token（`sess_...`）；
     //    - 用户个人 API token（`okb_...`，要求该 token 与用户都开启 mcp）；
-    // 3. 受信任子网（**仅当** `system.json.trusted_subnet_enabled = true`）。
-    let mcp_token = settings.mcp_token();
-    let auth_enabled = !mcp_token.is_empty() || user_store.user_count() > 0;
+    // 2. 受信任子网（**仅当** `system.json.trusted_subnet_enabled = true`）。
+    let auth_enabled = user_store.user_count() > 0;
     if auth_enabled {
         let token = crate::auth::extract_token_from_headers(&headers);
 
         let principal = match token.as_deref() {
-            // 全局 mcp_token → 本地管理主体
-            Some(t) if !mcp_token.is_empty() && t == mcp_token => {
-                crate::auth::Principal::local(crate::auth::Role::Admin, true)
-            }
             // 用户会话 / 个人 token
             Some(t) => match crate::auth::resolve_principal(t, &user_store, &sessions) {
                 Some(p) => p,

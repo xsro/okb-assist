@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use crate::auth::{self, Principal, Role};
 use crate::session::SessionStore;
-use crate::users::{NewUser, UserPatch, UserStore, STATUS_ACTIVE};
+use crate::users::{ApiToken, NewUser, TokenScope, UserPatch, UserStore, STATUS_ACTIVE};
 
 pub fn router() -> axum::Router<()> {
     axum::Router::new()
@@ -93,8 +93,12 @@ struct ResetPasswordBody {
 struct IssueTokenBody {
     #[serde(default)]
     label: String,
+    /// 权限作用域：`api`（默认）或 `mcp`，二者互斥
     #[serde(default)]
-    mcp: bool,
+    scope: Option<String>,
+    /// 自定义令牌明文（留空 = 自动生成 `okb_…`）
+    #[serde(default)]
+    token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +135,75 @@ fn ok_users(users: &UserStore) -> Value {
         "pending": list.iter().filter(|u| u.is_pending()).count(),
         "users": list.iter().map(|u| u.to_public_json()).collect::<Vec<_>>(),
     })
+}
+
+/// 解析请求体里的权限作用域（缺省 = `api`，非法值 → 400）
+fn parse_token_scope(raw: Option<&str>) -> Result<TokenScope, Response> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(TokenScope::Api),
+        Some(s) => TokenScope::from_str(s).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"detail": "权限无效：仅支持 api / mcp"})),
+            )
+                .into_response()
+        }),
+    }
+}
+
+/// 签发令牌（自动生成或用户自定义），两个入口（admin / 自助）共用。
+///
+/// 规则：
+/// - `scope = mcp` 要求用户本身已开启 `mcp`；
+/// - `token` 留空 → 自动生成 `okb_<32B base64url>`；否则按用户提供的明文登记
+///   （≥ 8 位、可见 ASCII、全局不重复，校验在 [`crate::users::register_api_token`]）；
+/// - 响应里返回明文（自定义时即原样回显），只此一次。
+fn issue_token(
+    users: &UserStore,
+    user: &crate::users::User,
+    body: &IssueTokenBody,
+    default_label: &str,
+) -> Result<(String, ApiToken), Response> {
+    let scope = parse_token_scope(body.scope.as_deref())?;
+    if scope.allows_mcp() && !user.mcp {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"detail": format!(
+                "用户 {} 未被授予 MCP 权限，请先在用户信息里开启 mcp",
+                user.username
+            )})),
+        )
+            .into_response());
+    }
+
+    let label = if body.label.trim().is_empty() {
+        default_label.to_string()
+    } else {
+        body.label.trim().to_string()
+    };
+
+    let custom = body.token.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let result = match custom {
+        // 自定义令牌：明文由用户提供，原样回显
+        Some(plain) => users
+            .register_api_token(&user.id, plain, &label, scope)
+            .map(|token| (plain.to_string(), token)),
+        None => users.issue_api_token(&user.id, &label, scope),
+    };
+    result.map_err(|e| e.into_response())
+}
+
+/// 令牌签发成功后的统一响应体
+fn token_issued_response(plain: String, token: ApiToken) -> Response {
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "token": plain,
+            "meta": token.to_public_json(),
+            "detail": "请立即保存：该 token 只显示这一次",
+        })),
+    )
+        .into_response()
 }
 
 // ── 用户管理（admin） ───────────────────────────────────
@@ -424,36 +497,18 @@ async fn issue_user_token(
         Some(u) => u,
         None => return not_found("用户不存在"),
     };
-    if body.mcp && !user.mcp {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"detail": format!(
-                "用户 {} 未被授予 MCP 权限，请先在用户信息里开启 mcp",
-                user.username
-            )})),
-        )
-            .into_response();
-    }
-    match users.issue_api_token(&id, &body.label, body.mcp) {
+    match issue_token(&users, &user, &body, "token") {
         Ok((plain, token)) => {
             tracing::info!(
                 audit = "token_issue",
                 user_id = %id,
                 token_id = %token.id,
-                mcp = token.mcp,
+                scope = token.scope.as_str(),
                 "管理员为用户签发 token"
             );
-            (
-                StatusCode::CREATED,
-                Json(json!({
-                    "token": plain,
-                    "meta": token.to_public_json(),
-                    "detail": "请立即保存：该 token 只显示这一次",
-                })),
-            )
-                .into_response()
+            token_issued_response(plain, token)
         }
-        Err(e) => e.into_response(),
+        Err(resp) => resp,
     }
 }
 
@@ -502,7 +557,11 @@ async fn issue_my_token(
     let Some(user) = users.find_by_id(&principal.user_id) else {
         return not_found("用户不存在");
     };
-    if body.mcp && !user.mcp {
+    let scope = match parse_token_scope(body.scope.as_deref()) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    if scope.allows_mcp() && !user.mcp {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"detail": "当前账号未被授予 MCP 权限，请先联系管理员开启"})),
@@ -510,31 +569,18 @@ async fn issue_my_token(
             .into_response();
     }
 
-    let label = if body.label.trim().is_empty() {
-        "personal".to_string()
-    } else {
-        body.label
-    };
-    match users.issue_api_token(&user.id, &label, body.mcp && user.mcp) {
+    match issue_token(&users, &user, &body, "personal") {
         Ok((plain, token)) => {
             tracing::info!(
                 audit = "token_issue_self",
                 user = %user.username,
                 token_id = %token.id,
-                mcp = token.mcp,
+                scope = token.scope.as_str(),
                 "用户自助签发 token"
             );
-            (
-                StatusCode::CREATED,
-                Json(json!({
-                    "token": plain,
-                    "meta": token.to_public_json(),
-                    "detail": "请立即保存：该 token 只显示这一次",
-                })),
-            )
-                .into_response()
+            token_issued_response(plain, token)
         }
-        Err(e) => e.into_response(),
+        Err(resp) => resp,
     }
 }
 

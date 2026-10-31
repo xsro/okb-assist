@@ -65,7 +65,16 @@
     "allow_registration": true,
     "items": [
       {
-        "api_tokens": [],
+        "api_tokens": [
+          {
+            "created_at": "2026-10-31T15:11:25.383195+00:00",
+            "id": "at_ae01465a77dd",
+            "label": "personal",
+            "last_used_at": null,
+            "mcp": true,
+            "token_sha256": "ae01465a77dd3f48285e0974ad8c63109cfe7109a3f4d9815e19319ee5f329f0"
+          }
+        ],
         "created_at": "2026-10-31T14:42:49.244988+00:00",
         "display_name": "管理员",
         "failed_logins": 0,
@@ -77,7 +86,7 @@
         "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$2QhejRxpKpvQMirhrgnSXg$MYkniF1Kj60fFN7rvOOKL5wqYQgbEOYYxmsLyOAZ1l4",
         "role": "admin",
         "status": "active",
-        "updated_at": "2026-10-31T14:53:49.007104+00:00",
+        "updated_at": "2026-10-31T15:11:25.383611+00:00",
         "username": "admin"
       }
     ],

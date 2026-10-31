@@ -201,12 +201,23 @@
         <h3>访问令牌：{{ tokenTarget.username }}</h3>
         <div class="token-create">
           <input v-model="tokenLabel" type="text" placeholder="备注（如 zotero）" />
-          <label class="checkbox">
-            <input v-model="tokenMcp" type="checkbox" :disabled="!tokenTarget.mcp" />
-            MCP
-          </label>
+          <select v-model="tokenScope">
+            <option value="api">API（/assist/api/*）</option>
+            <option value="mcp" :disabled="!tokenTarget.mcp">MCP（/assist/mcp）</option>
+          </select>
+          <input
+            v-model="tokenPlain"
+            type="text"
+            placeholder="自定义令牌（留空自动生成）"
+            autocomplete="off"
+            spellcheck="false"
+          />
           <button class="btn btn-sm" :disabled="tokenBusy" @click="createToken">签发</button>
         </div>
+        <p class="form-hint">
+          API 与 MCP 令牌互不通用：API 令牌调 <code>/assist/api/*</code>，MCP 令牌只能调 MCP。
+          自定义明文至少 8 位、仅可见 ASCII，且不能与其他账号重复。
+        </p>
         <p v-if="!tokenTarget.mcp" class="form-hint">该用户未开启 MCP，无法签发 MCP 令牌。</p>
 
         <div v-if="issuedToken" class="issued-token">
@@ -222,7 +233,7 @@
           <thead>
             <tr>
               <th>备注</th>
-              <th>MCP</th>
+              <th>权限</th>
               <th>创建时间</th>
               <th></th>
             </tr>
@@ -230,7 +241,7 @@
           <tbody>
             <tr v-for="t in tokenTarget.api_tokens" :key="t.id">
               <td>{{ t.label || '—' }}</td>
-              <td>{{ t.mcp ? '是' : '否' }}</td>
+              <td>{{ t.scope === 'mcp' ? 'MCP' : 'API' }}</td>
               <td>{{ formatTime(t.created_at) }}</td>
               <td class="row-actions">
                 <button class="btn btn-sm btn-outline-danger" @click="revokeToken(t.id)">撤销</button>
@@ -267,7 +278,7 @@ import {
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { useToast } from '@/composables/useToast'
 import { useTokenStore } from '@/stores/token'
-import type { Role, User, UserStatus, UsersSettings } from '@/types/auth'
+import type { Role, TokenScope, User, UserStatus, UsersSettings } from '@/types/auth'
 
 withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 
@@ -307,7 +318,8 @@ const resetBusy = ref(false)
 // 令牌
 const tokenTarget = ref<User | null>(null)
 const tokenLabel = ref('')
-const tokenMcp = ref(false)
+const tokenScope = ref<TokenScope>('api')
+const tokenPlain = ref('')
 const tokenBusy = ref(false)
 const issuedToken = ref('')
 
@@ -479,7 +491,8 @@ async function submitReset() {
 async function openTokens(u: User) {
   tokenTarget.value = u
   tokenLabel.value = ''
-  tokenMcp.value = !!u.mcp
+  tokenScope.value = 'api'
+  tokenPlain.value = ''
   issuedToken.value = ''
 }
 
@@ -487,13 +500,15 @@ async function createToken() {
   if (!tokenTarget.value) return
   tokenBusy.value = true
   try {
-    const res = await issueUserToken(
-      tokenTarget.value.id,
-      tokenLabel.value.trim() || 'token',
-      tokenMcp.value
-    )
+    const custom = tokenPlain.value.trim()
+    const res = await issueUserToken(tokenTarget.value.id, {
+      label: tokenLabel.value.trim() || 'token',
+      scope: tokenScope.value,
+      token: custom || undefined
+    })
     issuedToken.value = res.token
     tokenLabel.value = ''
+    tokenPlain.value = ''
     await loadAll()
     // 同步刷新弹窗里的用户对象
     const fresh = users.value.find((x) => x.id === tokenTarget.value?.id)

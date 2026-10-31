@@ -69,9 +69,8 @@ export interface ServiceConfig {
   vector_dbs: VectorDbConfig[]
 }
 
+/** `system.json` 内容（管理员可见）。凭据已全部迁到 `config.json` 的 `users` 段 */
 export interface SystemConfig {
-  token: string
-  mcp_token: string
   database_url: string
   cwd: string
 }

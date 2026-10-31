@@ -1133,8 +1133,12 @@ async fn admin_set_quota(
 }
 
 /// `GET /assist/api/admin/drive/settings`
+///
+/// 除 `config.json` 的 `drive` 段策略外，额外返回 `root`（`system.json` 中
+/// `drive_root` 解析后的实际路径），方便管理员确认文件到底存在哪里。
 async fn admin_get_settings(
     Extension(role): Extension<Role>,
+    Extension(settings): Extension<Arc<Settings>>,
     Extension(cm): Extension<Arc<ConfigManager>>,
 ) -> Response {
     if let Err(resp) = require_admin(&role) {
@@ -1146,6 +1150,8 @@ async fn admin_get_settings(
         "enabled": config.enabled,
         "max_upload_mb": config.max_upload_mb,
         "default_quota_mb": config.default_quota_mb,
+        // 实际存储根目录（只读，来自 system.json，改后需重启）
+        "root": settings.drive_root().to_string_lossy().to_string(),
     }))
     .into_response()
 }
@@ -1163,6 +1169,7 @@ struct UpdateDriveSettingsBody {
 /// `PUT /assist/api/admin/drive/settings`
 async fn admin_update_settings(
     Extension(role): Extension<Role>,
+    Extension(settings): Extension<Arc<Settings>>,
     Extension(cm): Extension<Arc<ConfigManager>>,
     Json(body): Json<UpdateDriveSettingsBody>,
 ) -> Response {
@@ -1194,6 +1201,7 @@ async fn admin_update_settings(
         "enabled": config.enabled,
         "max_upload_mb": config.max_upload_mb,
         "default_quota_mb": config.default_quota_mb,
+        "root": settings.drive_root().to_string_lossy().to_string(),
     }))
     .into_response()
 }

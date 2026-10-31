@@ -6,6 +6,7 @@ import type {
   LoginResponse,
   MeResponse,
   TokenIssueResponse,
+  TokenScope,
   TokensListResponse,
   User
 } from '@/types/auth'
@@ -69,9 +70,13 @@ export function listMyTokens(): Promise<TokensListResponse> {
   return apiGet<TokensListResponse>('/assist/api/auth/tokens')
 }
 
-/** 签发个人 token（明文只返回一次） */
-export function issueMyToken(label: string, mcp: boolean): Promise<TokenIssueResponse> {
-  return apiPost<TokenIssueResponse>('/assist/api/auth/tokens', { label, mcp })
+/** 签发个人 token（明文只返回一次）。`token` 留空 = 自动生成 okb_… */
+export function issueMyToken(payload: {
+  label: string
+  scope: TokenScope
+  token?: string
+}): Promise<TokenIssueResponse> {
+  return apiPost<TokenIssueResponse>('/assist/api/auth/tokens', payload)
 }
 
 export function revokeMyToken(tokenId: string): Promise<{ ok: boolean }> {

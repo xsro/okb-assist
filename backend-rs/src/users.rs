@@ -29,11 +29,16 @@ use crate::config_manager::ConfigManager;
 pub const MIN_PASSWORD_LEN: usize = 8;
 /// 密码长度上限（字符）
 pub const MAX_PASSWORD_LEN: usize = 128;
-/// API token 前缀（`okb_<32B base64url>`），便于识别与日志脱敏
+/// API token 前缀（自动生成的 `okb_<32B base64url>`），便于识别与日志脱敏
 pub const API_TOKEN_PREFIX: &str = "okb_";
+/// 自定义令牌长度下限（字符）
+pub const MIN_TOKEN_LEN: usize = 8;
+/// 自定义令牌长度上限（字符）
+pub const MAX_TOKEN_LEN: usize = 256;
 
-/// 引导期 token 的 label：`system.json` 的 `token` 迁为该用户的一条 api_token。
-/// 该用户**首次设置密码成功后会自动吊销**它（见 [`UserStore::set_password`]）。
+/// 历史「引导期 token」的 label（旧版本会把 `system.json` 的 `token` 接管为该用户的一条
+/// api_token）。现已不再产生此类令牌，保留仅为了兼容旧安装：该用户**首次设置密码成功后
+/// 会自动吊销**遗留的这类令牌（见 [`UserStore::set_password`]）。
 pub const BOOTSTRAP_TOKEN_LABEL: &str = "bootstrap";
 
 pub const STATUS_PENDING: &str = "pending";
@@ -66,6 +71,12 @@ pub enum UserError {
     LastAdmin,
     #[error("账号已被锁定，请稍后再试")]
     Locked,
+    /// 自定义令牌字符串不合法（长度 / 字符集）
+    #[error("{0}")]
+    InvalidToken(String),
+    /// 该令牌字符串已被其他账号占用
+    #[error("该令牌已被其他账号使用，请换一个")]
+    TokenTaken,
     #[error("配置写入失败：{0}")]
     Config(String),
 }
@@ -78,6 +89,7 @@ impl UserError {
             UserError::NotFound => StatusCode::NOT_FOUND,
             UserError::UsernameTaken => StatusCode::CONFLICT,
             UserError::LastAdmin => StatusCode::CONFLICT,
+            UserError::TokenTaken => StatusCode::CONFLICT,
             UserError::Locked => StatusCode::TOO_MANY_REQUESTS,
             UserError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::BAD_REQUEST,
@@ -128,7 +140,52 @@ impl UserStatus {
 
 // ── 数据结构 ────────────────────────────────────────────
 
-/// 用户的一条长期凭证（API / MCP token）。
+/// 个人令牌的权限作用域：**严格二选一**。
+///
+/// - [`TokenScope::Api`]：可调 `/assist/api/*`，**不能**调 MCP；
+/// - [`TokenScope::Mcp`]：可调 `/assist/mcp`，**不能**调 `/assist/api/*`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenScope {
+    Api,
+    Mcp,
+}
+
+impl Default for TokenScope {
+    fn default() -> Self {
+        // 缺字段时按最小权限：只给 API（MCP 需要用户显式选择）
+        Self::Api
+    }
+}
+
+impl TokenScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TokenScope::Api => "api",
+            TokenScope::Mcp => "mcp",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "api" => Some(TokenScope::Api),
+            "mcp" => Some(TokenScope::Mcp),
+            _ => None,
+        }
+    }
+
+    /// 是否可用于 `/assist/api/*`
+    pub fn allows_api(&self) -> bool {
+        matches!(self, TokenScope::Api)
+    }
+
+    /// 是否可用于 MCP（还需用户本身开启 mcp）
+    pub fn allows_mcp(&self) -> bool {
+        matches!(self, TokenScope::Mcp)
+    }
+}
+
+/// 用户的一条长期凭证（纯 API 或纯 MCP，二选一）。
 ///
 /// 明文 token 只在签发响应里出现一次，磁盘上只有 `token_sha256`。
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -138,9 +195,9 @@ pub struct ApiToken {
     pub label: String,
     /// `sha256(明文 token)` 的小写 hex
     pub token_sha256: String,
-    /// 该 token 是否可用于 MCP
+    /// 权限作用域（api / mcp，互斥）
     #[serde(default)]
-    pub mcp: bool,
+    pub scope: TokenScope,
     pub created_at: String,
     #[serde(default)]
     pub last_used_at: Option<String>,
@@ -152,7 +209,7 @@ impl ApiToken {
         json!({
             "id": self.id,
             "label": self.label,
-            "mcp": self.mcp,
+            "scope": self.scope.as_str(),
             "created_at": self.created_at,
             "last_used_at": self.last_used_at,
         })
@@ -367,6 +424,28 @@ pub fn validate_password(password: &str) -> Result<(), UserError> {
     } else {
         Ok(())
     }
+}
+
+/// 校验用户自定义的令牌字符串：
+///
+/// - 长度（字符）在 [`MIN_TOKEN_LEN`]–[`MAX_TOKEN_LEN`] 之间；
+/// - 只允许可见 ASCII（`0x21..=0x7E`），因此不能包含空格、制表符、控制字符或非 ASCII。
+///
+/// 留空表示「自动生成」，由调用方处理（本函数不接受空串）。
+pub fn validate_token_plaintext(token: &str) -> Result<(), UserError> {
+    let n = token.chars().count();
+    if n < MIN_TOKEN_LEN || n > MAX_TOKEN_LEN {
+        return Err(UserError::InvalidToken(format!(
+            "令牌长度需在 {}–{} 位之间（当前 {} 位）",
+            MIN_TOKEN_LEN, MAX_TOKEN_LEN, n
+        )));
+    }
+    if !token.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(UserError::InvalidToken(
+            "令牌只能包含可见 ASCII 字符（不能有空格、中文或控制字符）".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// 生成 Argon2id 哈希（PHC 字符串）
@@ -708,8 +787,8 @@ impl UserStore {
 
     /// 设置/重置密码（管理员重置与自己改密都走这里）。
     ///
-    /// 会清除 `must_set_password`、失败计数与锁定；并**自动吊销引导期 token**
-    /// （`label == "bootstrap"`）：密码一旦可用，`system.json.token` 就不再有效。
+    /// 会清除 `must_set_password`、失败计数与锁定；并**自动吊销遗留的引导期 token**
+    /// （`label == "bootstrap"`，旧版本 `system.json.token` 的遗产）。
     /// 撤销已有会话由路由层负责（需要 `SessionStore`）。
     pub fn set_password(&self, id: &str, password: &str) -> Result<User, UserError> {
         validate_password(password)?;
@@ -763,50 +842,57 @@ impl UserStore {
         section.find_by_id(id).cloned().ok_or(UserError::NotFound)
     }
 
-    /// 签发 API / MCP token。
+    /// 签发 API / MCP token（明文自动生成，`okb_<32B base64url>`）。
     ///
     /// 返回 `(明文 token, token 元数据)`，**明文只在此刻返回一次**，磁盘上只有 sha256。
     pub fn issue_api_token(
         &self,
         id: &str,
         label: &str,
-        mcp: bool,
+        scope: TokenScope,
     ) -> Result<(String, ApiToken), UserError> {
         let plain = generate_api_token();
-        let token = self.register_api_token(id, &plain, label, mcp)?;
+        let token = self.register_api_token(id, &plain, label, scope)?;
         Ok((plain, token))
     }
 
     /// 把一把**已存在的明文 token** 登记到用户名下（只存 sha256）。
     ///
-    /// 用于引导场景：`system.json` 的 `token` 被原样接管为该用户的 `bootstrap` token，
-    /// 使旧 token 在初始化过渡期内仍可登录。
+    /// 用于「用户自定义令牌」（如把外部系统已有的 token 收敛为个人凭证）。
+    /// 校验：至少 [`MIN_TOKEN_LEN`] 位、仅可见 ASCII（不含空格）、全局不重复。
+    /// 同一个用户的同一 token 重复登记是幂等的。
     pub fn register_api_token(
         &self,
         id: &str,
         plaintext: &str,
         label: &str,
-        mcp: bool,
+        scope: TokenScope,
     ) -> Result<ApiToken, UserError> {
-        if plaintext.trim().is_empty() {
-            return Err(UserError::Config("token 不能为空".to_string()));
-        }
+        validate_token_plaintext(plaintext)?;
+        let sha = hash_api_token(plaintext);
         let token = ApiToken {
-            id: format!("at_{}", &hash_api_token(plaintext)[..12]),
+            id: format!("at_{}", &sha[..12]),
             label: label.trim().to_string(),
-            token_sha256: hash_api_token(plaintext),
-            mcp,
+            token_sha256: sha.clone(),
+            scope,
             created_at: now_rfc3339(),
             last_used_at: None,
         };
         let token_for_section = token.clone();
         self.mutate(|section| {
+            // 全局唯一：不允许两个账号登记同一个明文令牌（否则解析主体会有歧义）
+            let taken_by_other = section.items.iter().any(|u| {
+                u.id != id && u.api_tokens.iter().any(|t| t.token_sha256 == sha)
+            });
+            if taken_by_other {
+                return Err(UserError::TokenTaken);
+            }
             let user = section
                 .items
                 .iter_mut()
                 .find(|u| u.id == id)
                 .ok_or(UserError::NotFound)?;
-            // 同一个 token 不重复登记（幂等，避免重启时重复迁移）
+            // 同一个 token 不重复登记（幂等）
             if !user
                 .api_tokens
                 .iter()
@@ -1202,7 +1288,7 @@ mod tests {
             })
             .unwrap();
 
-        let (plain, token) = store.issue_api_token(&u.id, "zotero", true).unwrap();
+        let (plain, token) = store.issue_api_token(&u.id, "zotero", TokenScope::Mcp).unwrap();
         assert!(plain.starts_with(API_TOKEN_PREFIX));
         assert!(token.id.starts_with("at_"));
 
@@ -1219,8 +1305,8 @@ mod tests {
         assert!(!store.revoke_api_token(&u.id, &token.id).unwrap());
         assert!(store.find_by_api_token(&plain).is_none());
 
-        store.issue_api_token(&u.id, "a", false).unwrap();
-        store.issue_api_token(&u.id, "b", false).unwrap();
+        store.issue_api_token(&u.id, "a", TokenScope::Api).unwrap();
+        store.issue_api_token(&u.id, "b", TokenScope::Api).unwrap();
         assert_eq!(store.revoke_all_api_tokens(&u.id).unwrap(), 2);
         assert_eq!(store.find_by_id(&u.id).unwrap().api_tokens.len(), 0);
     }
@@ -1229,7 +1315,7 @@ mod tests {
     fn public_json_hides_secrets() {
         let (_dir, store, _cm) = test_store();
         let u = store.create(admin()).unwrap();
-        let (plain, _) = store.issue_api_token(&u.id, "l", true).unwrap();
+        let (plain, _) = store.issue_api_token(&u.id, "l", TokenScope::Mcp).unwrap();
         let json = store.find_by_id(&u.id).unwrap().to_public_json().to_string();
         assert!(!json.contains("password_hash"));
         assert!(!json.contains("token_sha256"));
@@ -1323,16 +1409,82 @@ mod tests {
         let u = store.create(admin()).unwrap();
         // 引导场景：接管 system.json 的 token
         let t1 = store
-            .register_api_token(&u.id, "legacy-admin-token", BOOTSTRAP_TOKEN_LABEL, true)
+            .register_api_token(&u.id, "legacy-admin-token", BOOTSTRAP_TOKEN_LABEL, TokenScope::Mcp)
             .unwrap();
         let t2 = store
-            .register_api_token(&u.id, "legacy-admin-token", BOOTSTRAP_TOKEN_LABEL, true)
+            .register_api_token(&u.id, "legacy-admin-token", BOOTSTRAP_TOKEN_LABEL, TokenScope::Mcp)
             .unwrap();
         assert_eq!(t1.token_sha256, t2.token_sha256);
         assert_eq!(store.find_by_id(&u.id).unwrap().api_tokens.len(), 1, "重复登记应幂等");
         assert!(store.find_by_api_token("legacy-admin-token").is_some());
         // 空 token 拒绝
-        assert!(store.register_api_token(&u.id, "  ", "x", false).is_err());
+        assert!(store.register_api_token(&u.id, "  ", "x", TokenScope::Api).is_err());
+    }
+
+    #[test]
+    fn custom_token_validation_and_global_uniqueness() {
+        let (_dir, store, _cm) = test_store();
+        let a = store.create(admin()).unwrap();
+        let b = store
+            .create(NewUser {
+                username: "bob".to_string(),
+                password: Some("bob-pass-123".to_string()),
+                mcp: true,
+                ..Default::default()
+            })
+            .unwrap();
+
+        // 自定义令牌：≥ 8 位、可见 ASCII 即可
+        let ok = store
+            .register_api_token(&a.id, "we-network-control", "agent", TokenScope::Mcp)
+            .unwrap();
+        assert_eq!(ok.scope, TokenScope::Mcp);
+        assert_eq!(ok.to_public_json()["scope"], json!("mcp"));
+        assert!(!ok.to_public_json().to_string().contains("token_sha256"));
+
+        // 太短 / 含空格 / 非 ASCII 一律拒绝
+        assert!(matches!(
+            store.register_api_token(&a.id, "short", "x", TokenScope::Api),
+            Err(UserError::InvalidToken(_))
+        ));
+        assert!(matches!(
+            store.register_api_token(&a.id, "has space", "x", TokenScope::Api),
+            Err(UserError::InvalidToken(_))
+        ));
+        assert!(matches!(
+            store.register_api_token(&a.id, "中文令牌中文令牌", "x", TokenScope::Api),
+            Err(UserError::InvalidToken(_))
+        ));
+
+        // 全局唯一：别的账号不能用同一串明文
+        assert!(matches!(
+            store.register_api_token(&b.id, "we-network-control", "dup", TokenScope::Mcp),
+            Err(UserError::TokenTaken)
+        ));
+        // 同一用户重复登记仍幂等（不新增条目）
+        store
+            .register_api_token(&a.id, "we-network-control", "agent", TokenScope::Mcp)
+            .unwrap();
+        assert_eq!(store.find_by_id(&a.id).unwrap().api_tokens.len(), 1);
+    }
+
+    #[test]
+    fn token_scope_defaults_to_api_and_round_trips() {
+        // 缺字段 → api（最小权限）
+        let parsed: ApiToken = serde_json::from_value(json!({
+            "id": "at_x",
+            "label": "zotero",
+            "token_sha256": "00",
+            "created_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(parsed.scope, TokenScope::Api);
+
+        assert_eq!(TokenScope::from_str("MCP"), Some(TokenScope::Mcp));
+        assert_eq!(TokenScope::from_str(" api "), Some(TokenScope::Api));
+        assert_eq!(TokenScope::from_str("both"), None);
+        assert!(!TokenScope::Mcp.allows_api());
+        assert!(!TokenScope::Api.allows_mcp());
     }
 
     #[test]
@@ -1348,9 +1500,9 @@ mod tests {
             .unwrap();
         assert!(u.must_set_password);
         store
-            .register_api_token(&u.id, "system-json-token", BOOTSTRAP_TOKEN_LABEL, true)
+            .register_api_token(&u.id, "system-json-token", BOOTSTRAP_TOKEN_LABEL, TokenScope::Mcp)
             .unwrap();
-        let (keep, _) = store.issue_api_token(&u.id, "zotero", false).unwrap();
+        let (keep, _) = store.issue_api_token(&u.id, "zotero", TokenScope::Api).unwrap();
 
         store.set_password(&u.id, "new-admin-pass").unwrap();
 

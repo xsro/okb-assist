@@ -123,7 +123,7 @@ cargo build --release
   - 文件未提供 `llm` 时不凭空创建空池，否则会盖掉默认模型池（`deep_merge` 对数组是整体替换）。
   - 各向量库 `embedding` 的 `protocol` 依次回退 `embedding.source` → `llm.models[0].protocol`；`url`/`key` 回退 `llm.models[0]`；`model` 缺失补 `nomic-embed-text`。
 - 前端对应组件：`LlmConfigSection.vue`（模型池增删/排序/单项连接测试）、`LlmExtractConfigSection.vue`（`from` 选择 + 继承占位符 + 生效值预览 + 提示词模板/截断长度/`overwrite` 开关）、`VectorDbConfigSection.vue`（每个向量库的嵌入协议/URL/Key/模型）。连接测试走 `/assist/api/config/test`：`type=llm` 用请求体参数（表单实时测试），`type=llm_extract` 由服务端按已保存配置（含继承）解析。
-- **敏感字段写 `!cat <path>` 引用，不要把密钥写进 JSON**：`system.json` 的 `token`/`mcp_token`、`mineru[].token` 以及 `llm.models[].key` 都支持以 `!` 开头的值 —— `resolve_token()`（`backend-rs/src/utils.rs`）会读取 `!cat <path>` 指向的文件（路径相对进程 `cwd`，即 `backend-rs/`）并去首尾空白，结果进程内缓存。**LLM 密钥的解析发生在 `ModelEndpoint::client()` 与连接测试的 `test_llm()`**，因此 `config.json` 与 `/assist/api/config` 里只会出现 `!cat ./data/tokens/xxx` 这样的引用，不回显真实密钥；密钥文件放在 `backend-rs/data/tokens/`（已被 git 忽略）。
+- **敏感字段写 `!cat <path>` 引用，不要把密钥写进 JSON**：`mineru[].token` 以及 `llm.models[].key` 都支持以 `!` 开头的值 —— `resolve_token()`（`backend-rs/src/utils.rs`）会读取 `!cat <path>` 指向的文件（路径相对进程 `cwd`，即 `backend-rs/`）并去首尾空白，结果进程内缓存。**LLM 密钥的解析发生在 `ModelEndpoint::client()` 与连接测试的 `test_llm()`**，因此 `config.json` 与 `/assist/api/config` 里只会出现 `!cat ./data/tokens/xxx` 这样的引用，不回显真实密钥；密钥文件放在 `backend-rs/data/tokens/`（已被 git 忽略）。
 - 服务状态端点键为 `llm`（不再是 `ollama`），如 `/assist/api/admin/services/status` 返回 `{mineru, llm, fastembed, vector_dbs, qdrant}`；其中 `llm` 探测的是**信息补全所用的端点**（含 `protocol`/`url`/`model`/`models`）。
 - `PUT /assist/api/config` 会校验 `llm.models` 每项都有非空 `url` 与 `model`，否则返回 400。`llm_extract` 不做校验（空值即继承）。
 
@@ -150,7 +150,7 @@ cargo build --release
         "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$…",
         "must_set_password": false,
         "api_tokens": [
-          { "id": "at_0ba285287ecd", "label": "zotero", "token_sha256": "…", "mcp": true,
+          { "id": "at_0ba285287ecd", "label": "zotero", "token_sha256": "…", "scope": "api",
             "created_at": "…", "last_used_at": null }
         ],
         "created_at": "…", "updated_at": "…", "last_login_at": "…",
@@ -162,7 +162,18 @@ cargo build --release
 ```
 
 - **密码**：Argon2id PHC 字符串（`Argon2::default()` = m=19456,t=2,p=1），`password_hash` 永不出现在任何 API 响应/日志中（统一走 `User::to_public_json()`）。
-- **长期凭证**：`okb_<32B base64url>`，磁盘只存 `sha256`（`token_sha256`），明文**只在签发响应里出现一次**。
+- **长期凭证**：磁盘只存 `sha256`（`token_sha256`），明文**只在签发响应里出现一次**。两种来源：
+  - **自动生成**：`okb_<32B base64url>`（`users::generate_api_token()`）；
+  - **用户自定义**：请求体带 `token` 字段，按 `users::validate_token_plaintext()` 校验 —— 长度
+    `MIN_TOKEN_LEN..=MAX_TOKEN_LEN`（8–256 字符）、仅可见 ASCII（`is_ascii_graphic()`，禁止空格/中文/控制字符），
+    并**全局唯一**（同一明文不能登记到两个账号，`UserError::TokenTaken` → 409）；同一用户重复登记幂等。
+    自定义时建议只用 `[A-Za-z0-9_-]`：静态目录的 `okb_static` cookie 只接受 URL-safe 字符，
+    含 `.`/`!` 等字符的令牌走 `?token=` 能认证，但页内相对资源拿不到 cookie。
+- **令牌作用域（`scope`，严格二选一）**：`api`（可调 `/assist/api/*`、**不能**调 MCP）/
+  `mcp`（可调 `/assist/mcp`、**不能**调 `/assist/api/*`）。`TokenScope` 缺字段默认 `api`（最小权限）。
+  `resolve_principal` 把它算成 `Principal.api` / `Principal.mcp`（后者还需 `用户.mcp = true`）；
+  `token_middleware` 对 `Principal.api == false` 的令牌返回 401 `code: mcp_only_token`，
+  `static_files::authorize` 同样要求 `p.api`。**会话 token（密码登录）不受限**：`api = true`，`mcp = 用户.mcp`。
 - **状态**：`pending`（待审核）/ `active` / `disabled`（禁用后会话与令牌立即失效）。
 - **不变量**：至少保留一个 `active` 的 `admin`；最后一个管理员不能降级/禁用/删除（`UserError::LastAdmin` → 409）。
 - **登录防护**：连续失败 5 次后按 `30s * 2^n` 指数退避写 `locked_until`（上限 1h）；登录/注册各有内存滑动窗口限流；用户名不存在时跑一次等时 Argon2 校验（`users::verify_dummy`）防枚举。
@@ -189,7 +200,7 @@ cargo build --release
 #### 启动引导与迁移（`main()`）
 
 1. `users.migrate_legacy_permissions()`：旧 `config.json.permissions` → `legacy-<sha256 前 6 位>` 占位用户（`pending`、无凭据、角色/mcp 沿用），**旧 token 全部失效**，随后从磁盘删除 `permissions` 键（方案 B）。
-2. `auth::ensure_bootstrap()`：没有 active admin 且 `system.json.token` 不是空/`change-me` 时，创建无密码 `admin` 并把该 token 登记为 `label=bootstrap` 的 api_token；**该用户 `set_password` 成功后 bootstrap token 自动吊销**。未配置 token 则保持「未初始化」，由前端初始化页创建首个管理员。
+2. 首个管理员**只**由前端初始化页调 `POST /assist/api/auth/bootstrap` 创建；`system.json` 的 `token` / `mcp_token` 两个全局凭据字段**已删除**（`ensure_bootstrap` / `Settings::token()` / `Settings::mcp_token()` 均不再存在）。启动时没有 active admin 只打一条 `warn`。
 
 #### 接口一览
 
@@ -203,14 +214,14 @@ cargo build --release
 | GET | `/assist/api/auth/me` | 已登录 | 当前主体（含令牌元数据，无哈希） |
 | POST | `/assist/api/auth/password` | 已登录 | 改密（撤销该用户全部会话；有密码时需 `old_password`） |
 | GET | `/assist/api/auth/check` | 公开（自行解析凭证） | 兼容旧前端的 `{role, valid, permissions}` + `user/mcp/via` |
-| GET/POST | `/assist/api/auth/tokens` | 已登录 | 查看/签发**自己的**令牌 |
+| GET/POST | `/assist/api/auth/tokens` | 已登录 | 查看/签发**自己的**令牌（`{label, scope: api\|mcp, token?}`，`token` 留空自动生成） |
 | DELETE | `/assist/api/auth/tokens/:id` | 已登录 | 撤销自己的令牌 |
 | GET | `/assist/api/admin/users` | admin | 用户列表（`?status=`），返回 `count/pending/users` |
 | POST | `/assist/api/admin/users` | admin | 新建用户 |
 | PUT/DELETE | `/assist/api/admin/users/:id` | admin | 改角色/状态/mcp/备注名；删除（级联撤销会话） |
 | POST | `/assist/api/admin/users/:id/approve` | admin | 审核通过 |
 | POST | `/assist/api/admin/users/:id/password` | admin | 重置密码（`revoke_tokens` 可选） |
-| GET/POST | `/assist/api/admin/users/:id/tokens` | admin | 查看/签发该用户令牌 |
+| GET/POST | `/assist/api/admin/users/:id/tokens` | admin | 查看/签发该用户令牌（请求体同上） |
 | DELETE | `/assist/api/admin/users/:id/tokens/:token_id` | admin | 撤销 |
 | GET/PUT | `/assist/api/admin/users/settings` | admin | 注册策略 / 会话 TTL |
 
@@ -220,7 +231,7 @@ cargo build --release
 
 #### MCP 鉴权（`mcp_server.rs`）
 
-依次接受：`system.json.mcp_token`（本地 admin 主体）→ 用户会话/个人令牌（`Principal.mcp = 用户.mcp && 令牌.mcp`）→ 受信任子网（需 `trusted_subnet_enabled`）。未开 MCP 的用户返回 `Unauthorized: MCP access not granted`。
+依次接受：用户会话（`mcp = 用户.mcp`）/ **MCP 权限的个人令牌**（`Principal.mcp = 用户.mcp && scope == mcp`）→ 受信任子网（需 `trusted_subnet_enabled`）。**不再有全局 `mcp_token` 入口**；`scope = api` 的令牌调 MCP 会被拒（`Unauthorized`），未开 MCP 的用户返回 `Unauthorized: MCP access not granted`。
 
 ### 用户网盘（`config.json` 的 `drive` 段 + `system.json` 的 `drive_root`）
 
@@ -234,7 +245,8 @@ cargo build --release
 {drive_root}/_public/{folder_id}/...    # 公有：按 read_role / write_role 阈值判定
 ```
 
-路径全部来自 `system.json` 的 `drive_root`（相对 `cwd`），目录懒创建。
+路径全部来自 `system.json` 的 `drive_root`（解析规则同 `static_dirs[].dir`：相对路径按 `cwd`、
+绝对路径原样使用、支持 `{system_dir}` 与 `{env:VAR}` 变量，改后需重启），目录懒创建。
 
 #### 策略（`config.json.drive`）
 
@@ -341,7 +353,7 @@ cargo build --release
 
 - **存储**：`services/chat_store.rs`，一个会话一个 JSON 文件，路径模板 `system.json` 的 `chat_session_path`（默认 `data/chat_sessions/{id}.json`，`{id}` 为**字符串**，走 `ConfigManager::substitute_path_variables_str`）。会话 ID 形如 `20261015T081515912-523019`（UTC 时间到毫秒 + 随机后缀，字典序即时间序），写入为**原子写**（`*.tmp` + rename）。
 - **文件内容**：`version`/`id`/`title`/`owner_key`/`role`/`model`/`tool_mode`/`message_count`/`created_at`/`updated_at`/`items`（展示条目）/`transcript`（完整对话，含 `assistant.tool_calls` 与 `tool` 结果，重新打开后可继续对话）。
-- **按角色/人归属（复用现有 permissions 机制）**：`owner_key` 由访问 token 派生（`auth::OwnerKey::from_token` = sha256 前 32 位 hex；免鉴权的如 `token=change-me`、受信任子网代理请求归为 `local`），**只在服务端比对、绝不在 API 响应里回传**；列表只返回 `mine` 与保存时的 `role`。规则：**admin 可看/可删全部，其余只能看自己的**（同一角色不同 token 相互不可见）。归属与 `created_at` 在更新时保持文件原值，客户端无法改写归属。
+- **按角色/人归属（复用现有 permissions 机制）**：`owner_key` 由认证主体派生（`Principal::owner_key()`：用户 → `u:<user_id>`；受信任子网这类免鉴权主体 → `local`），**只在服务端比对、绝不在 API 响应里回传**；列表只返回 `mine` 与保存时的 `role`。规则：**admin 可看/可删全部，其余只能看自己的**（同一角色不同 token 相互不可见）。归属与 `created_at` 在更新时保持文件原值，客户端无法改写归属。
 - **接口**（均在 `/assist/api/chat/*`，角色限制与 chat 一致）：
   - `GET /assist/api/chat/sessions` —— 列表（`{count, sessions:[{id,title,role,model,tool_mode,message_count,created_at,updated_at,mine}]}`，默认最多 200 条，按 `updated_at` 倒序）；
   - `GET /assist/api/chat/sessions/:id` —— 读取（额外含 `items`/`transcript`）；
@@ -365,8 +377,6 @@ cargo build --release
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
 | `cwd` | 工作目录，支持 `{system_dir}` 替换 | `{system_dir}` |
-| `token` | **仅首次启动引导用**：无管理员且非 `change-me` 时自动建 `admin` 并接管为该用户的 `bootstrap` 令牌（设密后自动失效）。之后不再参与鉴权 | `change-me` |
-| `mcp_token` | MCP 全局 Bearer Token（等价本地 admin 主体；个人令牌请用「账户」页签发） | `change-me` |
 | `trusted_subnets` | 受信任子网白名单（CIDR 数组） | `[]` |
 | `trusted_subnet_enabled` | 是否启用受信任子网免鉴权（**默认关闭**，需显式打开） | `false` |
 | `trusted_subnet_role` | 命中受信任子网时授予的角色 | `admin` |
@@ -375,7 +385,7 @@ cargo build --release
 | `markdown_path` | Markdown 文件路径模板 | `data/markdowns/{id}.md` |
 | `info_path` | 元信息 JSON 路径模板 | `data/markdowns/{id}.json` |
 | `chat_session_path` | 问答会话文件路径模板（`{id}` 为会话 ID，字符串） | `data/chat_sessions/{id}.json` |
-| `drive_root` | 用户网盘根目录（私有 `users/{user_id}/`、公有 `_public/{folder_id}/`） | `data/drive` |
+| `drive_root` | 用户网盘根目录（私有 `users/{user_id}/`、公有 `_public/{folder_id}/`）；相对路径按 `cwd`，也可写绝对路径（独立磁盘/挂载点），支持 `{system_dir}` / `{env:VAR}` | `data/drive` |
 | `crossref_path` | Crossref 数据路径模板 | `data/markdowns/{id}_crossref.json` |
 | `markdown_asset_path` | Markdown 资产包路径模板 | `data/pdfs/{id}/{id}.zip` |
 | `pdf_path` | PDF 文件路径模板 | `data/pdfs/{id}/{id}.pdf` |
@@ -448,7 +458,7 @@ cargo build --release
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、迁移、索引重置。
 6. **问答**（`chat.rs`）：`GET /assist/api/chat/models`、`GET /assist/api/chat/tools` 列出模型池与可调用的 MCP 工具，`POST /assist/api/chat` 基于 `llm.models` 做多轮对话，并可在本请求内循环调用 MCP 工具（非流式）。见下方「问答（Chat）」。
 7. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
-8. **MCP 服务**（`mcp_server.rs`）：Streamable HTTP 端点 `/assist/mcp/stream`，SSE 挂载在 `/assist/mcp`；Bearer 认证接受 `system.json` 的 `mcp_token`（本地 admin 主体）、用户会话/个人令牌（`Principal.mcp`）、受信任子网（需 `trusted_subnet_enabled`）。完整工具列表见 `document/mcp.md`。
+8. **MCP 服务**（`mcp_server.rs`）：Streamable HTTP 端点 `/assist/mcp/stream`，SSE 挂载在 `/assist/mcp`；Bearer 认证接受用户会话/个人令牌（`Principal.mcp`）、受信任子网（需 `trusted_subnet_enabled`）。完整工具列表见 `document/mcp.md`。
 
 ## 后台任务（异步执行）
 
@@ -625,7 +635,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 
 ## ⚠️ 易错点（编辑前必读）
 
-1. **鉴权现状**：只认 `users` 段（会话 token / 用户 API token）。`system.json.token` 仅作首次引导（设密后失效）；`trusted_subnets` 默认不生效，需 `trusted_subnet_enabled = true`；系统未初始化时只有 `/auth/status|check|bootstrap` 可用。`TokenMiddleware` 仅对 `/assist/api/*` 生效。
+1. **鉴权现状**：只认 `users` 段（会话 token / 用户个人令牌）。`system.json` 里**没有任何全局凭据字段**（旧 `token` / `mcp_token` 已删除）；`trusted_subnets` 默认不生效，需 `trusted_subnet_enabled = true`；系统未初始化时只有 `/auth/status|check|bootstrap` 可用。`TokenMiddleware` 仅对 `/assist/api/*` 生效。个人令牌的 `scope` **严格互斥**（api 只能调 API、mcp 只能调 MCP），新增受凭证保护的端点时记得同步判断 `Principal.api` / `Principal.mcp`，不要只看「令牌有效」。
 2. **配置改动不会自动生效**：`config.json` 改后需 reload；`system.json` 改后需重启进程（进程内缓存）。
 3. **MCP 路由注册顺序有依赖**（`backend-rs/src/main.rs`）：必须在 SSE 挂载之前精确注册 Streamable HTTP 端点。不要"整理"这个顺序。
 4. **没有测试、没有 lint**：编辑后需手动 `cargo build` 确认编译通过，并用 curl 校验端点。

@@ -2,6 +2,7 @@
 //!
 //! 使用 axum Extension 注入，支持运行时配置热更新。
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::json;
@@ -460,24 +461,30 @@ impl Settings {
     }
 
     // ── 系统配置 ──
-    pub fn token(&self) -> String {
-        let cfg = self.get_system_config();
-        let raw = cfg["token"].as_str().unwrap_or("change-me");
-        crate::utils::resolve_token(raw)
-    }
-
-    /// 用户网盘根目录（`system.json` 的 `drive_root`，相对 `cwd`）
-    pub fn drive_root(&self) -> String {
-        self.get_system_config()["drive_root"]
+    /// 用户网盘根目录（`system.json` 的 `drive_root`，默认 `data/drive`）。
+    ///
+    /// 解析规则与 `static_dirs[].dir` 一致：
+    /// - 支持 `{system_dir}`（system.json 所在目录）与 `{env:VAR_NAME}` 变量；
+    /// - 绝对路径（`/mnt/disk/drive`、`D:/drive`）原样使用，可把网盘放到独立磁盘/挂载点；
+    /// - 相对路径按 `cwd` 解析（进程启动时已 chdir 到该目录，因此实际就是相对进程工作目录）。
+    ///
+    /// `system.json` 改后需重启进程才生效（进程内缓存）。
+    pub fn drive_root(&self) -> PathBuf {
+        let system_config = self.get_system_config();
+        let raw = system_config["drive_root"]
             .as_str()
-            .unwrap_or("data/drive")
-            .to_string()
-    }
-
-    pub fn mcp_token(&self) -> String {
-        let cfg = self.get_system_config();
-        let raw = cfg["mcp_token"].as_str().unwrap_or("change-me");
-        crate::utils::resolve_token(raw)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("data/drive");
+        let expanded = crate::config_manager::ConfigManager::substitute_path_variables_str(
+            &raw.replace("{system_dir}", &self.system_dir()),
+            "",
+        );
+        if Path::new(&expanded).is_absolute() {
+            PathBuf::from(expanded)
+        } else {
+            Path::new(&self.cwd()).join(expanded)
+        }
     }
 
     pub fn max_concurrent_tasks(&self) -> usize {
@@ -775,5 +782,69 @@ mod tests {
         assert_eq!(s.llm_model_config(Some("missing")).model, "m1");
         assert_eq!(s.llm_model_config(Some("  ")).model, "m1");
         assert_eq!(s.llm_model_config(None).model, "m1");
+    }
+
+    /// 网盘存储根目录：`drive_root` 来自 system.json
+    /// （支持 `{system_dir}` / `{env:VAR}` 变量、绝对路径，相对路径按 cwd 解析）
+    #[test]
+    fn drive_root_supports_variables_and_absolute_paths() {
+        fn settings_with_system(dir: &std::path::Path, body: serde_json::Value) -> Settings {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("config.json"), "{}").unwrap();
+            std::fs::write(dir.join("system.json"), body.to_string()).unwrap();
+            Settings::new(Arc::new(ConfigManager::for_tests(
+                dir.join("config.json"),
+                dir.join("system.json"),
+            )))
+        }
+
+        let base = std::env::temp_dir().join(format!(
+            "okb-drive-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dir = base.join("cfg");
+
+        // 缺省：默认 data/drive，相对 for_tests 的 cwd（"."）解析
+        let s = settings_with_system(&dir, serde_json::json!({}));
+        assert_eq!(s.drive_root(), Path::new(".").join("data/drive"));
+
+        // 相对路径仍按 cwd 解析
+        let s = settings_with_system(&dir, serde_json::json!({"drive_root": "mnt/drive"}));
+        assert_eq!(s.drive_root(), Path::new(".").join("mnt/drive"));
+
+        // {system_dir} → system.json 所在目录
+        let s = settings_with_system(
+            &dir,
+            serde_json::json!({"drive_root": "{system_dir}/drive"}),
+        );
+        assert_eq!(s.drive_root(), dir.join("drive"));
+
+        // {env:VAR} → 环境变量
+        let env_key = format!("OKB_TEST_DRIVE_ROOT_{}", std::process::id());
+        std::env::set_var(&env_key, base.join("env-drive").to_string_lossy().to_string());
+        let s = settings_with_system(
+            &dir,
+            serde_json::json!({"drive_root": format!("{{env:{env_key}}}")}),
+        );
+        assert_eq!(s.drive_root(), base.join("env-drive"));
+        std::env::remove_var(&env_key);
+
+        // 绝对路径原样使用
+        let absolute = base.join("abs-drive");
+        let s = settings_with_system(
+            &dir,
+            serde_json::json!({"drive_root": absolute.to_string_lossy().to_string()}),
+        );
+        assert_eq!(s.drive_root(), absolute);
+
+        // 空白值回退默认值
+        let s = settings_with_system(&dir, serde_json::json!({"drive_root": "  "}));
+        assert_eq!(s.drive_root(), Path::new(".").join("data/drive"));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

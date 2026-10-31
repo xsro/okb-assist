@@ -7,8 +7,7 @@
 //! 凭证模型：
 //! - 密码登录 → 签发服务端会话 token（`sess_...`，见 [`crate::session`]）；
 //! - Token 登录 → 直接用会话 token 或用户的 API token（`okb_...`）访问任意接口；
-//! - 初始化过渡期 → `system.json` 的 admin token 被接管为 admin 用户的 `bootstrap`
-//!   api_token，设置密码后自动失效。
+//! - 首次初始化 → 前端初始化页调 `bootstrap` 创建首个管理员（不再有 `system.json` 全局 token）。
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration as StdDuration;
@@ -465,8 +464,8 @@ async fn me(
 
 /// `POST /assist/api/auth/password` —— 修改自己的密码。
 ///
-/// 已有密码时需提供 `old_password`；无密码账号（引导期 admin 用 token 登录）可直设。
-/// 成功后撤销该用户的全部会话（`bootstrap` token 由 `UserStore::set_password` 一并吊销）。
+/// 已有密码时需提供 `old_password`；无密码账号（管理员创建但尚未设密）可直设。
+/// 成功后撤销该用户的全部会话（遗留的 `bootstrap` token 由 `UserStore::set_password` 一并吊销）。
 async fn change_password(
     Extension(users): Extension<Arc<UserStore>>,
     Extension(sessions): Extension<Arc<SessionStore>>,
@@ -533,6 +532,21 @@ async fn check(
 
     let user = users.find_by_id(&principal.user_id);
     let must_set_password = user.as_ref().map(|u| u.must_set_password).unwrap_or(false);
+
+    // MCP 专属令牌不能用于 Web 登录（Token 登录）：前端会把它当会话用，
+    // 后续所有 `/assist/api/*` 都会 401，所以直接在这里判无效。
+    if !principal.api {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "role": null,
+                "valid": false,
+                "code": "mcp_only_token",
+                "detail": "该令牌仅用于 MCP，不能用于 Web 登录；请改用权限为 API 的令牌或账号密码登录",
+            })),
+        )
+            .into_response();
+    }
 
     // 刷新页面 / Token 登录也顺带下发静态目录 cookie（与登录一致）
     let cookie = token.as_deref().and_then(|t| {

@@ -2,7 +2,7 @@
 //!
 //! 配置分为两个文件：
 //! - config.json: 服务配置（MinerU、LLM、向量数据库），可通过前端修改
-//! - system.json: 系统配置（token、并发数、数据库、上传目录），仅限手动修改
+//! - system.json: 系统配置（并发数、数据库、上传目录、静态挂载等），仅限手动修改
 
 use std::fs;
 use std::path::PathBuf;
@@ -257,8 +257,6 @@ pub fn default_users_section() -> serde_json::Value {
 /// 默认系统配置
 pub fn default_system() -> serde_json::Value {
     serde_json::json!({
-        "token": "change-me",
-        "mcp_token": "change-me",
         "max_concurrent_tasks": 3,
         "database_url": "sqlite:///data/okb_assist.db",
         "cwd": "{system_dir}",

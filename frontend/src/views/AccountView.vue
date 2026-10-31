@@ -73,8 +73,10 @@
     <section class="section">
       <h3>个人访问令牌（Zotero / MCP 客户端）</h3>
       <p class="section-hint">
-        令牌以 <code>okb_…</code> 开头，可用于 <code>X-Token</code> 头或
-        <code>Authorization: Bearer</code>（MCP）。明文只在创建时显示一次。
+        权限二选一，互不通用：<strong>API</strong> 令牌用于 Zotero / 脚本调用
+        <code>/assist/api/*</code>（不能访问 MCP）；<strong>MCP</strong> 令牌只用于 MCP 客户端
+        （不能调用 API）。令牌可自动生成（<code>okb_…</code>），也可自己填一串喜欢的字符串。
+        明文只在创建时显示一次。
       </p>
 
       <div class="token-create">
@@ -82,16 +84,29 @@
           <label>备注</label>
           <input v-model="newToken.label" type="text" placeholder="如 zotero / obsidian" />
         </div>
-        <label class="checkbox">
-          <input v-model="newToken.mcp" type="checkbox" :disabled="!store.user?.mcp" />
-          允许访问 MCP
-        </label>
+        <div class="form-group inline scope-group">
+          <label>权限</label>
+          <select v-model="newToken.scope">
+            <option value="api">API（/assist/api/*）</option>
+            <option value="mcp" :disabled="!store.user?.mcp">MCP（/assist/mcp）</option>
+          </select>
+        </div>
+        <div class="form-group inline">
+          <label>令牌（可选）</label>
+          <input
+            v-model="newToken.token"
+            type="text"
+            :placeholder="`留空自动生成 okb_…（至少 ${MIN_TOKEN_LEN} 位）`"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
         <button class="btn btn-sm" :disabled="tokenBusy" @click="createToken">
           {{ tokenBusy ? '创建中…' : '创建令牌' }}
         </button>
       </div>
       <p v-if="!store.user?.mcp" class="section-hint muted">
-        当前账号未获得 MCP 权限，如需在 MCP 客户端里查询文献库，请联系管理员在用户管理中开启。
+        当前账号未获得 MCP 权限，如需签发 MCP 令牌，请联系管理员在用户管理中开启。
       </p>
 
       <div v-if="issuedToken" class="issued-token">
@@ -107,7 +122,7 @@
         <thead>
           <tr>
             <th>备注</th>
-            <th>MCP</th>
+            <th>权限</th>
             <th>创建时间</th>
             <th>最后使用</th>
             <th></th>
@@ -116,7 +131,11 @@
         <tbody>
           <tr v-for="t in tokens" :key="t.id">
             <td>{{ t.label || '—' }}</td>
-            <td>{{ t.mcp ? '是' : '否' }}</td>
+            <td>
+              <span class="scope-badge" :class="t.scope">
+                {{ t.scope === 'mcp' ? 'MCP' : 'API' }}
+              </span>
+            </td>
             <td>{{ formatTime(t.created_at) }}</td>
             <td>{{ formatTime(t.last_used_at) }}</td>
             <td class="row-actions">
@@ -136,17 +155,20 @@ import { useRouter } from 'vue-router'
 import { issueMyToken, listMyTokens, revokeMyToken } from '@/api/auth'
 import { useTokenStore } from '@/stores/token'
 import { useToast } from '@/composables/useToast'
-import type { ApiTokenMeta } from '@/types/auth'
+import type { ApiTokenMeta, TokenScope } from '@/types/auth'
 
 const store = useTokenStore()
 const router = useRouter()
 const toast = useToast()
 
+/** 与后端 `users::MIN_TOKEN_LEN` 保持一致 */
+const MIN_TOKEN_LEN = 8
+
 const tokens = ref<ApiTokenMeta[]>([])
 const tokenBusy = ref(false)
 const pwdBusy = ref(false)
 const issuedToken = ref('')
-const newToken = reactive({ label: '', mcp: false })
+const newToken = reactive({ label: '', scope: 'api' as TokenScope, token: '' })
 const pwd = reactive({ old: '', next: '', next2: '' })
 
 const viaLabel = computed(() => {
@@ -161,8 +183,6 @@ const viaLabel = computed(() => {
 onMounted(async () => {
   await store.refreshMe()
   await loadTokens()
-  // 默认勾选 MCP（若账号有权限）
-  newToken.mcp = !!store.user?.mcp
 })
 
 async function loadTokens() {
@@ -184,9 +204,15 @@ function formatTime(v?: string | null): string {
 async function createToken() {
   tokenBusy.value = true
   try {
-    const res = await issueMyToken(newToken.label.trim() || 'personal', newToken.mcp)
+    const custom = newToken.token.trim()
+    const res = await issueMyToken({
+      label: newToken.label.trim() || 'personal',
+      scope: newToken.scope,
+      token: custom || undefined
+    })
     issuedToken.value = res.token
     newToken.label = ''
+    newToken.token = ''
     toast.showSuccess('令牌已创建，请立即保存')
     await loadTokens()
   } catch (e) {
@@ -312,6 +338,21 @@ async function submitPassword() {
   font-size: 13px;
   color: var(--text-secondary);
   min-height: 36px;
+}
+.scope-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--bg-table-header);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.scope-badge.mcp {
+  background: var(--success-bg);
+  color: var(--success-text);
+  border-color: #c8e6c9;
 }
 .issued-token {
   background: var(--success-bg);

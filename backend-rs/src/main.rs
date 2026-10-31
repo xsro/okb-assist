@@ -153,8 +153,11 @@ async fn main() -> anyhow::Result<()> {
     let user_store = Arc::new(users::UserStore::new(config_manager.clone()));
     // 一次性迁移旧的 config.json.permissions → 无凭据占位用户（方案 B：旧 token 全部失效）
     user_store.migrate_legacy_permissions();
-    // 首次启动引导：无管理员时，尝试把 system.json.token 接管为 admin 的引导凭证
-    auth::ensure_bootstrap(&user_store, &settings);
+    // 首个管理员由前端初始化页创建（`POST /assist/api/auth/bootstrap`）；
+    // 不再从 `system.json` 接管任何全局 token。
+    if !auth::is_initialized(&user_store) {
+        tracing::warn!("系统尚未初始化：请在 /assist/login 初始化页创建第一个管理员账号");
+    }
     // CLI 兜底：重置密码后退出（不启动服务）
     if let Some(username) = args.reset_password.clone() {
         let password = match args.new_password.clone() {
@@ -174,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
             Some(user) => match user_store.set_password(&user.id, &password) {
                 Ok(_) => {
                     println!(
-                        "已重置用户 {} 的密码（引导 token 同时失效，历史会话在服务重启后清空）",
+                        "已重置用户 {} 的密码（历史会话在服务重启后清空）",
                         user.username
                     );
                     return Ok(());
@@ -505,6 +508,17 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
     // 凭证：会话 token → 用户 API token
     if let Some(token) = auth::extract_token(&req) {
         if let Some(principal) = auth::resolve_principal(&token, &user_store, &sessions) {
+            // 作用域严格互斥：MCP 专属令牌不能调 `/assist/api/*`
+            if !principal.api {
+                return (
+                    http::StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({
+                        "detail": "该令牌仅用于 MCP，不能访问 API；请使用权限为 API 的令牌或会话登录",
+                        "code": "mcp_only_token",
+                    })),
+                )
+                    .into_response();
+            }
             let owner = principal.owner_key();
             let role = principal.role.clone();
             req.extensions_mut().insert(owner);

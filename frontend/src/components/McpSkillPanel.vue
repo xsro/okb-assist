@@ -27,13 +27,17 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { getSystemConfig, getServiceConfig } from '@/api/config'
+import { getServiceConfig } from '@/api/config'
 import { useToast } from '@/composables/useToast'
+import { useTokenStore } from '@/stores/token'
 
 const { showSuccess } = useToast()
+const tokenStore = useTokenStore()
 
 const baseUrl = ref('')
-const mcpToken = ref('change-me')
+// 调用 MCP 的凭证：当前登录会话 token，或「账户」页签发的 MCP 权限个人令牌。
+// `system.json` 的全局 `mcp_token` 已移除；API 权限的令牌不能用于 MCP。
+const mcpToken = computed(() => tokenStore.token || '<你的个人令牌 okb_…>')
 
 const skills = [
   { key: 'curl', label: 'curl (Shell)' },
@@ -53,7 +57,7 @@ function getCurlSkill(): string {
     '> 适用场景：在 Shell / 脚本中通过 HTTP 调用 OKB-Assist 的 MCP 工具。\n\n' +
     '## 前置条件\n\n' +
     '- OKB-Assist 后端正在运行（默认 http://localhost:5001）\n' +
-    '- 已知 MCP Token（system.json 中的 mcp_token 字段，默认为 change-me 时禁用认证）\n\n' +
+    '- 已知可用凭证（会话 token，或「账户」页签发的 **MCP 权限**个人令牌；账号需开启 MCP）\n\n' +
     '## 环境变量\n\n' +
     'bash\n' +
     'export MCP_URL="' + url + '"\n' +
@@ -239,7 +243,7 @@ function getPowerShellSkill(): string {
     '> 适用场景：在 Windows PowerShell 中通过 HTTP 调用 OKB-Assist 的 MCP 工具。\n\n' +
     '## 前置条件\n\n' +
     '- OKB-Assist 后端正在运行（默认 http://localhost:5001）\n' +
-    '- 已知 MCP Token（system.json 中的 mcp_token 字段，默认为 change-me 时禁用认证）\n\n' +
+    '- 已知可用凭证（会话 token，或「账户」页签发的 **MCP 权限**个人令牌；账号需开启 MCP）\n\n' +
     '## 环境变量\n\n' +
     'powershell\n' +
     '$env:MCP_URL = "' + url + '"\n' +
@@ -483,10 +487,6 @@ const skillContent = computed(() => {
 })
 
 async function load() {
-  try {
-    const sys = await getSystemConfig()
-    mcpToken.value = sys.mcp_token || 'change-me'
-  } catch { /* ignore */ }
   try {
     const svc = await getServiceConfig()
     baseUrl.value = svc.base_url || ''

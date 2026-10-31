@@ -3,11 +3,14 @@
 export type Role = 'admin' | 'view-only' | 'view-upload'
 export type UserStatus = 'pending' | 'active' | 'disabled'
 
+/** 个人令牌的权限作用域：严格二选一（api 只能调 API，mcp 只能调 MCP） */
+export type TokenScope = 'api' | 'mcp'
+
 /** 用户的一条长期凭证（API / MCP token）元数据 —— 绝不含明文或哈希 */
 export interface ApiTokenMeta {
   id: string
   label: string
-  mcp: boolean
+  scope: TokenScope
   created_at: string
   last_used_at: string | null
 }

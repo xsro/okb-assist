@@ -270,13 +270,13 @@ fn authorize(req: &axum::extract::Request, settings: &Settings) -> Credential {
     if let (Some(store), Some(sessions)) = stores {
         // 1) 本模块下发的 cookie（浏览器直接导航）
         if let Some(token) = cookie_token(req.headers()) {
-            if auth::resolve_principal(&token, store, sessions).is_some() {
+            if auth::resolve_principal(&token, store, sessions).is_some_and(|p| p.api) {
                 return Credential::Cookie;
             }
         }
-        // 2) 显式凭证：X-Token / Authorization / ?token=
+        // 2) 显式凭证：X-Token / Authorization / ?token=（MCP 专属令牌不能用于静态目录）
         if let Some(token) = auth::extract_token(req) {
-            if auth::resolve_principal(&token, store, sessions).is_some() {
+            if auth::resolve_principal(&token, store, sessions).is_some_and(|p| p.api) {
                 return Credential::Other(token);
             }
         }

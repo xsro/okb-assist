@@ -34,8 +34,6 @@ cargo run -- --host 0.0.0.0 --port 5001
 
 ```json
 {
-  "token": "change-me",
-  "mcp_token": "change-me",
   "trusted_subnets": [],
   "trusted_subnet_enabled": false,
   "trusted_subnet_role": "admin",
@@ -44,26 +42,28 @@ cargo run -- --host 0.0.0.0 --port 5001
 }
 ```
 
+> 凭据不再放在 `system.json`：管理员账号、密码与个人令牌（`okb_…`）全部存在 `config.json` 的 `users` 段，
+> 首个管理员由前端初始化页创建（旧版的 `token` / `mcp_token` 两个全局凭据字段已移除）。
+
 | 字段 | 说明 |
 |------|------|
-| `token` | **仅用于首次启动引导**：系统还没有任何管理员且该值不是 `change-me` 时，自动创建 `admin` 账号并把该 token 接管为其 `bootstrap` 访问令牌。管理员**设置密码后该 token 自动失效**；之后再改它不会产生任何效果 |
-| `mcp_token` | MCP 全局 Bearer Token（等价于本地管理员主体）。个人 MCP 访问请用「账户」页签发的 `okb_…` 令牌 |
 | `trusted_subnets` | 受信任子网白名单（CIDR 数组） |
 | `trusted_subnet_enabled` | **默认 `false`**：必须显式开启后，`trusted_subnets` 命中的请求才免鉴权 |
 | `trusted_subnet_role` | 命中受信任子网时授予的角色（默认 `admin`） |
 | `max_concurrent_tasks` | 全局 extract/index 最大并发数 |
-| `drive_root` | 用户网盘根目录（私有 `users/{user_id}/`、公有 `_public/{folder_id}/`），默认 `data/drive` |
+| `drive_root` | 用户网盘根目录（私有 `users/{user_id}/`、公有 `_public/{folder_id}/`），默认 `data/drive`；
+  可写绝对路径（如 `/mnt/disk/okb-drive`）把网盘放到独立磁盘，支持 `{system_dir}` / `{env:VAR}` |
 
 ### 用户与登录
 
 用户数据存放在 `config.json` 的 `users` 段（密码只存 Argon2id 哈希），支持：
 
-- **首次初始化**：访问 `/assist/login`，系统提示创建第一个管理员（也可用 `system.json` 的 `token` 引导，见上表）；
+- **首次初始化**：访问 `/assist/login`，页面提示创建第一个管理员（无需任何预置 token）；
 - **密码登录**：登录后签发 7 天滑动续期的会话 token（`sess_…`，存 localStorage，请求头 `X-Token`）；
 - **Token 登录**：可直接粘贴个人访问令牌（`okb_…`）或会话 token；
 - **注册**：默认开放自助注册，新用户为 `pending`，需管理员在「用户管理」页审核；
-- **个人令牌**：每个用户在「账户」页签发/撤销，用于 Zotero、MCP 客户端等；
-- **MCP 访问**：用户级开关，`用户.mcp = true` 且令牌勾选 MCP 时才可调用。
+- **个人令牌**：每个用户在「账户」页签发/撤销，用于 Zotero、MCP 客户端等；权限**二选一**（`API` / `MCP`），且可自定义令牌明文（≥ 8 位、可见 ASCII）；
+- **MCP 访问**：用户级开关，`用户.mcp = true` 且令牌权限为 `MCP` 时才可调用（API 令牌不能调 MCP，反之亦然）。
 
 忘记管理员密码时的兜底：
 

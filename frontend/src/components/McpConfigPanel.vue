@@ -38,6 +38,12 @@
           </td>
         </tr>
       </table>
+      <p class="hint hint-sm">
+        上面展示的是你当前登录的会话 token（可直接用于调试）。长期使用（MCP 客户端 / 脚本）
+        建议到 <router-link to="/assist/account">账户</router-link> 页签发一把权限为
+        <strong>MCP</strong> 的个人令牌（<code>okb_…</code> 或你自定义的字符串），
+        泄露时只需撤销自己那一把。
+      </p>
     </div>
   </div>
 </template>
@@ -46,35 +52,18 @@
 import { ref, computed, onMounted } from 'vue'
 import { useToast } from '@/composables/useToast'
 import { useTokenStore } from '@/stores/token'
-import { getSystemConfig } from '@/api/config'
 
 const { showSuccess } = useToast()
 const tokenStore = useTokenStore()
 
 const baseUrl = ref('')
 const tokenCopied = ref(false)
-const mcpToken = ref('')
 
-// 管理员：从后端 system.json 读取真正的 mcp_token
-// 非管理员：使用当前登录的 token（permissions 中 mcp: true 的 token）
+// MCP 认证只接受用户自己的凭证（会话 token / 个人令牌 okb_…），
+// `system.json` 的全局 `mcp_token` 已移除。
 const userToken = computed(() => {
-  return mcpToken.value || tokenStore.token || '(未登录)'
+  return tokenStore.token || '(未登录)'
 })
-
-async function loadMcpToken() {
-  // 只有 admin 角色才能调用 getSystemConfig（需要 admin 权限）
-  if (tokenStore.role !== 'admin') {
-    mcpToken.value = tokenStore.token
-    return
-  }
-  try {
-    const sys = await getSystemConfig()
-    mcpToken.value = sys.mcp_token || tokenStore.token
-  } catch {
-    // 后端不可用时回退到当前 token
-    mcpToken.value = tokenStore.token
-  }
-}
 
 const mcpUrl = computed(() => {
   const origin = baseUrl.value || window.location.origin
@@ -190,7 +179,6 @@ async function copyToken() {
 
 onMounted(() => {
   load()
-  loadMcpToken()
 })
 </script>
 
@@ -199,6 +187,13 @@ onMounted(() => {
   color: var(--text-secondary);
   margin-bottom: 16px;
   line-height: 1.6;
+}
+.hint-sm {
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+.hint-sm code {
+  color: var(--primary);
 }
 .client-tabs {
   display: flex;

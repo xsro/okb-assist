@@ -94,4 +94,6 @@ export interface AdminDriveSettings {
   enabled: boolean
   max_upload_mb: number
   default_quota_mb: number
+  /** 实际存储根目录（只读，来自 system.json 的 drive_root，改后需重启） */
+  root?: string
 }

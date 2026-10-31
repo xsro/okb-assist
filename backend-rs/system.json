@@ -1,6 +1,5 @@
 {
   "cwd": "{system_dir}",
-  "token": "token-change-me",
   "config_path": "config.json",
   "log_path": "data/okb-log.jsonl",
   "max_concurrent_tasks": 3,
@@ -12,6 +11,7 @@
   "pdf_path": "data/pdfs/{id}/{id}.pdf",
   "chat_session_path": "data/chat_sessions/{id}.json",
   "uploads_folder": "data/_uploads",
+  "drive_root": "data/drive",
   "static_dirs": [
     {
       "path": "/static",
@@ -23,7 +23,6 @@
       "cache_control": true
     }
   ],
-  "mcp_token": "change-me",
   "trusted_subnets": [
     "192.168.1.0/24",
     "127.0.0.1/32"
