@@ -53,6 +53,9 @@ function onAuthRequired() {
 
 onMounted(async () => {
   window.addEventListener('auth:required', onAuthRequired)
+  // 等首次导航完成：否则硬导航（直接输入/外链打开 URL）时 `route` 还是初始 START_LOCATION，
+  // `route.fullPath` 会是 `/`，把 ?redirect= 覆盖成 `/`（深链登录后回跳失效）。
+  await router.isReady()
   // 启动时用本地 token 恢复会话（刷新页面后重新取角色/权限）
   if (tokenStore.token) {
     await tokenStore.restore()

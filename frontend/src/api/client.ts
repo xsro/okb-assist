@@ -121,9 +121,14 @@ export async function apiDelete<T>(path: string): Promise<T> {
   return res.data
 }
 
-export async function apiUpload<T>(path: string, formData: FormData): Promise<T> {
+export async function apiUpload<T>(
+  path: string,
+  formData: FormData,
+  config?: AxiosRequestConfig
+): Promise<T> {
   const res = await client.post<T>(path, formData, {
-    headers: { 'Content-Type': 'multipart/form-data' }
+    ...config,
+    headers: { 'Content-Type': 'multipart/form-data', ...(config?.headers || {}) }
   })
   return res.data
 }

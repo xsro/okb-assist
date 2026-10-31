@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, RwLock};
 /// `users` 段持有密码哈希与 token 哈希，只能通过 `users` 模块的专用端点与
 /// [`ConfigManager::update_users_section`] 修改；否则前端配置表单回传旧快照就会
 /// 覆盖账号或注入自定义 `password_hash`。
-const PROTECTED_CONFIG_SECTIONS: &[&str] = &["users"];
+const PROTECTED_CONFIG_SECTIONS: &[&str] = &["users", "drive"];
 
 /// 归一化并迁移服务配置的旧格式，使其符合“LLM 模型池 + 抽取专用模型”的新结构。
 ///
@@ -219,7 +219,24 @@ pub fn default_config() -> serde_json::Value {
                 }
             }
         ],
-        "users": default_users_section()
+        "users": default_users_section(),
+        "drive": default_drive_section()
+    })
+}
+
+/// 默认的 `drive` 段（用户网盘策略）。
+///
+/// - `enabled`：总开关；
+/// - `max_upload_mb`：单个文件上传上限；
+/// - `default_quota_mb` / `quota_overrides`：配额（0 = 不限）；
+/// - `public_folders`：管理员创建的公有文件夹（`read_role`/`write_role` 为角色阈值）。
+pub fn default_drive_section() -> serde_json::Value {
+    serde_json::json!({
+        "enabled": true,
+        "max_upload_mb": 200,
+        "default_quota_mb": 0,
+        "quota_overrides": {},
+        "public_folders": []
     })
 }
 
@@ -255,6 +272,7 @@ pub fn default_system() -> serde_json::Value {
         "pdf_path": "data/pdfs/{id}/{id}.pdf",
         "config_path": "config.json",
         "log_path": "okb-log.jsonl",
+        "drive_root": "data/drive",
         "trusted_subnets": [],
         "trusted_subnet_enabled": false,
         "trusted_subnet_role": "admin"
@@ -608,6 +626,30 @@ impl ConfigManager {
         Self::write_json_file(&self.config_file, &raw)?;
         *self.cache.write().unwrap() = None;
         Ok(raw["users"].clone())
+    }
+
+    /// 原子地修改 `config.json` 的任意顶层段（`users` / `drive` 等）。
+    ///
+    /// 与 [`Self::update_users_section`] 相同：加写锁 → 从磁盘重读 → 只改该段 →
+    /// 临时文件 + rename 写回；闭包返回 `Err` 时不写盘。
+    pub fn update_section<F>(&self, key: &str, f: F) -> anyhow::Result<serde_json::Value>
+    where
+        F: FnOnce(&mut serde_json::Value) -> anyhow::Result<()>,
+    {
+        let _guard = self.write_lock.lock().unwrap();
+        let mut raw = Self::read_raw_service_config(&self.config_file);
+        if !raw.get(key).map(|v| v.is_object()).unwrap_or(false) {
+            let default = default_config();
+            raw[key] = default
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+        }
+        let section = raw.get_mut(key).expect("该段已在上面补齐");
+        f(section)?;
+        Self::write_json_file(&self.config_file, &raw)?;
+        *self.cache.write().unwrap() = None;
+        Ok(raw[key].clone())
     }
 
     /// 原子地删除 `config.json` 的某个顶层键，返回被删除的值。

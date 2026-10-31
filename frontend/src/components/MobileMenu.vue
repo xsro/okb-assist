@@ -49,20 +49,20 @@ const closeMenu = inject('closeMobileMenu') as (() => void) | undefined
 
 const adminOnlyPaths = [
   '/assist/admin',
-  '/assist/users',
   '/assist/config',
   '/assist/duplicates',
   '/assist/point',
   '/assist/mcp-setup',
-  '/assist/logs'
+  '/assist/logs',
+  '/assist/drive/admin'
 ]
 
 const allNavItems = [
   { path: '/assist', label: '文献列表' },
   { path: '/assist/upload', label: '上传' },
+  { path: '/assist/drive', label: '网盘' },
   { path: '/assist/tools', label: '工具' },
   { path: '/assist/chat', label: '问答' },
-  { path: '/assist/users', label: '用户管理' },
   { path: '/assist/admin', label: '管理' },
   { path: '/assist/config', label: '配置' },
   { path: '/assist/duplicates', label: '去重' },

@@ -19,10 +19,9 @@ const routes = [
     meta: { title: '账户' }
   },
   {
+    // 用户管理已并入「配置」页的 tab；保留旧路径做重定向（书签/文档链接兼容）
     path: '/assist/users',
-    name: 'users',
-    component: () => import('@/views/UsersView.vue'),
-    meta: { title: '用户管理', requiresAdmin: true }
+    redirect: (to) => ({ path: '/assist/config', query: { ...to.query, tab: 'users' } })
   },
   {
     path: '/assist',
@@ -41,6 +40,18 @@ const routes = [
     name: 'upload',
     component: () => import('@/views/UploadView.vue'),
     meta: { title: '上传文献' }
+  },
+  {
+    path: '/assist/drive',
+    name: 'drive',
+    component: () => import('@/views/DriveView.vue'),
+    meta: { title: '网盘' }
+  },
+  {
+    path: '/assist/drive/admin',
+    name: 'driveAdmin',
+    component: () => import('@/views/DriveAdminView.vue'),
+    meta: { title: '网盘管理', requiresAdmin: true }
   },
   {
     path: '/assist/tools',

@@ -262,7 +262,7 @@ fn create_app(
                 .on_response(ResponseLog),
         )
         .layer(cors)
-        .layer(Extension(config_manager))
+        .layer(Extension(config_manager.clone()))
         .layer(Extension(settings.clone()))
         .layer(Extension(db.clone()))
         .layer(Extension(user_store))
@@ -279,6 +279,9 @@ fn create_app(
         .merge(routers::openapi::router())
         .merge(routers::auth::router())
         .merge(routers::users::router())
+        .merge(routers::drive::router().layer(axum::extract::DefaultBodyLimit::max(
+            routers::drive::body_limit_bytes(&config_manager),
+        )))
         .route("/assist/mcp/stream", post(mcp_server::mcp_stream_handler).options(mcp_server::mcp_options_handler))
         .route("/assist/file/:filename", get(serve_file_alias))
         .route("/", get(root_redirect))

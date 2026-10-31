@@ -1,7 +1,7 @@
 <template>
-  <div class="users-view container">
-    <div class="page-header">
-      <h2>用户管理</h2>
+  <div class="users-view" :class="{ container: !embedded, embedded }">
+    <div class="page-header" :class="{ 'no-title': embedded }">
+      <h2 v-if="!embedded">用户管理</h2>
       <div class="header-actions">
         <button class="btn btn-sm btn-outline" @click="loadAll" :disabled="loading">刷新</button>
         <button class="btn btn-sm" @click="openCreate">新建用户</button>
@@ -268,6 +268,8 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { useToast } from '@/composables/useToast'
 import { useTokenStore } from '@/stores/token'
 import type { Role, User, UserStatus, UsersSettings } from '@/types/auth'
+
+withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 
 const toast = useToast()
 const tokenStore = useTokenStore()
@@ -543,6 +545,9 @@ const confirmRef = ref<InstanceType<typeof ConfirmDialog> | null>(null)
 </script>
 
 <style scoped>
+.page-header.no-title {
+  justify-content: flex-end;
+}
 .page-header {
   display: flex;
   align-items: center;

@@ -187,9 +187,29 @@ function switchTab(next: Tab) {
   success.value = ''
 }
 
+/** 回跳目标必须是站内绝对路径（防开放重定向） */
+function safeRedirect(raw: unknown): string {
+  if (typeof raw !== 'string' || !raw.startsWith('/') || raw.startsWith('//')) return '/assist'
+  // 反斜杠、控制字符会被浏览器规范化成别的协议/主机
+  if (raw.includes('\\') || /[\u0000-\u001f]/.test(raw)) return '/assist'
+  return raw
+}
+
+/**
+ * 登录后回跳。
+ *
+ * - SPA 路由（`/assist/...` 且有匹配的页面）→ 客户端路由跳转；
+ * - 其余路径（例如 `system.json` 的 `static_dirs` 挂载的 `/static/...`）→ 整页跳转，
+ *   凭证由登录/校验时下发的 `okb_static` 会话 cookie 携带（浏览器直接导航带不了 X-Token）。
+ */
 function redirectAfterLogin() {
-  const target = (route.query.redirect as string) || '/assist'
-  router.replace(target)
+  const target = safeRedirect(route.query.redirect)
+  const resolved = router.resolve(target)
+  if (resolved.matched.length > 0) {
+    router.replace(target)
+    return
+  }
+  window.location.replace(target)
 }
 
 function message(e: unknown): string {

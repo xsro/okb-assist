@@ -169,7 +169,14 @@ fn issue_login_response(
         "登录成功，已签发会话"
     );
 
-    Json(json!({
+    // 浏览器直接导航到 `static_dirs` 挂载的静态目录时无法携带 `X-Token`，
+    // 因此登录成功顺带下发一个仅供静态目录使用的会话 cookie（API 不读它）。
+    let cookie = crate::static_files::session_cookie_header(
+        &token,
+        users.section().session_ttl_hours as i64,
+    );
+
+    let mut response = Json(json!({
         "token": token,
         "expires_at": session.expires_at.to_rfc3339(),
         "role": role.as_str(),
@@ -177,7 +184,13 @@ fn issue_login_response(
         "must_set_password": user.must_set_password,
         "user": user.to_public_json(),
     }))
-    .into_response()
+    .into_response();
+    if let Some(cookie) = cookie {
+        response
+            .headers_mut()
+            .insert(axum::http::header::SET_COOKIE, cookie);
+    }
+    response
 }
 
 // ── 状态 ────────────────────────────────────────────────
@@ -395,12 +408,18 @@ async fn login(
 async fn logout(
     Extension(sessions): Extension<Arc<SessionStore>>,
     headers: HeaderMap,
-) -> Json<Value> {
-    let revoked = auth::extract_token_from_headers(&headers)
-        .map(|t| sessions.revoke(&t))
-        .unwrap_or(false);
+) -> Response {
+    // 头部凭证优先；同时兼容浏览器静态目录下发的 cookie（否则登出后静态目录仍能打开）
+    let token = auth::extract_token_from_headers(&headers)
+        .or_else(|| crate::static_files::cookie_token(&headers));
+    let revoked = token.map(|t| sessions.revoke(&t)).unwrap_or(false);
     tracing::info!(audit = "logout", revoked, "登出");
-    Json(json!({"ok": true, "revoked": revoked}))
+    let mut response = Json(json!({"ok": true, "revoked": revoked})).into_response();
+    response.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        crate::static_files::clear_cookie_header(),
+    );
+    response
 }
 
 // ── 当前用户 ────────────────────────────────────────────
@@ -515,7 +534,12 @@ async fn check(
     let user = users.find_by_id(&principal.user_id);
     let must_set_password = user.as_ref().map(|u| u.must_set_password).unwrap_or(false);
 
-    Json(json!({
+    // 刷新页面 / Token 登录也顺带下发静态目录 cookie（与登录一致）
+    let cookie = token.as_deref().and_then(|t| {
+        crate::static_files::session_cookie_header(t, users.section().session_ttl_hours as i64)
+    });
+
+    let mut response = Json(json!({
         "role": principal.role.as_str(),
         "valid": true,
         "permissions": permissions_for(&principal.role, principal.mcp),
@@ -524,7 +548,13 @@ async fn check(
         "must_set_password": must_set_password,
         "user": user.map(|u| u.to_public_json()),
     }))
-    .into_response()
+    .into_response();
+    if let Some(cookie) = cookie {
+        response
+            .headers_mut()
+            .insert(axum::http::header::SET_COOKIE, cookie);
+    }
+    response
 }
 
 #[cfg(test)]

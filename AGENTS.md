@@ -20,6 +20,7 @@ OKB-Assist 是一个**本地学术文献库管理系统**（论文与专著）�
 - **外部服务**：MinerU（解析）、LLM（Ollama 原生 / OpenAI 兼容协议，模型池 + 信息补全模型）、Embedding 服务（各向量库独立配置，默认 Ollama 原生协议）、Qdrant（向量）、Fastembed（嵌入服务）、OpenWebUI（可选前端）、mutool（PDF 元数据提取，未启用 mupdf feature 时使用）
 - **客户端工具**：`client-rs/` — Zotero CSV 导入工具（Rust）
 - **用户体系**：注册 / 密码登录 / Token 登录 / MCP 授权，用户数据存 `config.json` 的 `users` 段（详见下方「用户与认证」）
+- **网盘**：每个用户一个私有目录 + 管理员创建的公有文件夹（按角色阈值授权），与文献库完全独立（详见下方「用户网盘」）
 
 ## 包管理与常用命令
 
@@ -70,7 +71,8 @@ cargo build --release
 | `backend-rs/src/users.rs` | 用户存储（`config.json` 的 `users` 段，Argon2id 密码、sha256 令牌、最后管理员不变量、旧 `permissions` 迁移） |
 | `backend-rs/src/session.rs` | 服务端会话表（`sess_…`，内存态，7 天滑动续期） |
 | `backend-rs/src/logger.rs` | 双日志初始化（文件 + 控制台） |
-| `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`openapi.rs`、`mod.rs` |
+| `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`drive.rs`、`openapi.rs`、`mod.rs` |
+| `backend-rs/src/services/drive.rs` | 用户网盘：路径安全、角色阈值、配额统计、目录列举、Content-Type 推断 |
 | `backend-rs/src/services/` | 后端适配器：`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
@@ -91,7 +93,7 @@ cargo build --release
 | `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 8 构建，输出到 `frontend/dist/`，包管理器 `pnpm`） |
 | `frontend/dist/` | 前端构建产物（`index.html`、`assets/`），由后端 serving |
 | `data/` | 运行时数据（`okb_assist.db`、`_uploads/`、`tokens/` 等），由 `system.json` 模板决定路径；实际位置为 `backend-rs/data/`，已被 `backend-rs/.gitignore` 忽略 |
-| `document/` | 参考文档：`mcp.md`（MCP 工具列表）、`user-management.md`（用户/登录/令牌使用指南）、`user-management-plan.md`（权限→用户升级计划与进度）、`build.md`（部署构建）、`search.md`（搜索语法）、`datalab.to.md`、`mineru4/`、`skills/`、`openwebui.md`、`qdrant.md`、`udisks2-automount.md` |
+| `document/` | 参考文档：`mcp.md`（MCP 工具列表）、`user-management.md`（用户/登录/令牌使用指南）、`user-management-plan.md`（权限→用户升级计划与进度）、`drive.md`（网盘设计与使用）、`build.md`（部署构建）、`search.md`（搜索语法）、`datalab.to.md`、`mineru4/`、`skills/`、`openwebui.md`、`qdrant.md`、`udisks2-automount.md` |
 
 ## 配置（JSON 文件，非环境变量）
 
@@ -220,6 +222,86 @@ cargo build --release
 
 依次接受：`system.json.mcp_token`（本地 admin 主体）→ 用户会话/个人令牌（`Principal.mcp = 用户.mcp && 令牌.mcp`）→ 受信任子网（需 `trusted_subnet_enabled`）。未开 MCP 的用户返回 `Unauthorized: MCP access not granted`。
 
+### 用户网盘（`config.json` 的 `drive` 段 + `system.json` 的 `drive_root`）
+
+每个用户有独立私有目录，另有管理员创建的**公有文件夹**（按**角色阈值**授权）。网盘与文献库
+（`documents` / 解析流水线 / 向量库）**完全独立**：上传到网盘的文件不会入库、不会解析。
+
+#### 存储布局
+
+```
+{drive_root}/users/{user_id}/...        # 私有：只有本人可读写
+{drive_root}/_public/{folder_id}/...    # 公有：按 read_role / write_role 阈值判定
+```
+
+路径全部来自 `system.json` 的 `drive_root`（相对 `cwd`），目录懒创建。
+
+#### 策略（`config.json.drive`）
+
+```json
+{
+  "drive": {
+    "enabled": true,
+    "max_upload_mb": 200,
+    "default_quota_mb": 0,
+    "quota_overrides": { "u_3c420f47d351178f": 5120 },
+    "public_folders": [
+      { "id": "pf_1a2b3c4d", "name": "团队资料",
+        "read_role": "view-only", "write_role": "admin",
+        "created_at": "2026-01-01T00:00:00Z" }
+    ]
+  }
+}
+```
+
+- **角色阈值**：等级 `admin(3) > view-upload(2) > view-only(1)`，`角色等级 >= 阈值` 即可读/写。
+  例：`read_role=view-only` + `write_role=admin` = 全站可读、仅管理员可写。
+- **配额**：`default_quota_mb`（0 = 不限），`quota_overrides` 按 `user_id` 覆盖（值 `0` = 该用户不限）。
+  统计方式为遍历该用户私有目录累加文件大小；**配额只约束私有目录**。
+- **`drive` 是受保护段**：`ConfigManager::PROTECTED_CONFIG_SECTIONS = ["users", "drive"]`，
+  `PUT /assist/api/config` 无法改写它；所有写操作走 `ConfigManager::update_section("drive", ..)`
+  （加写锁 → 读盘 → 只改这段 → 原子写）。
+
+#### 接口
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| GET | `/assist/api/drive` | 已登录 | 概览：开关、配额、当前用户可访问的公有文件夹（含 `can_write`） |
+| GET | `/assist/api/drive/list?scope&path` | 已登录 | 列目录（`scope=private` 或 `public:<id>`），返回面包屑/占用/上限 |
+| POST | `/assist/api/drive/upload` | 已登录 | multipart：`scope`、`path` + 一个或多个 `file`（字段顺序敏感） |
+| POST | `/assist/api/drive/mkdir` | 有写权限 | 新建文件夹 |
+| POST | `/assist/api/drive/rename` | 有写权限 | 重命名 |
+| POST | `/assist/api/drive/move` | 有写权限 | 移动到目录（同名自动加 `(n)` 后缀） |
+| DELETE | `/assist/api/drive/file?scope&path&recursive` | 有写权限 | 删除；非空目录需 `recursive=1` |
+| GET | `/assist/api/drive/download?scope&path&token` | 已登录 | 附件下载（支持 Range） |
+| GET | `/assist/api/drive/raw?scope&path&token` | 已登录 | 内联预览（图片/PDF；非可预览类型强制下载防 XSS） |
+| GET | `/assist/api/drive/text?scope&path` | 已登录 | 文本预览（≤512KB，超长 `truncated=true`） |
+| GET/POST | `/assist/api/admin/drive/folders[/:id]` | admin | 公有文件夹列表/创建（`PUT` 改名称与阈值，`DELETE ?force=1`） |
+| GET/PUT | `/assist/api/admin/drive/quotas[/:user_id]` | admin | 配额总览/设置（`{quota_mb, clear}`） |
+| GET/PUT | `/assist/api/admin/drive/settings` | admin | `enabled` / `max_upload_mb` / `default_quota_mb` |
+
+- `download`/`raw` 支持 `?token=`（`<img>`/`<iframe>` 无法带 `X-Token` 头），由中间件的查询参数解析兜底。
+- 上传上限：`routers::drive::body_limit_bytes()` 计算 `DefaultBodyLimit`（10 个文件 + 1MB 余量，上限 512MB），
+  单个文件另按 `max_upload_mb` 边读边校验；先写 `.upload-*.part` 再 rename，超限/失败即删除临时文件。
+- 若要让新的 `max_upload_mb` 完全生效需重启（body limit 在启动时计算）。
+
+#### 路径安全（`services/drive.rs`）
+
+- `validate_name()`：拒绝 `/`、`\`、`..`、`.`、控制字符、>200 字节；
+- `sanitize_rel_path()`：逐段过滤空段/`.`，拒绝 `..`/绝对路径/控制字符/超长（1024 字节）；
+- `resolve_path()`：拼接后对**最近的已存在祖先**做 `canonicalize()`，必须仍在作用域根内（防符号链接逃逸）；
+- `validate_folder_id()`：`[A-Za-z0-9_-]{1,32}`（同时用于 `user_id` 与 `folder_id`）；
+- 列目录时跳过符号链接；删除时禁止删除作用域根目录。
+
+#### 前端
+
+- `views/DriveView.vue`（`/assist/drive`，全部角色）：左侧作用域（我的网盘 + 公有文件夹，标注可写/只读），
+  右侧文件表（进入目录 / 预览 / 下载 / 重命名 / 移动 / 删除）、拖拽上传 + 进度、配额条；
+  预览支持图片、PDF、文本/Markdown（文本走 `/drive/text`）；只读作用域不显示写操作按钮。
+- `views/DriveAdminView.vue`（`/assist/drive/admin`，admin）：网盘开关/单文件上限/默认配额、
+  公有文件夹增删改（名称 + 读写阈值）、逐用户配额覆盖。
+- `api/drive.ts`、`types/drive.ts`；导航「网盘」（`/assist/drive/admin` 仅 admin 可见）。
+
 ### 元数据抽取（信息补全）的校对语义
 
 实现在 `backend-rs/src/routers/pipeline.rs` 的 `do_extract_impl` + `backend-rs/src/services/llm.rs` 的 `extract_metadata` / `build_extract_prompt`。
@@ -293,6 +375,7 @@ cargo build --release
 | `markdown_path` | Markdown 文件路径模板 | `data/markdowns/{id}.md` |
 | `info_path` | 元信息 JSON 路径模板 | `data/markdowns/{id}.json` |
 | `chat_session_path` | 问答会话文件路径模板（`{id}` 为会话 ID，字符串） | `data/chat_sessions/{id}.json` |
+| `drive_root` | 用户网盘根目录（私有 `users/{user_id}/`、公有 `_public/{folder_id}/`） | `data/drive` |
 | `crossref_path` | Crossref 数据路径模板 | `data/markdowns/{id}_crossref.json` |
 | `markdown_asset_path` | Markdown 资产包路径模板 | `data/pdfs/{id}/{id}.zip` |
 | `pdf_path` | PDF 文件路径模板 | `data/pdfs/{id}/{id}.pdf` |
@@ -331,12 +414,18 @@ cargo build --release
 | `try_index` | `true` | 命中目录时补 `index` 指定的首页（语义同 nginx `index`，**没有** SPA 全量回退） |
 | `index` | `index.html` | 首页文件名 |
 | `list_dir` | `false` | 目录无首页时返回简单文件列表（默认关闭） |
-| `auth` | `true` | 是否需要凭证：接受会话 token / 用户 API token（`X-Token` 头、`Authorization: Bearer`、`?token=`），受信任子网需 `trusted_subnet_enabled = true`；`false` 为完全公开 |
+| `auth` | `true` | 是否需要凭证：会话 cookie（`okb_static`）/ 会话 token / 用户 API token（`X-Token` 头、`Authorization: Bearer`、`?token=`），受信任子网需 `trusted_subnet_enabled = true`；`false` 为完全公开 |
 | `cache_control` | `true` | 是否附带 `Cache-Control`（静态资源长缓存，`index.html` 不缓存；关闭时统一 `no-cache`） |
 
 - **只读**：只注册 `get()`（axum 的 GET 路由同时响应 `HEAD` 并自动去掉响应体），其他方法 405。
 - **安全**：请求子路径做 percent-decoding 后拒绝 `..` / 反斜杠 / NUL，最终路径必须 `canonicalize()` 且仍在挂载根目录内（指向目录外的软链同样被拒）。
 - **目录补斜杠**：命中目录但 URL 未以 `/` 结尾时返回 301 补 `/`，保证首页里的相对链接正确。
+- **自动登录跳转**：`auth: true` 且未通过鉴权时 ——
+  - 浏览器页面导航（`Accept` 含 `text/html`）→ **302 到 `/assist/login?redirect=<原路径%3Fquery>`**，登录/已登录自动回跳（`LoginView.vue::redirectAfterLogin` 对非 SPA 路径用 `window.location.replace` 整页跳回）；
+  - 其他请求（curl / fetch / 下载工具）→ 401 JSON，不会被重定向搞坏。
+- **凭证 cookie（`okb_static`）**：浏览器直接导航带不了 `X-Token`，所以登录成功（`POST /auth/login`）、`GET /auth/check`（刷新页面 / Token 登录）、以及静态目录上用 `?token=` 认证成功时都会下发
+  `Set-Cookie: okb_static=<token>; Path=/; HttpOnly; SameSite=Lax; Max-Age=<session_ttl_hours>`；登出（`POST /auth/logout`）下发 `Max-Age=0` 清除并顺手`revoke` cookie 里的会话。
+  **只有 `static_files` 读这个 cookie，`token_middleware` / API 一律不认**（避免扩大 API 鉴权面）；下发时顺带解决页面内相对资源（图片/子页面）的鉴权问题。
 - 重复 `path`、`path` 为 `/`、缺 `path`/`dir` 的条目一律忽略并打 `warn`；**前缀不允许互相嵌套**（`/a` 与 `/a/b` 在 axum 的路由表里会冲突，只保留更长的 `/a/b`），匹配时最长前缀优先。
 
 ## 架构与请求流
@@ -409,6 +498,7 @@ cargo build --release
 | `Toast.vue` | 消息提示 |
 | `ConfirmDialog.vue` | 确认对话框 |
 | `TokenModal.vue` | 账号面板（当前用户/角色、Token 登录、历史令牌、退出登录、跳转账户页） |
+| `views/UsersView.vue` | 用户管理（表格/待审核/令牌/注册策略），既可作为独立页面也可 `embedded` 嵌入配置页 tab |
 | `ErrorBoundary.vue` | 错误边界（catch 渲染异常） |
 | `SkeletonLoading.vue` | 骨架屏 |
 | `MarkdownViewer.vue` | Markdown 渲染（marked + KaTeX + DOMPurify） |
@@ -430,14 +520,15 @@ cargo build --release
 |------|------|------|------|
 | `/assist/login` | `LoginView.vue` | 登录 / 注册 / Token 登录 / 首次初始化管理员（`meta.public`） | 公开 |
 | `/assist/account` | `AccountView.vue` | 账户：资料、修改密码、个人访问令牌（Zotero/MCP） | 全部 |
-| `/assist/users` | `UsersView.vue` | 用户管理：待审核、角色/状态/MCP、重置密码、令牌签发、注册策略与会话 TTL | admin |
+| `/assist/config` | `ConfigView.vue` | 配置页（内含两个 tab：**服务配置** / **用户管理**——用户管理由 `UsersView.vue` 以 `embedded` 模式渲染） | admin |
+| `/assist/drive` | `DriveView.vue` | 网盘：我的网盘 + 公有文件夹（列目录/上传/下载/预览/重命名/移动/删除） | 全部 |
+| `/assist/drive/admin` | `DriveAdminView.vue` | 网盘管理：开关/单文件上限/默认配额、公有文件夹与角色阈值、逐用户配额 | admin |
 | `/assist` | `HomeView.vue` | 文献列表（桌面表格/移动卡片 + 列管理 + 高级搜索） | 全部 |
 | `/assist/detail/:id` | `DetailView.vue` | 文档详情（元信息 + PDF 元信息 / Crossref 记录 / 引用条目三个懒加载折叠区） | 全部 |
 | `/assist/markdown/:id` | `MarkdownView.vue` | Markdown 阅读（浮动设置按钮收纳全部工具；行号默认开、移动端默认关；设置面板的「源码编辑」跳到编辑器并从当前阅读行开始载入） | 全部 |
 | `/assist/markdown/:id/edit` | `MarkdownEditView.vue` | Markdown 编辑（AceEditor）；支持 `?line=a-b` 只载入指定行范围，阅读页「源码编辑」即跳到这里 | admin |
 | `/assist/upload` | `UploadView.vue` | 上传 PDF | admin / view-upload |
 | `/assist/doc/:id` | `DocManageView.vue` | 文档管理 | 全部 |
-| `/assist/config` | `ConfigView.vue` | 服务配置 | admin |
 | `/assist/admin` | `AdminView.vue` | 管理面板（含监控、统计） | admin |
 | `/assist/duplicates` | `DuplicatesView.vue` | 去重 | admin |
 | `/assist/point` | `PointView.vue` | 向量库管理 | admin |
@@ -550,9 +641,12 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 14. **MinerU API 的 output_formats 顺序无关**：`submit_job()` 必须同时请求 `"markdown"` 和 `"zip"` 两个格式。`zip` 格式包含解析结果的完整输出（Markdown + 图片），而 `markdown` 格式是自包含的 data URI 版本。两套输出分别下载后合并处理。
 15. **`users` 段不要手改、不要经 `/assist/api/config` 写入**：`ConfigManager::save_config()` 会跳过 `PROTECTED_CONFIG_SECTIONS = ["users"]` 并从磁盘取回真值；用户写操作必须走 `users::UserStore`（内部 `update_users_section` 原子写 + 写锁）。密码哈希/令牌哈希永不回显。
 16. **删改用户要级联撤销凭据**：禁用/删除用户、重置密码都要 `sessions.revoke_user(&id)`（`routers/users.rs` 已处理）；`set_password` 会自动吊销 `label = "bootstrap"` 的令牌，但**不会**吊销用户自签令牌（需管理员显式 `revoke_tokens`）。
-17. **全屏（`meta.bare`）路由的高度链**：`main-content-bare` → `.error-boundary-wrap` → 页面容器 → `AceEditor` 每一层都必须是纵向 flex（`flex:1; min-height:0`）。`App.vue` 用 `.main-content-bare :deep(.error-boundary-wrap)` 补了这一层；漏掉就会让内部 `height:100%/flex:1` 的编辑器塌陷成内容高度（表现为编辑区只有 200px 高、下方一大片空白）。
+17. **网盘路径必须过 `resolve_path()`**：任何来自客户端的相对路径都要经 `sanitize_rel_path` + canonicalize 校验，禁止直接 `base.join(user_input)`（防 `../` 与符号链接逃逸）；新增文件操作端点时同样处理。
+18. **`drive` 段是受保护配置**：修改公有文件夹/配额/设置必须走 `/assist/api/admin/drive/*`（内部 `update_section`），不要扩展 `PUT /assist/api/config` 去写它，否则会与 `save_config` 的“从磁盘取回真值”逻辑打架。
+19. **全屏（`meta.bare`）路由的高度链**：`main-content-bare` → `.error-boundary-wrap` → 页面容器 → `AceEditor` 每一层都必须是纵向 flex（`flex:1; min-height:0`）。`App.vue` 用 `.main-content-bare :deep(.error-boundary-wrap)` 补了这一层；漏掉就会让内部 `height:100%/flex:1` 的编辑器塌陷成内容高度（表现为编辑区只有 200px 高、下方一大片空白）。
 18. **静态目录挂载（`static_dirs`）的路由注册顺序**（`main.rs::create_app`）：这些路由必须在 `.layer(middleware)` **之前**注册 —— 处理器靠 Extension 里的 `Settings`/`UserStore`/`SessionStore` 做鉴权，而 axum 的 `Router::layer` 只对已存在的路由生效（这也是 `spa_fallback` 改用全局 `settings` 单例的原因）。另外 axum 的 `/*rest` 通配符**不匹配空剩余路径**，`/prefix`、`/prefix/`、`/prefix/*rest` 三条都要注册，否则访问不了 `/prefix/`。
-19. **静态目录的鉴权与内置路由不同**：它不走 `token_middleware`（后者只覆盖 `/assist/api/*`），而是在处理器内自己判（`static_files::is_authorized`：会话/用户令牌 + 受信任子网），所以新增挂载时要保留这条判定，不能直接读文件。
+19. **静态目录的鉴权与内置路由不同**：它不走 `token_middleware`（后者只覆盖 `/assist/api/*`），而是在处理器内自己判（`static_files::authorize`：`okb_static` cookie / 会话・用户令牌 / 受信任子网），所以新增挂载时要保留这条判定，不能直接读文件。另外：`axum::body::Body` **不是 `Sync`**，`serve_mount` 里不能把 `&Request` 跨 `await` 传给 helper，否则整个 future 不再是 `Send`，axum 会报 `Handler` 未实现（现已改成传 `&str` / `&StaticMount`）。
+20. **前端启动重定向必须先 `await router.isReady()`**（`App.vue`）：硬导航（直接输入 URL / 外链）时 `route` 还是初始 `START_LOCATION`，`route.fullPath` 是 `/`，不等待会把 `?redirect=` 覆盖成 `/`，导致“登录后回跳”失效。
 
 ## 入口与关键文件速查
 

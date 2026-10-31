@@ -1,7 +1,26 @@
 <template>
   <div class="config-view">
-    <h2>服务配置</h2>
+    <div class="page-head">
+      <h2>配置</h2>
+      <div class="config-tabs">
+        <button
+          class="config-tab"
+          :class="{ active: activeTab === 'service' }"
+          @click="switchTab('service')"
+        >
+          服务配置
+        </button>
+        <button
+          class="config-tab"
+          :class="{ active: activeTab === 'users' }"
+          @click="switchTab('users')"
+        >
+          用户管理
+        </button>
+      </div>
+    </div>
 
+    <div v-show="activeTab === 'service'">
     <div v-if="config" class="config-form">
       <BaseUrlSection v-model="config" />
 
@@ -31,23 +50,6 @@
         @update="onConfigUpdate"
       />
 
-      <!-- 用户与权限（已迁移到独立的用户管理页） -->
-      <div class="section">
-        <h3>用户与权限</h3>
-        <p class="section-desc">
-          角色与访问令牌已迁移到「用户管理」：用户可以注册 / 密码登录 / 使用个人 API token，
-          每个用户可单独授予 MCP 访问权限。
-        </p>
-        <div class="user-summary">
-          <span>用户总数：<strong>{{ usersSummary.count }}</strong></span>
-          <span>待审核：<strong>{{ usersSummary.pending }}</strong></span>
-          <span>
-            自助注册：<strong>{{ usersSummary.allow_registration ? '已开放' : '已关闭' }}</strong>
-          </span>
-        </div>
-        <router-link class="btn btn-sm" to="/assist/users">打开用户管理</router-link>
-      </div>
-
       <div class="action-buttons">
         <button class="btn" @click="save">保存</button>
         <button class="btn btn-outline" @click="reload">重载</button>
@@ -56,14 +58,18 @@
     </div>
 
     <div v-else class="loading">加载中...</div>
+    </div>
+
+    <!-- 用户管理（原独立页面，现并入配置页的 tab） -->
+    <UsersView v-if="activeTab === 'users'" embedded />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { getServiceConfig, updateServiceConfig, reloadConfig } from '@/api/config'
 import { getServiceStatus } from '@/api/admin'
-import { apiGet } from '@/api/client'
 import { useToast } from '@/composables/useToast'
 import type { LlmModelEntry, ServiceConfig } from '@/types/config'
 import BaseUrlSection from '@/components/config/BaseUrlSection.vue'
@@ -71,6 +77,7 @@ import MineruConfigSection from '@/components/config/MineruConfigSection.vue'
 import LlmConfigSection from '@/components/config/LlmConfigSection.vue'
 import LlmExtractConfigSection from '@/components/config/LlmExtractConfigSection.vue'
 import VectorDbConfigSection from '@/components/config/VectorDbConfigSection.vue'
+import UsersView from '@/views/UsersView.vue'
 
 const { showSuccess, showError } = useToast()
 
@@ -203,32 +210,88 @@ function reset() {
   config.value = JSON.parse(JSON.stringify(originalConfig.value))
 }
 
-// ── 用户摘要（config.json 的 users 段不直接下发，只用汇总信息） ──
+// ── 页内 tab（服务配置 / 用户管理） ──
+//
+// 用户管理原先是独立路由 `/assist/users`，现并入配置页：
+// - 选中状态与 `?tab=users` 同步，便于深链与刷新保持；
+// - 用 v-show 保留服务配置的编辑状态，用户管理面板懒挂载（切到才请求数据）。
 
-const usersSummary = ref<{ count: number; pending: number; allow_registration: boolean }>({
-  count: 0,
-  pending: 0,
-  allow_registration: true
-})
+type ConfigTab = 'service' | 'users'
 
-async function loadUsersSummary() {
-  try {
-    const res = await apiGet<{
-      users_summary?: { count: number; pending: number; allow_registration: boolean }
-    }>('/assist/api/config')
-    if (res.users_summary) usersSummary.value = res.users_summary
-  } catch {
-    // 静默忽略：非关键信息
-  }
+const route = useRoute()
+const router = useRouter()
+
+function tabFromQuery(): ConfigTab {
+  return route.query.tab === 'users' ? 'users' : 'service'
 }
+
+const activeTab = ref<ConfigTab>(tabFromQuery())
+
+function switchTab(next: ConfigTab) {
+  if (activeTab.value === next) return
+  activeTab.value = next
+  const query = { ...route.query }
+  if (next === 'users') {
+    query.tab = 'users'
+  } else {
+    delete query.tab
+  }
+  void router.replace({ query })
+}
+
+// 外部通过链接切换 tab（如从 MCP 配置页跳「用户管理」）时同步
+watch(
+  () => route.query.tab,
+  () => {
+    activeTab.value = tabFromQuery()
+  }
+)
 
 onMounted(() => {
   load()
-  loadUsersSummary()
 })
 </script>
 
 <style scoped>
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.page-head h2 {
+  font-size: 20px;
+  font-weight: 600;
+}
+.config-tabs {
+  display: inline-flex;
+  gap: 4px;
+  background: var(--bg);
+  padding: 4px;
+  border-radius: 8px;
+}
+.config-tab {
+  border: none;
+  background: transparent;
+  padding: 7px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  min-height: 34px;
+}
+.config-tab:hover {
+  color: var(--text);
+}
+.config-tab.active {
+  background: var(--bg-white);
+  color: var(--primary);
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+
 .config-form .section {
   margin-bottom: 16px;
 }

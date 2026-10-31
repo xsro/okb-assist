@@ -466,6 +466,14 @@ impl Settings {
         crate::utils::resolve_token(raw)
     }
 
+    /// 用户网盘根目录（`system.json` 的 `drive_root`，相对 `cwd`）
+    pub fn drive_root(&self) -> String {
+        self.get_system_config()["drive_root"]
+            .as_str()
+            .unwrap_or("data/drive")
+            .to_string()
+    }
+
     pub fn mcp_token(&self) -> String {
         let cfg = self.get_system_config();
         let raw = cfg["mcp_token"].as_str().unwrap_or("change-me");

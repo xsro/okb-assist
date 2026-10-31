@@ -39,7 +39,8 @@ cargo run -- --host 0.0.0.0 --port 5001
   "trusted_subnets": [],
   "trusted_subnet_enabled": false,
   "trusted_subnet_role": "admin",
-  "max_concurrent_tasks": 3
+  "max_concurrent_tasks": 3,
+  "drive_root": "data/drive"
 }
 ```
 
@@ -51,6 +52,7 @@ cargo run -- --host 0.0.0.0 --port 5001
 | `trusted_subnet_enabled` | **默认 `false`**：必须显式开启后，`trusted_subnets` 命中的请求才免鉴权 |
 | `trusted_subnet_role` | 命中受信任子网时授予的角色（默认 `admin`） |
 | `max_concurrent_tasks` | 全局 extract/index 最大并发数 |
+| `drive_root` | 用户网盘根目录（私有 `users/{user_id}/`、公有 `_public/{folder_id}/`），默认 `data/drive` |
 
 ### 用户与登录
 
@@ -73,6 +75,18 @@ cd backend-rs
 > ⚠️ 从旧版本升级：`config.json` 里旧的 `permissions` 条目会被一次性迁移成 `legacy-xxx` 占位用户
 > （`pending`、无凭据），**旧 token 全部失效**，需管理员为其重置密码或直接删除。
 > 详见 [document/user-management.md](./document/user-management.md)。
+
+### 用户网盘
+
+- 每个用户有独立私有网盘（`{drive_root}/users/{user_id}/`），支持多级目录、上传下载、常见格式在线预览；
+- 管理员可创建**公有文件夹**（`{drive_root}/_public/{folder_id}/`），权限按**角色阈值**配置：
+  `read_role` / `write_role`，等级 `admin > view-upload > view-only`，用户角色 ≥ 阈值即可读/写；
+- 配额默认不限，可按用户单独覆盖（0 = 不限）；单文件大小上限默认 200MB；
+- 与文献库/解析流水线**完全独立**；
+- 策略存在 `config.json` 的 `drive` 段（配置页不可改写，走 `/assist/api/admin/drive/*`）。
+
+前端入口：导航「网盘」（`/assist/drive`）；管理员另有「网盘管理」（`/assist/drive/admin`）。
+详细说明见 [document/drive.md](./document/drive.md)。
 
 ### 工作目录（`cwd`）
 

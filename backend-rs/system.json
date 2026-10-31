@@ -12,7 +12,17 @@
   "pdf_path": "data/pdfs/{id}/{id}.pdf",
   "chat_session_path": "data/chat_sessions/{id}.json",
   "uploads_folder": "data/_uploads",
-  "static_dirs": [],
+  "static_dirs": [
+    {
+      "path": "/static",
+      "dir": ".",
+      "try_index": true,
+      "index": "index.html",
+      "list_dir": false,
+      "auth": true,
+      "cache_control": true
+    }
+  ],
   "mcp_token": "change-me",
   "trusted_subnets": [
     "192.168.1.0/24",
