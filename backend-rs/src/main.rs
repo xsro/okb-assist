@@ -26,6 +26,7 @@ mod services;
 mod routers;
 mod logger;
 mod mcp_server;
+mod static_files;
 mod auth;
 mod session;
 mod users;
@@ -281,8 +282,27 @@ fn create_app(
         .route("/assist/mcp/stream", post(mcp_server::mcp_stream_handler).options(mcp_server::mcp_options_handler))
         .route("/assist/file/:filename", get(serve_file_alias))
         .route("/", get(root_redirect))
-        .nest_service("/assist/uploads", tower_http::services::ServeDir::new(settings.uploads_folder()))
-        .layer(middleware);
+        .nest_service("/assist/uploads", tower_http::services::ServeDir::new(settings.uploads_folder()));
+
+    // 静态目录挂载（system.json 的 static_dirs）：只注册 GET（axum 自动兼容 HEAD），
+    // 必须在 `.layer(middleware)` 之前注册，才能拿到 Extension 里的配置/用户/会话。
+    let mut app = app;
+    for mount in static_files::load_mounts(&settings) {
+        for pattern in static_files::route_patterns(&mount.path) {
+            app = app.route(&pattern, get(static_files::serve_mount));
+        }
+        tracing::info!(
+            path = %mount.path,
+            dir = %mount.dir,
+            try_index = mount.try_index,
+            index = %mount.index,
+            list_dir = mount.list_dir,
+            auth = mount.auth,
+            "静态目录挂载已启用"
+        );
+    }
+
+    let app = app.layer(middleware);
 
     // SPA fallback
     app.fallback(spa_fallback)
@@ -585,8 +605,8 @@ fn resolve_frontend_file(dist_dir: &std::path::Path, path: &str) -> Option<std::
     }
 }
 
-/// 根据扩展名返回 MIME 类型。
-fn mime_for_path(path: &std::path::Path) -> &'static str {
+/// 根据扩展名返回 MIME 类型（静态目录挂载复用）。
+pub(crate) fn mime_for_path(path: &std::path::Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "html" => "text/html; charset=utf-8",
         "js" | "mjs" => "application/javascript",
@@ -714,8 +734,8 @@ impl<B> OnResponse<B> for ResponseLog {
     }
 }
 
-/// 与 Python `_get_cache_control` 对齐的缓存策略。
-fn cache_control_for(path: &std::path::Path) -> &'static str {
+/// 与 Python `_get_cache_control` 对齐的缓存策略（静态目录挂载复用）。
+pub(crate) fn cache_control_for(path: &std::path::Path) -> &'static str {
     let basename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     if basename == "index.html" || ext.is_empty() {

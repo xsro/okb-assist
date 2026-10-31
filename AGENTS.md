@@ -297,6 +297,7 @@ cargo build --release
 | `markdown_asset_path` | Markdown 资产包路径模板 | `data/pdfs/{id}/{id}.zip` |
 | `pdf_path` | PDF 文件路径模板 | `data/pdfs/{id}/{id}.pdf` |
 | `uploads_folder` | 上传目录 | `data/_uploads` |
+| `static_dirs` | 静态目录挂载数组（把本地文件夹挂到 URL 前缀下），见下方小节 | `[]` |
 | `config_path` | config.json 路径（相对于 system.json 所在目录） | `config.json` |
 | `log_path` | 日志路径 | `okb-log.jsonl` |
 | `mutool_path` | mutool 可执行文件路径 | `mutool` |
@@ -304,6 +305,39 @@ cargo build --release
 
 > **路径模板**：`cwd` 支持 `{system_dir}` 替换；其他路径属性相对于 `cwd`，支持 `{id}` 和 `{env:VAR_NAME}` 变量。
 > **trusted_subnets**：空数组 `[]` 表示不信任任何子网。即使配置了网段，也必须把 `trusted_subnet_enabled` 设为 `true` 才生效（默认关闭，避免「在局域网内即管理员」被默认踩到）。
+
+### 静态目录挂载（`system.json` 的 `static_dirs`）
+
+把本地文件夹挂到任意 URL 前缀下做只读文件服务（下载/预览 PDF、放前端 demo、把导出目录交给外部工具抓取）。实现在 `backend-rs/src/static_files.rs`，**路由在启动时注册，改配置需重启进程**。
+
+```json
+"static_dirs": [
+  {
+    "path": "/static",
+    "dir": "data/static",
+    "try_index": true,
+    "index": "index.html",
+    "list_dir": false,
+    "auth": true,
+    "cache_control": true
+  }
+]
+```
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `path` | — | URL 前缀，必填、以 `/` 开头；`/static/a.txt` → `<dir>/a.txt`。与内置路由（`/assist/api`、`/assist/mcp`、`/assist/uploads`、`/assist/file`、`/assist/assets`、`/assist/openapi`）冲突的挂载会被跳过并打 `warn` |
+| `dir` | — | 本地目录，必填；相对路径按 `cwd` 解析，支持 `{system_dir}` 与 `{env:VAR}` |
+| `try_index` | `true` | 命中目录时补 `index` 指定的首页（语义同 nginx `index`，**没有** SPA 全量回退） |
+| `index` | `index.html` | 首页文件名 |
+| `list_dir` | `false` | 目录无首页时返回简单文件列表（默认关闭） |
+| `auth` | `true` | 是否需要凭证：接受会话 token / 用户 API token（`X-Token` 头、`Authorization: Bearer`、`?token=`），受信任子网需 `trusted_subnet_enabled = true`；`false` 为完全公开 |
+| `cache_control` | `true` | 是否附带 `Cache-Control`（静态资源长缓存，`index.html` 不缓存；关闭时统一 `no-cache`） |
+
+- **只读**：只注册 `get()`（axum 的 GET 路由同时响应 `HEAD` 并自动去掉响应体），其他方法 405。
+- **安全**：请求子路径做 percent-decoding 后拒绝 `..` / 反斜杠 / NUL，最终路径必须 `canonicalize()` 且仍在挂载根目录内（指向目录外的软链同样被拒）。
+- **目录补斜杠**：命中目录但 URL 未以 `/` 结尾时返回 301 补 `/`，保证首页里的相对链接正确。
+- 重复 `path`、`path` 为 `/`、缺 `path`/`dir` 的条目一律忽略并打 `warn`；**前缀不允许互相嵌套**（`/a` 与 `/a/b` 在 axum 的路由表里会冲突，只保留更长的 `/a/b`），匹配时最长前缀优先。
 
 ## 架构与请求流
 
@@ -341,6 +375,7 @@ cargo build --release
 ## 路由前缀
 
 - 前端 SPA：`/assist/*` → fallback 到 `frontend/dist/index.html`（由 Vue Router 处理客户端路由）
+- 静态目录挂载：`system.json` 的 `static_dirs[].path` 决定前缀（默认无挂载）
 - API：`/assist/api/documents`、`/assist/api/pipeline`、`/assist/api/chat`、`/assist/api/admin`、`/assist/api/config`、`/assist/api/auth/check`、`/assist/openapi`
 - 文件别名（免 token）：`/assist/file/{filename}`
 - MCP：`/assist/mcp/stream`（Streamable HTTP）、`/assist/mcp`（SSE）
@@ -516,6 +551,8 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 15. **`users` 段不要手改、不要经 `/assist/api/config` 写入**：`ConfigManager::save_config()` 会跳过 `PROTECTED_CONFIG_SECTIONS = ["users"]` 并从磁盘取回真值；用户写操作必须走 `users::UserStore`（内部 `update_users_section` 原子写 + 写锁）。密码哈希/令牌哈希永不回显。
 16. **删改用户要级联撤销凭据**：禁用/删除用户、重置密码都要 `sessions.revoke_user(&id)`（`routers/users.rs` 已处理）；`set_password` 会自动吊销 `label = "bootstrap"` 的令牌，但**不会**吊销用户自签令牌（需管理员显式 `revoke_tokens`）。
 17. **全屏（`meta.bare`）路由的高度链**：`main-content-bare` → `.error-boundary-wrap` → 页面容器 → `AceEditor` 每一层都必须是纵向 flex（`flex:1; min-height:0`）。`App.vue` 用 `.main-content-bare :deep(.error-boundary-wrap)` 补了这一层；漏掉就会让内部 `height:100%/flex:1` 的编辑器塌陷成内容高度（表现为编辑区只有 200px 高、下方一大片空白）。
+18. **静态目录挂载（`static_dirs`）的路由注册顺序**（`main.rs::create_app`）：这些路由必须在 `.layer(middleware)` **之前**注册 —— 处理器靠 Extension 里的 `Settings`/`UserStore`/`SessionStore` 做鉴权，而 axum 的 `Router::layer` 只对已存在的路由生效（这也是 `spa_fallback` 改用全局 `settings` 单例的原因）。另外 axum 的 `/*rest` 通配符**不匹配空剩余路径**，`/prefix`、`/prefix/`、`/prefix/*rest` 三条都要注册，否则访问不了 `/prefix/`。
+19. **静态目录的鉴权与内置路由不同**：它不走 `token_middleware`（后者只覆盖 `/assist/api/*`），而是在处理器内自己判（`static_files::is_authorized`：会话/用户令牌 + 受信任子网），所以新增挂载时要保留这条判定，不能直接读文件。
 
 ## 入口与关键文件速查
 

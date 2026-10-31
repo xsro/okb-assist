@@ -570,6 +570,16 @@ impl Settings {
             .to_string()
     }
 
+    /// 静态目录挂载配置（`system.json` 的 `static_dirs` 段，原始 JSON 数组）。
+    ///
+    /// 解析与校验见 [`crate::static_files`]；此段需重启进程生效。
+    pub fn static_dirs(&self) -> Vec<serde_json::Value> {
+        self.get_system_config()["static_dirs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub fn ui_path(&self) -> String {
         self.get_system_config()["ui_path"]
             .as_str()

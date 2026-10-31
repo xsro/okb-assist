@@ -246,6 +246,8 @@ pub fn default_system() -> serde_json::Value {
         "database_url": "sqlite:///data/okb_assist.db",
         "cwd": "{system_dir}",
         "uploads_folder": "data/_uploads",
+        // 静态目录挂载（把本地文件夹挂到 URL 前缀下），详见 crate::static_files
+        "static_dirs": [],
         "markdown_path": "data/markdowns/{id}.md",
         "info_path": "data/markdowns/{id}.json",
         "crossref_path": "data/markdowns/{id}_crossref.json",
