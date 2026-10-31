@@ -35,6 +35,8 @@ Token 来源 (la 需要):
   ~/.okb/cache/               下载的压缩包缓存
   ~/.okb/versions/{git_hash}/  按提交 SHA(artifact) 解压的目录
   ~/.okb/releases/{tag_name}/  按 Release 标签名解压的目录 (后端/前端)
+  ~/.okb/versions/latest/okb-assist  最新安装版本二进制的软链接
+                             (install la / install lr 后自动更新)
 """
 
 import argparse
@@ -61,6 +63,10 @@ RETRY_DELAY = 10  # 秒
 
 # Cargo.toml 中定义的二进制名称
 BINARY_NAME = "okb_assist"
+
+# 最新版本的稳定软链接目录（versions/latest/，安装后自动指向最新二进制）
+LATEST_DIR = VERSIONS_DIR / "latest"
+LATEST_LINK_NAME = "okb-assist"
 
 
 # ── 平台探测 ──
@@ -481,6 +487,38 @@ def download_release_asset(download_url: str, output_path: Path,
     return _download_with_retry(download_url, output_path, timeout=timeout)
 
 
+# ── 最新版本软链接 ──
+
+def link_latest_binary(binary: Path | None) -> Path | None:
+    """把刚安装的二进制软链接到 versions/latest/okb-assist。
+
+    链接使用相对路径（相对于 versions/latest/），便于整个 ~/.okb 目录搬移。
+    失败只告警，不影响安装结果。
+    """
+    if not binary:
+        return None
+
+    try:
+        target = Path(binary).resolve()
+    except OSError:
+        target = Path(binary)
+
+    link_path = LATEST_DIR / LATEST_LINK_NAME
+    try:
+        LATEST_DIR.mkdir(parents=True, exist_ok=True)
+        # 先清理旧链接（broken symlink 的 exists() 为 False，故先判断 is_symlink）
+        if link_path.is_symlink() or link_path.exists():
+            link_path.unlink()
+        rel_target = os.path.relpath(target, LATEST_DIR)
+        link_path.symlink_to(rel_target)
+    except OSError as e:
+        warn(f"创建最新版本链接失败: {e}")
+        return None
+
+    ok(f"最新版本链接: {link_path} -> {rel_target}")
+    return link_path
+
+
 # ── 版本管理 ──
 
 def get_installed_versions() -> list[dict]:
@@ -489,7 +527,8 @@ def get_installed_versions() -> list[dict]:
         if not base_dir.exists():
             continue
         for item in base_dir.iterdir():
-            if item.is_dir():
+            # versions/latest 是软链接目录，不作为独立版本列出
+            if item.is_dir() and item.resolve() != LATEST_DIR.resolve():
                 binary = find_binary_in_dir(item)
                 versions.append({
                     "version": item.name,
@@ -578,6 +617,7 @@ def cmd_install_artifact():
         if existing_bin:
             ok(f"版本 {short_sha} 已安装")
             print(f"  路径: {existing_bin}")
+            link_latest_binary(existing_bin)
             return
         warn(f"目录 {short_sha} 已存在但缺少二进制，重新安装 ...")
 
@@ -615,6 +655,7 @@ def cmd_install_artifact():
     binary = find_binary_in_dir(version_dir)
     if binary:
         ok(f"二进制文件: {binary}")
+        link_latest_binary(binary)
     else:
         warn(f"未在 {version_dir}/ 中找到二进制文件 (预期名称: {BINARY_NAME})")
 
@@ -656,6 +697,7 @@ def cmd_install_release():
         if existing_bin:
             ok(f"版本 {tag} 已安装")
             print(f"  路径: {existing_bin}")
+            link_latest_binary(existing_bin)
             return
         warn(f"目录 {tag} 已存在但缺少二进制，重新安装 ...")
 
@@ -688,6 +730,7 @@ def cmd_install_release():
         binary = find_binary_in_dir(version_dir)
         if binary:
             ok(f"二进制文件: {binary}")
+            link_latest_binary(binary)
         else:
             warn(f"未在 {version_dir}/ 中找到二进制文件 (预期名称: {BINARY_NAME})")
 
@@ -767,7 +810,9 @@ def main():
             "目录结构:\n"
             f"  {OKB_DIR}/cache/              下载的压缩包缓存\n"
             f"  {OKB_DIR}/versions/{{git_hash}}/  按提交 SHA 解压的目录\n"
-            f"  {OKB_DIR}/releases/{{tag_name}}/  按 Release 标签解压的目录\n\n"
+            f"  {OKB_DIR}/releases/{{tag_name}}/  按 Release 标签解压的目录\n"
+            f"  {OKB_DIR}/versions/latest/okb-assist  最新二进制的软链接\n"
+            "                             (install la / install lr 后自动更新)\n\n"
             "Token 来源 (la 需要):\n"
             "  1. 环境变量 GH_TOKEN\n"
             "  2. 环境变量 GITHUB_TOKEN\n"
