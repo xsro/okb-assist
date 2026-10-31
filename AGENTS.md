@@ -507,7 +507,7 @@ cargo build --release
 | `StatusBadge.vue` | 状态徽章（状态/索引状态） |
 | `Toast.vue` | 消息提示 |
 | `ConfirmDialog.vue` | 确认对话框 |
-| `TokenModal.vue` | 账号面板（当前用户/角色、Token 登录、历史令牌、退出登录、跳转账户页） |
+| `TokenModal.vue` | 账号面板（当前用户/角色、凭证来源、「退出登录」、跳转账户页）。**不提供页内切换账号** —— 切换走「退出登录 → 登录页选择账号」 |
 | `views/UsersView.vue` | 用户管理（表格/待审核/令牌/注册策略），既可作为独立页面也可 `embedded` 嵌入配置页 tab |
 | `ErrorBoundary.vue` | 错误边界（catch 渲染异常） |
 | `SkeletonLoading.vue` | 骨架屏 |
@@ -528,7 +528,7 @@ cargo build --release
 
 | 路由 | 视图 | 说明 | 权限 |
 |------|------|------|------|
-| `/assist/login` | `LoginView.vue` | 登录 / 注册 / Token 登录 / 首次初始化管理员（`meta.public`） | 公开 |
+| `/assist/login` | `LoginView.vue` | 登录 / 注册 / Token 登录 / 首次初始化管理员（`meta.public`）；本机登录过的账号以卡片列表列出（点一下填好用户名，仍需输密码），另有「登录新账号」入口 | 公开 |
 | `/assist/account` | `AccountView.vue` | 账户：资料、修改密码、个人访问令牌（Zotero/MCP） | 全部 |
 | `/assist/config` | `ConfigView.vue` | 配置页（内含两个 tab：**服务配置** / **用户管理**——用户管理由 `UsersView.vue` 以 `embedded` 模式渲染） | admin |
 | `/assist/drive` | `DriveView.vue` | 网盘：我的网盘 + 公有文件夹（列目录/上传/下载/预览/重命名/移动/删除） | 全部 |
@@ -574,7 +574,7 @@ cargo build --release
 
 ### 状态管理
 - `useToast()`（`src/composables/useToast.ts`）：`showSuccess()` / `showError()` / `showInfo()` / `showToast()`
-- `useRequireToken()`（`src/composables/useRequireToken.ts`）：Token 校验引导
+- `useRequireToken()`（`src/composables/useRequireToken.ts`）：需登录操作的前置校验；未登录时不再弹 Token 面板，而是跳 `/assist/login?redirect=<当前地址>`
 - `useResponsive()`（`src/composables/useResponsive.ts`）：响应式断点检测（`isMobile` / `isDesktop` / `isTablet` / `isSmallMobile`）
 - `usePagination()`（`src/composables/usePagination.ts`）：分页加载封装（`items` / `loading` / `page` / `total` / `load`）
 - `useDebounce()`（`src/composables/useDebounce.ts`）：防抖工具

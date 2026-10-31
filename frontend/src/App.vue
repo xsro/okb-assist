@@ -20,6 +20,7 @@
 import { computed, onMounted, onUnmounted, ref, provide } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTokenStore } from '@/stores/token'
+import { accountStorage } from '@/api/client'
 import { useErrorStore } from '@/stores/error'
 import AppHeader from '@/components/AppHeader.vue'
 import Toast from '@/components/Toast.vue'
@@ -53,6 +54,8 @@ function onAuthRequired() {
 
 onMounted(async () => {
   window.addEventListener('auth:required', onAuthRequired)
+  // 清理旧版本留在本地的明文 token 历史（账号列表只存元信息，不存凭证）
+  accountStorage.purgeLegacy()
   // 等首次导航完成：否则硬导航（直接输入/外链打开 URL）时 `route` 还是初始 START_LOCATION，
   // `route.fullPath` 会是 `/`，把 ?redirect= 覆盖成 `/`（深链登录后回跳失效）。
   await router.isReady()

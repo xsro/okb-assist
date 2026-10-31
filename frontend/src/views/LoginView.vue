@@ -58,29 +58,78 @@
 
         <!-- 账号登录 -->
         <form v-if="tab === 'login'" @submit.prevent="doLogin">
-          <div class="form-group">
-            <label>用户名</label>
-            <input
-              v-model="form.username"
-              type="text"
-              placeholder="用户名"
-              autocomplete="username"
-              autofocus
-            />
+          <!-- 本机登录过的账号：点一下自动填好用户名，仍需输入密码 -->
+          <div v-if="showAccountPicker && accounts.length" class="account-picker">
+            <div class="picker-title">选择账号</div>
+            <button
+              v-for="acc in accounts"
+              :key="acc.username"
+              type="button"
+              class="account-item"
+              :disabled="busy"
+              @click="pickAccount(acc)"
+            >
+              <span class="account-avatar">{{ avatarOf(acc) }}</span>
+              <span class="account-body">
+                <span class="account-name">{{ acc.displayName || acc.username }}</span>
+                <span class="account-sub">
+                  {{ acc.username }}<template v-if="acc.role"> · {{ roleLabel(acc.role) }}</template>
+                  <template v-if="acc.lastUsed"> · {{ formatTime(acc.lastUsed) }}</template>
+                </span>
+              </span>
+              <span
+                class="account-forget"
+                title="从本机列表移除"
+                @click.stop="forgetAccount(acc.username)"
+                >×</span
+              >
+            </button>
+            <button type="button" class="btn btn-outline btn-block" @click="useOtherAccount">
+              登录新账号
+            </button>
           </div>
-          <div class="form-group">
-            <label>密码</label>
-            <input
-              v-model="form.password"
-              type="password"
-              placeholder="密码"
-              autocomplete="current-password"
-            />
-          </div>
-          <div v-if="error" class="notice notice-error">{{ error }}</div>
-          <button class="btn btn-block" type="submit" :disabled="busy">
-            {{ busy ? '登录中…' : '登录' }}
-          </button>
+
+          <template v-else>
+            <div v-if="pickedAccount" class="picked-bar">
+              <span class="picked-text">
+                账号：<b>{{ pickedAccount.displayName || pickedAccount.username }}</b>
+                （{{ pickedAccount.username }}）
+              </span>
+              <button
+                v-if="accounts.length"
+                type="button"
+                class="link-btn"
+                :disabled="busy"
+                @click="backToPicker"
+              >
+                切换账号
+              </button>
+            </div>
+            <div class="form-group">
+              <label>用户名</label>
+              <input
+                v-model="form.username"
+                ref="usernameInput"
+                type="text"
+                placeholder="用户名"
+                autocomplete="username"
+              />
+            </div>
+            <div class="form-group">
+              <label>密码</label>
+              <input
+                v-model="form.password"
+                ref="passwordInput"
+                type="password"
+                placeholder="密码"
+                autocomplete="current-password"
+              />
+            </div>
+            <div v-if="error" class="notice notice-error">{{ error }}</div>
+            <button class="btn btn-block" type="submit" :disabled="busy">
+              {{ busy ? '登录中…' : '登录' }}
+            </button>
+          </template>
         </form>
 
         <!-- 注册 -->
@@ -141,9 +190,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTokenStore } from '@/stores/token'
+import type { SavedAccount } from '@/api/client'
 import { useToast } from '@/composables/useToast'
 
 type Tab = 'login' | 'register' | 'token'
@@ -164,6 +214,83 @@ const form = reactive({
   displayName: '',
   token: ''
 })
+
+/** 本机登录过的账号（只有元信息，无凭证） */
+const accounts = computed(() => store.accounts)
+/** 「选择账号」列表 vs 用户名/密码表单 */
+const showAccountPicker = ref(true)
+/** 当前选中的账号（登录仍需输入密码） */
+const pickedUsername = ref('')
+const usernameInput = ref<HTMLInputElement>()
+const passwordInput = ref<HTMLInputElement>()
+
+const pickedAccount = computed(
+  () => accounts.value.find((a) => a.username === pickedUsername.value) || null
+)
+
+function roleLabel(role: string): string {
+  const labels: Record<string, string> = {
+    admin: '管理员',
+    'view-only': '只读用户',
+    'view-upload': '查看+上传'
+  }
+  return labels[role] || role || ''
+}
+
+function avatarOf(acc: SavedAccount): string {
+  const name = (acc.displayName || acc.username || '?').trim()
+  return name.slice(0, 1).toUpperCase()
+}
+
+function formatTime(ts: number): string {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/** 选中本机登录过的账号：填好用户名，让用户输密码（不保存/不回放任何凭证） */
+async function pickAccount(acc: SavedAccount) {
+  error.value = ''
+  success.value = ''
+  form.username = acc.username
+  form.password = ''
+  pickedUsername.value = acc.username
+  showAccountPicker.value = false
+  await nextTick()
+  passwordInput.value?.focus()
+}
+
+/** 登录新账号（清空用户名，从密码表单重新开始） */
+async function useOtherAccount() {
+  error.value = ''
+  success.value = ''
+  form.username = ''
+  form.password = ''
+  pickedUsername.value = ''
+  showAccountPicker.value = false
+  await nextTick()
+  usernameInput.value?.focus()
+}
+
+function forgetAccount(username: string) {
+  store.forgetAccount(username)
+  if (pickedUsername.value === username) {
+    pickedUsername.value = ''
+    form.username = ''
+    form.password = ''
+  }
+  if (!accounts.value.length) showAccountPicker.value = false
+}
+
+async function backToPicker() {
+  error.value = ''
+  success.value = ''
+  form.password = ''
+  form.username = ''
+  pickedUsername.value = ''
+  showAccountPicker.value = true
+}
 
 const status = computed(() => store.status)
 /** 还没有任何管理员 → 只能初始化 */
@@ -226,10 +353,13 @@ async function doLogin() {
   error.value = ''
   try {
     await store.login(form.username.trim(), form.password)
+    form.password = ''
     toast.showSuccess('登录成功')
     redirectAfterLogin()
   } catch (e) {
     error.value = message(e)
+    form.password = ''
+    passwordInput.value?.focus()
   } finally {
     busy.value = false
   }
@@ -316,6 +446,10 @@ onMounted(async () => {
   }
   if (needSetup.value) tab.value = 'login'
   else if (status.value && !status.value.allow_registration) tab.value = 'login'
+  // 本机有登录过的账号 → 先进「选择账号」，否则直接给用户名/密码表单
+  showAccountPicker.value = accounts.value.length > 0
+  if (!showAccountPicker.value) await nextTick()
+  if (!showAccountPicker.value) usernameInput.value?.focus()
 })
 </script>
 
@@ -423,5 +557,113 @@ onMounted(async () => {
   outline: none;
   border-color: var(--primary);
   box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.15);
+}
+
+/* 本机登录过的账号 */
+.account-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.picker-title {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.account-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-white);
+  cursor: pointer;
+  text-align: left;
+  min-height: 52px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.account-item:hover {
+  border-color: var(--primary);
+  background: var(--bg-secondary);
+}
+.account-item:active {
+  transform: scale(0.99);
+}
+.account-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--primary-light);
+  color: var(--primary-dark);
+  font-size: 14px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.account-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.account-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-forget {
+  flex-shrink: 0;
+  padding: 0 6px;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.account-forget:hover {
+  color: var(--danger);
+}
+.picked-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 13px;
+}
+.picked-text {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+.link-btn:hover {
+  text-decoration: underline;
 }
 </style>

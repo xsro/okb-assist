@@ -14,35 +14,78 @@ export const tokenStorage = {
   }
 }
 
-export interface TokenHistoryItem {
-  token: string
+// ── 本地记住的账号（只存账号元信息，绝不保存任何凭证） ──────────────────
+//
+// 用途：登出后在登录页列出「本浏览器登录过的账号」，点一下自动填好用户名，
+// 仍需输入密码。**不存 token**：登出会吊销服务端会话，保存的 `sess_` 也没用了，
+// 长期保存明文凭证本身也是风险。
+
+export interface SavedAccount {
+  username: string
+  displayName: string
   role: string
-  timestamp: number
+  /** 上次成功登录时间（毫秒时间戳） */
+  lastUsed: number
 }
 
-const HISTORY_KEY = 'okb_token_history'
-const MAX_HISTORY = 10
+const ACCOUNTS_KEY = 'okb_accounts'
+/** 旧版本把明文 token 存在这个键里，已废弃（读到就删） */
+const LEGACY_TOKEN_HISTORY_KEY = 'okb_token_history'
+const MAX_ACCOUNTS = 10
 
-export const tokenHistoryStorage = {
-  get(): TokenHistoryItem[] {
+function normalizeAccount(raw: unknown): SavedAccount | null {
+  const item = raw as Partial<SavedAccount> | null
+  const username = typeof item?.username === 'string' ? item.username.trim() : ''
+  if (!username) return null
+  return {
+    username,
+    displayName: typeof item?.displayName === 'string' ? item.displayName : '',
+    role: typeof item?.role === 'string' ? item.role : '',
+    lastUsed: typeof item?.lastUsed === 'number' ? item.lastUsed : 0
+  }
+}
+
+export const accountStorage = {
+  get(): SavedAccount[] {
     try {
-      return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]')
+      const raw = JSON.parse(localStorage.getItem(ACCOUNTS_KEY) || '[]')
+      if (!Array.isArray(raw)) return []
+      return raw
+        .map(normalizeAccount)
+        .filter((a): a is SavedAccount => !!a)
+        .sort((a, b) => b.lastUsed - a.lastUsed)
+        .slice(0, MAX_ACCOUNTS)
     } catch {
       return []
     }
   },
-  add(token: string, role: string) {
-    const history = this.get().filter(h => h.token !== token)
-    history.unshift({ token, role, timestamp: Date.now() })
-    if (history.length > MAX_HISTORY) history.length = MAX_HISTORY
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(history))
+  /** 记录/刷新一个账号（按用户名归并，最近登录的排最前） */
+  remember(account: { username: string; displayName?: string; role?: string }) {
+    const username = (account.username || '').trim()
+    if (!username) return
+    const list = this.get().filter((a) => a.username !== username)
+    list.unshift({
+      username,
+      displayName: (account.displayName || '').trim(),
+      role: account.role || '',
+      lastUsed: Date.now()
+    })
+    localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(list.slice(0, MAX_ACCOUNTS)))
   },
-  remove(token: string) {
-    const history = this.get().filter(h => h.token !== token)
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(history))
+  forget(username: string) {
+    const list = this.get().filter((a) => a.username !== username)
+    localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(list))
   },
   clear() {
-    localStorage.removeItem(HISTORY_KEY)
+    localStorage.removeItem(ACCOUNTS_KEY)
+  },
+  /** 清理旧版本留在本地的明文 token 历史 */
+  purgeLegacy() {
+    try {
+      localStorage.removeItem(LEGACY_TOKEN_HISTORY_KEY)
+    } catch {
+      /* 忽略 */
+    }
   }
 }
 

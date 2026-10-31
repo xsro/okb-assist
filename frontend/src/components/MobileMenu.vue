@@ -18,7 +18,7 @@
         </router-link>
       </nav>
       <div class="mobile-menu-footer">
-        <button v-if="!tokenStore.isAuthenticated" class="btn" @click="promptToken">
+        <button v-if="!tokenStore.isAuthenticated" class="btn" @click="goLogin">
           登录
         </button>
         <template v-else>
@@ -78,9 +78,9 @@ const navItems = computed(() => {
   return allNavItems.filter(item => !adminOnlyPaths.includes(item.path))
 })
 
-function promptToken() {
+function goLogin() {
   closeMenu?.()
-  tokenStore.promptForToken()
+  router.push('/assist/login')
 }
 
 function goAccount() {

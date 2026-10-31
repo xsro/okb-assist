@@ -6,10 +6,15 @@
  * - Token 登录 → 直接粘贴会话 token 或用户个人 API token（`okb_...`）；
  * - 刷新页面时 `restore()` 用本地 token 调 `/auth/check` 重新拉取角色与权限。
  *
+ * 另存一份「本浏览器登录过的账号」（`localStorage.okb_accounts`，只有用户名/显示名/角色，**不存凭证**）：
+ * 登出后登录页用它列出账号卡片，点一下只自动填用户名，仍需输入密码。
+ * 页内没有「切换账号」入口 —— 换号一律先登出（会吊销服务端会话）再去登录页。
+ *
  * 仍保留 `useTokenStore` 这个名字，避免大面积改动既有视图/组件。
  */
 import { defineStore } from 'pinia'
-import { apiGet, tokenHistoryStorage, tokenStorage } from '@/api/client'
+import { accountStorage, apiGet, tokenStorage } from '@/api/client'
+import type { SavedAccount } from '@/api/client'
 import {
   bootstrap as apiBootstrap,
   changePassword as apiChangePassword,
@@ -38,7 +43,8 @@ interface State {
   status: AuthStatus | null
   restoring: boolean
   showTokenModal: boolean
-  tokenHistory: { token: string; role: string }[]
+  /** 本浏览器登录过的账号（只有元信息，无凭证） */
+  accounts: SavedAccount[]
 }
 
 function roleLabels(role: Role | null): string {
@@ -62,7 +68,7 @@ export const useTokenStore = defineStore('token', {
     status: null,
     restoring: false,
     showTokenModal: false,
-    tokenHistory: tokenHistoryStorage.get().map((h) => ({ token: h.token, role: h.role }))
+    accounts: accountStorage.get()
   }),
 
   getters: {
@@ -95,6 +101,19 @@ export const useTokenStore = defineStore('token', {
       this.user = (res.user as User) || null
       this.via = res.via || ''
       this.mustSetPassword = res.must_set_password === true
+      this.rememberAccount()
+    },
+
+    /** 记住当前账号（登录页的「选择账号」列表用，不涉及任何凭证） */
+    rememberAccount() {
+      const username = this.user?.username
+      if (!username) return
+      accountStorage.remember({
+        username,
+        displayName: this.user?.display_name || '',
+        role: this.role || ''
+      })
+      this.accounts = accountStorage.get()
     },
 
     /** Token 登录：校验并保存（会话 token 或用户 API token 均可） */
@@ -108,10 +127,6 @@ export const useTokenStore = defineStore('token', {
           return false
         }
         this.applyCheck(res)
-        if (this.role) {
-          tokenHistoryStorage.add(this.token, this.role)
-          this.tokenHistory = tokenHistoryStorage.get().map((h) => ({ token: h.token, role: h.role }))
-        }
         return true
       } catch {
         this.clearToken()
@@ -130,8 +145,7 @@ export const useTokenStore = defineStore('token', {
       this.mcp = res.user.mcp
       this.via = 'session'
       this.mustSetPassword = res.must_set_password
-      tokenHistoryStorage.add(res.token, res.role)
-      this.tokenHistory = tokenHistoryStorage.get().map((h) => ({ token: h.token, role: h.role }))
+      this.rememberAccount()
       return res
     },
 
@@ -157,12 +171,15 @@ export const useTokenStore = defineStore('token', {
       this.mcp = res.user.mcp
       this.via = 'session'
       this.mustSetPassword = res.must_set_password
+      this.rememberAccount()
       await this.refreshStatus()
       return res
     },
 
-    /** 登出：先撤销服务端会话，再清本地 */
+    /** 登出：先撤销服务端会话，再清本地（账号列表保留，供登录页快速选账号） */
     async logout() {
+      // 登出前刷新一次快照（角色/备注名可能在本次会话内变过）
+      this.rememberAccount()
       try {
         if (this.token) await apiLogout()
       } catch {
@@ -225,6 +242,7 @@ export const useTokenStore = defineStore('token', {
         this.via = res.via
         this.permissions = res.permissions
         this.mustSetPassword = res.user.must_set_password
+        this.rememberAccount()
         return res
       } catch {
         return null
@@ -239,16 +257,18 @@ export const useTokenStore = defineStore('token', {
       return res
     },
 
-    removeFromHistory(token: string) {
-      tokenHistoryStorage.remove(token)
-      this.tokenHistory = tokenHistoryStorage.get().map((h) => ({ token: h.token, role: h.role }))
+    /** 从登录页的账号列表里移除一个账号 */
+    forgetAccount(username: string) {
+      accountStorage.forget(username)
+      this.accounts = accountStorage.get()
     },
 
-    clearHistory() {
-      tokenHistoryStorage.clear()
-      this.tokenHistory = []
+    clearAccounts() {
+      accountStorage.clear()
+      this.accounts = []
     },
 
+    /** 打开账号面板（已登录时的当前账号 / 登出 / 账户设置） */
     promptForToken() {
       this.showTokenModal = true
     },
