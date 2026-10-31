@@ -658,7 +658,7 @@ fn bad_gateway(detail: String) -> Response {
 //
 // 存储细节见 `services::chat_store`：默认 `data/chat_sessions/{id}.json`
 // （模板来自 `system.json` 的 `chat_session_path`），写入为原子写。
-// `owner_key` 由访问 token 派生（`auth::OwnerKey`），只做归属比对，绝不回传。
+// `owner_key` 由用户 id 派生（`auth::OwnerKey::from_user` → `u:<user_id>`），只做归属比对，绝不回传。
 
 #[derive(Deserialize)]
 struct SessionPayload {
@@ -685,7 +685,7 @@ struct SessionListQuery {
 /// `GET /assist/api/chat/sessions` —— 会话列表
 ///
 /// 权限：admin 可看全部（带 `mine` 标记与归属角色），其余角色只能看自己的。
-/// 响应不含 `owner_key`（token 派生值不回传）。
+/// 响应不含 `owner_key`（归属标识不回传）。
 async fn list_sessions(
     Extension(role): Extension<auth::Role>,
     Extension(owner): Extension<auth::OwnerKey>,

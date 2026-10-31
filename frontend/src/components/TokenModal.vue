@@ -3,21 +3,53 @@
     <div class="modal token-modal">
       <h3>{{ titleText }}</h3>
 
-      <!-- 当前 Token（已登录时显示） -->
-      <div v-if="isAuthenticated && !verifying" class="current-token-section">
-        <div class="current-token-row">
-          <code class="token-value">{{ tokenMasked ? maskToken(tokenStore.token) : tokenStore.token }}</code>
-          <button class="btn-icon" @click="tokenMasked = !tokenMasked" :title="tokenMasked ? '显示' : '隐藏'">
-            {{ tokenMasked ? '👁️' : '🙈' }}
-          </button>
+      <!-- 已登录：显示当前账号 -->
+      <div v-if="isAuthenticated" class="current-account">
+        <div class="account-main">
+          <span class="account-name">{{ tokenStore.displayName || '已登录' }}</span>
+          <span class="account-role" :class="'role-' + (tokenStore.role || '')">
+            {{ tokenStore.roleLabel }}
+          </span>
         </div>
-        <div class="current-role" :class="'role-' + (tokenStore.role || '')">
-          {{ roleLabel(tokenStore.role || '') }}
+        <div class="account-meta">
+          <span>凭证：{{ viaLabel }}</span>
+          <span v-if="tokenStore.user?.username">用户名：{{ tokenStore.user?.username }}</span>
+        </div>
+        <div v-if="tokenStore.mustSetPassword" class="account-warn">
+          当前仍是引导凭证，请到「账户」页设置密码。
         </div>
       </div>
 
-      <!-- 已保存的 token 历史 -->
-      <div v-if="!verifying" class="token-history">
+      <!-- Token 登录 / 切换账号 -->
+      <div class="token-login-section">
+        <p class="input-label">
+          {{ isAuthenticated ? '切换到其他账号或令牌：' : '也可直接粘贴 Token 登录：' }}
+        </p>
+        <div class="token-input-row">
+          <input
+            v-model="inputToken"
+            :type="showInputToken ? 'text' : 'password'"
+            placeholder="okb_… / sess_…"
+            @keyup.enter="submit"
+            :disabled="verifying"
+            ref="inputRef"
+          />
+          <button class="btn-icon" @click="showInputToken = !showInputToken" :title="showInputToken ? '隐藏' : '显示'">
+            {{ showInputToken ? '🙈' : '👁️' }}
+          </button>
+        </div>
+        <div v-if="errorMsg" class="error-msg">{{ errorMsg }}</div>
+        <div v-if="verifying" class="verifying">正在验证…</div>
+        <div class="token-actions">
+          <button class="btn btn-sm" @click="submit" :disabled="verifying || !inputToken.trim()">
+            {{ verifying ? '验证中…' : 'Token 登录' }}
+          </button>
+        </div>
+      </div>
+
+      <!-- 历史 token -->
+      <div v-if="tokenHistory.length && !verifying" class="token-history">
+        <div class="history-title">最近使用</div>
         <div
           v-for="(item, idx) in tokenHistory"
           :key="idx"
@@ -30,31 +62,21 @@
         </div>
       </div>
 
-      <!-- 输入新 token -->
-      <p class="input-label">{{ isAuthenticated ? '切换到其他 token：' : '输入 token：' }}</p>
-      <div class="token-input-row">
-        <input
-          v-model="inputToken"
-          :type="showInputToken ? 'text' : 'password'"
-          placeholder="输入 Token"
-          @keyup.enter="submit"
-          :disabled="verifying"
-          ref="inputRef"
-        />
-        <button class="btn-icon" @click="showInputToken = !showInputToken" :title="showInputToken ? '隐藏' : '显示'">
-          {{ showInputToken ? '🙈' : '👁️' }}
-        </button>
-      </div>
-
-      <div v-if="errorMsg" class="error-msg">{{ errorMsg }}</div>
-      <div v-if="verifying" class="verifying">正在验证 token 并获取权限...</div>
-
       <div class="modal-actions">
-        <button class="btn" @click="submit" :disabled="verifying || !inputToken.trim()">
-          {{ verifying ? '验证中...' : '确定' }}
+        <router-link
+          v-if="isAuthenticated"
+          class="btn btn-outline"
+          to="/assist/account"
+          @click="close"
+        >
+          账户设置
+        </router-link>
+        <button v-if="isAuthenticated" class="btn btn-outline-danger" @click="doLogout" :disabled="verifying">
+          退出登录
         </button>
-        <button v-if="isAuthenticated" class="btn btn-outline-danger" @click="logout" :disabled="verifying">登出</button>
-        <button class="btn btn-outline" @click="close" :disabled="verifying">{{ isAuthenticated ? '关闭' : '取消' }}</button>
+        <button class="btn" @click="close" :disabled="verifying">
+          {{ isAuthenticated ? '关闭' : '去登录页' }}
+        </button>
       </div>
     </div>
   </div>
@@ -62,9 +84,11 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { useTokenStore } from '@/stores/token'
 
 const tokenStore = useTokenStore()
+const router = useRouter()
 
 const visible = computed({
   get: () => tokenStore.showTokenModal,
@@ -77,20 +101,25 @@ const inputToken = ref('')
 const verifying = ref(false)
 const errorMsg = ref('')
 const showInputToken = ref(false)
-const tokenMasked = ref(true)
 const inputRef = ref<HTMLInputElement>()
 
-const isAuthenticated = computed(() => tokenStore.isAuthenticated)
+const isAuthenticated = computed(() => tokenStore.isAuthenticated && !!tokenStore.role)
 const tokenHistory = computed(() => tokenStore.tokenHistory)
 
-const titleText = computed(() => {
-  if (verifying.value) return '验证中...'
-  return isAuthenticated.value ? 'Token 管理' : '访问 Token'
+const titleText = computed(() => (isAuthenticated.value ? '账号' : 'Token 登录'))
+
+const viaLabel = computed(() => {
+  const map: Record<string, string> = {
+    session: '账号密码（会话）',
+    api_token: '访问令牌',
+    local_subnet: '受信任子网'
+  }
+  return map[tokenStore.via] || '—'
 })
 
 function roleLabel(role: string): string {
   const labels: Record<string, string> = {
-    'admin': '管理员',
+    admin: '管理员',
     'view-only': '只读',
     'view-upload': '查看+上传'
   }
@@ -99,47 +128,46 @@ function roleLabel(role: string): string {
 
 function maskToken(token: string): string {
   if (!token) return ''
-  if (token.length <= 8) return token.slice(0, 4) + '****'
+  if (token.length <= 12) return token.slice(0, 4) + '****'
   return token.slice(0, 6) + '****' + token.slice(-4)
-}
-
-async function doLogin(token: string) {
-  verifying.value = true
-  errorMsg.value = ''
-  try {
-    await tokenStore.setToken(token)
-    if (tokenStore.role) {
-      tokenStore.closeTokenModal()
-      inputToken.value = ''
-    } else {
-      errorMsg.value = 'token 验证失败，请检查后重试'
-    }
-  } catch {
-    errorMsg.value = 'token 无效或请求失败'
-  } finally {
-    verifying.value = false
-  }
 }
 
 async function submit() {
   const token = inputToken.value.trim()
   if (!token) return
-  await doLogin(token)
+  verifying.value = true
+  errorMsg.value = ''
+  try {
+    const ok = await tokenStore.setToken(token)
+    if (ok) {
+      tokenStore.closeTokenModal()
+      inputToken.value = ''
+      router.push('/assist')
+    } else {
+      errorMsg.value = 'Token 无效或已被撤销'
+    }
+  } catch {
+    errorMsg.value = 'Token 验证失败'
+  } finally {
+    verifying.value = false
+  }
 }
 
 function selectHistory(token: string) {
-  doLogin(token)
+  inputToken.value = token
+  submit()
 }
 
 function removeHistory(token: string) {
   tokenStore.removeFromHistory(token)
 }
 
-function logout() {
-  tokenStore.clearToken()
+async function doLogout() {
+  await tokenStore.logout()
   inputToken.value = ''
   errorMsg.value = ''
-  tokenMasked.value = true
+  tokenStore.closeTokenModal()
+  router.replace({ path: '/assist/login' })
 }
 
 function close() {
@@ -147,7 +175,10 @@ function close() {
   tokenStore.closeTokenModal()
   inputToken.value = ''
   errorMsg.value = ''
-  tokenMasked.value = true
+  // 未登录时「关闭」等价于去登录页
+  if (!isAuthenticated.value) {
+    router.push({ path: '/assist/login' })
+  }
 }
 </script>
 
@@ -161,6 +192,7 @@ function close() {
   gap: 8px;
   justify-content: flex-end;
   margin-top: 20px;
+  flex-wrap: wrap;
 }
 
 .modal p {
@@ -168,61 +200,67 @@ function close() {
   font-size: 14px;
 }
 
-/* 当前 Token */
-.current-token-section {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 16px;
+/* 当前账号 */
+.current-account {
+  padding: 12px 14px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 8px;
   margin-bottom: 16px;
 }
 
-.current-token-row {
+.account-main {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex: 1;
-  min-width: 0;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
-.token-value {
-  flex: 1;
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
-  font-size: 13px;
+.account-name {
+  font-size: 15px;
+  font-weight: 600;
   color: var(--text);
-  word-break: break-all;
-  padding: 4px 8px;
-  background: var(--bg-white);
-  border-radius: 4px;
-  border: 1px solid var(--border);
 }
 
-.current-role {
-  flex-shrink: 0;
+.account-role {
   padding: 2px 10px;
   border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
-  white-space: nowrap;
 }
-.current-role.role-admin {
+.role-admin {
   background: #e3f2fd;
   color: #1565c0;
 }
-.current-role.role-view-only {
+.role-view-only {
   background: #e8f5e9;
   color: #2e7d32;
 }
-.current-role.role-view-upload {
+.role-view-upload {
   background: #f3e5f5;
   color: #7b1fa2;
 }
 
-.input-label {
+.account-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.account-warn {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  font-size: 12px;
+}
+
+.input-label {
+  margin-top: 4px;
 }
 
 .token-input-row {
@@ -234,10 +272,26 @@ function close() {
 
 .token-input-row input {
   flex: 1;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.token-input-row input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.15);
+}
+
+.token-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
 }
 
 .error-msg {
-  color: #f44336;
+  color: var(--danger);
   font-size: 13px;
   margin-top: 8px;
 }
@@ -253,7 +307,7 @@ function close() {
   border: 1px solid var(--border);
   border-radius: 6px;
   cursor: pointer;
-  padding: 6px 10px;
+  padding: 8px 10px;
   font-size: 14px;
   line-height: 1;
   flex-shrink: 0;
@@ -264,9 +318,15 @@ function close() {
 
 /* 历史记录 */
 .token-history {
-  margin-bottom: 12px;
+  margin-top: 16px;
   max-height: 200px;
   overflow-y: auto;
+}
+
+.history-title {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
 }
 
 .history-item {
@@ -287,7 +347,7 @@ function close() {
 }
 
 .history-token {
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
   font-size: 12px;
   color: var(--text);
   flex: 1;
@@ -303,18 +363,6 @@ function close() {
   white-space: nowrap;
   flex-shrink: 0;
 }
-.history-role.role-admin {
-  background: #e3f2fd;
-  color: #1565c0;
-}
-.history-role.role-view-only {
-  background: #e8f5e9;
-  color: #2e7d32;
-}
-.history-role.role-view-upload {
-  background: #f3e5f5;
-  color: #7b1fa2;
-}
 
 .history-remove {
   background: none;
@@ -327,6 +375,6 @@ function close() {
   flex-shrink: 0;
 }
 .history-remove:hover {
-  color: #f44336;
+  color: var(--danger);
 }
 </style>

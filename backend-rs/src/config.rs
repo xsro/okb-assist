@@ -2,11 +2,11 @@
 //!
 //! 使用 axum Extension 注入，支持运行时配置热更新。
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
 
+use crate::auth::Role;
 use crate::config_manager::ConfigManager;
 use crate::services::llm::{ExtractOptions, LlmClient, Protocol};
 
@@ -424,25 +424,6 @@ impl Settings {
 
     // ── 权限 ──
 
-    /// 从 config.json 读取权限配置（新格式）。
-    /// 格式：{ token: { access: role, mcp: bool } }
-    pub fn permission_tokens(&self) -> HashMap<String, serde_json::Value> {
-        let mut result = HashMap::new();
-        if let Some(perms) = self.get_config()["permissions"].as_object() {
-            for (token, entry) in perms {
-                // entry 可以是旧版字符串（兼容）或新版对象
-                if entry.is_string() {
-                    // 旧格式 "token": "role" → 转为新格式
-                    let role = entry.as_str().unwrap_or("");
-                    result.insert(token.clone(), json!({"access": role, "mcp": false}));
-                } else if entry.is_object() {
-                    result.insert(token.clone(), entry.clone());
-                }
-            }
-        }
-        result
-    }
-
     // ── 受信任子网白名单 ──
 
     /// 返回受信任子网白名单（CIDR 格式字符串列表）。
@@ -458,6 +439,24 @@ impl Settings {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// 是否启用受信任子网免鉴权（**默认关闭**）。
+    ///
+    /// 即使 `trusted_subnets` 已配置，也必须显式把 `trusted_subnet_enabled`
+    /// 置为 `true` 才会生效，避免「局域网即管理员」被默认踩到。
+    pub fn trusted_subnet_enabled(&self) -> bool {
+        self.get_system_config()["trusted_subnet_enabled"]
+            .as_bool()
+            .unwrap_or(false)
+    }
+
+    /// 命中受信任子网时授予的角色（默认 `admin`）
+    pub fn trusted_subnet_role(&self) -> Role {
+        self.get_system_config()["trusted_subnet_role"]
+            .as_str()
+            .and_then(Role::from_str)
+            .unwrap_or(Role::Admin)
     }
 
     // ── 系统配置 ──

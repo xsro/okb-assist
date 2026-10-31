@@ -68,14 +68,26 @@ client.interceptors.request.use(
   (error: unknown) => Promise.reject(error)
 )
 
-// 响应拦截：401 处理
+// 响应拦截：401 处理（登录/注册/探测接口的 401 属于正常业务错误，不跳转）
+const AUTH_ENDPOINTS_WITHOUT_REDIRECT = [
+  '/assist/api/auth/login',
+  '/assist/api/auth/register',
+  '/assist/api/auth/bootstrap',
+  '/assist/api/auth/status',
+  '/assist/api/auth/check'
+]
+
 client.interceptors.response.use(
   (response: AxiosResponse) => response,
   (error: unknown) => {
-    const axiosError = error as { response?: { status?: number } }
+    const axiosError = error as { config?: { url?: string }; response?: { status?: number } }
     if (axiosError.response?.status === 401) {
-      tokenStorage.clear()
-      window.dispatchEvent(new CustomEvent('auth:required'))
+      const url = axiosError.config?.url || ''
+      const isAuthEndpoint = AUTH_ENDPOINTS_WITHOUT_REDIRECT.some((p) => url.includes(p))
+      if (!isAuthEndpoint) {
+        tokenStorage.clear()
+        window.dispatchEvent(new CustomEvent('auth:required'))
+      }
     }
     return Promise.reject(error)
   }

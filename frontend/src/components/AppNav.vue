@@ -17,13 +17,14 @@ import { useTokenStore } from '@/stores/token'
 
 const tokenStore = useTokenStore()
 
-const adminOnlyPaths = ['/assist/admin', '/assist/config', '/assist/logs']
+const adminOnlyPaths = ['/assist/admin', '/assist/config', '/assist/logs', '/assist/users']
 
 const allNavItems = [
   { path: '/assist', label: '文献列表' },
   { path: '/assist/upload', label: '上传' },
   { path: '/assist/tools', label: '工具' },
   { path: '/assist/chat', label: '问答' },
+  { path: '/assist/users', label: '用户' },
   { path: '/assist/admin', label: '管理' },
   { path: '/assist/config', label: '配置' },
   { path: '/assist/logs', label: '日志' },

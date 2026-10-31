@@ -1060,6 +1060,8 @@ fn mcp_log_enabled(target: u8) -> bool {
 pub async fn mcp_stream_handler(
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
+    Extension(user_store): Extension<Arc<crate::users::UserStore>>,
+    Extension(sessions): Extension<Arc<crate::session::SessionStore>>,
     req: Request,
 ) -> Response {
     // 安全提取客户端 IP：优先 X-Forwarded-For（反代环境），回退 TCP 对端地址。
@@ -1094,40 +1096,75 @@ pub async fn mcp_stream_handler(
         }
     };
 
-    // Bearer token 校验（优先 mcp_token，其次 permissions 中 mcp: true 的 token）
+    // MCP 鉴权。
+    //
+    // 允许三类调用方：
+    // 1. `system.json.mcp_token`（全局通用入口，视为本地 admin 主体）；
+    // 2. 已完成认证且 `Principal.mcp == true` 的用户凭证：
+    //    - 密码登录签发的会话 token（`sess_...`）；
+    //    - 用户个人 API token（`okb_...`，要求该 token 与用户都开启 mcp）；
+    // 3. 受信任子网（**仅当** `system.json.trusted_subnet_enabled = true`）。
     let mcp_token = settings.mcp_token();
-    let auth_enabled = !mcp_token.is_empty() || !settings.permission_tokens().is_empty();
+    let auth_enabled = !mcp_token.is_empty() || user_store.user_count() > 0;
     if auth_enabled {
-        let bearer_token = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .map(|s| s.to_string());
+        let token = crate::auth::extract_token_from_headers(&headers);
 
-        let authorized = match &bearer_token {
-            Some(token) => {
-                // 检查 mcp_token
-                if !mcp_token.is_empty() && token == &mcp_token {
-                    true
+        let principal = match token.as_deref() {
+            // 全局 mcp_token → 本地管理主体
+            Some(t) if !mcp_token.is_empty() && t == mcp_token => {
+                crate::auth::Principal::local(crate::auth::Role::Admin, true)
+            }
+            // 用户会话 / 个人 token
+            Some(t) => match crate::auth::resolve_principal(t, &user_store, &sessions) {
+                Some(p) => p,
+                None => {
+                    warn!(client_ip, "MCP authentication failed: invalid credential");
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({"jsonrpc": "2.0", "error": {"code": -32001, "message": "Unauthorized"}})),
+                    )
+                        .into_response();
+                }
+            },
+            None => {
+                // 无凭证：仅当启用受信任子网且 IP 命中时放行
+                let subnets = settings.trusted_subnets();
+                let lan = settings.trusted_subnet_enabled()
+                    && !subnets.is_empty()
+                    && crate::utils::ip_matches_subnets(&client_ip, &subnets);
+                if lan {
+                    crate::auth::Principal::local(crate::auth::Role::Admin, true)
                 } else {
-                    // 检查 permissions 中是否有 mcp: true 的 token
-                    let admin_token = settings.token();
-                    let perm_tokens = settings.permission_tokens();
-                    crate::auth::has_mcp_access(token, &admin_token, &mcp_token, &perm_tokens)
+                    warn!(client_ip, "MCP authentication failed: missing credential");
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({"jsonrpc": "2.0", "error": {"code": -32001, "message": "Unauthorized"}})),
+                    )
+                        .into_response();
                 }
             }
-            None => false,
         };
-        let subnets = settings.trusted_subnets();
-        let lan = !subnets.is_empty() && crate::utils::ip_matches_subnets(&client_ip, &subnets);
-        if !authorized && !lan {
-            warn!(client_ip, "MCP authentication failed");
+
+        if !principal.mcp {
+            warn!(
+                client_ip,
+                user = %principal.username,
+                "MCP access denied: user/token has mcp = false"
+            );
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(json!({"jsonrpc": "2.0", "error": {"code": -32001, "message": "Unauthorized"}})),
+                Json(json!({"jsonrpc": "2.0", "error": {"code": -32001, "message": "Unauthorized: MCP access not granted"}})),
             )
                 .into_response();
         }
+
+        info!(
+            client_ip,
+            user = %principal.username,
+            role = %principal.role.as_str(),
+            via = %principal.via.as_str(),
+            "MCP request authorized"
+        );
     }
 
     let server = McpServer::new(db, settings);

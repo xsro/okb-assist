@@ -36,17 +36,43 @@ cargo run -- --host 0.0.0.0 --port 5001
 {
   "token": "change-me",
   "mcp_token": "change-me",
-  "trusted_subnets": ["192.168.1.0/24", "127.0.0.1/32"],
+  "trusted_subnets": [],
+  "trusted_subnet_enabled": false,
+  "trusted_subnet_role": "admin",
   "max_concurrent_tasks": 3
 }
 ```
 
 | 字段 | 说明 |
 |------|------|
-| `token` | Admin Token，为空或 `change-me` 时跳过鉴权 |
-| `mcp_token` | MCP Bearer Token |
-| `trusted_subnets` | 受信任子网白名单（CIDR 数组），匹配的请求免 Token 鉴权。空数组 `[]` 表示不信任任何子网 |
+| `token` | **仅用于首次启动引导**：系统还没有任何管理员且该值不是 `change-me` 时，自动创建 `admin` 账号并把该 token 接管为其 `bootstrap` 访问令牌。管理员**设置密码后该 token 自动失效**；之后再改它不会产生任何效果 |
+| `mcp_token` | MCP 全局 Bearer Token（等价于本地管理员主体）。个人 MCP 访问请用「账户」页签发的 `okb_…` 令牌 |
+| `trusted_subnets` | 受信任子网白名单（CIDR 数组） |
+| `trusted_subnet_enabled` | **默认 `false`**：必须显式开启后，`trusted_subnets` 命中的请求才免鉴权 |
+| `trusted_subnet_role` | 命中受信任子网时授予的角色（默认 `admin`） |
 | `max_concurrent_tasks` | 全局 extract/index 最大并发数 |
+
+### 用户与登录
+
+用户数据存放在 `config.json` 的 `users` 段（密码只存 Argon2id 哈希），支持：
+
+- **首次初始化**：访问 `/assist/login`，系统提示创建第一个管理员（也可用 `system.json` 的 `token` 引导，见上表）；
+- **密码登录**：登录后签发 7 天滑动续期的会话 token（`sess_…`，存 localStorage，请求头 `X-Token`）；
+- **Token 登录**：可直接粘贴个人访问令牌（`okb_…`）或会话 token；
+- **注册**：默认开放自助注册，新用户为 `pending`，需管理员在「用户管理」页审核；
+- **个人令牌**：每个用户在「账户」页签发/撤销，用于 Zotero、MCP 客户端等；
+- **MCP 访问**：用户级开关，`用户.mcp = true` 且令牌勾选 MCP 时才可调用。
+
+忘记管理员密码时的兜底：
+
+```bash
+cd backend-rs
+./target/release/okb_assist --reset-password admin --new-password '新密码'
+```
+
+> ⚠️ 从旧版本升级：`config.json` 里旧的 `permissions` 条目会被一次性迁移成 `legacy-xxx` 占位用户
+> （`pending`、无凭据），**旧 token 全部失效**，需管理员为其重置密码或直接删除。
+> 详见 [document/user-management.md](./document/user-management.md)。
 
 ### 工作目录（`cwd`）
 

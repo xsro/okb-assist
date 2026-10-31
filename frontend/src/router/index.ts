@@ -7,6 +7,24 @@ const routes = [
     redirect: '/assist'
   },
   {
+    path: '/assist/login',
+    name: 'login',
+    component: () => import('@/views/LoginView.vue'),
+    meta: { title: '登录', public: true }
+  },
+  {
+    path: '/assist/account',
+    name: 'account',
+    component: () => import('@/views/AccountView.vue'),
+    meta: { title: '账户' }
+  },
+  {
+    path: '/assist/users',
+    name: 'users',
+    component: () => import('@/views/UsersView.vue'),
+    meta: { title: '用户管理', requiresAdmin: true }
+  },
+  {
     path: '/assist',
     name: 'home',
     component: () => import('@/views/HomeView.vue'),
@@ -97,35 +115,38 @@ const router = createRouter({
   routes
 })
 
-// 路由守卫：权限检查 + 设置页面标题
-router.beforeEach((to, _from, next) => {
+// 路由守卫：登录态检查 + 权限检查 + 设置页面标题
+router.beforeEach(async (to, _from, next) => {
   const title = (to.meta?.title as string) || 'OKB-Assist'
   document.title = `${title} - OKB-Assist`
 
   const store = useTokenStore()
-  const role = store.role
-  const hasToken = store.isAuthenticated
 
-  // role 为 null 但已有 token（正在验证中），放行让 api 鉴权
-  if (!role && hasToken) {
+  // 公开路由（登录页）
+  if (to.meta?.public === true) {
     next()
     return
   }
 
+  // 刷新页面：本地区有 token 但还没有角色 → 先恢复会话
+  if (!store.role && store.token) {
+    await store.restore()
+  }
+
+  // 未认证 → 去登录页，并记住原目标
+  if (!store.role) {
+    next({ path: '/assist/login', query: { redirect: to.fullPath } })
+    return
+  }
+
   // requiresAdmin: 仅 admin 可访问
-  if (to.meta.requiresAdmin && role !== 'admin') {
-    if (!hasToken) {
-      store.promptForToken()
-    }
+  if (to.meta.requiresAdmin && store.role !== 'admin') {
     next('/assist')
     return
   }
 
   // 上传页面：admin 或 view-upload 可访问
-  if (to.name === 'upload' && role !== 'admin' && role !== 'view-upload') {
-    if (!hasToken) {
-      store.promptForToken()
-    }
+  if (to.name === 'upload' && store.role !== 'admin' && store.role !== 'view-upload') {
     next('/assist')
     return
   }

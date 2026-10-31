@@ -50,12 +50,6 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/admin/dedup", post(dedup))
         .route("/assist/api/admin/logs/", get(get_logs))
         .route("/assist/api/admin/logs", get(get_logs))
-        .route("/assist/api/admin/permissions/", get(get_permissions))
-        .route("/assist/api/admin/permissions", get(get_permissions))
-        .route("/assist/api/admin/permissions/", post(add_permission_token))
-        .route("/assist/api/admin/permissions", post(add_permission_token))
-        .route("/assist/api/admin/permissions/delete/", post(delete_permission_token))
-        .route("/assist/api/admin/permissions/delete", post(delete_permission_token))
 }
 
 async fn dedup(
@@ -717,89 +711,3 @@ async fn get_logs(
         "displayed": slice.len(),
     })).into_response()
 }
-
-// ── 权限 Token 管理 ────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-struct PermissionTokenBody {
-    #[serde(alias = "access")]
-    role: String,
-    token: String,
-    #[serde(default)]
-    mcp: bool,
-}
-
-/// 获取所有角色的权限 token 列表
-async fn get_permissions(
-    Extension(role): Extension<auth::Role>,
-    Extension(cm): Extension<Arc<crate::config_manager::ConfigManager>>,
-) -> Json<Value> {
-    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
-        return Json(json!({"detail": "权限不足"}));
-    }
-    let config = cm.get_service_config();
-    let perms = config.get("permissions").cloned().unwrap_or(json!({}));
-    Json(json!({"permissions": perms}))
-}
-
-/// 添加一个 token（新格式：{ token: { access: role, mcp: bool } }）
-async fn add_permission_token(
-    Extension(role): Extension<auth::Role>,
-    Extension(cm): Extension<Arc<crate::config_manager::ConfigManager>>,
-    Json(body): Json<PermissionTokenBody>,
-) -> Json<Value> {
-    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
-        return Json(json!({"detail": "权限不足"}));
-    }
-
-    if body.role != "view-only" && body.role != "view-upload" {
-        return Json(json!({"detail": "角色无效，仅支持 view-only 和 view-upload"}));
-    }
-    if body.token.is_empty() {
-        return Json(json!({"detail": "token 不能为空"}));
-    }
-
-    let mut config = cm.get_service_config();
-    let perms = config.get_mut("permissions").and_then(|p| p.as_object_mut());
-    if let Some(perms) = perms {
-        // 新格式: { token: { access: role, mcp: bool } }
-        if perms.contains_key(&body.token) {
-            return Json(json!({"detail": "token 已存在"}));
-        }
-        perms.insert(body.token.clone(), json!({
-            "access": body.role,
-            "mcp": body.mcp,
-        }));
-    }
-
-    cm.save_config(&config);
-    cm.reload_config();
-
-    let perms = config.get("permissions").cloned().unwrap_or(json!({}));
-    Json(json!({"permissions": perms}))
-}
-
-/// 删除一个 token
-async fn delete_permission_token(
-    Extension(role): Extension<auth::Role>,
-    Extension(cm): Extension<Arc<crate::config_manager::ConfigManager>>,
-    Json(body): Json<PermissionTokenBody>,
-) -> Json<Value> {
-    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
-        return Json(json!({"detail": "权限不足"}));
-    }
-
-    let mut config = cm.get_service_config();
-    let perms = config.get_mut("permissions").and_then(|p| p.as_object_mut());
-    if let Some(perms) = perms {
-        // 新格式: { token: { access: role, mcp: bool } }
-        perms.remove(&body.token);
-    }
-
-    cm.save_config(&config);
-    cm.reload_config();
-
-    let perms = config.get("permissions").cloned().unwrap_or(json!({}));
-    Json(json!({"permissions": perms}))
-}
-

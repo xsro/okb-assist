@@ -19,16 +19,17 @@
       </nav>
       <div class="mobile-menu-footer">
         <button v-if="!tokenStore.isAuthenticated" class="btn" @click="promptToken">
-          设置 Token
+          登录
         </button>
         <template v-else>
           <div class="mobile-token-status">
             <span class="token-indicator">●</span>
-            <span class="token-role-label">{{ roleName }}</span>
+            <span class="token-role-label">{{ tokenStore.displayName || '已登录' }}</span>
+            <span class="mobile-role">{{ tokenStore.roleLabel }}</span>
           </div>
           <div class="mobile-token-actions">
-            <button class="btn btn-sm" @click="switchToken">切换 Token</button>
-            <button class="btn btn-sm btn-outline-danger" @click="logout">登出</button>
+            <button class="btn btn-sm" @click="goAccount">账户</button>
+            <button class="btn btn-sm btn-outline-danger" @click="logout">退出登录</button>
           </div>
         </template>
       </div>
@@ -38,23 +39,17 @@
 
 <script setup lang="ts">
 import { inject, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { useTokenStore } from '@/stores/token'
 
 const tokenStore = useTokenStore()
-
-const roleName = computed(() => {
-  const labels: Record<string, string> = {
-    'admin': '管理员',
-    'view-only': '只读用户',
-    'view-upload': '查看+上传'
-  }
-  return labels[tokenStore.role || ''] || tokenStore.role || '已连接'
-})
+const router = useRouter()
 
 const closeMenu = inject('closeMobileMenu') as (() => void) | undefined
 
 const adminOnlyPaths = [
   '/assist/admin',
+  '/assist/users',
   '/assist/config',
   '/assist/duplicates',
   '/assist/point',
@@ -67,6 +62,7 @@ const allNavItems = [
   { path: '/assist/upload', label: '上传' },
   { path: '/assist/tools', label: '工具' },
   { path: '/assist/chat', label: '问答' },
+  { path: '/assist/users', label: '用户管理' },
   { path: '/assist/admin', label: '管理' },
   { path: '/assist/config', label: '配置' },
   { path: '/assist/duplicates', label: '去重' },
@@ -87,15 +83,15 @@ function promptToken() {
   tokenStore.promptForToken()
 }
 
-function switchToken() {
+function goAccount() {
   closeMenu?.()
-  tokenStore.clearToken()
-  tokenStore.promptForToken()
+  router.push('/assist/account')
 }
 
-function logout() {
+async function logout() {
   closeMenu?.()
-  tokenStore.clearToken()
+  await tokenStore.logout()
+  router.replace({ path: '/assist/login' })
 }
 </script>
 
@@ -215,6 +211,11 @@ function logout() {
 .token-indicator {
   color: var(--success);
   font-size: 12px;
+}
+
+.mobile-role {
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .token-role-label {

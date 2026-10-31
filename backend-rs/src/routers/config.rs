@@ -47,7 +47,13 @@ async fn get_config(
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
-    let config = cm.get_config();
+    let mut config = cm.get_config();
+    // `users` 段持有密码哈希与 token 哈希，不向配置页输出；只给摘要。
+    // （用户管理走 /assist/api/admin/users 系列端点）
+    if let Some(obj) = config.as_object_mut() {
+        obj.remove("users");
+        obj.insert("users_summary".to_string(), cm.users_summary());
+    }
     Json(config).into_response()
 }
 

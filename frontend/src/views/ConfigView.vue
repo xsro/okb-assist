@@ -31,43 +31,21 @@
         @update="onConfigUpdate"
       />
 
-      <!-- 权限管理 -->
+      <!-- 用户与权限（已迁移到独立的用户管理页） -->
       <div class="section">
-        <h3>权限管理</h3>
-        <p class="section-desc">管理角色 token，支持 view-only、view-upload</p>
-
-        <div v-if="permEntries.length > 0" class="perm-token-list">
-          <div v-for="(entry, idx) in permEntries" :key="idx" class="perm-token-row">
-            <code class="perm-token-value">{{ entry.token }}</code>
-            <span class="perm-token-role" :class="'role-' + entry.access">{{ roleLabel(entry.access) }}</span>
-            <span v-if="entry.mcp" class="perm-token-mcp-badge" title="允许 MCP 访问">MCP</span>
-            <button class="btn btn-sm btn-outline-danger" @click="removeToken(entry.token)" :disabled="savingPerm">删除</button>
-          </div>
+        <h3>用户与权限</h3>
+        <p class="section-desc">
+          角色与访问令牌已迁移到「用户管理」：用户可以注册 / 密码登录 / 使用个人 API token，
+          每个用户可单独授予 MCP 访问权限。
+        </p>
+        <div class="user-summary">
+          <span>用户总数：<strong>{{ usersSummary.count }}</strong></span>
+          <span>待审核：<strong>{{ usersSummary.pending }}</strong></span>
+          <span>
+            自助注册：<strong>{{ usersSummary.allow_registration ? '已开放' : '已关闭' }}</strong>
+          </span>
         </div>
-        <div v-else class="empty-hint">暂无权限 token</div>
-
-        <div class="perm-add-row">
-          <select v-model="newPermRole" class="perm-select">
-            <option value="view-only">view-only（只读）</option>
-            <option value="view-upload">view-upload（查看+上传）</option>
-          </select>
-          <input
-            v-model="newPermToken"
-            type="text"
-            :placeholder="'输入 ' + newPermRole + ' token'"
-            class="perm-input"
-            @keyup.enter="addToken"
-          />
-          <label class="perm-mcp-label">
-            <input type="checkbox" v-model="newPermMcp" />
-            MCP 访问
-          </label>
-          <button class="btn btn-sm" @click="addToken" :disabled="savingPerm || !newPermToken.trim()">
-            添加
-          </button>
-        </div>
-
-        <div v-if="permError" class="error-message">{{ permError }}</div>
+        <router-link class="btn btn-sm" to="/assist/users">打开用户管理</router-link>
       </div>
 
       <div class="action-buttons">
@@ -84,7 +62,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { getServiceConfig, updateServiceConfig, reloadConfig } from '@/api/config'
-import { getServiceStatus, getPermissionTokens, addPermissionToken, deletePermissionToken } from '@/api/admin'
+import { getServiceStatus } from '@/api/admin'
+import { apiGet } from '@/api/client'
 import { useToast } from '@/composables/useToast'
 import type { LlmModelEntry, ServiceConfig } from '@/types/config'
 import BaseUrlSection from '@/components/config/BaseUrlSection.vue'
@@ -224,74 +203,28 @@ function reset() {
   config.value = JSON.parse(JSON.stringify(originalConfig.value))
 }
 
-// ── 权限管理 ──
+// ── 用户摘要（config.json 的 users 段不直接下发，只用汇总信息） ──
 
-interface PermEntry { token: string; access: string; mcp: boolean }
-
-const permTokens = ref<Record<string, { access: string; mcp: boolean }>>({})
-const newPermToken = ref('')
-const newPermRole = ref('view-only')
-const newPermMcp = ref(false)
-const savingPerm = ref(false)
-const permError = ref('')
-
-const permEntries = computed<PermEntry[]>(() => {
-  return Object.entries(permTokens.value).map(([token, entry]) => ({ token, access: entry.access, mcp: entry.mcp }))
+const usersSummary = ref<{ count: number; pending: number; allow_registration: boolean }>({
+  count: 0,
+  pending: 0,
+  allow_registration: true
 })
 
-function roleLabel(role: string): string {
-  const labels: Record<string, string> = {
-    'view-only': '只读',
-    'view-upload': '查看+上传'
-  }
-  return labels[role] || role
-}
-
-async function loadPermTokens() {
+async function loadUsersSummary() {
   try {
-    const res = await getPermissionTokens()
-    permTokens.value = (res.permissions || {}) as Record<string, { access: string; mcp: boolean }>
+    const res = await apiGet<{
+      users_summary?: { count: number; pending: number; allow_registration: boolean }
+    }>('/assist/api/config')
+    if (res.users_summary) usersSummary.value = res.users_summary
   } catch {
-    // 静默忽略
-  }
-}
-
-async function addToken() {
-  const token = newPermToken.value.trim()
-  if (!token) return
-  savingPerm.value = true
-  permError.value = ''
-  try {
-    const res = await addPermissionToken(newPermRole.value, token, newPermMcp.value)
-    permTokens.value = (res.permissions || {}) as Record<string, { access: string; mcp: boolean }>
-    newPermToken.value = ''
-    newPermMcp.value = false
-  } catch {
-    permError.value = '添加失败，请重试'
-  } finally {
-    savingPerm.value = false
-  }
-}
-
-async function removeToken(token: string) {
-  const entry = permTokens.value[token]
-  if (!entry) return
-  if (!confirm(`确定删除 token: ${token}（${roleLabel(entry.access)}）？`)) return
-  savingPerm.value = true
-  permError.value = ''
-  try {
-    const res = await deletePermissionToken(entry.access, token)
-    permTokens.value = (res.permissions || {}) as Record<string, { access: string; mcp: boolean }>
-  } catch {
-    permError.value = '删除失败，请重试'
-  } finally {
-    savingPerm.value = false
+    // 静默忽略：非关键信息
   }
 }
 
 onMounted(() => {
   load()
-  loadPermTokens()
+  loadUsersSummary()
 })
 </script>
 

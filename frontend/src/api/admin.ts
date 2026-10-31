@@ -87,22 +87,3 @@ export function getLogs(params: {
 }) {
   return apiGet<LogResponse>('/assist/api/admin/logs', params)
 }
-
-// ── 权限管理 ────────────────────────────────────────────
-
-export type PermissionsMap = Record<string, { access: string; mcp: boolean }>
-
-/** 获取权限 token 列表 */
-export function getPermissionTokens() {
-  return apiGet<{ permissions: PermissionsMap }>('/assist/api/admin/permissions')
-}
-
-/** 添加权限 token */
-export function addPermissionToken(role: string, token: string, mcp = false) {
-  return apiPost<{ permissions: PermissionsMap }>('/assist/api/admin/permissions', { role, token, mcp })
-}
-
-/** 删除权限 token */
-export function deletePermissionToken(role: string, token: string) {
-  return apiPost<{ permissions: PermissionsMap }>('/assist/api/admin/permissions/delete', { role, token })
-}

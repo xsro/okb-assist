@@ -19,6 +19,7 @@ OKB-Assist 是一个**本地学术文献库管理系统**（论文与专著）�
 - **向量库**：Qdrant（默认），适配器层同时支持 Milvus / Chroma
 - **外部服务**：MinerU（解析）、LLM（Ollama 原生 / OpenAI 兼容协议，模型池 + 信息补全模型）、Embedding 服务（各向量库独立配置，默认 Ollama 原生协议）、Qdrant（向量）、Fastembed（嵌入服务）、OpenWebUI（可选前端）、mutool（PDF 元数据提取，未启用 mupdf feature 时使用）
 - **客户端工具**：`client-rs/` — Zotero CSV 导入工具（Rust）
+- **用户体系**：注册 / 密码登录 / Token 登录 / MCP 授权，用户数据存 `config.json` 的 `users` 段（详见下方「用户与认证」）
 
 ## 包管理与常用命令
 
@@ -65,9 +66,11 @@ cargo build --release
 | 路径 | 说明 |
 |------|------|
 | `backend-rs/src/main.rs` | **入口**：Axum app、路由/MCP/中间件 |
-| `backend-rs/src/auth.rs` | 鉴权与角色匹配（Admin/ViewOnly/ViewUpload） |
+| `backend-rs/src/auth.rs` | 角色判定（`Role`/`assert_role`）、凭证解析（`Principal`/`resolve_principal`）、首次启动引导 |
+| `backend-rs/src/users.rs` | 用户存储（`config.json` 的 `users` 段，Argon2id 密码、sha256 令牌、最后管理员不变量、旧 `permissions` 迁移） |
+| `backend-rs/src/session.rs` | 服务端会话表（`sess_…`，内存态，7 天滑动续期） |
 | `backend-rs/src/logger.rs` | 双日志初始化（文件 + 控制台） |
-| `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`openapi.rs`、`mod.rs` |
+| `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/` | 后端适配器：`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
@@ -88,7 +91,7 @@ cargo build --release
 | `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 8 构建，输出到 `frontend/dist/`，包管理器 `pnpm`） |
 | `frontend/dist/` | 前端构建产物（`index.html`、`assets/`），由后端 serving |
 | `data/` | 运行时数据（`okb_assist.db`、`_uploads/`、`tokens/` 等），由 `system.json` 模板决定路径；实际位置为 `backend-rs/data/`，已被 `backend-rs/.gitignore` 忽略 |
-| `document/` | 参考文档：`mcp.md`（MCP 工具列表）、`build.md`（部署构建）、`search.md`（搜索语法）、`datalab.to.md`、`mineru4/`、`skills/`、`openwebui.md`、`qdrant.md`、`udisks2-automount.md` |
+| `document/` | 参考文档：`mcp.md`（MCP 工具列表）、`user-management.md`（用户/登录/令牌使用指南）、`user-management-plan.md`（权限→用户升级计划与进度）、`build.md`（部署构建）、`search.md`（搜索语法）、`datalab.to.md`、`mineru4/`、`skills/`、`openwebui.md`、`qdrant.md`、`udisks2-automount.md` |
 
 ## 配置（JSON 文件，非环境变量）
 
@@ -121,6 +124,101 @@ cargo build --release
 - **敏感字段写 `!cat <path>` 引用，不要把密钥写进 JSON**：`system.json` 的 `token`/`mcp_token`、`mineru[].token` 以及 `llm.models[].key` 都支持以 `!` 开头的值 —— `resolve_token()`（`backend-rs/src/utils.rs`）会读取 `!cat <path>` 指向的文件（路径相对进程 `cwd`，即 `backend-rs/`）并去首尾空白，结果进程内缓存。**LLM 密钥的解析发生在 `ModelEndpoint::client()` 与连接测试的 `test_llm()`**，因此 `config.json` 与 `/assist/api/config` 里只会出现 `!cat ./data/tokens/xxx` 这样的引用，不回显真实密钥；密钥文件放在 `backend-rs/data/tokens/`（已被 git 忽略）。
 - 服务状态端点键为 `llm`（不再是 `ollama`），如 `/assist/api/admin/services/status` 返回 `{mineru, llm, fastembed, vector_dbs, qdrant}`；其中 `llm` 探测的是**信息补全所用的端点**（含 `protocol`/`url`/`model`/`models`）。
 - `PUT /assist/api/config` 会校验 `llm.models` 每项都有非空 `url` 与 `model`，否则返回 400。`llm_extract` 不做校验（空值即继承）。
+
+### 用户与认证（`config.json` 的 `users` 段）
+
+用户数据存在 `config.json` 的 `users` 段，由 `backend-rs/src/users.rs` 独占读写（其他代码不要直接改这段）：
+
+```json
+{
+  "users": {
+    "version": 1,
+    "allow_registration": true,
+    "require_approval": true,
+    "registration_role": "view-only",
+    "session_ttl_hours": 168,
+    "items": [
+      {
+        "id": "u_3c420f47d351178f",
+        "username": "admin",
+        "display_name": "管理员",
+        "role": "admin",
+        "status": "active",
+        "mcp": true,
+        "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$…",
+        "must_set_password": false,
+        "api_tokens": [
+          { "id": "at_0ba285287ecd", "label": "zotero", "token_sha256": "…", "mcp": true,
+            "created_at": "…", "last_used_at": null }
+        ],
+        "created_at": "…", "updated_at": "…", "last_login_at": "…",
+        "failed_logins": 0, "locked_until": null
+      }
+    ]
+  }
+}
+```
+
+- **密码**：Argon2id PHC 字符串（`Argon2::default()` = m=19456,t=2,p=1），`password_hash` 永不出现在任何 API 响应/日志中（统一走 `User::to_public_json()`）。
+- **长期凭证**：`okb_<32B base64url>`，磁盘只存 `sha256`（`token_sha256`），明文**只在签发响应里出现一次**。
+- **状态**：`pending`（待审核）/ `active` / `disabled`（禁用后会话与令牌立即失效）。
+- **不变量**：至少保留一个 `active` 的 `admin`；最后一个管理员不能降级/禁用/删除（`UserError::LastAdmin` → 409）。
+- **登录防护**：连续失败 5 次后按 `30s * 2^n` 指数退避写 `locked_until`（上限 1h）；登录/注册各有内存滑动窗口限流；用户名不存在时跑一次等时 Argon2 校验（`users::verify_dummy`）防枚举。
+
+#### 会话（`session.rs`）
+
+- 密码登录签发 `sess_<32B base64url>`，存**进程内存**（`SessionStore`，`Mutex<HashMap>`），重启即失效。
+- TTL 取自 `users.session_ttl_hours`（默认 168h）并**滑动续期**：每次成功校验把 `expires_at` 推到 `now + ttl`，空闲超期才失效。
+- `validate()` 顺带惰性清理过期会话；用户被禁用/删除时会话立即作废（`resolve_principal` 里顺手 `revoke`）。
+
+#### 鉴权链路（`main.rs::token_middleware`）
+
+仅保护 `/assist/api/*`，顺序：
+
+1. `/image/` 图片 URL 放行（注入 `ViewOnly`）；
+2. **未初始化门禁**：`auth::is_initialized()` 为 false（没有任何 active admin）时，除 `/auth/status|check|bootstrap` 外一律 401（`code: not_initialized`）；
+3. 公开端点放行：`/assist/api/auth/{status,check,login,register,bootstrap}`；
+4. 受信任子网：**仅当** `system.json` 的 `trusted_subnet_enabled = true` 且 IP 命中 `trusted_subnets` 时，注入 `Principal::local(trusted_subnet_role, true)`；
+5. `auth::resolve_principal()`：`sess_` 前缀 → 会话表；否则按 sha256 匹配用户 `api_tokens`；
+6. 未命中 → 401。
+
+命中后注入 **三样** Extension：`auth::Principal`（新代码用）、`auth::Role`（兼容既有 40+ 处 `Extension<Role>`）、`auth::OwnerKey`（会话归属，`u:<user_id>`，免鉴权为 `local`）。
+
+#### 启动引导与迁移（`main()`）
+
+1. `users.migrate_legacy_permissions()`：旧 `config.json.permissions` → `legacy-<sha256 前 6 位>` 占位用户（`pending`、无凭据、角色/mcp 沿用），**旧 token 全部失效**，随后从磁盘删除 `permissions` 键（方案 B）。
+2. `auth::ensure_bootstrap()`：没有 active admin 且 `system.json.token` 不是空/`change-me` 时，创建无密码 `admin` 并把该 token 登记为 `label=bootstrap` 的 api_token；**该用户 `set_password` 成功后 bootstrap token 自动吊销**。未配置 token 则保持「未初始化」，由前端初始化页创建首个管理员。
+
+#### 接口一览
+
+| 方法 | 路径 | 权限 | 说明 |
+|---|---|---|---|
+| GET | `/assist/api/auth/status` | 公开 | 初始化状态、用户数/待审核数、注册策略、会话 TTL |
+| POST | `/assist/api/auth/bootstrap` | 无 admin 时 | 创建首个管理员并登录 |
+| POST | `/assist/api/auth/register` | 公开（受开关控制） | 自助注册 → 默认 `pending` |
+| POST | `/assist/api/auth/login` | 公开 | 用户名+密码 → 会话 token |
+| POST | `/assist/api/auth/logout` | 已登录 | 撤销当前会话 |
+| GET | `/assist/api/auth/me` | 已登录 | 当前主体（含令牌元数据，无哈希） |
+| POST | `/assist/api/auth/password` | 已登录 | 改密（撤销该用户全部会话；有密码时需 `old_password`） |
+| GET | `/assist/api/auth/check` | 公开（自行解析凭证） | 兼容旧前端的 `{role, valid, permissions}` + `user/mcp/via` |
+| GET/POST | `/assist/api/auth/tokens` | 已登录 | 查看/签发**自己的**令牌 |
+| DELETE | `/assist/api/auth/tokens/:id` | 已登录 | 撤销自己的令牌 |
+| GET | `/assist/api/admin/users` | admin | 用户列表（`?status=`），返回 `count/pending/users` |
+| POST | `/assist/api/admin/users` | admin | 新建用户 |
+| PUT/DELETE | `/assist/api/admin/users/:id` | admin | 改角色/状态/mcp/备注名；删除（级联撤销会话） |
+| POST | `/assist/api/admin/users/:id/approve` | admin | 审核通过 |
+| POST | `/assist/api/admin/users/:id/password` | admin | 重置密码（`revoke_tokens` 可选） |
+| GET/POST | `/assist/api/admin/users/:id/tokens` | admin | 查看/签发该用户令牌 |
+| DELETE | `/assist/api/admin/users/:id/tokens/:token_id` | admin | 撤销 |
+| GET/PUT | `/assist/api/admin/users/settings` | admin | 注册策略 / 会话 TTL |
+
+- 旧的 `/assist/api/admin/permissions*` 三个端点**已删除**（P3 迁移）。
+- `GET /assist/api/config` 不再返回 `users` 段，只给 `users_summary: {count, pending, allow_registration}`；`PUT /assist/api/config` 也无法改写 `users`（`ConfigManager` 的 `PROTECTED_CONFIG_SECTIONS`）。
+- CLI 兜底：`okb_assist --reset-password <用户名> --new-password '<密码>'`（省略密码则从 stdin 读）。
+
+#### MCP 鉴权（`mcp_server.rs`）
+
+依次接受：`system.json.mcp_token`（本地 admin 主体）→ 用户会话/个人令牌（`Principal.mcp = 用户.mcp && 令牌.mcp`）→ 受信任子网（需 `trusted_subnet_enabled`）。未开 MCP 的用户返回 `Unauthorized: MCP access not granted`。
 
 ### 元数据抽取（信息补全）的校对语义
 
@@ -185,9 +283,11 @@ cargo build --release
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
 | `cwd` | 工作目录，支持 `{system_dir}` 替换 | `{system_dir}` |
-| `token` | Admin Token（为空或 `change-me` 时跳过鉴权） | `change-me` |
-| `mcp_token` | MCP Bearer Token（为空或 `change-me` 时跳过鉴权） | `change-me` |
-| `trusted_subnets` | 受信任子网白名单（CIDR 数组），匹配的请求免 Token 鉴权 | `[]` |
+| `token` | **仅首次启动引导用**：无管理员且非 `change-me` 时自动建 `admin` 并接管为该用户的 `bootstrap` 令牌（设密后自动失效）。之后不再参与鉴权 | `change-me` |
+| `mcp_token` | MCP 全局 Bearer Token（等价本地 admin 主体；个人令牌请用「账户」页签发） | `change-me` |
+| `trusted_subnets` | 受信任子网白名单（CIDR 数组） | `[]` |
+| `trusted_subnet_enabled` | 是否启用受信任子网免鉴权（**默认关闭**，需显式打开） | `false` |
+| `trusted_subnet_role` | 命中受信任子网时授予的角色 | `admin` |
 | `max_concurrent_tasks` | 全局 extract/index 最大并发数 | `3` |
 | `database_url` | SQLite 连接串 | `sqlite:///data/okb_assist.db` |
 | `markdown_path` | Markdown 文件路径模板 | `data/markdowns/{id}.md` |
@@ -203,11 +303,11 @@ cargo build --release
 | `ui_path` | 前端 UI 构建产物路径 | `frontend/dist` |
 
 > **路径模板**：`cwd` 支持 `{system_dir}` 替换；其他路径属性相对于 `cwd`，支持 `{id}` 和 `{env:VAR_NAME}` 变量。
-> **trusted_subnets**：空数组 `[]` 表示不信任任何子网，全部需要 Token 鉴权。设为 `["192.168.1.0/24", "127.0.0.1/32"]` 可允许局域网和本机免认证。
+> **trusted_subnets**：空数组 `[]` 表示不信任任何子网。即使配置了网段，也必须把 `trusted_subnet_enabled` 设为 `true` 才生效（默认关闭，避免「在局域网内即管理员」被默认踩到）。
 
 ## 架构与请求流
 
-1. **Web/API 层**：`backend-rs/src/main.rs` + `backend-rs/src/routers/*`。`TokenMiddleware` 仅对 `/assist/api/*` 校验 `X-Token`/query `token`，放行 `/assist/mcp`、`/assist/assets`（前端静态资源）、`/assist/uploads`、`/assist/file`、`/redirect`，以及对 `/assist/api/documents/` 下含 `/image/` 的图片 URL 放行。`token` 为 `change-me`（或未设置）时整体跳过校验；来自 `trusted_subnets` 白名单的请求也免校验。CORS 限定前端来源（开发 `localhost:5173`，生产同源 `localhost:5001`）。
+1. **Web/API 层**：`backend-rs/src/main.rs` + `backend-rs/src/routers/*`。`TokenMiddleware` 仅对 `/assist/api/*` 校验凭证（`X-Token` 头 → `Authorization: Bearer` → query `token`），放行 `/assist/mcp`、`/assist/assets`（前端静态资源）、`/assist/uploads`、`/assist/file`、`/redirect`，以及 `/assist/api/documents/` 下含 `/image/` 的图片 URL。凭证由 `auth::resolve_principal` 解析成 `Principal`（会话 `sess_…` → 用户 API token `okb_…`）；**系统未初始化（没有任何 active admin）时只允许 `/auth/status|check|bootstrap`**；受信任子网仅在 `trusted_subnet_enabled = true` 时生效。CORS 限定前端来源（开发 `localhost:5173`，生产同源 `localhost:5001`）。
 2. **数据模型**：`Document`（主记录 + 状态）、`DocumentVectorIndex`（每个向量库的索引状态，唯一键 `(document_id, vector_db_id)`）。状态机用 `DocStatus` / `IndexStatus` 枚举（`backend-rs/src/models.rs`）。
 3. **摄取流水线**（`backend-rs/src/routers/pipeline.rs`，核心状态机）：
    - parse（MinerU）→ `parsing` → `markdown_done`
@@ -225,7 +325,7 @@ cargo build --release
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、迁移、索引重置。
 6. **问答**（`chat.rs`）：`GET /assist/api/chat/models`、`GET /assist/api/chat/tools` 列出模型池与可调用的 MCP 工具，`POST /assist/api/chat` 基于 `llm.models` 做多轮对话，并可在本请求内循环调用 MCP 工具（非流式）。见下方「问答（Chat）」。
 7. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
-8. **MCP 服务**（`mcp_server.rs`）：Streamable HTTP 端点 `/assist/mcp/stream`，SSE 挂载在 `/assist/mcp`；Bearer token 用 `system.json` 的 `mcp_token` 校验。完整工具列表见 `document/mcp.md`。
+8. **MCP 服务**（`mcp_server.rs`）：Streamable HTTP 端点 `/assist/mcp/stream`，SSE 挂载在 `/assist/mcp`；Bearer 认证接受 `system.json` 的 `mcp_token`（本地 admin 主体）、用户会话/个人令牌（`Principal.mcp`）、受信任子网（需 `trusted_subnet_enabled`）。完整工具列表见 `document/mcp.md`。
 
 ## 后台任务（异步执行）
 
@@ -273,7 +373,7 @@ cargo build --release
 | `StatusBadge.vue` | 状态徽章（状态/索引状态） |
 | `Toast.vue` | 消息提示 |
 | `ConfirmDialog.vue` | 确认对话框 |
-| `TokenModal.vue` | Token 输入模态框 |
+| `TokenModal.vue` | 账号面板（当前用户/角色、Token 登录、历史令牌、退出登录、跳转账户页） |
 | `ErrorBoundary.vue` | 错误边界（catch 渲染异常） |
 | `SkeletonLoading.vue` | 骨架屏 |
 | `MarkdownViewer.vue` | Markdown 渲染（marked + KaTeX + DOMPurify） |
@@ -293,6 +393,9 @@ cargo build --release
 
 | 路由 | 视图 | 说明 | 权限 |
 |------|------|------|------|
+| `/assist/login` | `LoginView.vue` | 登录 / 注册 / Token 登录 / 首次初始化管理员（`meta.public`） | 公开 |
+| `/assist/account` | `AccountView.vue` | 账户：资料、修改密码、个人访问令牌（Zotero/MCP） | 全部 |
+| `/assist/users` | `UsersView.vue` | 用户管理：待审核、角色/状态/MCP、重置密码、令牌签发、注册策略与会话 TTL | admin |
 | `/assist` | `HomeView.vue` | 文献列表（桌面表格/移动卡片 + 列管理 + 高级搜索） | 全部 |
 | `/assist/detail/:id` | `DetailView.vue` | 文档详情（元信息 + PDF 元信息 / Crossref 记录 / 引用条目三个懒加载折叠区） | 全部 |
 | `/assist/markdown/:id` | `MarkdownView.vue` | Markdown 阅读（浮动设置按钮收纳全部工具；行号默认开、移动端默认关；设置面板的「源码编辑」跳到编辑器并从当前阅读行开始载入） | 全部 |
@@ -339,7 +442,7 @@ cargo build --release
 - `useResponsive()`（`src/composables/useResponsive.ts`）：响应式断点检测（`isMobile` / `isDesktop` / `isTablet` / `isSmallMobile`）
 - `usePagination()`（`src/composables/usePagination.ts`）：分页加载封装（`items` / `loading` / `page` / `total` / `load`）
 - `useDebounce()`（`src/composables/useDebounce.ts`）：防抖工具
-- Pinia stores：`pipeline.ts`（任务状态）、`toast.ts`（消息队列）、`token.ts`（认证令牌）、`error.ts`（错误记录）
+- Pinia stores：`pipeline.ts`（任务状态）、`toast.ts`（消息队列）、`token.ts`（**认证状态**：会话 token + 当前用户 + 角色/权限位，导出 `useTokenStore`，别名 `useAuthStore`）、`error.ts`（错误记录）
 
 ### API 层
 `src/api/` 通过 `axios` 请求后端：
@@ -396,11 +499,11 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 
 ## ⚠️ 易错点（编辑前必读）
 
-1. **Token 校验**：`token` 为 `change-me`（或未设置）时整体跳过校验；来自 `trusted_subnets` 局域网的请求也免校验。`TokenMiddleware` 仅对 `/assist/api/*` 生效。
+1. **鉴权现状**：只认 `users` 段（会话 token / 用户 API token）。`system.json.token` 仅作首次引导（设密后失效）；`trusted_subnets` 默认不生效，需 `trusted_subnet_enabled = true`；系统未初始化时只有 `/auth/status|check|bootstrap` 可用。`TokenMiddleware` 仅对 `/assist/api/*` 生效。
 2. **配置改动不会自动生效**：`config.json` 改后需 reload；`system.json` 改后需重启进程（进程内缓存）。
 3. **MCP 路由注册顺序有依赖**（`backend-rs/src/main.rs`）：必须在 SSE 挂载之前精确注册 Streamable HTTP 端点。不要"整理"这个顺序。
 4. **没有测试、没有 lint**：编辑后需手动 `cargo build` 确认编译通过，并用 curl 校验端点。
-5. **局域网白名单配置**：`TokenMiddleware` 和 MCP 鉴权的 LAN 免 Token 白名单由 `system.json` 的 `trusted_subnets` 控制（CIDR 数组）。空数组 `[]` 表示不信任任何子网，全部需要 Token 鉴权。默认值为 `["192.168.1.0/24", "127.0.0.1/32"]`。
+5. **局域网白名单配置**：`TokenMiddleware` 和 MCP 鉴权的 LAN 免 Token 白名单由 `system.json` 的 `trusted_subnets`（CIDR 数组）+ `trusted_subnet_enabled`（默认 `false`）+ `trusted_subnet_role`（默认 `admin`）共同控制；网段配了但开关没开时**不生效**。
 6. **SQLite 单写者**：并发写入可行但仍是瓶颈，勿引入大量并发写。
 7. **SPA Fallback 路由**（`backend-rs/src/main.rs`）：`@app.get("/assist/{full_path:path}")` 必须放在所有路由之后。命中 `api/`、`mcp/`、`uploads/`、`file/` 前缀时避免吞掉 API 和 MCP 端点。
 8. **前端构建产物在 `frontend/dist/`**：`pnpm run build` 输出到 `frontend/dist/`。`vite.config.ts` 的 `base: '/assist/'` 使所有资源 URL 以 `/assist/assets/` 开头。
@@ -410,7 +513,9 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 12. **SQLx 编译时检查**：`sqlx` 默认在 `debug` 模式下会校验 SQL 查询，如果迁移了数据库结构需运行 `cargo sqlx prepare`（需安装 `sqlx-cli`）。
 13. **MinerU Markdown 图片处理**（`backend-rs/src/services/mineru.rs`）：`get_task_result()` 必须优先从 ZIP 输出提取 Markdown（含本地图片引用），而非从独立 Markdown 输出（含 data URI）。`finish_parse_result()` 在 `pipeline.rs` 中还需**复制独立图片文件**到目标目录，否则 Markdown 中的相对路径引用会失效。
 14. **MinerU API 的 output_formats 顺序无关**：`submit_job()` 必须同时请求 `"markdown"` 和 `"zip"` 两个格式。`zip` 格式包含解析结果的完整输出（Markdown + 图片），而 `markdown` 格式是自包含的 data URI 版本。两套输出分别下载后合并处理。
-15. **全屏（`meta.bare`）路由的高度链**：`main-content-bare` → `.error-boundary-wrap` → 页面容器 → `AceEditor` 每一层都必须是纵向 flex（`flex:1; min-height:0`）。`App.vue` 用 `.main-content-bare :deep(.error-boundary-wrap)` 补了这一层；漏掉就会让内部 `height:100%/flex:1` 的编辑器塌陷成内容高度（表现为编辑区只有 200px 高、下方一大片空白）。
+15. **`users` 段不要手改、不要经 `/assist/api/config` 写入**：`ConfigManager::save_config()` 会跳过 `PROTECTED_CONFIG_SECTIONS = ["users"]` 并从磁盘取回真值；用户写操作必须走 `users::UserStore`（内部 `update_users_section` 原子写 + 写锁）。密码哈希/令牌哈希永不回显。
+16. **删改用户要级联撤销凭据**：禁用/删除用户、重置密码都要 `sessions.revoke_user(&id)`（`routers/users.rs` 已处理）；`set_password` 会自动吊销 `label = "bootstrap"` 的令牌，但**不会**吊销用户自签令牌（需管理员显式 `revoke_tokens`）。
+17. **全屏（`meta.bare`）路由的高度链**：`main-content-bare` → `.error-boundary-wrap` → 页面容器 → `AceEditor` 每一层都必须是纵向 flex（`flex:1; min-height:0`）。`App.vue` 用 `.main-content-bare :deep(.error-boundary-wrap)` 补了这一层；漏掉就会让内部 `height:100%/flex:1` 的编辑器塌陷成内容高度（表现为编辑区只有 200px 高、下方一大片空白）。
 
 ## 入口与关键文件速查
 

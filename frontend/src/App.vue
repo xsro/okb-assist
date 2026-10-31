@@ -10,7 +10,7 @@
       </ErrorBoundary>
     </main>
     <TokenModal />
-    <footer v-if="!isBareRoute" class="app-footer">
+    <footer v-if="!isBareRoute && route.name !== 'login'" class="app-footer">
       <span>OKB-Assist</span>
     </footer>
   </div>
@@ -18,10 +18,9 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, provide } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useTokenStore } from '@/stores/token'
 import { useErrorStore } from '@/stores/error'
-import { apiGet } from '@/api/client'
 import AppHeader from '@/components/AppHeader.vue'
 import Toast from '@/components/Toast.vue'
 import TokenModal from '@/components/TokenModal.vue'
@@ -32,6 +31,7 @@ const tokenStore = useTokenStore()
 const showMobileMenu = ref(false)
 
 const route = useRoute()
+const router = useRouter()
 /** 全屏路由：隐藏 AppHeader / 页脚 / 内边距（路由 meta.bare = true） */
 const isBareRoute = computed(() => route.meta?.bare === true)
 
@@ -43,19 +43,24 @@ provide('closeMobileMenu', () => {
   showMobileMenu.value = false
 })
 
+function onAuthRequired() {
+  tokenStore.clearToken()
+  const current = router.currentRoute.value
+  if (current.name !== 'login') {
+    router.replace({ path: '/assist/login', query: { redirect: current.fullPath } })
+  }
+}
+
 onMounted(async () => {
-  window.addEventListener('auth:required', () => {
-    tokenStore.promptForToken()
-  })
-  // 启动时验证已存储的 token（localStorage 中有 token 但 role=null 的情况）
-  if (tokenStore.token && !tokenStore.role) {
-    try {
-      const res = await apiGet<{ role: string; permissions: Record<string, boolean> }>('/assist/api/auth/check')
-      tokenStore.role = res.role as 'admin' | 'view-only' | 'view-upload' | null
-      tokenStore.permissions = res.permissions
-    } catch {
-      tokenStore.clearToken()
+  window.addEventListener('auth:required', onAuthRequired)
+  // 启动时用本地 token 恢复会话（刷新页面后重新取角色/权限）
+  if (tokenStore.token) {
+    await tokenStore.restore()
+    if (!tokenStore.role) {
+      onAuthRequired()
     }
+  } else if (route.name !== 'login') {
+    router.replace({ path: '/assist/login', query: { redirect: route.fullPath } })
   }
 })
 
@@ -73,6 +78,7 @@ console.error = (...args: unknown[]) => {
 
 onUnmounted(() => {
   console.error = originalConsoleError
+  window.removeEventListener('auth:required', onAuthRequired)
 })
 </script>
 

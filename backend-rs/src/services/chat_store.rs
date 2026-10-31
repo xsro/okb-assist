@@ -5,7 +5,8 @@
 //! - 只有用户在前端显式点击「保存」才会落盘（后端不在对话过程中写任何东西）；
 //! - 文件内同时保存展示条目（`items`）与发给模型的完整 transcript
 //!   （含 `assistant.tool_calls` 与 `tool` 结果），以便重新打开后能继续对话；
-//! - `owner_key` 由访问 token 派生（见 `auth::OwnerKey`），只在服务端用于归属比对，
+//! - `owner_key` 由**用户 id** 派生（`u:<user_id>`，见 `auth::OwnerKey::from_user`），
+//!   免鉴权请求为 `local`；旧文件可能是 `t:<sha256(token) 前 32 位>` 的旧格式。只在服务端用于归属比对，
 //!   API 响应里只回传 `mine` 与归属角色；
 //! - 写入为原子写（先写 `*.tmp` 再 rename），避免半截文件。
 //!
@@ -35,7 +36,7 @@ pub struct StoredSession {
     /// 标题（默认取首条用户消息）
     #[serde(default)]
     pub title: String,
-    /// 归属人标识（token 派生的 sha256 前缀，或 `local`）；**不对外回传**
+    /// 归属人标识（`u:<user_id>`，旧格式为 `t:<sha256>`，免鉴权为 `local`）；**不对外回传**
     #[serde(default)]
     pub owner_key: String,
     /// 保存时的角色（admin / view-only / view-upload）

@@ -6,18 +6,27 @@ OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol
 
 ## 认证配置
 
-MCP 服务使用 Bearer Token 认证。Token 在 `system.json` 的 `mcp_token` 字段中配置：
+MCP 服务使用 Bearer Token 认证，支持三种凭据：
+
+| 凭据 | 说明 |
+|---|---|
+| **个人访问令牌**（推荐） | 用户在「账户」页签发的 `okb_…`，要求账号已开启「MCP 访问」且令牌勾选 MCP。权限跟随该用户角色，泄露只需撤销自己那把 |
+| **全局 MCP token** | `system.json` 的 `mcp_token`，等价于本地管理员主体，用于共享/自动化场景 |
+| **会话 token** | 浏览器登录拿到的 `sess_…`（一般只用于调试） |
 
 ```json
 {
-  "mcp_token": "your-secret-token"
+  "mcp_token": "your-secret-token",
+  "trusted_subnet_enabled": false
 }
 ```
 
-- Token 为 `change-me` 时**禁用认证**（开发模式）
-- Token 为其他值时，客户端必须在请求中携带 `Authorization: Bearer <token>`
-- `system.json` 中的 `token` 字段用于 API 认证，与 `mcp_token` 独立
-- 来自 `trusted_subnets` 白名单（CIDR 数组）的请求免 Token 鉴权
+- 启用认证后，客户端必须携带 `Authorization: Bearer <token>`（或 `X-Token: <token>`）
+- 账号被禁用 / 令牌被撤销后立即 401
+- 未开启 MCP 的用户即使有令牌也会被拒绝：`Unauthorized: MCP access not granted`
+- 受信任子网免鉴权需**显式**把 `system.json` 的 `trusted_subnet_enabled` 设为 `true`
+  （默认关闭，即使 `trusted_subnets` 已配网段也不生效）
+- 用户管理与令牌说明见 [user-management.md](./user-management.md)
 
 ---
 
@@ -30,7 +39,7 @@ OKB-Assist 同时提供两种 MCP 传输端点，二者**会话相互独立**（
 | **Streamable HTTP（推荐）** | `http://<host>:<port>/assist/mcp/stream` | 当前标准传输；精确路径，末尾无斜杠 |
 | **SSE（legacy 兼容）** | `http://<host>:<port>/assist/mcp/sse` | 旧版传输，仅供需要 SSE 的客户端使用 |
 
-> 两种传输都使用同一个 `mcp_token` 进行 Bearer 认证，工具与资源完全一致。
+> 两种传输的认证规则一致（个人令牌 / 全局 `mcp_token` / 会话令牌），工具与资源完全一致。
 
 ### 方式一：Streamable HTTP 远程连接（推荐）
 

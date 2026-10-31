@@ -4,10 +4,16 @@
 //! - config.json: 服务配置（MinerU、LLM、向量数据库），可通过前端修改
 //! - system.json: 系统配置（token、并发数、数据库、上传目录），仅限手动修改
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+
+/// 不允许被 `save_config()`（即 `PUT /assist/api/config`）覆写的配置段。
+///
+/// `users` 段持有密码哈希与 token 哈希，只能通过 `users` 模块的专用端点与
+/// [`ConfigManager::update_users_section`] 修改；否则前端配置表单回传旧快照就会
+/// 覆盖账号或注入自定义 `password_hash`。
+const PROTECTED_CONFIG_SECTIONS: &[&str] = &["users"];
 
 /// 归一化并迁移服务配置的旧格式，使其符合“LLM 模型池 + 抽取专用模型”的新结构。
 ///
@@ -84,6 +90,19 @@ fn migrate_legacy_service_config(mut raw: serde_json::Value) -> serde_json::Valu
                 obj.entry("protocol".to_string())
                     .or_insert_with(|| serde_json::json!("ollama"));
             }
+        }
+    }
+
+    // 1.5) users 段归一化：必须是对象，且 items 必须是数组
+    //      （手改配置写成字符串/对象时不应让整个用户模块不可用）
+    match raw.get_mut("users") {
+        Some(users) if users.is_object() => {
+            if !users.get("items").map(|v| v.is_array()).unwrap_or(false) {
+                users["items"] = serde_json::json!([]);
+            }
+        }
+        _ => {
+            raw["users"] = default_users_section();
         }
     }
 
@@ -200,7 +219,21 @@ pub fn default_config() -> serde_json::Value {
                 }
             }
         ],
-        "permissions": {}
+        "users": default_users_section()
+    })
+}
+
+/// 默认的 `users` 段。
+///
+/// 字段含义见 `crate::users::UsersSection`（两处默认值必须一致，有单元测试守护）。
+pub fn default_users_section() -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "allow_registration": true,
+        "require_approval": true,
+        "registration_role": "view-only",
+        "session_ttl_hours": 168,
+        "items": []
     })
 }
 
@@ -220,7 +253,9 @@ pub fn default_system() -> serde_json::Value {
         "pdf_path": "data/pdfs/{id}/{id}.pdf",
         "config_path": "config.json",
         "log_path": "okb-log.jsonl",
-        "trusted_subnets": []
+        "trusted_subnets": [],
+        "trusted_subnet_enabled": false,
+        "trusted_subnet_role": "admin"
     })
 }
 
@@ -232,6 +267,9 @@ pub struct ConfigManager {
     cwd: String,
     cache: Arc<RwLock<Option<serde_json::Value>>>,
     system_cache: Arc<RwLock<Option<serde_json::Value>>>,
+    /// 写锁：串行化 config.json / system.json 的「读盘 → 改 → 原子写」序列，
+    /// 避免「保存服务配置」与「保存 users 段」互相覆盖。
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl ConfigManager {
@@ -282,6 +320,7 @@ impl ConfigManager {
             cwd,
             cache: Arc::new(RwLock::new(None)),
             system_cache: Arc::new(RwLock::new(None)),
+            write_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -314,6 +353,7 @@ impl ConfigManager {
             cwd: ".".to_string(),
             cache: Arc::new(RwLock::new(None)),
             system_cache: Arc::new(RwLock::new(None)),
+            write_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -410,8 +450,35 @@ impl ConfigManager {
             fs::create_dir_all(parent)?;
         }
         let content = serde_json::to_string_pretty(data)?;
-        fs::write(filepath, content)?;
+        // 原子写：先写同目录临时文件再 rename，避免写到一半崩溃/断电导致配置（现已含密码哈希）残缺
+        let file_name = filepath
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "config.json".to_string());
+        let tmp = filepath.with_file_name(format!(
+            ".{}.tmp.{}.{}",
+            file_name,
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::write(&tmp, content)?;
+        if let Err(e) = fs::rename(&tmp, filepath) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(())
+    }
+
+    /// 直接从磁盘读取 config.json 原始内容（应用旧格式迁移，但**不与默认值合并**）。
+    /// 供「只改某一段」的原子写入使用：未经合并的内容可直接写回，不会丢失未识别字段。
+    fn read_raw_service_config(filepath: &PathBuf) -> serde_json::Value {
+        match fs::read_to_string(filepath)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        {
+            Some(raw) => migrate_legacy_service_config(raw),
+            None => default_config(),
+        }
     }
 
     pub fn load_config(&self) -> serde_json::Value {
@@ -485,6 +552,7 @@ impl ConfigManager {
     }
 
     pub fn save_config(&self, config: &serde_json::Value) -> anyhow::Result<()> {
+        let _guard = self.write_lock.lock().unwrap();
         let service_keys: Vec<String> = default_config()
             .as_object()
             .map(|o| o.keys().cloned().collect())
@@ -492,15 +560,82 @@ impl ConfigManager {
         let mut service_config = serde_json::Map::new();
         if let Some(obj) = config.as_object() {
             for (k, v) in obj {
+                // 受保护段（users）不能由配置页覆写：跳过，随后从磁盘取回
+                if PROTECTED_CONFIG_SECTIONS.contains(&k.as_str()) {
+                    continue;
+                }
                 if service_keys.contains(k) {
                     service_config.insert(k.clone(), v.clone());
                 }
             }
         }
+        // 受保护段一律以磁盘上的值为准（不存在时用默认值），保证保存服务配置不会清空账号
+        let on_disk = Self::read_raw_service_config(&self.config_file);
+        for key in PROTECTED_CONFIG_SECTIONS {
+            let value = on_disk
+                .get(*key)
+                .cloned()
+                .unwrap_or_else(|| default_config()[*key].clone());
+            service_config.insert(key.to_string(), value);
+        }
         let result = serde_json::Value::Object(service_config);
         Self::write_json_file(&self.config_file, &result)?;
         *self.cache.write().unwrap() = Some(result);
         Ok(())
+    }
+
+    /// 原子地修改 `config.json` 的 `users` 段。
+    ///
+    /// 流程：加写锁 → 从磁盘重读原始内容 → 只改 `users` → 临时文件 + rename 写回。
+    /// 闭包返回 `Err` 时**不会写盘**（`users` 模块据此实现「校验失败则不落盘」）。
+    /// 写盘后缓存置空，下次读取重新与默认值合并。
+    pub fn update_users_section<F>(&self, f: F) -> anyhow::Result<serde_json::Value>
+    where
+        F: FnOnce(&mut serde_json::Value) -> anyhow::Result<()>,
+    {
+        let _guard = self.write_lock.lock().unwrap();
+        let mut raw = Self::read_raw_service_config(&self.config_file);
+        if !raw.get("users").map(|v| v.is_object()).unwrap_or(false) {
+            raw["users"] = default_users_section();
+        }
+        let section = raw.get_mut("users").expect("users 段已在上方补齐");
+        if !section.get("items").map(|v| v.is_array()).unwrap_or(false) {
+            section["items"] = serde_json::json!([]);
+        }
+        f(section)?;
+        Self::write_json_file(&self.config_file, &raw)?;
+        *self.cache.write().unwrap() = None;
+        Ok(raw["users"].clone())
+    }
+
+    /// 原子地删除 `config.json` 的某个顶层键，返回被删除的值。
+    ///
+    /// 用于旧格式的一次性迁移（如 `permissions`）：先取值建用户，再把这个键从磁盘移除，
+    /// 避免下次启动重复迁移。
+    pub fn take_config_key(&self, key: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        let _guard = self.write_lock.lock().unwrap();
+        let mut raw = Self::read_raw_service_config(&self.config_file);
+        let removed = raw.as_object_mut().and_then(|obj| obj.remove(key));
+        let Some(removed) = removed else {
+            return Ok(None);
+        };
+        Self::write_json_file(&self.config_file, &raw)?;
+        *self.cache.write().unwrap() = None;
+        Ok(Some(removed))
+    }
+
+    /// `users` 段的只读摘要（供 `/assist/api/config` 返回，避免暴露密码哈希）
+    pub fn users_summary(&self) -> serde_json::Value {
+        let config = self.load_config();
+        let users = &config["users"];
+        let items = users["items"].as_array();
+        serde_json::json!({
+            "count": items.map(|a| a.len()).unwrap_or(0),
+            "pending": items
+                .map(|a| a.iter().filter(|u| u["status"] == "pending").count())
+                .unwrap_or(0),
+            "allow_registration": users["allow_registration"].as_bool().unwrap_or(true),
+        })
     }
 
     pub fn reload_config(&self) -> serde_json::Value {
@@ -517,6 +652,7 @@ impl ConfigManager {
     /// 更新系统配置（仅允许修改部分字段）。
     /// 写入文件时从磁盘重新读取以保留文件的 key 顺序。
     pub fn update_system_config(&self, config: &serde_json::Value) -> anyhow::Result<()> {
+        let _guard = self.write_lock.lock().unwrap();
         // 从磁盘读取原始 JSON，保留文件中 key 的顺序
         let file_content = fs::read_to_string(&self.system_file).unwrap_or_default();
         let current = if file_content.is_empty() {
@@ -700,5 +836,143 @@ mod tests {
         assert_eq!(merged["llm"]["models"][0]["protocol"], "ollama");
         assert_eq!(merged["llm_extract"]["model"], "");
         assert_eq!(merged["vector_dbs"][0]["embedding"]["model"], "nomic-embed-text");
+    }
+
+    // ── users 段：写入隔离、原子写、迁移归一化 ──────────────
+
+    fn temp_cm() -> (tempfile::TempDir, ConfigManager) {
+        let dir = tempfile::tempdir().unwrap();
+        let cm = ConfigManager::for_tests(
+            dir.path().join("config.json"),
+            dir.path().join("system.json"),
+        );
+        (dir, cm)
+    }
+
+    #[test]
+    fn default_config_has_users_section() {
+        let d = defaults();
+        assert!(d["users"].is_object());
+        assert_eq!(d["users"]["version"], 1);
+        assert_eq!(d["users"]["session_ttl_hours"], 168);
+        assert_eq!(d["users"]["items"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn update_users_section_only_touches_users() {
+        let (_dir, cm) = temp_cm();
+        cm.save_config(&serde_json::json!({"base_url": "http://keep.test/"}))
+            .unwrap();
+
+        cm.update_users_section(|users| {
+            users["items"] = serde_json::json!([{"id": "u_1", "username": "alice"}]);
+            Ok(())
+        })
+        .unwrap();
+
+        let cfg = cm.get_service_config();
+        assert_eq!(cfg["base_url"], "http://keep.test/", "其他段不应被改");
+        assert_eq!(cfg["users"]["items"][0]["username"], "alice");
+        // 未手写的标志回退默认值
+        assert_eq!(cfg["users"]["version"], 1);
+        assert_eq!(cfg["users"]["allow_registration"], true);
+    }
+
+    #[test]
+    fn update_users_section_skips_write_on_error() {
+        let (dir, cm) = temp_cm();
+        cm.update_users_section(|users| {
+            users["items"] = serde_json::json!([{"id": "u_1", "username": "alice"}]);
+            Ok(())
+        })
+        .unwrap();
+        let before = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+
+        let err = cm.update_users_section(|users| {
+            users["items"] = serde_json::json!([]);
+            anyhow::bail!("拒绝写入")
+        });
+        assert!(err.is_err());
+        let after = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+        assert_eq!(before, after, "闭包报错时不得写盘");
+    }
+
+    #[test]
+    fn save_config_cannot_overwrite_users() {
+        let (_dir, cm) = temp_cm();
+        cm.update_users_section(|users| {
+            users["items"] = serde_json::json!([{"id": "u_1", "username": "alice", "role": "admin"}]);
+            Ok(())
+        })
+        .unwrap();
+
+        // 配置页如果回传一个伪造的 users 段，必须被忽略
+        cm.save_config(&serde_json::json!({
+            "base_url": "http://x.test/",
+            "users": {"items": [{"id": "u_evil", "username": "evil", "role": "admin"}]}
+        }))
+        .unwrap();
+
+        cm.reload_config();
+        let cfg = cm.get_service_config();
+        assert_eq!(cfg["users"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(cfg["users"]["items"][0]["username"], "alice");
+        assert_eq!(cfg["base_url"], "http://x.test/");
+    }
+
+    #[test]
+    fn write_json_file_leaves_no_temp_files() {
+        let (dir, cm) = temp_cm();
+        cm.save_config(&serde_json::json!({"base_url": "http://a.test/"}))
+            .unwrap();
+        cm.update_users_section(|users| {
+            users["version"] = serde_json::json!(2);
+            Ok(())
+        })
+        .unwrap();
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "不应残留临时文件: {:?}", leftovers);
+        assert!(dir.path().join("config.json").exists());
+    }
+
+    #[test]
+    fn migration_normalizes_users_section() {
+        // users 被写成字符串 → 回退默认段
+        let raw = migrate_legacy_service_config(serde_json::json!({"users": "oops"}));
+        assert_eq!(raw["users"], default_users_section());
+
+        // users.items 不是数组 → 补成空数组，其余字段保留
+        let raw = migrate_legacy_service_config(serde_json::json!({
+            "users": {"version": 2, "items": {"bad": true}}
+        }));
+        assert_eq!(raw["users"]["version"], 2);
+        assert_eq!(raw["users"]["items"], serde_json::json!([]));
+
+        // 缺 users 段 → 补默认值（幂等）
+        let once = migrate_legacy_service_config(serde_json::json!({}));
+        assert_eq!(once["users"], default_users_section());
+        assert_eq!(migrate_legacy_service_config(once.clone()), once);
+    }
+
+    #[test]
+    fn users_summary_counts_and_pending() {
+        let (_dir, cm) = temp_cm();
+        cm.update_users_section(|users| {
+            users["items"] = serde_json::json!([
+                {"id": "u_1", "username": "a", "status": "active"},
+                {"id": "u_2", "username": "b", "status": "pending"}
+            ]);
+            Ok(())
+        })
+        .unwrap();
+        let summary = cm.users_summary();
+        assert_eq!(summary["count"], 2);
+        assert_eq!(summary["pending"], 1);
+        assert_eq!(summary["allow_registration"], true);
     }
 }

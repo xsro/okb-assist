@@ -2,6 +2,36 @@
   "active_mineru": "官方标准（需要token）",
   "alias_expiration_hours": 1,
   "base_url": "http://127.0.0.1:5001/",
+  "llm": {
+    "models": [
+      {
+        "key": "***",
+        "model": "qwen3.5:9b",
+        "name": "default",
+        "protocol": "ollama",
+        "url": "http://127.0.0.1:11434"
+      },
+      {
+        "key": "!cat ./data/tokens/model-dot_ai",
+        "model": "dots3-note-prev",
+        "name": "dots",
+        "protocol": "openai",
+        "tool_mode": "auto",
+        "url": "https://note3-prev-api.askdiandian.com/v1"
+      }
+    ]
+  },
+  "llm_extract": {
+    "from": "",
+    "key": "",
+    "max_input_chars": 6000,
+    "max_tokens": 2048,
+    "model": "",
+    "overwrite": true,
+    "prompt": "",
+    "protocol": "",
+    "url": ""
+  },
   "mineru": [
     {
       "max_tasks": 3,
@@ -31,50 +61,70 @@
       "url": "https://www.datalab.to"
     }
   ],
-  "llm": {
-    "models": [
+  "users": {
+    "allow_registration": true,
+    "items": [
       {
-        "name": "default",
-        "key": "***",
-        "model": "qwen3.5:9b",
-        "protocol": "ollama",
-        "url": "http://127.0.0.1:11434"
+        "api_tokens": [],
+        "created_at": "2026-10-31T13:41:02.135211+00:00",
+        "display_name": "旧 token 迁移",
+        "failed_logins": 0,
+        "id": "u_926aa3cef1a3aecb",
+        "last_login_at": null,
+        "locked_until": null,
+        "mcp": true,
+        "must_set_password": true,
+        "role": "view-upload",
+        "status": "active",
+        "updated_at": "2026-10-31T13:41:59.006996+00:00",
+        "username": "legacy-1cf78f"
       },
       {
-        "name": "dots",
-        "protocol": "openai",
-        "url": "https://note3-prev-api.askdiandian.com/v1",
-        "key": "!cat ./data/tokens/model-dot_ai",
-        "model": "dots3-note-prev",
-        "tool_mode": "auto"
+        "api_tokens": [],
+        "created_at": "2026-10-31T13:41:28.206213+00:00",
+        "display_name": "管理员",
+        "failed_logins": 0,
+        "id": "u_fead56d451105e19",
+        "last_login_at": null,
+        "locked_until": null,
+        "mcp": true,
+        "must_set_password": false,
+        "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$BbwQQR+EN6/3TQ7SksNJZA$4NpA5bGaKs3MjuX6bc6zoJ23s8qA8FjVBFYsiReqRgE",
+        "role": "admin",
+        "status": "active",
+        "updated_at": "2026-10-31T13:41:28.206213+00:00",
+        "username": "admin"
+      },
+      {
+        "api_tokens": [],
+        "created_at": "2026-10-31T13:42:46.257818+00:00",
+        "display_name": "",
+        "failed_logins": 0,
+        "id": "u_14b1b73c872c5de7",
+        "last_login_at": null,
+        "locked_until": null,
+        "mcp": false,
+        "must_set_password": false,
+        "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$O5bpccUmwigW1NOEK2cquw$pavzRcTj1uISzYQnStuEIgD4F9Uen49AdLWajo4LbPM",
+        "role": "view-upload",
+        "status": "active",
+        "updated_at": "2026-10-31T13:42:46.257818+00:00",
+        "username": "user"
       }
-    ]
-  },
-  "llm_extract": {
-    "from": "",
-    "protocol": "",
-    "url": "",
-    "key": "",
-    "model": "",
-    "prompt": "",
-    "max_input_chars": 6000,
-    "max_tokens": 2048,
-    "overwrite": true
-  },
-  "permissions": {
-    "60b8be6583ac41abb3af63e01151bd86": {
-      "access":"view-upload",
-      "mcp":true
-    }
+    ],
+    "registration_role": "view-only",
+    "require_approval": true,
+    "session_ttl_hours": 168,
+    "version": 1
   },
   "vector_dbs": [
     {
       "collection": "documents",
       "embedding": {
-        "protocol": "ollama",
-        "url": "http://127.0.0.1:11434",
         "key": "",
-        "model": "nomic-embed-text"
+        "model": "nomic-embed-text",
+        "protocol": "ollama",
+        "url": "http://127.0.0.1:11434"
       },
       "enabled": true,
       "id": "default",

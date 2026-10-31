@@ -27,6 +27,8 @@ mod routers;
 mod logger;
 mod mcp_server;
 mod auth;
+mod session;
+mod users;
 
 use config::Settings;
 use config_manager::ConfigManager;
@@ -77,6 +79,14 @@ struct Args {
     /// system.json 文件路径（config.json 路径由此文件中的 config_path 字段确定）
     #[arg(long, short = 's', default_value = "system.json")]
     system_path: String,
+
+    /// 重置指定用户的密码后退出（忘记管理员密码时的兜底手段）
+    #[arg(long = "reset-password", value_name = "USERNAME")]
+    reset_password: Option<String>,
+
+    /// 配合 --reset-password 使用的新密码（省略则从标准输入读取）
+    #[arg(long = "new-password", value_name = "PASSWORD")]
+    new_password: Option<String>,
 }
 
 fn print_version() {
@@ -138,6 +148,57 @@ async fn main() -> anyhow::Result<()> {
     let settings = Arc::new(Settings::new(config_manager.clone()));
     settings::init_settings(settings.clone());
 
+    // 用户 / 会话状态（用户持久化在 config.json 的 users 段，会话在内存）
+    let user_store = Arc::new(users::UserStore::new(config_manager.clone()));
+    // 一次性迁移旧的 config.json.permissions → 无凭据占位用户（方案 B：旧 token 全部失效）
+    user_store.migrate_legacy_permissions();
+    // 首次启动引导：无管理员时，尝试把 system.json.token 接管为 admin 的引导凭证
+    auth::ensure_bootstrap(&user_store, &settings);
+    // CLI 兜底：重置密码后退出（不启动服务）
+    if let Some(username) = args.reset_password.clone() {
+        let password = match args.new_password.clone() {
+            Some(p) if !p.is_empty() => p,
+            _ => {
+                println!(
+                    "请输入 {} 的新密码（至少 {} 位，输入可见）：",
+                    username,
+                    users::MIN_PASSWORD_LEN
+                );
+                let mut buf = String::new();
+                std::io::stdin().read_line(&mut buf)?;
+                buf.trim().to_string()
+            }
+        };
+        match user_store.find_by_username(&username) {
+            Some(user) => match user_store.set_password(&user.id, &password) {
+                Ok(_) => {
+                    println!(
+                        "已重置用户 {} 的密码（引导 token 同时失效，历史会话在服务重启后清空）",
+                        user.username
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("重置失败：{}", e);
+                    std::process::exit(1);
+                }
+            },
+            None => {
+                eprintln!("用户不存在：{}", username);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let session_ttl = user_store.section().session_ttl_hours;
+    let session_store = Arc::new(session::SessionStore::new(session_ttl));
+    tracing::info!(
+        users = user_store.user_count(),
+        initialized = auth::is_initialized(&user_store),
+        session_ttl_hours = session_store.ttl_hours(),
+        "用户体系就绪"
+    );
+
     // 初始化数据库
     let db = Database::new(&settings.database_url()).await?;
     db.init().await?;
@@ -145,7 +206,13 @@ async fn main() -> anyhow::Result<()> {
     let db_arc = Arc::new(db);
 
     // 构建应用
-    let app = create_app(db_arc.clone(), config_manager.clone(), settings.clone());
+    let app = create_app(
+        db_arc.clone(),
+        config_manager.clone(),
+        settings.clone(),
+        user_store,
+        session_store,
+    );
 
     let addr = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -164,6 +231,8 @@ fn create_app(
     db: Arc<Database>,
     config_manager: Arc<ConfigManager>,
     settings: Arc<Settings>,
+    user_store: Arc<users::UserStore>,
+    session_store: Arc<session::SessionStore>,
 ) -> axum::Router<()> {
     let cors = CorsLayer::new()
         .allow_origin([
@@ -195,6 +264,8 @@ fn create_app(
         .layer(Extension(config_manager))
         .layer(Extension(settings.clone()))
         .layer(Extension(db.clone()))
+        .layer(Extension(user_store))
+        .layer(Extension(session_store))
         .layer(middleware::from_fn(error_log_middleware))
         .layer(middleware::from_fn(token_middleware));
 
@@ -205,9 +276,10 @@ fn create_app(
         .merge(routers::config::router())
         .merge(routers::chat::router())
         .merge(routers::openapi::router())
+        .merge(routers::auth::router())
+        .merge(routers::users::router())
         .route("/assist/mcp/stream", post(mcp_server::mcp_stream_handler).options(mcp_server::mcp_options_handler))
         .route("/assist/file/:filename", get(serve_file_alias))
-        .route("/assist/api/auth/check", get(auth_check_handler))
         .route("/", get(root_redirect))
         .nest_service("/assist/uploads", tower_http::services::ServeDir::new(settings.uploads_folder()))
         .layer(middleware);
@@ -313,14 +385,38 @@ async fn error_log_middleware(req: axum::extract::Request, next: Next) -> Respon
     axum::response::Response::from_parts(parts, axum::body::Body::from(body_bytes))
 }
 
-/// Token 鉴权中间件。
+/// 无需凭证即可访问的认证端点（`/assist/api/auth/*`）
+const PUBLIC_AUTH_PATHS: &[&str] = &[
+    "/assist/api/auth/status",
+    "/assist/api/auth/check",
+    "/assist/api/auth/login",
+    "/assist/api/auth/register",
+    "/assist/api/auth/bootstrap",
+];
+
+/// 系统尚未初始化（还没有任何管理员）时唯一允许访问的端点
+const UNINITIALIZED_ALLOWED_PATHS: &[&str] = &[
+    "/assist/api/auth/status",
+    "/assist/api/auth/check",
+    "/assist/api/auth/bootstrap",
+];
+
+/// 鉴权中间件（仅保护 `/assist/api/*`）。
 ///
-/// 仅保护 `/assist/api/*`。
-/// - 来自 192.168.1.0/24 局域网的请求免校验；
-/// - 通过 `X-Token` 头或 `token` 查询参数校验；
-/// - `/assist/api/documents/` 下含 `/image/` 的图片 URL 放行；
-/// - 匹配角色：admin(system.json) → view-only/view-upload(config.json)
-/// - 将匹配的角色注入 Request extensions
+/// 判定顺序：
+/// 1. `/image/` 图片 URL 放行（免 token，注入 `ViewOnly` 角色）；
+/// 2. **未初始化门禁**：还没有 active admin 时，除 `status` / `check` / `bootstrap`
+///    外一律 401（避免新装实例裸奔）；
+/// 3. 公开的认证端点（`status` / `check` / `login` / `register` / `bootstrap`）放行；
+/// 4. 受信任子网：仅在 `system.json` 的 `trusted_subnet_enabled = true` 时生效，
+///    注入「本地用户」主体（角色取 `trusted_subnet_role`，默认 admin）；
+/// 5. 凭证解析（`auth::resolve_principal`）：服务端会话 `sess_...` → 用户 API token；
+/// 6. 未命中 → 401。
+///
+/// 命中后向 request extensions 注入三样东西：
+/// - `auth::Principal`：用户身份（新代码用它取 `user_id` / `username` / `mcp`）；
+/// - `auth::Role`：兼容既有 `Extension<Role>` 处理器；
+/// - `auth::OwnerKey`：会话历史的归属标识（`u:<user_id>`，免鉴权为 `local`）。
 async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
 
@@ -329,8 +425,7 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
         return next.run(req).await;
     }
 
-    // 会话归属：默认按免鉴权处理，拿到有效 token 后再覆盖为 token 派生值。
-    // 该信息供「会话历史」按人/角色归属使用，不参与鉴权判定。
+    // 会话归属：默认按免鉴权处理，拿到有效凭证后再覆盖为用户维度。
     req.extensions_mut().insert(auth::OwnerKey::local());
 
     // 图片 URL 放行（免 token，但注入 ViewOnly 角色以便后续处理）
@@ -339,136 +434,66 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
         return next.run(req).await;
     }
 
-    // auth/check 放行（无需 token 即可获取角色信息）
-    if path == "/assist/api/auth/check" || path == "/assist/api/auth/check/" {
-        return next.run(req).await;
-    }
+    let normalized = path.trim_end_matches('/').to_string();
 
     let settings = req.extensions().get::<Arc<Settings>>().cloned();
-    if let Some(settings) = settings {
-        let admin_token = settings.token();
+    let user_store = req.extensions().get::<Arc<users::UserStore>>().cloned();
+    let sessions = req.extensions().get::<Arc<session::SessionStore>>().cloned();
 
-        // 受信任子网白名单免校验
-        let client_ip = req
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.split(',').next().unwrap_or("").trim().to_string());
-        if let Some(ref ip) = client_ip {
-            let subnets = settings.trusted_subnets();
-            if !subnets.is_empty() && crate::utils::ip_matches_subnets(ip, &subnets) {
-                req.extensions_mut().insert(auth::Role::Admin);
-                return next.run(req).await;
-            }
-        }
-
-        // 读取请求 token
-        let provided = req
-            .headers()
-            .get("x-token")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .or_else(|| {
-                req.uri().query().and_then(|q| {
-                    q.split('&').find_map(|kv| {
-                        let (k, v) = kv.split_once('=')?;
-                        if k == "token" {
-                            Some(v.to_string())
-                        } else {
-                            None
-                        }
-                    })
-                })
-            });
-
-        if let Some(provided) = provided {
-            // 匹配角色：admin → view-only → view-upload
-            let perm_tokens = settings.permission_tokens();
-            if let Some(perm) = auth::match_role(&provided, &admin_token, &perm_tokens) {
-                req.extensions_mut().insert(auth::OwnerKey::from_token(&provided));
-                req.extensions_mut().insert(perm.role);
-                return next.run(req).await;
-            }
-        }
-
-        return (
-            http::StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"detail": "未授权：无效或缺失的 token"})),
-        )
-            .into_response();
-    }
-
-    next.run(req).await
-}
-
-/// 认证探测端点：接收 X-Token，返回角色和权限信息。
-/// 此端点在 token_middleware 之前注册，handler 内手动校验。
-async fn auth_check_handler(
-    axum::extract::Extension(settings): axum::extract::Extension<Arc<Settings>>,
-    req: axum::extract::Request,
-) -> impl axum::response::IntoResponse {
-    let provided = req
-        .headers()
-        .get("x-token")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            req.uri().query().and_then(|q| {
-                q.split('&').find_map(|kv| {
-                    let (k, v) = kv.split_once('=')?;
-                    if k == "token" {
-                        Some(v.to_string())
-                    } else {
-                        None
-                    }
-                })
-            })
-        });
-
-    let (role, mcp, is_valid) = match &provided {
-        Some(token) => {
-            let admin_token = settings.token();
-            let perm_tokens = settings.permission_tokens();
-            match auth::match_role(token, &admin_token, &perm_tokens) {
-                Some(perm) => (perm.role.as_str().to_string(), perm.mcp, true),
-                None => ("".to_string(), false, false),
-            }
-        }
-        None => ("".to_string(), false, false),
+    let (Some(settings), Some(user_store), Some(sessions)) = (settings, user_store, sessions) else {
+        // 状态未注入（理论上不会发生）：退化为放行，保持旧行为
+        return next.run(req).await;
     };
 
-    if !is_valid {
+    // 未初始化门禁：只放行 status / check / bootstrap
+    if !auth::is_initialized(&user_store) {
+        if UNINITIALIZED_ALLOWED_PATHS.contains(&normalized.as_str()) {
+            return next.run(req).await;
+        }
         return (
             http::StatusCode::UNAUTHORIZED,
             axum::Json(serde_json::json!({
-                "role": null,
-                "valid": false,
-                "detail": "无效的 token"
+                "detail": "系统尚未初始化：请先创建管理员账号",
+                "code": "not_initialized",
             })),
         )
             .into_response();
     }
 
-    let permissions = serde_json::json!({
-        "view_document": true,
-        "view_pdf": role == "admin" || role == "view-only",
-        "view_markdown": role == "admin" || role == "view-only" || role == "view-upload",
-        "edit": role == "admin",
-        "delete": role == "admin",
-        "admin": role == "admin",
-        "config": role == "admin",
-        "upload": role == "admin" || role == "view-upload",
-        "pipeline": role == "admin",
-        "mcp": mcp,
-    });
+    // 公开的认证端点
+    if PUBLIC_AUTH_PATHS.contains(&normalized.as_str()) {
+        return next.run(req).await;
+    }
+
+    // 受信任子网（默认关闭；即使配置了网段也需显式开启）
+    if settings.trusted_subnet_enabled() {
+        let subnets = settings.trusted_subnets();
+        let client_ip = extract_client_ip(&req);
+        if !subnets.is_empty() && crate::utils::ip_matches_subnets(&client_ip, &subnets) {
+            let role = settings.trusted_subnet_role();
+            tracing::debug!(client_ip = %client_ip, role = %role.as_str(), "受信任子网免鉴权");
+            req.extensions_mut().insert(auth::Principal::local(role.clone(), true));
+            req.extensions_mut().insert(auth::OwnerKey::local());
+            req.extensions_mut().insert(role);
+            return next.run(req).await;
+        }
+    }
+
+    // 凭证：会话 token → 用户 API token
+    if let Some(token) = auth::extract_token(&req) {
+        if let Some(principal) = auth::resolve_principal(&token, &user_store, &sessions) {
+            let owner = principal.owner_key();
+            let role = principal.role.clone();
+            req.extensions_mut().insert(owner);
+            req.extensions_mut().insert(role);
+            req.extensions_mut().insert(principal);
+            return next.run(req).await;
+        }
+    }
 
     (
-        http::StatusCode::OK,
-        axum::Json(serde_json::json!({
-            "role": role,
-            "valid": true,
-            "permissions": permissions
-        })),
+        http::StatusCode::UNAUTHORIZED,
+        axum::Json(serde_json::json!({"detail": "未授权：无效或缺失的 token"})),
     )
         .into_response()
 }

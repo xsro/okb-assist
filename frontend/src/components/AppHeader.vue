@@ -11,39 +11,37 @@
             <span></span>
           </span>
         </button>
-        <button v-if="!tokenStore.isAuthenticated" class="btn btn-sm desktop-token" @click="tokenStore.promptForToken">
-          设置 Token
-        </button>
-        <div v-else class="token-status-wrap desktop-token" @click="tokenStore.promptForToken">
+        <router-link v-if="tokenStore.isAuthenticated" to="/assist/account" class="account-link desktop-token">
+          账户
+        </router-link>
+        <div v-if="tokenStore.isAuthenticated" class="token-status-wrap desktop-token" @click="tokenStore.promptForToken">
           <div class="token-status">
-            <span class="token-status-text">已连接</span>
-            <span class="token-status-role">{{ roleName }}</span>
+            <span class="token-status-text">{{ tokenStore.displayName || '已登录' }}</span>
+            <span class="token-status-role">{{ tokenStore.roleLabel }}</span>
           </div>
           <span class="token-arrow">▾</span>
         </div>
+        <button v-else class="btn btn-sm desktop-token" @click="goLogin">登录</button>
       </div>
     </div>
   </header>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, inject, onMounted, onUnmounted } from 'vue'
+import { ref, inject, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { useTokenStore } from '@/stores/token'
 import AppNav from '@/components/AppNav.vue'
 
 const tokenStore = useTokenStore()
+const router = useRouter()
 const menuOpen = ref(false)
 
 const toggleMenu = inject('toggleMobileMenu') as (() => void) | undefined
 
-const roleName = computed(() => {
-  const labels: Record<string, string> = {
-    'admin': '管理员',
-    'view-only': '只读用户',
-    'view-upload': '查看+上传'
-  }
-  return labels[tokenStore.role || ''] || tokenStore.role || '未登录'
-})
+function goLogin() {
+  router.push({ path: '/assist/login' })
+}
 const closeMenu = inject('closeMobileMenu') as (() => void) | undefined
 
 function handleMenuClick() {
