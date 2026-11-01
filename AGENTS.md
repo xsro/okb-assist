@@ -542,8 +542,8 @@ cargo build --release
 | `/assist/admin` | `AdminView.vue` | 管理面板（含监控、统计） | admin |
 | `/assist/duplicates` | `DuplicatesView.vue` | 去重 | admin |
 | `/assist/point` | `PointView.vue` | 向量库管理 | admin |
-| `/assist/mcp-setup` | `McpSetupView.vue` | MCP 配置引导 | admin |
-| `/assist/tools` | `ToolsView.vue` | 工具面板 | 全部 |
+| `/assist/tools` | `ToolsView.vue` | 工具面板（全文/语义搜索、公式编辑、MCP 配置；支持 `?tab=mcp` 直达） | 全部 |
+| `/assist/mcp-setup` | —（重定向） | 旧路径，重定向到 `/assist/tools?tab=mcp` | 全部 |
 | `/assist/chat` | `ChatView.vue` | 简易问答（LLM 模型池 + Markdown/KaTeX 渲染） | 全部 |
 | `/assist/logs` | `LogViewer.vue` | 日志查看 | admin |
 

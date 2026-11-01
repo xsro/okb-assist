@@ -151,7 +151,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { issueMyToken, listMyTokens, revokeMyToken } from '@/api/auth'
 import { useTokenStore } from '@/stores/token'
 import { useToast } from '@/composables/useToast'
@@ -159,6 +159,7 @@ import type { ApiTokenMeta, TokenScope } from '@/types/auth'
 
 const store = useTokenStore()
 const router = useRouter()
+const route = useRoute()
 const toast = useToast()
 
 /** 与后端 `users::MIN_TOKEN_LEN` 保持一致 */
@@ -182,6 +183,10 @@ const viaLabel = computed(() => {
 
 onMounted(async () => {
   await store.refreshMe()
+  // 支持从 MCP 配置页直达：/assist/account?scope=mcp 时预选「MCP」权限
+  if (route.query.scope === 'mcp' && store.user?.mcp) {
+    newToken.scope = 'mcp'
+  }
   await loadTokens()
 })
 

@@ -158,7 +158,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { grepSearch, semanticSearch } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
@@ -176,6 +177,18 @@ const tabs = [
   { key: 'mcp', label: 'MCP 配置' }
 ]
 const activeTab = ref('grep')
+
+// 支持 ?tab=mcp 直达（旧的 /assist/mcp-setup 路径重定向到这里）
+const route = useRoute()
+const TAB_KEYS = tabs.map(t => t.key)
+watch(
+  () => route.query.tab,
+  (tab) => {
+    const key = typeof tab === 'string' ? tab : ''
+    if (TAB_KEYS.includes(key)) activeTab.value = key
+  },
+  { immediate: true }
+)
 
 const grepPattern = ref('')
 const grepResults = ref<SearchResult[] | null>(null)

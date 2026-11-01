@@ -24,6 +24,11 @@ const routes = [
     redirect: (to) => ({ path: '/assist/config', query: { ...to.query, tab: 'users' } })
   },
   {
+    // MCP 配置引导已并入「工具」页的 MCP 配置 tab；保留旧路径做重定向（书签/文档链接兼容）
+    path: '/assist/mcp-setup',
+    redirect: { path: '/assist/tools', query: { tab: 'mcp' } }
+  },
+  {
     path: '/assist',
     name: 'home',
     component: () => import('@/views/HomeView.vue'),
@@ -106,12 +111,6 @@ const routes = [
     name: 'point',
     component: () => import('@/views/PointView.vue'),
     meta: { title: '向量库管理', requiresAdmin: true }
-  },
-  {
-    path: '/assist/mcp-setup',
-    name: 'mcpSetup',
-    component: () => import('@/views/McpSetupView.vue'),
-    meta: { title: 'MCP 配置', requiresAdmin: true }
   },
   {
     path: '/assist/logs',
