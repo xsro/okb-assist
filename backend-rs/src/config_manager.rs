@@ -173,6 +173,8 @@ pub fn default_users_section() -> serde_json::Value {
         "allow_registration": true,
         "require_approval": true,
         "registration_role": "view-only",
+        // 自助注册用户默认是否具备 MCP 权限（默认开启）
+        "registration_mcp": true,
         "session_ttl_hours": 168,
         "items": []
     })

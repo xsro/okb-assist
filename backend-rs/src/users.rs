@@ -329,6 +329,9 @@ pub struct UsersSection {
     /// 自助注册用户的默认角色（不允许 admin）
     #[serde(default = "default_registration_role")]
     pub registration_role: String,
+    /// 自助注册用户默认是否具备 MCP 权限
+    #[serde(default = "default_true")]
+    pub registration_mcp: bool,
     /// 会话有效期（小时），滑动续期
     #[serde(default = "default_session_ttl_hours")]
     pub session_ttl_hours: i64,
@@ -359,6 +362,7 @@ impl Default for UsersSection {
             allow_registration: true,
             require_approval: true,
             registration_role: default_registration_role(),
+            registration_mcp: true,
             session_ttl_hours: default_session_ttl_hours(),
             items: Vec::new(),
         }
@@ -965,6 +969,7 @@ impl UserStore {
         allow_registration: Option<bool>,
         require_approval: Option<bool>,
         registration_role: Option<&str>,
+        registration_mcp: Option<bool>,
         session_ttl_hours: Option<i64>,
     ) -> Result<UsersSection, UserError> {
         if let Some(role) = registration_role {
@@ -982,6 +987,9 @@ impl UserStore {
             }
             if let Some(v) = registration_role {
                 section.registration_role = v.trim().to_string();
+            }
+            if let Some(v) = registration_mcp {
+                section.registration_mcp = v;
             }
             if let Some(v) = session_ttl_hours {
                 section.session_ttl_hours = v.max(1);
@@ -1024,6 +1032,7 @@ mod tests {
         assert!(section.allow_registration);
         assert!(section.require_approval);
         assert_eq!(section.registration_role, "view-only");
+        assert!(section.registration_mcp);
         assert_eq!(section.session_ttl_hours, 168);
         assert!(section.items.is_empty());
         assert!(!store.is_initialized());
@@ -1298,15 +1307,16 @@ mod tests {
     fn update_settings_rejects_admin_registration_role() {
         let (_dir, store, _cm) = test_store();
         assert!(matches!(
-            store.update_settings(None, None, Some("admin"), None),
+            store.update_settings(None, None, Some("admin"), None, None),
             Err(UserError::InvalidRole)
         ));
         let section = store
-            .update_settings(Some(false), Some(false), Some("view-upload"), Some(24))
+            .update_settings(Some(false), Some(false), Some("view-upload"), Some(false), Some(24))
             .unwrap();
         assert!(!section.allow_registration);
         assert!(!section.require_approval);
         assert_eq!(section.registration_role, "view-upload");
+        assert!(!section.registration_mcp);
         assert_eq!(section.session_ttl_hours, 24);
     }
 

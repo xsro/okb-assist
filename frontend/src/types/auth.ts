@@ -41,6 +41,7 @@ export interface AuthStatus {
   allow_registration: boolean
   require_approval: boolean
   registration_role: Role
+  registration_mcp: boolean
   session_ttl_hours: number
   version: number
 }
@@ -75,6 +76,7 @@ export interface UsersSettings {
   allow_registration: boolean
   require_approval: boolean
   registration_role: Role
+  registration_mcp: boolean
   session_ttl_hours: number
 }
 

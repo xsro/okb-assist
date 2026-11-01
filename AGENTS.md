@@ -137,6 +137,7 @@ cargo build --release
     "allow_registration": true,
     "require_approval": true,
     "registration_role": "view-only",
+    "registration_mcp": true,
     "session_ttl_hours": 168,
     "items": [
       {
@@ -183,6 +184,7 @@ cargo build --release
   `token_middleware` 对 `Principal.api == false` 的令牌返回 401 `code: mcp_only_token`，
   `static_files::authorize` 同样要求 `p.api`。**会话 token（密码登录）不受限**：`api = true`，`mcp = 用户.mcp`。
 - **状态**：`pending`（待审核）/ `active` / `disabled`（禁用后会话与令牌立即失效）。
+- **自助注册默认权限**：角色取 `registration_role`（不允许 admin），MCP 权限取 `registration_mcp`（**默认 `true`**，即注册即具备 MCP 权限；管理员可在用户管理页关闭或逐个用户调整）。
 - **不变量**：至少保留一个 `active` 的 `admin`；最后一个管理员不能降级/禁用/删除（`UserError::LastAdmin` → 409）。
 - **登录防护**：连续失败 5 次后按 `30s * 2^n` 指数退避写 `locked_until`（上限 1h）；登录/注册各有内存滑动窗口限流；用户名不存在时跑一次等时 Argon2 校验（`users::verify_dummy`）防枚举。
 

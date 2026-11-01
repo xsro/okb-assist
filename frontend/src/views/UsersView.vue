@@ -115,6 +115,10 @@
             <option value="view-upload">查看+上传</option>
           </select>
         </div>
+        <label class="setting">
+          <input v-model="settings.registration_mcp" type="checkbox" />
+          <span>注册用户默认具备 MCP 权限</span>
+        </label>
         <div class="setting">
           <span>会话有效期（小时）</span>
           <input v-model.number="settings.session_ttl_hours" type="number" min="1" max="8760" />
@@ -293,6 +297,7 @@ const settings = reactive<UsersSettings>({
   allow_registration: true,
   require_approval: true,
   registration_role: 'view-only',
+  registration_mcp: true,
   session_ttl_hours: 168
 })
 const settingsBusy = ref(false)

@@ -202,6 +202,7 @@ async fn status(Extension(users): Extension<Arc<UserStore>>) -> Json<Value> {
         "allow_registration": section.allow_registration,
         "require_approval": section.require_approval,
         "registration_role": section.registration_role,
+        "registration_mcp": section.registration_mcp,
         "session_ttl_hours": section.session_ttl_hours,
         "version": section.version,
     }))
@@ -289,8 +290,8 @@ async fn register(
         display_name: body.display_name,
         role: section.registration_role.clone(),
         status: status.clone(),
-        // 新用户默认不给 MCP 权限（管理员可后续开启）
-        mcp: false,
+        // 新用户默认是否给 MCP 权限由 `users.registration_mcp` 控制（默认开启）
+        mcp: section.registration_mcp,
         must_set_password: false,
     });
 

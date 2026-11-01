@@ -111,6 +111,8 @@ struct UpdateSettingsBody {
     #[serde(default)]
     registration_role: Option<String>,
     #[serde(default)]
+    registration_mcp: Option<bool>,
+    #[serde(default)]
     session_ttl_hours: Option<i64>,
 }
 
@@ -294,6 +296,7 @@ async fn get_settings(
         "allow_registration": section.allow_registration,
         "require_approval": section.require_approval,
         "registration_role": section.registration_role,
+        "registration_mcp": section.registration_mcp,
         "session_ttl_hours": section.session_ttl_hours,
     }))
     .into_response()
@@ -313,6 +316,7 @@ async fn update_settings(
         body.allow_registration,
         body.require_approval,
         body.registration_role.as_deref(),
+        body.registration_mcp,
         body.session_ttl_hours,
     ) {
         Ok(section) => {
@@ -323,6 +327,7 @@ async fn update_settings(
                 allow_registration = section.allow_registration,
                 require_approval = section.require_approval,
                 registration_role = %section.registration_role,
+                registration_mcp = section.registration_mcp,
                 session_ttl_hours = section.session_ttl_hours,
                 "用户策略已更新"
             );
@@ -330,6 +335,7 @@ async fn update_settings(
                 "allow_registration": section.allow_registration,
                 "require_approval": section.require_approval,
                 "registration_role": section.registration_role,
+                "registration_mcp": section.registration_mcp,
                 "session_ttl_hours": section.session_ttl_hours,
             }))
             .into_response()
