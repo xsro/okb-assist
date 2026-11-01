@@ -11,6 +11,8 @@ export interface ApiTokenMeta {
   id: string
   label: string
   scope: TokenScope
+  /** 仅 MCP 令牌有值：令牌明文（API 令牌恒为 null；改版前的 MCP 令牌也不可恢复） */
+  token?: string | null
   created_at: string
   last_used_at: string | null
 }

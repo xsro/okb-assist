@@ -31,7 +31,7 @@
   </a>
   <a class="doc-card" href="#/mcp">
     <span class="doc-card__title">MCP 连接指南</span>
-    <span class="doc-card__desc">令牌类型、两种传输端点（Streamable HTTP / SSE）、各客户端配置</span>
+    <span class="doc-card__desc">令牌类型、唯一传输端点（Streamable HTTP）、各客户端配置</span>
   </a>
   <a class="doc-card" href="#/mcp-tools">
     <span class="doc-card__title">MCP 工具列表</span>

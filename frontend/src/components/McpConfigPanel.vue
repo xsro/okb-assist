@@ -25,16 +25,32 @@
         </span>
       </div>
       <div class="cred-actions">
-        <router-link class="btn btn-sm" :to="{ path: '/assist/account', query: { scope: 'mcp' } }">
-          去账户页签发 MCP 令牌
-        </router-link>
-        <span class="cred-hint">明文只在签发时显示一次，请自行保存</span>
+        <a class="btn btn-sm" :href="accountUrl">去账户页签发 MCP 令牌</a>
+        <span class="cred-hint">MCP 令牌明文可随时在账户页查看，无需当场保存</span>
       </div>
     </div>
 
-    <!-- 粘贴 MCP 令牌用于生成配置（不读取、不展示当前登录凭证） -->
+    <!-- 选择自己的 MCP 令牌（后端回呈明文）或手动粘贴 -->
     <div class="token-input">
-      <label for="mcp-token-input">粘贴你的 MCP 令牌</label>
+      <label for="mcp-token-select">我的 MCP 令牌</label>
+      <div class="token-input-row">
+        <select id="mcp-token-select" v-model="selectedTokenId" @change="onSelectToken">
+          <option value="">── 手动粘贴下面的令牌 ──</option>
+          <option v-for="t in usableTokens" :key="t.id" :value="t.id">
+            {{ t.label || '未命名' }} · {{ maskValue(t.token) }}
+          </option>
+        </select>
+        <a class="btn btn-sm btn-outline" :href="accountUrl">签发新的 MCP 令牌</a>
+      </div>
+      <p v-if="!usableTokens.length" class="hint hint-sm">
+        还没有可用的 MCP 令牌（或当前账号未开启 MCP 权限）。
+        <a :href="accountUrl">去账户页签发 MCP 令牌</a>。
+      </p>
+      <p v-if="legacyTokens.length" class="hint hint-sm warn-text">
+        有 {{ legacyTokens.length }} 个旧 MCP 令牌的明文不可恢复（签发时还没有该功能），请到账户页撤销后重新签发。
+      </p>
+
+      <label for="mcp-token-input">或手动粘贴令牌</label>
       <div class="token-input-row">
         <input
           id="mcp-token-input"
@@ -54,7 +70,7 @@
         在这台机器的浏览器里记住（存入 localStorage，公共电脑请勿勾选）
       </label>
       <p v-if="!mcpToken" class="hint hint-sm warn-text">
-        未填令牌：下方配置里留的是占位符 <code>{{ TOKEN_PLACEHOLDER }}</code>，粘贴后再复制才能直接使用。
+        未选定令牌：下方配置里留的是占位符 <code>{{ TOKEN_PLACEHOLDER }}</code>，选好或粘贴后再复制才能直接使用。
       </p>
     </div>
 
@@ -89,7 +105,7 @@
           <td class="token-cell">
             <code v-if="mcpToken" class="token-value">{{ maskedToken }}</code>
             <code v-else class="token-value muted-value">{{ TOKEN_PLACEHOLDER }}</code>
-            <span class="cred-note">{{ mcpToken ? '（你粘贴的 MCP 令牌）' : '（尚未粘贴）' }}</span>
+            <span class="cred-note">{{ mcpToken ? '（当前用于生成配置的 MCP 令牌）' : '（尚未选择/粘贴）' }}</span>
           </td>
         </tr>
       </table>
@@ -107,24 +123,49 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useToast } from '@/composables/useToast'
 import { useTokenStore } from '@/stores/token'
+import { listMyTokens } from '@/api/auth'
+import type { ApiTokenMeta } from '@/types/auth'
 
 const { showSuccess, showError } = useToast()
 const tokenStore = useTokenStore()
 
 const baseUrl = ref('')
 
-// 【重要】这里不再展示当前登录凭证（会话 token / API 令牌）的明文：
+// 【重要】页面只展示 **MCP 专属令牌**（`scope=mcp`），它们由后端回呈明文，可直接选进配置：
 // - `sess_…` 是整站登录态，抄进 MCP 客户端等于把账号搬运出去，且进程重启即失效；
-// - `scope=api` 的个人令牌在 MCP 上必然 401（`Principal.mcp = 用户.mcp && scope == mcp`），
-//   能出现在本页面的只可能是这两种凭证（MCP 专属令牌会被 `/auth/me` 拒绝，
-//   根本无法用它登录前端），所以旧展示既危险又不可用。
-// 现在只显示「凭证类型 + 是否具备 MCP 权限」，令牌改为用户自己粘贴。
+// - `scope=api` 的个人令牌在 MCP 上必然 401（`Principal.mcp = 用户.mcp && scope == mcp`）；
+// - `scope=mcp` 的令牌无法登录前端，只用于 MCP，所以它的明文在这里暴露面可控。
 const TOKEN_PLACEHOLDER = '<在此粘贴你的 MCP 令牌>'
 
-/** 用户粘贴的 MCP 令牌（**仅本页内存**，刷新即清空；勾选「记住」才落 localStorage） */
+/** 用户粘贴/选中的 MCP 令牌（**仅本页内存**，刷新即清空；勾选「记住」才落 localStorage） */
 const mcpToken = ref('')
 const remember = ref(false)
 const testing = ref(false)
+
+/** 账户页签发的 MCP 令牌（含明文，供下拉选择） */
+const mcpTokens = ref<ApiTokenMeta[]>([])
+const selectedTokenId = ref('')
+
+/** 明文可用的令牌（改版前签发的 MCP 令牌只有哈希，无法回呈） */
+const usableTokens = computed(() => mcpTokens.value.filter((t) => !!t.token))
+const legacyTokens = computed(() => mcpTokens.value.filter((t) => !t.token))
+
+/** 账户页直达地址（带 scope=mcp 预选） */
+const accountUrl = computed(() => {
+  const origin = baseUrl.value || window.location.origin
+  return `${origin}/assist/account?scope=mcp`
+})
+
+function maskValue(v?: string | null): string {
+  if (!v) return ''
+  return v.length <= 4 ? '••••' : `••••${v.slice(-4)}`
+}
+
+/** 从下拉选中令牌 → 填入配置 */
+function onSelectToken() {
+  const picked = usableTokens.value.find((t) => t.id === selectedTokenId.value)
+  mcpToken.value = picked?.token || ''
+}
 
 /** 记住令牌的 localStorage 键（按用户隔离，避免多账号互相覆盖） */
 const rememberKey = computed(() => `okb_mcp_config_token:${tokenStore.user?.id || 'anon'}`)
@@ -173,8 +214,12 @@ function clearToken() {
   localStorage.removeItem(rememberKey.value)
 }
 
-// 勾选「记住」时保留令牌变更
+// 勾选「记住」时保留令牌变更；手动改动了粘贴框与所选令牌不一致时退回「手动粘贴」
 watch(mcpToken, (v) => {
+  if (selectedTokenId.value) {
+    const picked = usableTokens.value.find((t) => t.id === selectedTokenId.value)
+    if (!picked || (picked.token || '') !== v) selectedTokenId.value = ''
+  }
   if (!remember.value) return
   if (v) localStorage.setItem(rememberKey.value, v)
   else localStorage.removeItem(rememberKey.value)
@@ -269,11 +314,32 @@ async function load() {
   // 不需要走后端 API，直接使用当前页面 origin
   baseUrl.value = window.location.origin
 
+  await loadMcpTokens()
+
   // 只恢复用户主动勾选「记住」的 MCP 令牌（绝不回写登录凭证）
   const saved = localStorage.getItem(rememberKey.value)
   if (saved) {
     mcpToken.value = saved
     remember.value = true
+    const matched = usableTokens.value.find((t) => t.token === saved)
+    if (matched) selectedTokenId.value = matched.id
+    return
+  }
+  // 没有记住的令牌时，自动选中第一个可用的 MCP 令牌（明文由后端回呈）
+  const first = usableTokens.value[0]
+  if (first) {
+    selectedTokenId.value = first.id
+    mcpToken.value = first.token || ''
+  }
+}
+
+/** 拉取自己的 MCP 令牌（`GET /assist/api/auth/tokens`，MCP 条目带明文字段） */
+async function loadMcpTokens() {
+  try {
+    const res = await listMyTokens()
+    mcpTokens.value = (res.tokens || []).filter((t) => t.scope === 'mcp')
+  } catch {
+    mcpTokens.value = []
   }
 }
 
@@ -456,6 +522,18 @@ onMounted(() => {
   font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
   font-size: 12px;
 }
+.token-input-row select {
+  flex: 1;
+  min-width: 200px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--bg-card, #fff);
+}
+.token-input > label:not(:first-of-type) {
+  margin-top: 14px;
+}
 .remember-line {
   display: flex;
   gap: 6px;
@@ -620,6 +698,11 @@ onMounted(() => {
   }
 
   .token-input-row input {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .token-input-row select {
     min-width: 0;
     width: 100%;
   }

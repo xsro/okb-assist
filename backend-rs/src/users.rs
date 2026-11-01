@@ -4,7 +4,8 @@
 //! 唯一的读写入口：
 //!
 //! - 密码只存 **Argon2id PHC 哈希**（`$argon2id$v=19$m=19456,t=2,p=1$...`），永不回显；
-//! - 长期凭证（API / MCP token）只存 **sha256 哈希**，明文只在签发时返回一次；
+//! - 长期凭证的 `token_sha256` 始终是权威哈希；**MCP 令牌额外存一份明文**（`token` 字段），
+//!   以便账户页 / MCP 配置页随时回显，API 令牌仍只存哈希；
 //! - 所有写操作走 [`ConfigManager::update_users_section`]：加写锁 → 从磁盘重读 →
 //!   只改 `users` 段 → 临时文件 + rename 原子写，避免与 LLM/向量库配置保存互相覆盖；
 //! - 维护「至少一个 active admin」不变量，防止把系统锁死。
@@ -182,7 +183,9 @@ impl TokenScope {
 
 /// 用户的一条长期凭证（纯 API 或纯 MCP，二选一）。
 ///
-/// 明文 token 只在签发响应里出现一次，磁盘上只有 `token_sha256`。
+/// 鉴权始终只认 `token_sha256`；`scope = mcp` 的令牌**额外存一份明文**（`token`），
+/// 因为 MCP 客户端配置（工具页）需要随时回显，用户抄错/丢失后无法重来。
+/// `scope = api` 的令牌不存明文，明文只在签发响应里出现一次。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApiToken {
     pub id: String,
@@ -190,6 +193,9 @@ pub struct ApiToken {
     pub label: String,
     /// `sha256(明文 token)` 的小写 hex
     pub token_sha256: String,
+    /// **仅 `scope = mcp` 时存在**：令牌明文（API 令牌恒为 `None`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
     /// 权限作用域（api / mcp，互斥）
     #[serde(default)]
     pub scope: TokenScope,
@@ -199,12 +205,25 @@ pub struct ApiToken {
 }
 
 impl ApiToken {
-    /// 对外暴露的元数据（绝不含哈希）
+    /// 可回显的明文：**只有 MCP 令牌**返回，API 令牌永远 `None`。
+    ///
+    /// 历史数据（改为存明文之前签发的 MCP 令牌）没有该字段，调用方需按
+    /// `None` 处理（提示重新签发）。
+    pub fn plaintext(&self) -> Option<&str> {
+        if self.scope.allows_mcp() {
+            self.token.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// 对外暴露的元数据（绝不含哈希）；MCP 令牌附带明文字段 `token`
     pub fn to_public_json(&self) -> Value {
         json!({
             "id": self.id,
             "label": self.label,
             "scope": self.scope.as_str(),
+            "token": self.plaintext(),
             "created_at": self.created_at,
             "last_used_at": self.last_used_at,
         })
@@ -836,7 +855,8 @@ impl UserStore {
 
     /// 签发 API / MCP token（明文自动生成，`okb_<32B base64url>`）。
     ///
-    /// 返回 `(明文 token, token 元数据)`，**明文只在此刻返回一次**，磁盘上只有 sha256。
+    /// 返回 `(明文 token, token 元数据)`。`scope = mcp` 的令牌明文会一并落盘
+    /// （可随时回显），`scope = api` 的令牌只落 sha256、明文仅此一次。
     pub fn issue_api_token(
         &self,
         id: &str,
@@ -848,7 +868,7 @@ impl UserStore {
         Ok((plain, token))
     }
 
-    /// 把一把**已存在的明文 token** 登记到用户名下（只存 sha256）。
+    /// 把一把**已存在的明文 token** 登记到用户名下（存 sha256；`scope = mcp` 时同时存明文）。
     ///
     /// 用于「用户自定义令牌」（如把外部系统已有的 token 收敛为个人凭证）。
     /// 校验：至少 [`MIN_TOKEN_LEN`] 位、仅可见 ASCII（不含空格）、全局不重复。
@@ -866,6 +886,12 @@ impl UserStore {
             id: format!("at_{}", &sha[..12]),
             label: label.trim().to_string(),
             token_sha256: sha.clone(),
+            // MCP 令牌需要随时回显到 MCP 客户端配置里；API 令牌不存明文
+            token: if scope.allows_mcp() {
+                Some(plaintext.to_string())
+            } else {
+                None
+            },
             scope,
             created_at: now_rfc3339(),
             last_used_at: None,
@@ -1176,13 +1202,22 @@ mod tests {
             })
             .unwrap();
 
+        // MCP 令牌：sha256 与明文同时落盘（供账户页 / MCP 配置页回显）
         let (plain, token) = store.issue_api_token(&u.id, "zotero", TokenScope::Mcp).unwrap();
         assert!(plain.starts_with(API_TOKEN_PREFIX));
         assert!(token.id.starts_with("at_"));
 
         let raw = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
-        assert!(!raw.contains(&plain), "明文 token 不得落盘");
         assert!(raw.contains(&token.token_sha256));
+        assert!(raw.contains(&plain), "MCP 令牌明文应落盘");
+        assert_eq!(token.plaintext(), Some(plain.as_str()));
+
+        // API 令牌：只存 sha256，明文不落盘
+        let (api_plain, api_token) = store.issue_api_token(&u.id, "script", TokenScope::Api).unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+        assert!(raw.contains(&api_token.token_sha256));
+        assert!(!raw.contains(&api_plain), "API 令牌明文不得落盘");
+        assert_eq!(api_token.plaintext(), None);
 
         let (found, found_token) = store.find_by_api_token(&plain).unwrap();
         assert_eq!(found.id, u.id);
@@ -1195,7 +1230,7 @@ mod tests {
 
         store.issue_api_token(&u.id, "a", TokenScope::Api).unwrap();
         store.issue_api_token(&u.id, "b", TokenScope::Api).unwrap();
-        assert_eq!(store.revoke_all_api_tokens(&u.id).unwrap(), 2);
+        assert_eq!(store.revoke_all_api_tokens(&u.id).unwrap(), 3);
         assert_eq!(store.find_by_id(&u.id).unwrap().api_tokens.len(), 0);
     }
 
@@ -1203,12 +1238,21 @@ mod tests {
     fn public_json_hides_secrets() {
         let (_dir, store, _cm) = test_store();
         let u = store.create(admin()).unwrap();
-        let (plain, _) = store.issue_api_token(&u.id, "l", TokenScope::Mcp).unwrap();
+        let (api_plain, _) = store.issue_api_token(&u.id, "l", TokenScope::Api).unwrap();
         let json = store.find_by_id(&u.id).unwrap().to_public_json().to_string();
         assert!(!json.contains("password_hash"));
         assert!(!json.contains("token_sha256"));
-        assert!(!json.contains(&plain));
+        assert!(!json.contains(&api_plain), "API 令牌明文不得回显");
         assert!(json.contains("\"has_password\":true"));
+    }
+
+    #[test]
+    fn mcp_plaintext_is_exposed_to_owner() {
+        let (_dir, store, _cm) = test_store();
+        let u = store.create(admin()).unwrap();
+        let (plain, _) = store.issue_api_token(&u.id, "mcp", TokenScope::Mcp).unwrap();
+        let json = store.find_by_id(&u.id).unwrap().to_public_json().to_string();
+        assert!(json.contains(&plain), "MCP 令牌明文应可回显");
     }
 
     #[test]

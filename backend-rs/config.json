@@ -71,22 +71,31 @@
             "id": "at_ae01465a77dd",
             "label": "personal",
             "last_used_at": null,
-            "mcp": true,
+            "scope": "api",
             "token_sha256": "ae01465a77dd3f48285e0974ad8c63109cfe7109a3f4d9815e19319ee5f329f0"
+          },
+          {
+            "created_at": "2026-11-01T09:41:57.954914+00:00",
+            "id": "at_b96205161ec4",
+            "label": "随机",
+            "last_used_at": null,
+            "scope": "mcp",
+            "token": "okb_dj-9IEmCBxKz8aGjobQT3Rfs07_W_557FJOQmM1NycU",
+            "token_sha256": "b96205161ec4102a5637e3fba0ef3736277694dc212d165c4fc1635b50a9cd7f"
           }
         ],
         "created_at": "2026-10-31T14:42:49.244988+00:00",
         "display_name": "管理员",
         "failed_logins": 0,
         "id": "u_3f7a1a0469ac434a",
-        "last_login_at": "2026-10-31T14:53:49.007104+00:00",
+        "last_login_at": "2026-11-01T09:41:38.831706+00:00",
         "locked_until": null,
         "mcp": true,
         "must_set_password": false,
         "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$2QhejRxpKpvQMirhrgnSXg$MYkniF1Kj60fFN7rvOOKL5wqYQgbEOYYxmsLyOAZ1l4",
         "role": "admin",
         "status": "active",
-        "updated_at": "2026-10-31T15:11:25.383611+00:00",
+        "updated_at": "2026-11-01T09:41:57.955281+00:00",
         "username": "admin"
       }
     ],

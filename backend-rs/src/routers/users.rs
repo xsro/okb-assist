@@ -5,7 +5,8 @@
 //!
 //! 约定：
 //! - 所有响应都不含 `password_hash` / `token_sha256`（统一走 [`User::to_public_json`]）；
-//! - API token 明文**只在签发响应里出现一次**；
+//! - **MCP 令牌**（`scope = mcp`）的明文会随元数据一起返回（可随时回显，方便填 MCP 客户端配置）；
+//! - **API 令牌**（`scope = api`）明文只在签发响应里出现一次；
 //! - 禁用/删除用户、重置密码时，同时撤销该用户的会话（`SessionStore`）。
 
 use std::sync::Arc;
@@ -157,7 +158,7 @@ fn parse_token_scope(raw: Option<&str>) -> Result<TokenScope, Response> {
 /// - `scope = mcp` 要求用户本身已开启 `mcp`；
 /// - `token` 留空 → 自动生成 `okb_<32B base64url>`；否则按用户提供的明文登记
 ///   （≥ 8 位、可见 ASCII、全局不重复，校验在 [`crate::users::register_api_token`]）；
-/// - 响应里返回明文（自定义时即原样回显），只此一次。
+/// - 响应里返回明文；`scope = api` 时**只此一次**，`scope = mcp` 时可随时在账户页查看。
 fn issue_token(
     users: &UserStore,
     user: &crate::users::User,
@@ -195,12 +196,17 @@ fn issue_token(
 
 /// 令牌签发成功后的统一响应体
 fn token_issued_response(plain: String, token: ApiToken) -> Response {
+    let detail = if token.scope.allows_mcp() {
+        "请复制到 MCP 客户端；该令牌明文可随时在账户页查看"
+    } else {
+        "请立即保存：该 API token 只显示这一次"
+    };
     (
         StatusCode::CREATED,
         Json(json!({
             "token": plain,
             "meta": token.to_public_json(),
-            "detail": "请立即保存：该 token 只显示这一次",
+            "detail": detail,
         })),
     )
         .into_response()
@@ -482,7 +488,9 @@ async fn list_user_tokens(
     }
 }
 
-/// `POST /assist/api/admin/users/:id/tokens` —— 签发 token（明文只返回一次）
+/// `POST /assist/api/admin/users/:id/tokens` —— 签发 token
+///
+/// 响应里返回明文：API 令牌只此一次，MCP 令牌可随时回显。
 async fn issue_user_token(
     Extension(role): Extension<Role>,
     Extension(users): Extension<Arc<UserStore>>,
@@ -533,7 +541,7 @@ async fn revoke_user_token(
 
 // ── 我的 token（自助） ──────────────────────────────────
 
-/// `GET /assist/api/auth/tokens` —— 查看自己的 token 元数据
+/// `GET /assist/api/auth/tokens` —— 查看自己的 token 元数据（MCP 令牌含明文）
 async fn list_my_tokens(
     Extension(users): Extension<Arc<UserStore>>,
     Extension(principal): Extension<Principal>,

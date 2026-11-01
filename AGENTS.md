@@ -150,6 +150,9 @@ cargo build --release
         "must_set_password": false,
         "api_tokens": [
           { "id": "at_0ba285287ecd", "label": "zotero", "token_sha256": "…", "scope": "api",
+            "created_at": "…", "last_used_at": null },
+          { "id": "at_0ba285287ece", "label": "mcp", "token_sha256": "…", "scope": "mcp",
+            "token": "okb_…（明文，仅 MCP 令牌有）",
             "created_at": "…", "last_used_at": null }
         ],
         "created_at": "…", "updated_at": "…", "last_login_at": "…",
@@ -161,7 +164,13 @@ cargo build --release
 ```
 
 - **密码**：Argon2id PHC 字符串（`Argon2::default()` = m=19456,t=2,p=1），`password_hash` 永不出现在任何 API 响应/日志中（统一走 `User::to_public_json()`）。
-- **长期凭证**：磁盘只存 `sha256`（`token_sha256`），明文**只在签发响应里出现一次**。两种来源：
+- **长期凭证**：鉴权始终只认 `sha256`（`token_sha256`）。明文留存策略按作用域区分：
+  - **`scope = mcp`**：**额外存明文字段 `token`**（`ApiToken::token`），并随 `to_public_json()` 回显（响应字段 `api_tokens[].token`）。
+    这样账户页与「工具 → MCP 配置」页可以随时回显令牌，直接填进 MCP 客户端配置；
+    `ApiToken::plaintext()` 保证只有 MCP 作用域才会吐出明文（API 令牌即使字段有值也不回显）。
+    改版前签发的 MCP 令牌没有该字段（哈希不可逆），前端按「明文不可恢复，请重新签发」处理。
+  - **`scope = api`**：只存哈希，明文**只在签发响应里出现一次**。
+  - 两种来源：
   - **自动生成**：`okb_<32B base64url>`（`users::generate_api_token()`）；
   - **用户自定义**：请求体带 `token` 字段，按 `users::validate_token_plaintext()` 校验 —— 长度
     `MIN_TOKEN_LEN..=MAX_TOKEN_LEN`（8–256 字符）、仅可见 ASCII（`is_ascii_graphic()`，禁止空格/中文/控制字符），
@@ -459,7 +468,7 @@ cargo build --release
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、去重、索引重置。
 6. **问答**（`chat.rs`）：`GET /assist/api/chat/models`、`GET /assist/api/chat/tools` 列出模型池与可调用的 MCP 工具，`POST /assist/api/chat` 基于 `llm.models` 做多轮对话，并可在本请求内循环调用 MCP 工具（非流式）。见下方「问答（Chat）」。
 7. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
-8. **MCP 服务**（`mcp_server.rs`）：Streamable HTTP 端点 `/assist/mcp/stream`，SSE 挂载在 `/assist/mcp`；Bearer 认证接受用户会话/个人令牌（`Principal.mcp`）、受信任子网（需 `trusted_subnet_enabled`）。完整工具列表见 `document/mcp.md`。
+8. **MCP 服务**（`mcp_server.rs`）：**只有一个** `POST /assist/mcp/stream` 端点（Streamable HTTP 的最小可用子集：读完请求体 → 返回单个 JSON 响应；**没有 SSE 传输**、没有 `Mcp-Session-Id` 会话、没有事件流）；Bearer 认证接受用户会话/个人令牌（`Principal.mcp`）、受信任子网（需 `trusted_subnet_enabled`）。完整工具列表见 `document/mcp.md`。
 
 ## 后台任务（异步执行）
 
@@ -469,7 +478,7 @@ cargo build --release
 - **并发限制**：两级信号量独立控制。**全局** `Semaphore(max_concurrent_tasks)`（`system.json` 默认 `3`）限制 extract（Ollama 元数据抽取）和 index（向量索引）的并发。**MinerU 专用** `Semaphore(max_tasks)`（每个配置独立，默认 `3`）限制 PDF 解析并发。两者互不抢占，避免 MinerU 慢解析阻塞其他文档的抽取/索引。
 - **批量进度 / 暂停状态存于进程内存**：模块级全局变量，**进程重启即丢失**。重启后需手动重新触发。
 - **真·fire-and-forget**：删除文档时，SQLite 记录与本地文件先同步删除，而 Qdrant 中对应向量点的删除通过 `tokio::spawn` 异步执行，**请求不等待、失败也不可见**。
-- **前台（非后台）操作**：连接测试、服务状态、语义/全文搜索、上传、问答（`/assist/api/chat`）均在前端 `await` 内同步完成。MCP 端点是唯一的流式长连接通道，但工具函数内部检索仍是同步 await。
+- **前台（非后台）操作**：连接测试、服务状态、语义/全文搜索、上传、问答（`/assist/api/chat`）均在前端 `await` 内同步完成。MCP 端点也是「收完整请求体 → 返回一个 JSON」，**不是流式长连接**，工具函数内部检索同样是同步 await。
 - **无定时任务**：没有 `APScheduler`/`schedule`/守护线程；后台仅为 Tokio 协程。
 
 ## 路由前缀
@@ -478,7 +487,7 @@ cargo build --release
 - 静态目录挂载：`system.json` 的 `static_dirs[].path` 决定前缀（默认无挂载）
 - API：`/assist/api/documents`、`/assist/api/pipeline`、`/assist/api/chat`、`/assist/api/admin`、`/assist/api/config`、`/assist/api/auth/me`、`/assist/openapi`
 - 文件别名（免 token）：`/assist/file/{filename}`
-- MCP：`/assist/mcp/stream`（Streamable HTTP）、`/assist/mcp`（SSE）
+- MCP：`/assist/mcp/stream`（Streamable HTTP，仅 POST/OPTIONS；SSE 与 stdio 均未实现，`/assist/mcp/*` 其它路径 404）
 - 上传文件：`/assist/uploads/`（由后端直接 serving）
 
 ## 前端架构
@@ -638,7 +647,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 
 1. **鉴权现状**：只认 `users` 段（会话 token / 用户个人令牌）。`system.json` 里**没有任何全局凭据字段**；`trusted_subnets` 默认不生效，需 `trusted_subnet_enabled = true`；系统未初始化时只有 `/auth/status|bootstrap` 可用。`TokenMiddleware` 仅对 `/assist/api/*` 生效。个人令牌的 `scope` **严格互斥**（api 只能调 API、mcp 只能调 MCP），新增受凭证保护的端点时记得同步判断 `Principal.api` / `Principal.mcp`，不要只看「令牌有效」。
 2. **配置改动不会自动生效**：`config.json` 改后需 reload；`system.json` 改后需重启进程（进程内缓存）。
-3. **MCP 路由注册顺序有依赖**（`backend-rs/src/main.rs`）：必须在 SSE 挂载之前精确注册 Streamable HTTP 端点。不要"整理"这个顺序。
+3. **MCP 只有一条路由，没有 SSE**（`backend-rs/src/main.rs`）：`.route("/assist/mcp/stream", post(..).options(..))`，处理器在 `mcp_server.rs::mcp_stream_handler`。全仓库没有任何 `axum::response::Sse` / `text/event-stream` / `Mcp-Session-Id` 代码；`/assist/mcp/sse`、`GET /assist/mcp/stream` 等未注册路径会走 `spa_fallback` 的 `mcp/` 前缀判定返回 404 JSON（不会回退到 index.html）。若要新增 SSE 传输，需自行实现 `GET` 流 + `POST` 消息通道，并在文档里同步说明。
 4. **没有测试、没有 lint**：编辑后需手动 `cargo build` 确认编译通过，并用 curl 校验端点。
 5. **局域网白名单配置**：`TokenMiddleware` 和 MCP 鉴权的 LAN 免 Token 白名单由 `system.json` 的 `trusted_subnets`（CIDR 数组）+ `trusted_subnet_enabled`（默认 `false`）+ `trusted_subnet_role`（默认 `admin`）共同控制；网段配了但开关没开时**不生效**。
 6. **SQLite 单写者**：并发写入可行但仍是瓶颈，勿引入大量并发写。
@@ -651,6 +660,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 13. **MinerU Markdown 图片处理**（`backend-rs/src/services/mineru.rs`）：`get_task_result()` 必须优先从 ZIP 输出提取 Markdown（含本地图片引用），而非从独立 Markdown 输出（含 data URI）。`finish_parse_result()` 在 `pipeline.rs` 中还需**复制独立图片文件**到目标目录，否则 Markdown 中的相对路径引用会失效。
 14. **MinerU API 的 output_formats 顺序无关**：`submit_job()` 必须同时请求 `"markdown"` 和 `"zip"` 两个格式。`zip` 格式包含解析结果的完整输出（Markdown + 图片），而 `markdown` 格式是自包含的 data URI 版本。两套输出分别下载后合并处理。
 15. **`users` / `drive` 段不要手改、不要经 `/assist/api/config` 写入**：`ConfigManager::save_config()` 会跳过 `PROTECTED_CONFIG_SECTIONS = ["users", "drive"]` 并从磁盘取回真值；用户写操作必须走 `users::UserStore`（内部 `update_users_section` 原子写 + 写锁）。密码哈希/令牌哈希永不回显。
+    **注意 MCP 令牌明文会落盘**（`users.items[].api_tokens[].token`，仅 `scope = mcp`）：`config.json` 的读权限等同于对应账号的 MCP 权限，新增备份/导出/日志功能时不要顺手把 `users` 段带出去。
 16. **删改用户要级联撤销凭据**：禁用/删除用户、重置密码都要 `sessions.revoke_user(&id)`（`routers/users.rs` 已处理）；`set_password` **不会**吊销用户已签发的令牌（需管理员显式 `revoke_tokens`）。
 17. **网盘路径必须过 `resolve_path()`**：任何来自客户端的相对路径都要经 `sanitize_rel_path` + canonicalize 校验，禁止直接 `base.join(user_input)`（防 `../` 与符号链接逃逸）；新增文件操作端点时同样处理。
 18. **`drive` 段是受保护配置**：修改公有文件夹/配额/设置必须走 `/assist/api/admin/drive/*`（内部 `update_section`），不要扩展 `PUT /assist/api/config` 去写它，否则会与 `save_config` 的“从磁盘取回真值”逻辑打架。

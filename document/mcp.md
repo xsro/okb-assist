@@ -17,6 +17,9 @@ MCP 服务使用 Bearer Token 认证，支持两种凭据：
 
 - 启用认证后，客户端必须携带 `Authorization: Bearer <token>`（或 `X-Token: <token>`）
 - 令牌权限**严格二选一**：`MCP` 令牌只能调 `/assist/mcp`（不能调 `/assist/api/*`），`API` 令牌反之
+- **MCP 令牌的明文可随时查看**：在「工具 → MCP 配置」页可直接下拉选中自己的 MCP 令牌并生成配置，
+  或到「账户」页的令牌列表点「显示 / 复制」；配置页也因此会在生成的客户端配置里直接写入明文。
+  API 令牌不做此处理（明文仍只在创建时显示一次）
 - 账号被禁用 / 令牌被撤销后立即 401
 - 未开启 MCP 的用户即使有令牌也会被拒绝：`Unauthorized: MCP access not granted`
 - 受信任子网免鉴权需**显式**把 `system.json` 的 `trusted_subnet_enabled` 设为 `true`
@@ -27,14 +30,19 @@ MCP 服务使用 Bearer Token 认证，支持两种凭据：
 
 ## 连接方式
 
-OKB-Assist 同时提供两种 MCP 传输端点，二者**会话相互独立**（连接其中一个不会影响另一个，客户端不应假设两者会话共享）：
+OKB-Assist **只提供一种** MCP 传输端点：
 
 | 传输 | 端点 URL | 说明 |
 |------|----------|------|
-| **Streamable HTTP（推荐）** | `http://<host>:<port>/assist/mcp/stream` | 当前标准传输；精确路径，末尾无斜杠 |
-| **SSE（legacy 兼容）** | `http://<host>:<port>/assist/mcp/sse` | 旧版传输，仅供需要 SSE 的客户端使用 |
+| **Streamable HTTP** | `http://<host>:<port>/assist/mcp/stream` | 唯一端点；精确路径、末尾无斜杠；只响应 `POST`（`OPTIONS` 用于预检） |
 
-> 两种传输的认证规则一致（个人令牌 / 会话令牌），工具与资源完全一致。
+实现细节（据 `backend-rs/src/mcp_server.rs`）：请求体一次性读完后按 JSON-RPC 方法返回**单个 JSON 响应**，
+属于 Streamable HTTP 的最小子集 —— 没有 `GET` 推流通道、没有 `Mcp-Session-Id` 会话管理、没有 `Last-Event-ID` 断线重放。
+
+> **未实现的传输**（按这些方式配置会连不上，均返回 404）：
+>
+> - **legacy SSE**：`/assist/mcp/sse`（`GET /sse` + `POST /messages`）不存在；
+> - **stdio**：不提供本地子进程模式。
 
 ### 方式一：Streamable HTTP 远程连接（推荐）
 
@@ -157,81 +165,16 @@ http_headers = {
 
 ---
 
-### 方式二：SSE 远程连接（legacy 兼容）
+### 方式二：HTTP 本地连接
 
-适用于需要 SSE 传输的客户端。服务启动后，MCP SSE 端点自动挂载在：
+适用于 AI 工具与 OKB-Assist 在同一台机器上运行的情况。MCP 服务器通过 HTTP 协议通信：
 
 ```
-http://<host>:<port>/assist/mcp/sse
+http://localhost:5001/assist/mcp/stream
 ```
 
-例如本地运行：`http://192.168.1.100:5001/assist/mcp/sse`
-
-#### Claude Desktop 配置
-
-编辑配置文件 `~/.claude/claude_desktop_config.json`（macOS）或 `%APPDATA%\Claude\claude_desktop_config.json`（Windows）：
-
-```json
-{
-  "mcpServers": {
-    "okb-assist": {
-      "url": "http://192.168.1.100:5001/assist/mcp/sse",
-      "headers": {
-        "Authorization": "Bearer <token>"
-      }
-    }
-  }
-}
-```
-
-#### Cursor 配置
-
-在项目根目录创建 `.cursor/mcp.json`：
-
-```json
-{
-  "mcpServers": {
-    "okb-assist": {
-      "url": "http://192.168.1.100:5001/assist/mcp/sse",
-      "headers": {
-        "Authorization": "Bearer <token>"
-      }
-    }
-  }
-}
-```
-
-#### Claude Code 配置
-
-编辑 `~/.claude/settings.json`：
-
-```json
-{
-  "mcpServers": {
-    "okb-assist": {
-      "type": "sse",
-      "url": "http://192.168.1.100:5001/assist/mcp/sse",
-      "headers": {
-        "Authorization": "Bearer <token>"
-      }
-    }
-  }
-}
-```
-
-或使用命令行：
-
-```bash
-claude mcp add okb-assist --transport sse http://192.168.1.100:5001/assist/mcp/sse --header "Authorization: Bearer <token>"
-```
-
----
-
-### 方式三：HTTP 本地连接
-
-适用于 AI 工具与 OKB-Assist 在同一台机器上运行的情况。MCP 服务器通过 HTTP 协议通信。
-
-> Rust 后端仅支持 HTTP 方式（Streamable HTTP / SSE），不再支持 stdio 模式。
+> Rust 后端**只有 HTTP 这一种传输**（`/assist/mcp/stream` 上的 POST JSON-RPC）。
+> 不支持 stdio 模式，也没有实现 legacy SSE 传输（`/assist/mcp/sse` 不存在，请求返回 404）。
 
 #### Claude Desktop 配置
 
@@ -285,11 +228,16 @@ curl http://192.168.1.100:5001/assist/api/admin/services/status
 ### 2. 测试 MCP 端点
 
 ```bash
-# Streamable HTTP 端点（精确路径，带 token 应返回 406，无 token 应返回 401）
-curl -s -o /dev/null -w "%{http_code}\n" http://192.168.1.100:5001/assist/mcp/stream \
-  -H "Authorization: Bearer <token>"
+# 最小 JSON-RPC 请求（ping 不需要任何文献数据）
+# 无凭证 → 401；带 MCP 权限令牌 → 200，body 为 {"jsonrpc":"2.0","id":1,"result":{}}
+curl -s -X POST http://192.168.1.100:5001/assist/mcp/stream \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
+```
 
-> 注意：Streamable HTTP 端点为精确路径 `/assist/mcp/stream`，末尾不要加斜杠。
+> 端点**只接受 `POST`**：`GET /assist/mcp/stream`、`/assist/mcp/sse`，以及 `/assist/mcp/*` 下的其它路径
+> 都会落到 SPA fallback，返回 `404 {"detail":"Not Found"}`。成功时是 `200` 的普通 JSON 响应，不是 `406`，也不是事件流。
 
 ### 3. 使用 MCP Inspector 测试
 
@@ -311,7 +259,7 @@ http://localhost:5001/assist/mcp/stream
 ```json
 "local": {
   "type": "streamable-http",
-  "url": "http://127.0.0.1:5001/assist/mcp/stream"
+  "url": "http://127.0.0.1:5001/assist/mcp/stream",
   "headers": {
     "Authorization": "Bearer okb_你的个人令牌"
   }
@@ -341,8 +289,14 @@ http://localhost:5001/assist/mcp/stream
 - 检查 Rust 工具链：`cargo --version`
 - 检查端口 5001 是否被占用
 
-### Streamable HTTP 返回 406
+### 返回 404（GET 请求 / `/assist/mcp/sse` / 末尾带斜杠）
 
-- 确认请求的 `Content-Type` 为 `application/json`
-- Streamable HTTP 端点为精确路径 `/assist/mcp/stream`，末尾不要加斜杠
-- 某些客户端可能需要在请求中包含 `Accept: application/json, text/event-stream`
+- 本服务只有一个 MCP 端点 `POST /assist/mcp/stream`：对该路径发 `GET`、访问 `/assist/mcp/sse`、
+  或把 URL 写成 `/assist/mcp/stream/` 都会 404
+- 客户端传输类型要选 `http` / `streamable-http`，**不要选 `sse`**（SSE 传输未实现）
+- 请求体必须是合法 JSON-RPC 2.0（缺 `jsonrpc` 字段返回 400，缺 `id` 也返回 400）
+
+### 客户端提示未收到事件流 / 不支持
+
+- 本实现只在 POST 上返回单个 JSON，**不返回 `text/event-stream`**：
+  少数只按 SSE 解析的 Streamable HTTP 客户端会连不上，请换用支持 `application/json` 响应的客户端（如 Claude Code）

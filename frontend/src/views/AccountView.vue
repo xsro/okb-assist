@@ -76,7 +76,7 @@
         权限二选一，互不通用：<strong>API</strong> 令牌用于 Zotero / 脚本调用
         <code>/assist/api/*</code>（不能访问 MCP）；<strong>MCP</strong> 令牌只用于 MCP 客户端
         （不能调用 API）。令牌可自动生成（<code>okb_…</code>），也可自己填一串喜欢的字符串。
-        明文只在创建时显示一次。
+        <strong>API 令牌</strong>的明文只在创建时显示一次；<strong>MCP 令牌</strong>的明文可在下面的列表里随时查看、复制（方便填到 MCP 客户端配置里）。
       </p>
 
       <div class="token-create">
@@ -123,6 +123,7 @@
           <tr>
             <th>备注</th>
             <th>权限</th>
+            <th>令牌明文</th>
             <th>创建时间</th>
             <th>最后使用</th>
             <th></th>
@@ -135,6 +136,19 @@
               <span class="scope-badge" :class="t.scope">
                 {{ t.scope === 'mcp' ? 'MCP' : 'API' }}
               </span>
+            </td>
+            <td class="token-cell">
+              <template v-if="t.scope === 'mcp' && t.token">
+                <code class="token-value">{{ revealed[t.id] ? t.token : maskValue(t.token) }}</code>
+                <button class="btn btn-sm btn-outline" @click="toggleReveal(t.id)">
+                  {{ revealed[t.id] ? '隐藏' : '显示' }}
+                </button>
+                <button class="btn btn-sm" @click="copyValue(t.token)">复制</button>
+              </template>
+              <span v-else-if="t.scope === 'mcp'" class="empty-hint muted">
+                旧令牌明文不可恢复，请撤销后重新签发
+              </span>
+              <span v-else class="empty-hint muted">仅创建时显示</span>
             </td>
             <td>{{ formatTime(t.created_at) }}</td>
             <td>{{ formatTime(t.last_used_at) }}</td>
@@ -169,6 +183,7 @@ const tokens = ref<ApiTokenMeta[]>([])
 const tokenBusy = ref(false)
 const pwdBusy = ref(false)
 const issuedToken = ref('')
+const revealed = ref<Record<string, boolean>>({})
 const newToken = reactive({ label: '', scope: 'api' as TokenScope, token: '' })
 const pwd = reactive({ old: '', next: '', next2: '' })
 
@@ -229,8 +244,20 @@ async function createToken() {
 }
 
 async function copyToken() {
+  await copyValue(issuedToken.value)
+}
+
+function maskValue(v: string): string {
+  return v.length <= 4 ? '••••' : `••••••••${v.slice(-4)}`
+}
+
+function toggleReveal(id: string) {
+  revealed.value[id] = !revealed.value[id]
+}
+
+async function copyValue(v: string) {
   try {
-    await navigator.clipboard.writeText(issuedToken.value)
+    await navigator.clipboard.writeText(v)
     toast.showSuccess('已复制到剪贴板')
   } catch {
     toast.showError('复制失败，请手动选择复制')
@@ -405,6 +432,28 @@ async function submitPassword() {
 }
 .row-actions {
   text-align: right;
+}
+/* MCP 令牌明文列：可显示/复制 */
+.token-cell {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.token-value {
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 12px;
+  word-break: break-all;
+  user-select: all;
+}
+.muted {
+  color: var(--text-muted);
+}
+@media (max-width: 768px) {
+  .token-cell {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 .empty-hint {
   font-size: 13px;
