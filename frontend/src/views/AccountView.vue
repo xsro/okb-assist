@@ -36,10 +36,6 @@
             <th>登录方式</th>
             <td>{{ viaLabel }}</td>
           </tr>
-          <tr>
-            <th>上次登录</th>
-            <td>{{ formatTime(store.user?.last_login_at) }}</td>
-          </tr>
         </tbody>
       </table>
     </section>

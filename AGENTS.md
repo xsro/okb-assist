@@ -156,7 +156,7 @@ cargo build --release
             "token": "okb_…（明文，仅 MCP 令牌有）",
             "created_at": "…", "last_used_at": null }
         ],
-        "created_at": "…", "updated_at": "…", "last_login_at": "…",
+        "created_at": "…", "updated_at": "…",
         "failed_logins": 0, "locked_until": null
       }
     ]

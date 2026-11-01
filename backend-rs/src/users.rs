@@ -254,8 +254,6 @@ pub struct User {
     pub api_tokens: Vec<ApiToken>,
     pub created_at: String,
     pub updated_at: String,
-    #[serde(default)]
-    pub last_login_at: Option<String>,
     /// 连续登录失败次数
     #[serde(default)]
     pub failed_logins: u32,
@@ -309,7 +307,6 @@ impl User {
             "must_set_password": self.must_set_password,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "last_login_at": self.last_login_at,
             "api_tokens": self.api_tokens.iter().map(ApiToken::to_public_json).collect::<Vec<_>>(),
         })
     }
@@ -703,7 +700,6 @@ impl UserStore {
                 api_tokens: Vec::new(),
                 created_at: now.clone(),
                 updated_at: now,
-                last_login_at: None,
                 failed_logins: 0,
                 locked_until: None,
             });
@@ -826,9 +822,20 @@ impl UserStore {
         section.find_by_id(id).cloned().ok_or(UserError::NotFound)
     }
 
-    /// 记录一次登录结果：成功则清空失败计数并刷新 `last_login_at`；
-    /// 失败则累加并按指数退避设置 `locked_until`（http 429 由调用方决定是否返回）。
+    /// 记录一次登录结果。
+    ///
+    /// - 成功：只清理失败计数与锁定窗口，**不记录登录时间、也不写 `config.json`**
+    ///   （仅在有失败残留时才落盘一次）；登录审计由日志文件负责。
+    /// - 失败：累加计数并按指数退避设置 `locked_until`。
     pub fn record_login(&self, id: &str, success: bool) -> Result<User, UserError> {
+        if success {
+            let section = self.section();
+            let user = section.find_by_id(id).ok_or(UserError::NotFound)?;
+            if user.failed_logins == 0 && user.locked_until.is_none() {
+                return Ok(user.clone());
+            }
+        }
+
         let section = self.mutate(|section| {
             let user = section
                 .items
@@ -839,7 +846,6 @@ impl UserStore {
             if success {
                 user.failed_logins = 0;
                 user.locked_until = None;
-                user.last_login_at = Some(now.to_rfc3339());
             } else {
                 user.failed_logins = user.failed_logins.saturating_add(1);
                 if user.failed_logins >= LOCK_AFTER_FAILURES {
@@ -1290,12 +1296,13 @@ mod tests {
     }
 
     #[test]
-    fn record_login_sets_timestamps() {
+    fn record_login_does_not_touch_config_on_success() {
         let (_dir, store, _cm) = test_store();
         let u = store.create(admin()).unwrap();
-        assert!(u.last_login_at.is_none());
+        let before = store.find_by_id(&u.id).unwrap();
         let after = store.record_login(&u.id, true).unwrap();
-        assert!(after.last_login_at.is_some());
+        // 成功登录不写盘：updated_at 保持不变
+        assert_eq!(after.updated_at, before.updated_at);
         assert_eq!(after.failed_logins, 0);
         let failed = store.record_login(&u.id, false).unwrap();
         assert_eq!(failed.failed_logins, 1);

@@ -38,7 +38,6 @@
               <th>状态</th>
               <th>MCP</th>
               <th>密码</th>
-              <th>最后登录</th>
               <th class="col-actions">操作</th>
             </tr>
           </thead>
@@ -73,7 +72,6 @@
                   {{ u.has_password ? '已设置' : '未设置' }}
                 </span>
               </td>
-              <td class="nowrap">{{ formatTime(u.last_login_at) }}</td>
               <td class="col-actions">
                 <button class="btn btn-sm btn-outline" @click="openReset(u)">重置密码</button>
                 <button class="btn btn-sm btn-outline" @click="openTokens(u)">
@@ -89,7 +87,7 @@
               </td>
             </tr>
             <tr v-if="!users.length">
-              <td colspan="8" class="empty-hint">暂无用户</td>
+              <td colspan="7" class="empty-hint">暂无用户</td>
             </tr>
           </tbody>
         </table>

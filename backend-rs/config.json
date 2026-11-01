@@ -88,7 +88,6 @@
         "display_name": "管理员",
         "failed_logins": 0,
         "id": "u_3f7a1a0469ac434a",
-        "last_login_at": "2026-11-01T11:03:19.417212+00:00",
         "locked_until": null,
         "mcp": true,
         "must_set_password": false,
