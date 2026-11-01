@@ -1,0 +1,347 @@
+/*!
+ * OKB-Assist 文档站样式（docsify）
+ * 主调：多巴胺绿（高饱和亮绿），用于品牌、强调、悬停与状态色；
+ * 正文链接使用同色系的深绿，保证白底上的可读性。
+ */
+
+:root {
+  /* 多巴胺绿：填充 / 边框 / 进度条 / 选中态 */
+  --theme-color: #00c853;
+  --dopa-green: #00c853;
+  --dopa-green-bright: #22e06a;
+  --dopa-green-soft: #e7fbee;
+  --dopa-green-soft-2: #f4fdf7;
+  --dopa-lime: #c6f24a;
+  /* 深绿：链接、正文强调、hover 文本 */
+  --dopa-green-ink: #0a8f43;
+  --dopa-green-ink-dark: #067032;
+
+  --doc-border: #e2eee7;
+  --doc-muted: #6b7a8d;
+  --doc-code-bg: #f6fbf8;
+  --doc-heading: #1f2d3d;
+}
+
+/* ---------- 基础排版 ---------- */
+
+body,
+html {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  color: #34495e;
+}
+
+.markdown-section {
+  max-width: 54rem;
+  padding: 30px 20px 60px;
+}
+
+.markdown-section h1,
+.markdown-section h2,
+.markdown-section h3,
+.markdown-section h4 {
+  color: var(--doc-heading);
+}
+
+.markdown-section pre,
+.markdown-section code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+.markdown-section pre {
+  background: var(--doc-code-bg);
+  border: 1px solid var(--doc-border);
+  border-radius: 8px;
+  padding: 0 1.1rem;
+}
+
+.markdown-section pre > code {
+  background: transparent;
+  padding: 1.4em 0;
+  font-size: 0.82rem;
+}
+
+.markdown-section code {
+  background: var(--dopa-green-soft-2);
+  border: 1px solid #d6f0e0;
+  color: var(--dopa-green-ink-dark);
+  border-radius: 4px;
+  font-size: 0.84em;
+}
+
+.markdown-section pre code {
+  border: 0;
+  background: transparent;
+  color: #35424f;
+}
+
+/* 标题：二级加绿色下划线，便于长页快速定位 */
+.markdown-section h2 {
+  border-bottom: 2px solid var(--dopa-green-soft);
+  padding-bottom: 0.45rem;
+  margin: 2.2rem 0 0.9rem;
+}
+
+.markdown-section h3 {
+  margin: 1.8rem 0 0.6rem;
+}
+
+/* 引用块：浅绿底 + 亮绿竖条 */
+.markdown-section blockquote {
+  background: var(--dopa-green-soft-2);
+  border-left: 4px solid var(--dopa-green);
+  border-radius: 0 6px 6px 0;
+  color: #46606f;
+  padding: 0.6rem 1.1rem;
+}
+
+.markdown-section blockquote p {
+  font-weight: 400;
+  margin: 0.4rem 0;
+}
+
+/* 表格：浅绿表头 + 绿色边框 */
+.markdown-section table {
+  border: 1px solid var(--doc-border);
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+.markdown-section th {
+  background: var(--dopa-green-soft);
+  color: #14603a;
+  white-space: nowrap;
+}
+
+.markdown-section td,
+.markdown-section th {
+  border-color: var(--doc-border);
+  padding: 8px 13px;
+  vertical-align: top;
+}
+
+.markdown-section tr {
+  border-top: 1px solid var(--doc-border);
+}
+
+.markdown-section tr:nth-child(2n) {
+  background: #fbfefc;
+}
+
+/* 链接：深绿，hover 更暗并加下划线 */
+.markdown-section a {
+  color: var(--dopa-green-ink);
+  font-weight: 500;
+}
+
+.markdown-section a:hover {
+  color: var(--dopa-green-ink-dark);
+  text-decoration: underline;
+}
+
+/* 分隔线用淡绿 */
+.markdown-section hr {
+  border-bottom: 1px solid var(--dopa-green-soft);
+}
+
+/* ---------- 侧边栏 ---------- */
+
+.sidebar {
+  border-right: 1px solid var(--doc-border);
+}
+
+.sidebar > h1.app-name {
+  margin: 0 0 1.2rem;
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.sidebar > h1.app-name > a {
+  color: var(--doc-heading);
+}
+
+.sidebar > h1.app-name > a:hover {
+  color: var(--dopa-green-ink);
+  text-decoration: none;
+}
+
+/* 分组标题（_sidebar.md 里的加粗项） */
+.sidebar ul li > p {
+  color: #8fa39a;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  margin: 1.1rem 0 0.2rem;
+}
+
+.sidebar ul li a {
+  color: #4d5f63;
+}
+
+.sidebar ul li a:hover {
+  color: var(--dopa-green-ink);
+}
+
+/* 当前页：右侧亮绿指示条 + 深绿文字 */
+.sidebar ul li.active > a {
+  border-right: 3px solid var(--dopa-green);
+  color: var(--dopa-green-ink);
+  font-weight: 600;
+}
+
+.sidebar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar:hover::-webkit-scrollbar-thumb {
+  background: rgba(0, 200, 83, 0.3);
+}
+
+/* ---------- 首页卡片网格（README.md 里的 .doc-grid） ---------- */
+
+.doc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0.85rem;
+  margin: 1.1rem 0 1.8rem;
+}
+
+.doc-card {
+  display: block;
+  padding: 0.85rem 1rem;
+  background: #fff;
+  border: 1px solid var(--doc-border);
+  border-radius: 10px;
+  text-decoration: none !important;
+  transition: transform 0.15s ease, box-shadow 0.15s ease,
+    border-color 0.15s ease, background 0.15s ease;
+}
+
+.doc-card:hover {
+  background: linear-gradient(180deg, #ffffff 0%, var(--dopa-green-soft-2) 100%);
+  border-color: var(--dopa-green);
+  box-shadow: 0 8px 20px rgba(0, 200, 83, 0.18);
+  transform: translateY(-2px);
+}
+
+.doc-card__title {
+  display: block;
+  margin-bottom: 0.3rem;
+  color: var(--doc-heading);
+  font-size: 0.98rem;
+  font-weight: 600;
+}
+
+.doc-card:hover .doc-card__title {
+  color: var(--dopa-green-ink);
+}
+
+.doc-card__desc {
+  display: block;
+  color: var(--doc-muted);
+  font-size: 0.82rem;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+/* ---------- 搜索 ---------- */
+
+.sidebar .search {
+  margin-bottom: 0.6rem;
+}
+
+.sidebar .search input {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--doc-border);
+  border-radius: 8px;
+  background: #fff;
+  outline: none;
+  font-size: 0.85rem;
+}
+
+.sidebar .search input:focus {
+  border-color: var(--dopa-green);
+  box-shadow: 0 0 0 3px rgba(0, 200, 83, 0.16);
+}
+
+.search .search-keyword {
+  background: var(--dopa-lime);
+  color: #1d3a12;
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
+/* 搜索结果里的段落预览不要太长 */
+.search p {
+  font-size: 0.8rem;
+  line-height: 1.45;
+  margin: 0.25rem 0;
+}
+
+.search .matching-post a:hover {
+  color: var(--dopa-green-ink);
+}
+
+/* ---------- 复制代码按钮 ---------- */
+
+.docsify-copy-code-button {
+  border-radius: 0 6px 0 6px;
+  background: var(--dopa-green-soft);
+  color: var(--dopa-green-ink);
+  font-size: 0.72rem;
+  padding: 0.2rem 0.55rem;
+}
+
+.docsify-copy-code-button.success {
+  background: var(--dopa-green);
+  color: #fff;
+}
+
+/* ---------- 移动端 ---------- */
+
+@media screen and (max-width: 768px) {
+  .markdown-section {
+    max-width: 100%;
+    padding: 16px 14px 48px;
+  }
+
+  .markdown-section h1 {
+    font-size: 1.6rem;
+  }
+
+  .markdown-section h2 {
+    font-size: 1.35rem;
+  }
+
+  .doc-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* 汉堡按钮移到左上角（docsify 默认在左下角，手机上不好找） */
+  .sidebar-toggle {
+    top: 0;
+    bottom: auto;
+    left: 0;
+    width: auto;
+    padding: 14px 16px 12px 14px;
+    background: #fff;
+    border-right: 1px solid var(--doc-border);
+    border-bottom: 1px solid var(--doc-border);
+    border-radius: 0 0 10px 0;
+    transition: transform 0.25s ease;
+  }
+
+  .markdown-section {
+    padding-top: 58px;
+  }
+
+  /* 侧栏展开时按钮跟随侧栏，避免压在遮罩上 */
+  body.close .sidebar-toggle {
+    width: 284px;
+    padding: 14px 30px 10px 14px;
+    background: #fff;
+  }
+}

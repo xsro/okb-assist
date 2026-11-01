@@ -93,7 +93,7 @@ cargo build --release
 | `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 8 构建，输出到 `frontend/dist/`，包管理器 `pnpm`） |
 | `frontend/dist/` | 前端构建产物（`index.html`、`assets/`），由后端 serving |
 | `data/` | 运行时数据（`okb_assist.db`、`_uploads/`、`tokens/` 等），由 `system.json` 模板决定路径；实际位置为 `backend-rs/data/`，已被 `backend-rs/.gitignore` 忽略 |
-| `document/` | 参考文档：`mcp.md`（MCP 工具列表）、`user-management.md`（用户/登录/令牌使用指南）、`user-management-plan.md`（权限→用户升级计划与进度）、`drive.md`（网盘设计与使用）、`build.md`（部署构建）、`search.md`（搜索语法）、`datalab.to.md`、`mineru4/`、`skills/`、`openwebui.md`、`qdrant.md`、`udisks2-automount.md` |
+| `document/` | 参考文档（同时是 **docsify 文档站**，由 `system.json` 的 `static_dirs` 挂到 `/document`）：`index.html`（docsify 入口）、`README.md`（首页/索引）、`_sidebar.md`（左侧目录）、`_404.md`、`assets/`（自有样式与登录守卫）；内容页 `mcp.md`（MCP 连接指南）、`mcp-tools.md`（工具列表）、`user-management.md`（用户/登录/令牌）、`user-management-plan.md`（权限→用户升级计划）、`drive.md`（网盘）、`build.md`（部署构建）、`search.md`（搜索语法）、`search-filesize-plan.md`、`datalab.to.md`、`openwebui.md`、`qdrant.md`、`udisks2-automount.md`、`mineru4/`、`skills/` |
 
 ## 配置（JSON 文件，非环境变量）
 
@@ -433,6 +433,11 @@ cargo build --release
   `Set-Cookie: okb_static=<token>; Path=/; HttpOnly; SameSite=Lax; Max-Age=<session_ttl_hours>`；登出（`POST /auth/logout`）下发 `Max-Age=0` 清除并顺手`revoke` cookie 里的会话。
   **只有 `static_files` 读这个 cookie，`token_middleware` / API 一律不认**（避免扩大 API 鉴权面）；下发时顺带解决页面内相对资源（图片/子页面）的鉴权问题。
 - 重复 `path`、`path` 为 `/`、缺 `path`/`dir` 的条目一律忽略并打 `warn`；**前缀不允许互相嵌套**（`/a` 与 `/a/b` 在 axum 的路由表里会冲突，只保留更长的 `/a/b`），匹配时最长前缀优先。
+- **仓库自带的文档站**：`system.json` 默认把 `/document` 挂到仓库 `document/` 目录（`try_index: true`、`index: index.html`、`cache_control: false`，改完 Markdown 刷新即可见）。该目录是 docsify 站点：
+  - `README.md` 首页（卡片式索引）、`_sidebar.md` 左侧目录、`_404.md` 未找到页、子目录各自的 `_sidebar.md`（docsify 会就近取用，新增子目录最好补一个，否则会多一次 404 探测）；
+  - docsify 运行时 / 主题 / 插件走 **jsDelivr CDN**（版本已锁定），`assets/css/custom.css`（多巴胺绿主调）与 `assets/js/auth-guard.js` 是站内自有文件；
+  - 鉴权靠 `static_dirs` 自己的判定（`okb_static` cookie）：未登录时 `auth-guard.js` 用一次 `README.md` 探针拿到 401 就整页跳 `/assist/login?redirect=<当前地址>`，登录后自动回跳；否则 docsify 会把 401 渲染成「404」；
+  - **新增文档后要在 `_sidebar.md` 与首页 `README.md` 里各补一条链接**（搜索索引也按侧栏链接生成）。
 
 ## 架构与请求流
 
@@ -661,5 +666,6 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 - 架构核心：`backend-rs/src/routers/pipeline.rs`、`backend-rs/src/routers/documents.rs`、`backend-rs/src/models.rs`、`backend-rs/src/services/vector_db.rs`、`backend-rs/src/mcp_server.rs`
 - 前端：`frontend/`（Vue 3 + TypeScript + Vite 8）
 - MCP 工具参考：`document/mcp.md`
+- 文档站（docsify）：`document/index.html`、`document/README.md`、`document/_sidebar.md`、`document/assets/css/custom.css`
 - 搜索语法参考：`document/search.md`
 - 启动说明：`README.md`

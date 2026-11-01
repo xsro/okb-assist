@@ -14,13 +14,22 @@
   "drive_root": "data/drive",
   "static_dirs": [
     {
-      "path": "/static",
-      "dir": ".",
+      "path": "/document",
+      "dir": "../document",
+      "try_index": true,
+      "index": "index.html",
+      "list_dir": false,
+      "auth": false,
+      "cache_control": false
+    },
+    {
+      "path": "/src",
+      "dir": "./src",
       "try_index": true,
       "index": "index.html",
       "list_dir": false,
       "auth": true,
-      "cache_control": true
+      "cache_control": false
     }
   ],
   "trusted_subnets": [

@@ -1,0 +1,4 @@
+- [← 文档首页](/)
+- **操作手册**
+  - [文献元数据修复](fix-info.md)
+- <a href="/assist/" target="_self" data-nosearch>打开 OKB-Assist →</a>

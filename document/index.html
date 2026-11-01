@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0" />
+  <meta name="description" content="OKB-Assist 文档 —— 本地学术文献库管理系统" />
+  <title>OKB-Assist 文档</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2300c853'/%3E%3Ctext x='32' y='43' font-size='30' font-family='Helvetica,Arial,sans-serif' fill='%23fff' text-anchor='middle'%3EOK%3C/text%3E%3C/svg%3E" />
+  <!-- 第三方资源走 CDN（版本已锁定），站内自有样式与脚本仍放在 assets/ 下 -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify@4.13.1/lib/themes/vue.css" />
+  <link rel="stylesheet" href="assets/css/custom.css" />
+</head>
+<body>
+  <div id="app">正在加载文档…</div>
+
+  <script>
+    window.$docsify = {
+      name: 'OKB-Assist 文档',
+      // 首页与目录（导航统一放在侧栏，避免每层子目录都要 _navbar.md）
+      homepage: 'README.md',
+      loadSidebar: true,
+      subMaxLevel: 3,
+      maxLevel: 4,
+      auto2top: true,
+      // 允许页面里用相对路径互相引用（含 mineru4/ 等子目录）
+      relativePath: true,
+      // /assist 下的应用页面不归 docsify 路由管，走浏览器默认跳转（按完整 href 正则匹配）
+      noCompileLinks: ['/assist/.*'],
+      notFoundPage: '_404.md',
+      // 全文搜索（本地索引，无需后端）
+      search: {
+        placeholder: '搜索文档…',
+        noData: '没有找到相关内容',
+        paths: 'auto',
+        depth: 4,
+        maxAge: 0,
+        namespace: 'okb-assist-docs'
+      },
+      copyCode: {
+        buttonText: '复制',
+        successText: '已复制',
+        errorText: '复制失败',
+        timeout: 2000
+      }
+    };
+  </script>
+
+  <!-- 未登录时先跳登录页：否则 docsify 会把 401 渲染成「404 - Not found」 -->
+  <script src="assets/js/auth-guard.js"></script>
+
+  <!-- docsify 运行时与插件（CDN，版本已锁定） -->
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4.13.1/lib/docsify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4.13.1/lib/plugins/search.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify-copy-code@2.1.1/dist/docsify-copy-code.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4.13.1/lib/plugins/zoom-image.min.js"></script>
+</body>
+</html>

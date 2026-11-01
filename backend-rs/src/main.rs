@@ -635,6 +635,9 @@ pub(crate) fn mime_for_path(path: &std::path::Path) -> &'static str {
         "ttf" => "font/ttf",
         "eot" => "application/vnd.ms-fontobject",
         "txt" => "text/plain; charset=utf-8",
+        // Markdown 以文本返回：`static_dirs` 直接打开 .md 时浏览器按文本显示，
+        // 而不是弹下载（docsify 文档站也依赖它按文本取回页面内容）。
+        "md" | "markdown" => "text/markdown; charset=utf-8",
         _ => "application/octet-stream",
     }
 }

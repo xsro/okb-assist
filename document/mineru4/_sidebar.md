@@ -1,0 +1,7 @@
+- [← 文档首页](/)
+- **MinerU 解析**
+  - [v4 私有部署](README.md)
+  - [v1 REST API 调研](mineru-api-server-report.md)
+  - [官方云 API](mineru-cloud-api.md)
+  - [解析接口测试](parse-api-test.md)
+- <a href="/assist/" target="_self" data-nosearch>打开 OKB-Assist →</a>
