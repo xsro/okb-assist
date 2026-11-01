@@ -55,16 +55,11 @@ impl DatalabClient {
 
         info!("Datalab 提交转换任务: file={}", file_name);
 
-        let pdf_bytes = tokio::fs::read(file_path).await.map_err(|e| {
-            error!("Datalab 读取文件失败 ({}): {}", file_path, e);
+        // multipart 流式上传（不把整份 PDF 读入内存）
+        let part = crate::services::mineru::stream_file_part(file_path, &file_name).await.map_err(|e| {
+            error!("Datalab 打开文件失败 ({}): {}", file_path, e);
             anyhow::anyhow!("Datalab 读取文件失败: {}", e)
         })?;
-
-        // multipart 上传表单
-        let part = reqwest::multipart::Part::bytes(pdf_bytes)
-            .file_name(file_name.clone())
-            .mime_str("application/pdf")
-            .map_err(|e| anyhow::anyhow!("创建 multipart 失败: {}", e))?;
 
         let form = reqwest::multipart::Form::new()
             .part("file", part)

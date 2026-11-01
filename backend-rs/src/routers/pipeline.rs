@@ -24,7 +24,7 @@ use crate::models::{Document, DocStatus, DocumentVectorIndex};
 use crate::paths;
 use crate::services::crossref::CrossrefClient;
 use crate::services::mineru::MinerUClient;
-use crate::services::pdf_meta::{extract_pdf_metadata_async, looks_like_placeholder, normalize_doi};
+use crate::services::pdf_meta::{extract_pdf_metadata_from_path_async, looks_like_placeholder, normalize_doi};
 use crate::services::vector_db::{chunk_text_by_markdown, get_vector_db};
 use crate::utils::{absolute_path, now_iso};
 
@@ -1282,12 +1282,12 @@ async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id
     }
 
     let pdf_path = paths::get_pdf_path(&settings, doc_id);
-    let content = match std::fs::read(&pdf_path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    if !std::path::Path::new(&pdf_path).exists() {
+        return;
+    }
 
-    let meta = extract_pdf_metadata_async(content, Some(doc.filename.clone()), Some(doc_id)).await;
+    // 只传路径：mutool / mupdf 直接读原文件，不把整份 PDF 读进内存
+    let meta = extract_pdf_metadata_from_path_async(pdf_path, Some(doc.filename.clone()), Some(doc_id)).await;
 
     // 调试：打印提取的元数据
     tracing::debug!("PDF 元数据提取结果 (doc_id={}): title={:?}, authors={:?}, year={:?}, journal={:?}, doi={:?}, volume={:?}, issue={:?}, pages={:?}",

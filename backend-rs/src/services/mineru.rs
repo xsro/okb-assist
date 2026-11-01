@@ -251,12 +251,14 @@ impl MinerUClient {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "document.pdf".to_string());
 
-        let pdf_bytes = tokio::fs::read(file_path).await?;
-        let (upload_id, upload_method, upload_url, upload_headers) =
-            self.v1_create_upload(&file_name, pdf_bytes.len() as u64, &pdf_bytes).await?;
+        // 流式读盘：只算大小与 sha256，不把整份 PDF 留在内存
+        let (file_size, sha256_hex) = file_fingerprint(file_path).await?;
+        let (upload_id, upload_method, upload_url, upload_headers) = self
+            .v1_create_upload(&file_name, file_size, &sha256_hex)
+            .await?;
 
         if upload_method != "SKIP" {
-            self.v1_upload_file(&upload_method, &upload_url, &upload_headers, pdf_bytes)
+            self.v1_upload_file(&upload_method, &upload_url, &upload_headers, file_path, file_size)
                 .await?;
         }
 
@@ -270,16 +272,9 @@ impl MinerUClient {
         &self,
         filename: &str,
         file_size: u64,
-        file_bytes: &[u8],
+        sha256_hex: &str,
     ) -> anyhow::Result<(String, String, String, HashMap<String, String>)> {
-        use sha2::Digest;
-        let file_bytes_vec = file_bytes.to_vec();
-        let sha256_hex = tokio::task::spawn_blocking(move || {
-            let sha256 = sha2::Sha256::digest(&file_bytes_vec);
-            hex::encode(sha256)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("SHA-256 计算失败: {}", e))?;
+        let sha256_hex = sha256_hex.to_string();
 
         let body = json!({
             "filename": filename,
@@ -332,13 +327,14 @@ impl MinerUClient {
         Ok((upload_id, upload_method, upload_url, upload_headers))
     }
 
-    /// V1: 上传文件字节
+    /// V1: 上传文件（流式：直接读磁盘文件作为请求体，不先读入内存）
     async fn v1_upload_file(
         &self,
         method: &str,
         url: &str,
         headers: &HashMap<String, String>,
-        data: Vec<u8>,
+        data_path: &str,
+        data_len: u64,
     ) -> anyhow::Result<()> {
         if method == "SKIP" {
             return Ok(());
@@ -359,7 +355,8 @@ impl MinerUClient {
             req = req.bearer_auth(&self.key);
         }
 
-        let resp = req.body(data).send().await?;
+        let req = stream_file_body(req, data_path, data_len).await?;
+        let resp = req.send().await?;
         if !resp.status().is_success() {
             anyhow::bail!("MinerU file upload failed: HTTP {}", resp.status());
         }
@@ -603,7 +600,8 @@ impl MinerUClient {
             .unwrap_or_default()
             .as_secs());
 
-        let pdf_bytes = tokio::fs::read(file_path).await?;
+        // 流式读盘：只算大小，上传时直接以磁盘文件为请求体
+        let file_size = tokio::fs::metadata(file_path).await?.len();
 
         // Step 1: 获取预签名上传 URL
         // 注意：model_version 参数已被官方 V4 API 移除，不再发送
@@ -661,13 +659,18 @@ impl MinerUClient {
 
         // Step 2: 上传文件到预签名 URL
         // 阿里云 OSS 预签名 URL 的签名不含 Content-Type，需移除默认 Content-Type header
-        let upload_resp = self
+        let put_req = self
             .http
             .put(upload_url)
-            .header("Content-Type", "")
-            .body(pdf_bytes)
-            .send()
-            .await;
+            .header("Content-Type", "");
+        let put_req = match stream_file_body(put_req, file_path, file_size).await {
+            Ok(r) => r,
+            Err(e) => {
+                error!("V4 打开待上传文件失败 (file={}): {}", file_name, e);
+                anyhow::bail!("V4 打开文件失败: {}", e);
+            }
+        };
+        let upload_resp = put_req.send().await;
 
         match &upload_resp {
             Ok(r) if r.status().is_success() => {
@@ -991,16 +994,11 @@ impl MinerUClient {
 
         info!("轻量 API 开始提交解析任务: file={}", file_name);
 
-        let pdf_bytes = tokio::fs::read(file_path).await.map_err(|e| {
-            error!("轻量 API 读取 PDF 文件失败 ({}): {}", file_path, e);
+        // 使用 multipart 流式上传文件（不把整份 PDF 读入内存）
+        let part = stream_file_part(file_path, &file_name).await.map_err(|e| {
+            error!("轻量 API 打开 PDF 文件失败 ({}): {}", file_path, e);
             anyhow::anyhow!("读取 PDF 文件失败: {}", e)
         })?;
-
-        // 使用 multipart 上传文件
-        let part = reqwest::multipart::Part::bytes(pdf_bytes)
-            .file_name(file_name.clone())
-            .mime_str("application/pdf")
-            .map_err(|e| anyhow::anyhow!("创建 multipart 失败: {}", e))?;
 
         let form = reqwest::multipart::Form::new()
             .part("file", part);
@@ -1206,6 +1204,44 @@ pub async fn parse_pdf_with_fallback(
 // ════════════════════════════════════════════════════════
 //  通用工具函数
 // ════════════════════════════════════════════════════════
+
+/// 流式计算 `(文件字节数, sha256)`，不在内存里留整份 PDF。
+async fn file_fingerprint(path: &str) -> anyhow::Result<(u64, String)> {
+    let size = tokio::fs::metadata(path).await?.len();
+    let hash = crate::utils::calculate_file_hash_async(path.to_string()).await?;
+    Ok((size, hash))
+}
+
+/// 把一个磁盘文件流式挂到请求体上。
+///
+/// 流式 body 本身不带长度，必须显式给 `Content-Length`：否则会退化为
+/// `Transfer-Encoding: chunked`，预签名上传 URL（OSS 等）会校验失败。
+async fn stream_file_body(
+    req: reqwest::RequestBuilder,
+    path: &str,
+    len: u64,
+) -> anyhow::Result<reqwest::RequestBuilder> {
+    let file = tokio::fs::File::open(path).await?;
+    let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file));
+    Ok(req
+        .header(reqwest::header::CONTENT_LENGTH, len)
+        .body(body))
+}
+
+/// 把磁盘文件包装成 multipart 部件（流式，带长度）。
+pub(crate) async fn stream_file_part(
+    path: &str,
+    file_name: &str,
+) -> anyhow::Result<reqwest::multipart::Part> {
+    let file = tokio::fs::File::open(path).await?;
+    let len = file.metadata().await?.len();
+    Ok(reqwest::multipart::Part::stream_with_length(
+        reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file)),
+        len,
+    )
+    .file_name(file_name.to_string())
+    .mime_str("application/pdf")?)
+}
 
 /// 从 ZIP 包中提取 markdown 和图片文件
 fn extract_from_zip(zip_data: &[u8], output_dir: &str) -> (Option<String>, Vec<(String, Vec<u8>)>) {

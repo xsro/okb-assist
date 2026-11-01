@@ -43,6 +43,9 @@
         </button>
         <span class="log-count" v-if="totalLogs > 0">
           共 {{ totalLogs }} 条，显示 {{ displayedLogs }} 条
+          <span v-if="scanTruncated" class="log-scan-hint" :title="scanHint">
+            （已回扫至上限，更早的日志未加载）
+          </span>
         </span>
       </div>
     </div>
@@ -97,7 +100,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { getLogs } from '@/api/admin'
 import { useRequireToken } from '@/composables/useRequireToken'
 import { apiGet } from '@/api/client'
@@ -122,6 +125,12 @@ const keywordFilter = ref('')
 const lineCount = ref(100)
 const totalLogs = ref(0)
 const displayedLogs = ref(0)
+/** 后端是否因回扫字节上限而没读到文件开头 */
+const scanTruncated = ref(false)
+const scannedBytes = ref(0)
+const scanHint = computed(() =>
+  `本次从文件尾回扫 ${(scannedBytes.value / 1024 / 1024).toFixed(1)} MB（上限固定），更早的日志需要调大上限或先清理日志`
+)
 const logFile = ref('')
 const autoRefresh = ref(false)
 const logListRef = ref<HTMLElement | null>(null)
@@ -186,11 +195,15 @@ async function loadLogs() {
     logs.value = res.entries
     totalLogs.value = res.total
     displayedLogs.value = res.displayed
+    scanTruncated.value = res.scan_truncated === true
+    scannedBytes.value = res.scanned_bytes || 0
     logFile.value = res.file
   } catch {
     logs.value = []
     totalLogs.value = 0
     displayedLogs.value = 0
+    scanTruncated.value = false
+    scannedBytes.value = 0
   } finally {
     loading.value = false
   }
@@ -308,6 +321,12 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--text-secondary);
   margin-left: auto;
+}
+
+/* 回扫上限提示（更早的日志未加载） */
+.log-scan-hint {
+  color: var(--warning, #c98a00);
+  margin-left: 4px;
 }
 
 /* ── 日志列表 ──────────────────────────────────────────── */

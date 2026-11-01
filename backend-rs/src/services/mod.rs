@@ -6,6 +6,7 @@ pub mod crossref;
 pub mod grep_search;
 pub mod datalab;
 pub mod drive;
+pub mod image_cache;
 pub mod llm;
 pub mod mineru;
 pub mod pdf_meta;

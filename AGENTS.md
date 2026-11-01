@@ -73,7 +73,7 @@ cargo build --release
 | `backend-rs/src/logger.rs` | 双日志初始化（文件 + 控制台） |
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`drive.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/drive.rs` | 用户网盘：路径安全、角色阈值、配额统计、目录列举、Content-Type 推断 |
-| `backend-rs/src/services/` | 后端适配器：`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取） |
+| `backend-rs/src/services/` | 后端适配器：`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
@@ -459,6 +459,9 @@ cargo build --release
    - 含批量控制器、暂停/恢复/重置、两级信号量并发限制：MinerU 解析使用独立 `Semaphore(max_tasks)`（按配置），extract/index 使用全局 `Semaphore(max_concurrent_tasks)`（`system.json`）。
    - **所有阶段均在后台执行**（见下方「后台任务」一节）—— 请求先返回，协程在事件循环继续；进度与状态机记录在 `Document` 上，可轮询查询。
 4. **文档管理**（`documents.rs`）：CRUD、上传、按路径登记、语义搜索 `/search`、全文搜索 `/grep-search`、`/assist/markdown` 读写、PDF/图片服务、去重。
+   - **上传/替换一律流式**：`upload`、`replace-pdf`、`replace-markdown`、`replace-asset` 都用 `stream_field_to_temp_file()` 把 multipart 分片边写盘边算 sha256（临时文件放 `pdf_path` 模板的上两级目录，即 `data/pdfs/.upload-*.part`，同盘 rename 到最终位置；失败/去重命中时由 `TempUpload` 守卫自动删除）。**不要再改成 `field.bytes()` + `Vec` 然后 clone**，那会让峰值内存变成文件体积的 2–3 倍。`register`（按路径登记）只流式算哈希 + `tokio::fs::copy`，不读入内存。
+   - **PDF 元数据只传路径**（`pdf_meta::extract_pdf_metadata_from_path_async` / `extract_pdf_report_from_path_async`）：mutool 直接读原文件（不再写临时副本），mupdf feature 用 `Document::open`。
+   - **`/image/:filename` 走按 doc 的 zip LRU 缓存**（`services/image_cache.rs`，64 MB 预算、单包 16 MB 上限、mtime+size 失效）：同一篇文档的 N 张图只读一次 `images.zip`。换包（`replace-asset`）与删文档时必须调 `image_cache::invalidate(doc_id)`。
    - `GET /assist/api/documents/:id/markdown/?line_start&line_count&full&raw` —— 按行切片读取；`raw=1` 返回文件原始内容（不做图片路径重写），供 Markdown 编辑器保证无损读写；响应含 `hash`（文件真实字节的 sha256）。
    - `PUT /assist/api/documents/:id/markdown/lines` —— 按行范围替换源码（admin）。语义：`line_start` 0-based 含端点，`line_count` 为被替换行数（0 = 纯插入），新行数 = `content.split('\n').count()`（与「切片 join('\n')」严格互逆），写入为原子写且不做图片路径还原（与 `raw=1` 配对）。删行必须显式传 `delete: true`（空字符串固定等于 1 个空行，不能表达删行）。
    - **乐观并发控制**：`PUT .../markdown/` 与 `.../markdown/lines/` 都接受可选 `base_hash`（取自 GET 的 `hash`），不一致时返回 **409** `{code:"conflict", hash, detail}`；不传则跳过校验。两个写接口的响应都返回写入后的 `hash`。
@@ -668,6 +671,8 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 18. **静态目录挂载（`static_dirs`）的路由注册顺序**（`main.rs::create_app`）：这些路由必须在 `.layer(middleware)` **之前**注册 —— 处理器靠 Extension 里的 `Settings`/`UserStore`/`SessionStore` 做鉴权，而 axum 的 `Router::layer` 只对已存在的路由生效（这也是 `spa_fallback` 改用全局 `settings` 单例的原因）。另外 axum 的 `/*rest` 通配符**不匹配空剩余路径**，`/prefix`、`/prefix/`、`/prefix/*rest` 三条都要注册，否则访问不了 `/prefix/`。
 19. **静态目录的鉴权与内置路由不同**：它不走 `token_middleware`（后者只覆盖 `/assist/api/*`），而是在处理器内自己判（`static_files::authorize`：`okb_static` cookie / 会话・用户令牌 / 受信任子网），所以新增挂载时要保留这条判定，不能直接读文件。另外：`axum::body::Body` **不是 `Sync`**，`serve_mount` 里不能把 `&Request` 跨 `await` 传给 helper，否则整个 future 不再是 `Send`，axum 会报 `Handler` 未实现（现已改成传 `&str` / `&StaticMount`）。
 20. **前端启动重定向必须先 `await router.isReady()`**（`App.vue`）：硬导航（直接输入 URL / 外链）时 `route` 还是初始 `START_LOCATION`，`route.fullPath` 是 `/`，不等待会把 `?redirect=` 覆盖成 `/`，导致“登录后回跳”失效。
+21. **大文件唯一路径是流式**：上传/解析链路里 **禁止** `tokio::fs::read(整份 PDF)`、`field.bytes()`、`resp.bytes().to_vec()` 之后只为了“顺手算个哈希/交给下一个函数”。哈希用 `utils::calculate_file_hash_async`（流式）或 `stream_field_to_temp_file` 里顺带算；上传请求体用 `reqwest::Body::wrap_stream(ReaderStream::new(file))` **并显式给 `Content-Length`**（否则退化成 chunked，OSS 预签名 URL 会校验失败）；multipart 用 `Part::stream_with_length`。
+22. **日志查看是“从文件尾反向读”**：`GET /assist/api/admin/logs` 用 `utils::ReverseLines`（`LOG_TAIL_MAX_BYTES = 32 MB` 回扫上限）逐行向前读，凑够 `lines` 条就停，**不再 `read_to_string` 整份 JSONL**。响应里的 `total` / `displayed` 现在是“本次返回条数”，`scanned_bytes` / `scan_truncated` 才是回扫情况（命中上限时前端会提示更早日志未加载）；别把它改回“读全文再过滤”。
 
 ## 入口与关键文件速查
 

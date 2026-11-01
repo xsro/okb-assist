@@ -2,14 +2,17 @@
 //!
 //! 当启用 `mupdf` feature 时，使用内置的 `mupdf` 库提取 Info 字典和页面文本。
 //! 未启用时，回退为调用外部 `mutool` 工具完成相同功能。
+//!
+//! **公共入口只接受文件路径**：调用方（上传、解析、PDF 信息页）都不必把整份 PDF
+//! 读进内存；mutool 路径也直接读原文件，不再为每次抽取写临时副本。
+
+use std::path::Path;
 
 #[cfg(feature = "mupdf")]
 use mupdf::{Document, MetadataName, TextExtractOptions};
 
 #[cfg(not(feature = "mupdf"))]
 use std::process::Command;
-#[cfg(not(feature = "mupdf"))]
-use tempfile::TempDir;
 
 // ── 公共 API ──────────────────────────────────────────────
 
@@ -40,30 +43,36 @@ pub fn normalize_doi(raw: &str) -> Option<String> {
     }
 }
 
-/// 异步提取 PDF 元数据（在后台线程执行）
-pub async fn extract_pdf_metadata_async(content: Vec<u8>, filename: Option<String>, doc_id: Option<i64>) -> serde_json::Value {
+/// 异步从磁盘上的 PDF 提取元数据（在后台线程执行，不把整份 PDF 读进内存）
+pub async fn extract_pdf_metadata_from_path_async(
+    path: String,
+    filename: Option<String>,
+    doc_id: Option<i64>,
+) -> serde_json::Value {
     tokio::task::spawn_blocking(move || {
-        extract_pdf_metadata(&content, filename.as_deref(), doc_id)
+        extract_pdf_metadata_from_path(Path::new(&path), filename.as_deref(), doc_id)
     })
     .await
     .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
 }
 
-/// 从 PDF 字节内容中提取元数据
+/// 从磁盘上的 PDF 提取元数据
 #[cfg(feature = "mupdf")]
-pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>, doc_id: Option<i64>) -> serde_json::Value {
+pub fn extract_pdf_metadata_from_path(
+    path: &Path,
+    filename: Option<&str>,
+    doc_id: Option<i64>,
+) -> serde_json::Value {
     let mut result = serde_json::Map::new();
 
-    if let Ok(doc) = Document::from_bytes(content, "pdf") {
+    if let Ok(doc) = Document::open(path) {
         // 1. 从 Info 字典提取
         extract_from_info_dict(&doc, filename, &mut result);
 
         // 2. 从页面文本提取（补充 Info 字典未覆盖的字段）
-        let full_text = extract_full_text(&doc, doc_id);
-        if let Some(ref text) = full_text {
+        if let Some(ref text) = extract_full_text(&doc, doc_id) {
             // 全宽字符归一化（中文 PDF 常见）
             let normalized = normalize_fullwidth(text);
-
             extract_from_text(&normalized, filename, &mut result);
         }
     }
@@ -71,18 +80,22 @@ pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>, doc_id: Opti
     serde_json::Value::Object(result)
 }
 
-/// 从 PDF 字节内容中提取元数据（回退方案：调用外部 mutool）
+/// 从磁盘上的 PDF 提取元数据（回退方案：直接让 mutool 读原文件，无需临时副本）
 #[cfg(not(feature = "mupdf"))]
-pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>, doc_id: Option<i64>) -> serde_json::Value {
+pub fn extract_pdf_metadata_from_path(
+    path: &Path,
+    filename: Option<&str>,
+    doc_id: Option<i64>,
+) -> serde_json::Value {
     let mut result = serde_json::Map::new();
 
     // 1. 通过 mutool 提取 Info 字典
-    if let Some(info) = extract_info_dict_via_mutool(content) {
+    if let Some(info) = extract_info_dict_from_path(path) {
         extract_from_info_dict_parsed(&info, filename, &mut result);
     }
 
     // 2. 通过 mutool 提取页面文本
-    if let Some(text) = extract_full_text_via_mutool(content, doc_id) {
+    if let Some(text) = extract_full_text_from_path(path, doc_id) {
         let normalized = normalize_fullwidth(&text);
         extract_from_text(&normalized, filename, &mut result);
     }
@@ -92,14 +105,14 @@ pub fn extract_pdf_metadata(content: &[u8], filename: Option<&str>, doc_id: Opti
 
 // ── PDF 元信息报告（Info 字典 + 页数 + 启发式结果） ────────
 
-/// 异步生成 PDF 元信息报告（在后台线程执行）
-pub async fn extract_pdf_report_async(
-    content: Vec<u8>,
+/// 异步生成 PDF 元信息报告（在后台线程执行，不把整份 PDF 读进内存）
+pub async fn extract_pdf_report_from_path_async(
+    path: String,
     filename: Option<String>,
     doc_id: Option<i64>,
 ) -> serde_json::Value {
     tokio::task::spawn_blocking(move || {
-        extract_pdf_report(&content, filename.as_deref(), doc_id)
+        extract_pdf_report_from_path(Path::new(&path), filename.as_deref(), doc_id)
     })
     .await
     .unwrap_or_else(|_| serde_json::json!({"error": "PDF 元信息提取任务崩溃"}))
@@ -119,10 +132,14 @@ pub async fn extract_pdf_report_async(
 /// ```
 /// `info` 为 PDF Info 字典原始键值；`heuristics` 为现有启发式抽取结果。
 #[cfg(feature = "mupdf")]
-pub fn extract_pdf_report(content: &[u8], filename: Option<&str>, doc_id: Option<i64>) -> serde_json::Value {
-    let mut report = base_report(content);
+pub fn extract_pdf_report_from_path(
+    path: &Path,
+    filename: Option<&str>,
+    doc_id: Option<i64>,
+) -> serde_json::Value {
+    let mut report = base_report_from_path(path);
 
-    let doc = match Document::from_bytes(content, "pdf") {
+    let doc = match Document::open(path) {
         Ok(d) => d,
         Err(e) => {
             report.insert("error".to_string(), serde_json::json!(e.to_string()));
@@ -167,26 +184,17 @@ pub fn extract_pdf_report(content: &[u8], filename: Option<&str>, doc_id: Option
     serde_json::Value::Object(report)
 }
 
-/// 生成 PDF 元信息报告（回退方案：调用外部 mutool）
+/// 生成 PDF 元信息报告（回退方案：直接让 mutool 读原文件）
 #[cfg(not(feature = "mupdf"))]
-pub fn extract_pdf_report(content: &[u8], filename: Option<&str>, doc_id: Option<i64>) -> serde_json::Value {
-    let mut report = base_report(content);
-
-    let temp_dir = match TempDir::new() {
-        Ok(d) => d,
-        Err(e) => {
-            report.insert("error".to_string(), serde_json::json!(format!("无法创建临时目录: {e}")));
-            return serde_json::Value::Object(report);
-        }
-    };
-    let temp_path = temp_dir.path().join("report.pdf");
-    if let Err(e) = std::fs::write(&temp_path, content) {
-        report.insert("error".to_string(), serde_json::json!(format!("无法写入临时文件: {e}")));
-        return serde_json::Value::Object(report);
-    }
+pub fn extract_pdf_report_from_path(
+    path: &Path,
+    filename: Option<&str>,
+    doc_id: Option<i64>,
+) -> serde_json::Value {
+    let mut report = base_report_from_path(path);
 
     // Info 字典原始键值
-    let entries = mutool_show(&temp_path, &["trailer.Info"])
+    let entries = mutool_show(path, &["trailer.Info"])
         .map(|out| parse_pdf_dict_entries(&out))
         .unwrap_or_default();
 
@@ -195,15 +203,15 @@ pub fn extract_pdf_report(content: &[u8], filename: Option<&str>, doc_id: Option
         info.insert(k.clone(), serde_json::Value::String(v.clone()));
     }
     report.insert("info".to_string(), serde_json::Value::Object(info));
-    report.insert("page_count".to_string(), serde_json::json!(mutool_page_count(&temp_path)));
-    report.insert("encrypted".to_string(), serde_json::json!(mutool_encrypted(&temp_path)));
+    report.insert("page_count".to_string(), serde_json::json!(mutool_page_count(path)));
+    report.insert("encrypted".to_string(), serde_json::json!(mutool_encrypted(path)));
 
     // 启发式抽取（复用既有逻辑）
     let mut heuristic = serde_json::Map::new();
     if let Some(parsed) = info_dict_from_entries(&entries) {
         extract_from_info_dict_parsed(&parsed, filename, &mut heuristic);
     }
-    if let Some(text) = extract_full_text_via_mutool(content, doc_id) {
+    if let Some(text) = extract_full_text_from_path(path, doc_id) {
         extract_from_text(&normalize_fullwidth(&text), filename, &mut heuristic);
     }
     report.insert("heuristics".to_string(), serde_json::Value::Object(heuristic));
@@ -212,14 +220,25 @@ pub fn extract_pdf_report(content: &[u8], filename: Option<&str>, doc_id: Option
 }
 
 /// 报告公共字段：文件大小与 PDF 版本
-fn base_report(content: &[u8]) -> serde_json::Map<String, serde_json::Value> {
+fn base_report_from_path(path: &Path) -> serde_json::Map<String, serde_json::Value> {
     let mut report = serde_json::Map::new();
-    report.insert("file_size".to_string(), serde_json::json!(content.len()));
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    report.insert("file_size".to_string(), serde_json::json!(size));
     report.insert(
         "pdf_version".to_string(),
-        serde_json::json!(pdf_version_from_header(content)),
+        serde_json::json!(pdf_version_from_file(path)),
     );
     report
+}
+
+/// 从文件头（前 1 KB）读取 PDF 版本号
+fn pdf_version_from_file(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = vec![0u8; 1024];
+    let n = file.read(&mut head).ok()?;
+    head.truncate(n);
+    pdf_version_from_header(&head)
 }
 
 /// 从文件头读取 PDF 版本号（如 `1.7`）
@@ -299,12 +318,8 @@ struct InfoDict {
 }
 
 #[cfg(not(feature = "mupdf"))]
-fn extract_info_dict_via_mutool(content: &[u8]) -> Option<InfoDict> {
-    let temp_dir = TempDir::new().ok()?;
-    let temp_path = temp_dir.path().join("extract_info.pdf");
-    std::fs::write(&temp_path, content).ok()?;
-
-    let stdout = mutool_show(&temp_path, &["trailer.Info"])?;
+fn extract_info_dict_from_path(path: &Path) -> Option<InfoDict> {
+    let stdout = mutool_show(path, &["trailer.Info"])?;
     let entries = parse_pdf_dict_entries(&stdout);
     info_dict_from_entries(&entries)
 }
@@ -702,14 +717,10 @@ fn extract_full_text(doc: &Document, doc_id: Option<i64>) -> Option<String> {
 }
 
 #[cfg(not(feature = "mupdf"))]
-fn extract_full_text_via_mutool(content: &[u8], doc_id: Option<i64>) -> Option<String> {
-    let temp_dir = TempDir::new().ok()?;
-    let temp_path = temp_dir.path().join("extract_text.pdf");
-    std::fs::write(&temp_path, content).ok()?;
-
+fn extract_full_text_from_path(path: &Path, doc_id: Option<i64>) -> Option<String> {
     let mutool_path = crate::settings::get_settings().mutool_path();
     let output = Command::new(&mutool_path)
-        .args(["draw", "-q", "-F", "text", temp_path.to_str()?])
+        .args(["draw", "-q", "-F", "text", path.to_str()?])
         .output()
         .ok()?;
 

@@ -93,6 +93,8 @@ async fn dedup(
                 .bind(del_id)
                 .execute(db.pool())
                 .await;
+            // 同步失效图片缓存（行已删，缓存不应继续占内存）
+            crate::services::image_cache::invalidate(*del_id);
             deleted_docs += 1;
         }
         merged_groups += 1;
@@ -614,6 +616,10 @@ async fn sync_file_sizes(
 
 // ── 日志查看 ────────────────────────────────────────────
 
+/// 日志查看从文件尾反向回扫的字节上限（32 MB）。
+/// 超过后不再继续往文件头方向扫，避免超大日志 + 过滤条件时长时间扫盘。
+const LOG_TAIL_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
 /// 日志查询参数
 #[derive(Debug, Deserialize)]
 pub struct LogQuery {
@@ -651,9 +657,10 @@ async fn get_logs(
     let level_filter = params.level.as_deref().unwrap_or("").to_lowercase();
     let keyword = params.q.as_deref().unwrap_or("").to_lowercase();
 
-    // 读取日志文件
-    let content = match std::fs::read_to_string(&log_path) {
-        Ok(c) => c,
+    // 从文件尾反向读行：只要最后 N 条，不再把整份 JSONL 读进内存。
+    // `LOG_TAIL_MAX_BYTES` 是回扫上限，避免超大文件在过滤密度低时长时间扫盘。
+    let mut iter = match crate::utils::ReverseLines::open(&log_path, LOG_TAIL_MAX_BYTES) {
+        Ok(it) => it,
         Err(e) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
                 "entries": [],
@@ -664,33 +671,26 @@ async fn get_logs(
         }
     };
 
-    let mut entries: Vec<Value> = Vec::new();
-
-    for line in content.lines() {
+    // 逆序收集（最新在前），凑够 max_lines 条就停
+    let mut entries_rev: Vec<Value> = Vec::new();
+    while let Some(line) = iter.next() {
         let line = line.trim();
         if line.is_empty() { continue; }
 
-        // 尝试解析 JSONL
+        // 尝试解析 JSONL；非 JSONL 行（进程启动消息等）按纯文本条目处理
         let entry: Value = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(_) => {
-                // 非 JSONL 行（如进程启动时的消息），作为纯文本条目
-                entries.push(json!({
-                    "message": line,
-                    "level": "info",
-                    "timestamp": "",
-                    "target": ""
-                }));
-                continue;
-            }
+            Err(_) => json!({
+                "message": line,
+                "level": "info",
+                "timestamp": "",
+                "target": ""
+            }),
         };
 
         // 按级别过滤
         if !level_filter.is_empty() {
-            let lvl = entry["level"]
-                .as_str()
-                .unwrap_or("")
-                .to_lowercase();
+            let lvl = entry["level"].as_str().unwrap_or("").to_lowercase();
             if lvl != level_filter { continue; }
         }
 
@@ -700,18 +700,25 @@ async fn get_logs(
             if !raw.contains(&keyword) { continue; }
         }
 
-        entries.push(entry);
+        entries_rev.push(entry);
+        if entries_rev.len() >= max_lines {
+            break;
+        }
     }
 
-    // 取最近的 N 条
-    let total = entries.len();
-    let start = if entries.len() > max_lines { entries.len() - max_lines } else { 0 };
-    let slice: Vec<Value> = entries.drain(start..).collect();
+    let scanned_bytes = iter.read_bytes();
+    // 回扫字节预算用尽且没退到文件头 → 更早的日志未加载（可能还有匹配项）
+    let scan_truncated = scanned_bytes >= LOG_TAIL_MAX_BYTES && !iter.at_start();
+
+    let total = entries_rev.len();
+    entries_rev.reverse();
 
     Json(json!({
-        "entries": slice,
+        "entries": entries_rev,
         "total": total,
         "file": log_path.to_string_lossy().to_string(),
-        "displayed": slice.len(),
+        "displayed": total,
+        "scanned_bytes": scanned_bytes,
+        "scan_truncated": scan_truncated,
     })).into_response()
 }

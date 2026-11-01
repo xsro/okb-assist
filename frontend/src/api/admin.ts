@@ -77,6 +77,10 @@ export interface LogResponse {
   file: string
   displayed: number
   error?: string
+  /** 本次从文件尾实际回扫的字节数 */
+  scanned_bytes?: number
+  /** true = 回扫字节预算用尽，文件开头还有更早的日志未加载 */
+  scan_truncated?: boolean
 }
 
 /** 获取日志 */

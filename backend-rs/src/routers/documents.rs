@@ -17,7 +17,10 @@ use crate::config::Settings;
 use crate::database::Database;
 use crate::models::Document;
 use crate::paths;
-use crate::services::pdf_meta::{extract_pdf_metadata_async, extract_pdf_report_async, normalize_doi};
+use crate::services::pdf_meta::{
+    extract_pdf_metadata_from_path_async, extract_pdf_report_from_path_async, normalize_doi,
+};
+use crate::services::image_cache;
 use crate::services::citation::{self, CitationRecord};
 use crate::auth;
 use crate::routers::pipeline::run_crossref_override;
@@ -25,6 +28,10 @@ use crate::routers::pipeline::run_crossref_override;
 use axum::http::{HeaderMap, HeaderValue};
 use tokio::io::{AsyncSeekExt, AsyncReadExt};
 use crate::utils::{calculate_file_hash_async, now_datetime, now_iso, sha256_hex_async};
+
+/// 单个文档上传（PDF / Markdown / 资源包）的大小上限，与 router 上的 `DefaultBodyLimit` 一致。
+/// 上传过程是流式的：这里只是一个提前中止的保险，不再靠把整份文件读进内存来判大小。
+const MAX_DOC_UPLOAD_BYTES: u64 = 200 * 1024 * 1024;
 
 /// 全局文件别名表（内存，重启即丢失）
 /// 存储格式：alias -> (doc_id, expires_at_unix_timestamp)
@@ -109,6 +116,133 @@ pub fn extract_doc_id_from_alias(alias: &str) -> Option<i64> {
     last_part[6..].parse::<i64>().ok()
 }
 
+// ── 流式上传工具 ────────────────────────────────────────
+
+/// 临时上传文件的守卫：未被 `take()` 消费时，`Drop` 会删掉文件。
+struct TempUpload {
+    path: Option<std::path::PathBuf>,
+}
+
+impl TempUpload {
+    fn path(&self) -> &std::path::Path {
+        self.path.as_deref().expect("临时文件已被取走")
+    }
+
+    fn take(&mut self) -> std::path::PathBuf {
+        self.path.take().expect("临时文件已被取走")
+    }
+}
+
+impl Drop for TempUpload {
+    fn drop(&mut self) {
+        if let Some(p) = &self.path {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// 上传临时目录：取 `pdf_path` 模板的上两级目录（`data/pdfs/{id}/{id}.pdf` → `data/pdfs`），
+/// 保证与最终位置同一文件系统，后面可以 rename 而不是跨设备复制。
+fn upload_temp_dir(settings: &Settings) -> std::path::PathBuf {
+    let sample = paths::get_pdf_path(settings, 0);
+    std::path::Path::new(&sample)
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("data/pdfs"))
+}
+
+/// 把 multipart 的文件字段流式写进临时文件，边写边算 sha256。
+///
+/// 返回 `(临时文件守卫, 字节数, sha256 hex)`；超过 `max_bytes` 立即中止
+/// 并删除临时文件。
+async fn stream_field_to_temp_file(
+    field: &mut axum::extract::multipart::Field<'_>,
+    temp_dir: &std::path::Path,
+    filename_hint: &str,
+    max_bytes: u64,
+) -> Result<(TempUpload, u64, String), String> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+
+    if let Err(e) = tokio::fs::create_dir_all(temp_dir).await {
+        return Err(format!("创建上传临时目录失败: {e}"));
+    }
+
+    // 文件名只用来辨识临时文件，只用安全字符并截断
+    let safe_hint: String = filename_hint
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(40)
+        .collect();
+    let tmp_path = temp_dir.join(format!(
+        ".upload-{}-{}-{}.part",
+        std::process::id(),
+        chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap_or_default(),
+        safe_hint
+    ));
+
+    let guard = TempUpload {
+        path: Some(tmp_path.clone()),
+    };
+    let mut file = match tokio::fs::File::create(&tmp_path).await {
+        Ok(f) => f,
+        Err(e) => return Err(format!("无法创建临时文件: {e}")),
+    };
+
+    let mut hasher = Sha256::new();
+    let mut written: u64 = 0;
+    let result: Result<(), String> = loop {
+        match field.chunk().await {
+            Ok(Some(chunk)) => {
+                written += chunk.len() as u64;
+                if written > max_bytes {
+                    break Err(format!(
+                        "文件过大（上限 {} MB）",
+                        max_bytes / 1024 / 1024
+                    ));
+                }
+                hasher.update(&chunk);
+                if let Err(e) = file.write_all(&chunk).await {
+                    break Err(format!("写入临时文件失败: {e}"));
+                }
+            }
+            Ok(None) => break Ok(()),
+            Err(e) => break Err(format!("读取上传数据失败: {e}")),
+        }
+    };
+    let flushed = file.flush().await;
+    drop(file);
+    result?;
+    flushed.map_err(|e| format!("刷新临时文件失败: {e}"))?;
+
+    Ok((guard, written, hex::encode(hasher.finalize())))
+}
+
+/// 把临时文件搬到最终位置：优先 `rename`（同一文件系统，零拷贝），失败再退化为复制。
+async fn persist_temp_file(mut temp: TempUpload, target: &str) -> std::io::Result<()> {
+    let src = temp.take();
+    if let Some(parent) = std::path::Path::new(target).parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    match tokio::fs::rename(&src, target).await {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let copied = tokio::fs::copy(&src, target).await.map(|_| ());
+            let _ = tokio::fs::remove_file(&src).await;
+            copied
+        }
+    }
+}
+
 pub fn router() -> axum::Router<()> {
     axum::Router::new()
         .route("/assist/api/documents/", get(list_documents).post(upload_document))
@@ -171,7 +305,7 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/:id/crossref", get(get_crossref_record))
         .route("/assist/api/documents/:id/citation/", get(get_citation))
         .route("/assist/api/documents/:id/citation", get(get_citation))
-        .layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_DOC_UPLOAD_BYTES as usize))
 }
 
 /// 列表查询参数
@@ -671,6 +805,8 @@ async fn delete_document(
             // 删除本地文件
             let _ = std::fs::remove_file(paths::get_pdf_path(&settings, id));
             let _ = std::fs::remove_file(paths::get_markdown_path(&settings, id));
+            // 图片缓存同步失效，避免已删文档的 zip 继续占着内存
+            image_cache::invalidate(id);
             let _ = doc;
 
             let result = sqlx::query("DELETE FROM documents WHERE id = ?")
@@ -809,6 +945,8 @@ async fn merge_documents(
         let _ = std::fs::remove_file(paths::get_info_path(&settings, *sid));
         let _ = std::fs::remove_file(paths::get_asset_path(&settings, *sid));
         let _ = std::fs::remove_file(paths::get_crossref_path(&settings, *sid));
+        // 源文档的图片缓存同步失效
+        image_cache::invalidate(*sid);
         // 删除向量索引记录
         let _ = sqlx::query("DELETE FROM document_vector_index WHERE document_id = ?")
             .bind(sid)
@@ -920,26 +1058,47 @@ async fn upload_document(
         return resp;
     }
     let mut filename: Option<String> = None;
-    let mut content: Vec<u8> = Vec::new();
+    // 流式落盘：整个上传过程不再把 PDF 读进内存，哈希在写入时顺带算好
+    let mut uploaded: Option<(TempUpload, u64, String)> = None;
     let mut force = false;
     let mut auto_process = true;
+    let temp_dir = upload_temp_dir(&settings);
 
-    while let Ok(Some(field)) = multipart.next_field().await {
-        if let Some(name) = field.name() {
-            if name == "file" {
-                filename = field.file_name().map(String::from);
-                match field.bytes().await {
-                    Ok(bytes) => content = bytes.to_vec(),
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let Some(name) = field.name().map(|s| s.to_string()) else {
+            continue;
+        };
+        match name.as_str() {
+            "file" => {
+                let hint = field.file_name().unwrap_or("upload.pdf").to_string();
+                filename = Some(hint.clone());
+                // 只保留最后一个文件字段（旧守卫在这里被 drop，临时文件随之删除）
+                let _ = uploaded.take();
+                match stream_field_to_temp_file(
+                    &mut field,
+                    &temp_dir,
+                    &hint,
+                    MAX_DOC_UPLOAD_BYTES,
+                )
+                .await
+                {
+                    Ok(v) => uploaded = Some(v),
                     Err(e) => {
-                        return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("读取文件内容失败: {}", e)}))).into_response();
+                        return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response()
                     }
                 }
-            } else if name == "force" {
+            }
+            "force" => {
                 let val = field.bytes().await.unwrap_or_default();
                 force = std::str::from_utf8(&val).unwrap_or("false") == "true";
-            } else if name == "auto_process" {
+            }
+            "auto_process" => {
                 let val = field.bytes().await.unwrap_or_default();
                 auto_process = std::str::from_utf8(&val).unwrap_or("true") != "false";
+            }
+            _ => {
+                // 未知字段：读完丢弃，保持流位置正确
+                let _ = field.bytes().await;
             }
         }
     }
@@ -953,10 +1112,21 @@ async fn upload_document(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "只支持 PDF 文件"}))).into_response();
     }
 
-    // 提取 PDF 元数据（后台线程，不阻塞 async 运行时）
-    let meta = extract_pdf_metadata_async(content.clone(), Some(filename.clone()), None).await;
-    // 计算文件哈希（后台线程，不阻塞 async 运行时）
-    let file_hash = sha256_hex_async(content.clone()).await;
+    let (temp_upload, upload_size, file_hash) = match uploaded {
+        Some(v) => v,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少文件"}))).into_response(),
+    };
+    if upload_size == 0 {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "文件为空"}))).into_response();
+    }
+
+    // 提取 PDF 元数据（后台线程读临时文件，不占用请求内存）
+    let meta = extract_pdf_metadata_from_path_async(
+        temp_upload.path().to_string_lossy().to_string(),
+        Some(filename.clone()),
+        None,
+    )
+    .await;
 
     // 检查重复（默认去重，force 可跳过）
     if !force {
@@ -1061,13 +1231,9 @@ async fn upload_document(
         },
     };
 
-    // 保存 PDF 文件（后台线程写磁盘，不阻塞 async 运行时）
+    // 保存 PDF 文件：临时文件已被流式写好，这里只是搬位置（同盘 rename，零拷贝）
     let pdf_path = paths::get_pdf_path(&settings, doc_id);
-    let pdf_path_clone = pdf_path.clone();
-    if let Some(parent) = std::path::Path::new(&pdf_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = tokio::task::spawn_blocking(move || std::fs::write(&pdf_path_clone, &content)).await.unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking panicked"))) {
+    if let Err(e) = persist_temp_file(temp_upload, &pdf_path).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": format!("保存文件失败: {}", e)}))).into_response();
     }
 
@@ -1111,15 +1277,12 @@ async fn register_document_by_path(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "只支持 PDF 文件"}))).into_response();
     }
 
-    let file_path_clone = data.file_path.clone();
-    let content = tokio::task::spawn_blocking(move || std::fs::read(&file_path_clone)).await
-        .unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking panicked")));
-    let content = match content {
-        Ok(c) => c,
+    // 直接从磁盘路径算哈希、抽元数据（流式读，不把整份 PDF 读进内存）
+    let file_hash = match calculate_file_hash_async(data.file_path.clone()).await {
+        Ok(h) => h,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
     };
-    let meta = extract_pdf_metadata_async(content.clone(), None, None).await;
-    let file_hash = sha256_hex_async(content.clone()).await;
+    let meta = extract_pdf_metadata_from_path_async(data.file_path.clone(), None, None).await;
 
     // 检查重复
     if !data.force {
@@ -1181,12 +1344,12 @@ async fn register_document_by_path(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
     };
 
-    // 复制文件
+    // 复制文件（tokio::fs::copy 走内核复制，不在用户态缓冲整份文件）
     let pdf_path = paths::get_pdf_path(&settings, doc_id);
     if let Some(parent) = std::path::Path::new(&pdf_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = tokio::fs::create_dir_all(parent).await;
     }
-    if let Err(e) = std::fs::copy(&data.file_path, &pdf_path) {
+    if let Err(e) = tokio::fs::copy(&data.file_path, &pdf_path).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": format!("复制文件失败: {}", e)}))).into_response();
     }
 
@@ -2553,19 +2716,13 @@ async fn get_pdf_info(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
     };
 
-    let pdf_path = std::path::PathBuf::from(paths::get_pdf_path(&settings, id));
-    let content = match tokio::task::spawn_blocking(move || std::fs::read(&pdf_path)).await {
-        Ok(Ok(c)) => c,
-        Ok(Err(_)) => {
-            return (StatusCode::NOT_FOUND, Json(json!({"detail": "PDF 文件不存在"}))).into_response()
-        }
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
-                .into_response()
-        }
-    };
+    let pdf_path = paths::get_pdf_path(&settings, id);
+    if !std::path::Path::new(&pdf_path).exists() {
+        return (StatusCode::NOT_FOUND, Json(json!({"detail": "PDF 文件不存在"}))).into_response();
+    }
 
-    let report = extract_pdf_report_async(content, Some(doc.filename.clone()), Some(id)).await;
+    // 只传路径：mutool / mupdf 直接读原文件，不把整份 PDF 读进内存
+    let report = extract_pdf_report_from_path_async(pdf_path, Some(doc.filename.clone()), Some(id)).await;
     Json(json!({
         "id": id,
         "filename": doc.filename,
@@ -2758,54 +2915,24 @@ async fn get_image_from_zip(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
     }
 
-    let zip_path = std::path::PathBuf::from(paths::get_asset_path(&settings, id));
-    if !zip_path.exists() {
+    let zip_path = paths::get_asset_path(&settings, id);
+    if !std::path::Path::new(&zip_path).exists() {
         return (StatusCode::NOT_FOUND, Json(json!({"detail": "图片包不存在"}))).into_response();
     }
 
-    let zip_path_read = zip_path.clone();
-    let raw = match tokio::task::spawn_blocking(move || std::fs::read(&zip_path_read)).await {
-        Ok(Ok(r)) => r,
-        _ => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "读取图片包失败"}))).into_response(),
+    // 按 doc 缓存 zip 字节（LRU）：同一篇文档的 N 张图片只读一次盘
+    let raw = match image_cache::load(id, &zip_path).await {
+        Some(r) => r,
+        None => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "读取图片包失败"}))).into_response(),
     };
 
-    let cursor = std::io::Cursor::new(raw);
-    let mut archive = match zip::ZipArchive::new(cursor) {
-        Ok(a) => a,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "图片包损坏"}))).into_response(),
+    // zip 解析与解压是 CPU 操作，放后台线程
+    let want = filename.clone();
+    let img_data = match tokio::task::spawn_blocking(move || image_cache::read_image(&raw, &want)).await {
+        Ok(Some(data)) => data,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "图片不存在"}))).into_response(),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "读取图片失败"}))).into_response(),
     };
-
-    let target = {
-        let mut found = None;
-        for i in 0..archive.len() {
-            if let Ok(entry) = archive.by_index(i) {
-                if let Some(name) = entry.enclosed_name() {
-                    let base = std::path::Path::new(&name)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    if base == filename {
-                        found = Some(name.to_path_buf());
-                        break;
-                    }
-                }
-            }
-        }
-        found
-    };
-
-    let target = match target {
-        Some(t) => t,
-        None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "图片不存在"}))).into_response(),
-    };
-
-    let mut img_data = Vec::new();
-    if let Ok(mut entry) = archive.by_name(&target.to_string_lossy()) {
-        use std::io::Read;
-        if entry.read_to_end(&mut img_data).is_err() {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "读取图片失败"}))).into_response();
-        }
-    }
 
     let mime = image_mime(&filename);
     (StatusCode::OK, [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "public, max-age=86400")], img_data).into_response()
@@ -2825,16 +2952,24 @@ async fn replace_pdf(
     }
 
     let mut file_name: Option<String> = None;
-    let mut content: Vec<u8> = Vec::new();
-    while let Ok(Some(field)) = multipart.next_field().await {
-        if field.name() == Some("file") {
-            file_name = field.file_name().map(|s| s.to_string());
-            match field.bytes().await {
-                Ok(bytes) => content = bytes.to_vec(),
+    let mut uploaded: Option<(TempUpload, u64, String)> = None;
+    let temp_dir = upload_temp_dir(&settings);
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let Some(name) = field.name().map(|s| s.to_string()) else {
+            continue;
+        };
+        if name == "file" {
+            let hint = field.file_name().unwrap_or("replace.pdf").to_string();
+            file_name = Some(hint.clone());
+            let _ = uploaded.take();
+            match stream_field_to_temp_file(&mut field, &temp_dir, &hint, MAX_DOC_UPLOAD_BYTES).await {
+                Ok(v) => uploaded = Some(v),
                 Err(e) => {
-                    return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("读取文件内容失败: {}", e)}))).into_response();
+                    return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response()
                 }
             }
+        } else {
+            let _ = field.bytes().await;
         }
     }
 
@@ -2847,13 +2982,16 @@ async fn replace_pdf(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "只支持 PDF 文件"}))).into_response();
     }
 
-    let file_hash = sha256_hex_async(content.clone()).await;
-    let pdf_path = std::path::PathBuf::from(paths::get_pdf_path(&settings, id));
-    if let Some(parent) = pdf_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let (temp_upload, upload_size, file_hash) = match uploaded {
+        Some(v) => v,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少文件"}))).into_response(),
+    };
+    if upload_size == 0 {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "文件为空"}))).into_response();
     }
-    let pdf_path_clone = pdf_path.clone();
-    if let Err(e) = tokio::task::spawn_blocking(move || std::fs::write(&pdf_path_clone, &content)).await.unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking panicked"))) {
+
+    let pdf_path = paths::get_pdf_path(&settings, id);
+    if let Err(e) = persist_temp_file(temp_upload, &pdf_path).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
     }
 
@@ -2910,33 +3048,45 @@ async fn replace_markdown(
     }
 
     let mut file_name: Option<String> = None;
-    let mut content: Vec<u8> = Vec::new();
-    while let Ok(Some(field)) = multipart.next_field().await {
-        if field.name() == Some("file") {
-            file_name = field.file_name().map(|s| s.to_string());
-            match field.bytes().await {
-                Ok(bytes) => content = bytes.to_vec(),
+    let mut uploaded: Option<(TempUpload, u64, String)> = None;
+    let temp_dir = upload_temp_dir(&settings);
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let Some(name) = field.name().map(|s| s.to_string()) else {
+            continue;
+        };
+        if name == "file" {
+            let hint = field.file_name().unwrap_or("replace.md").to_string();
+            file_name = Some(hint.clone());
+            let _ = uploaded.take();
+            match stream_field_to_temp_file(&mut field, &temp_dir, &hint, MAX_DOC_UPLOAD_BYTES).await {
+                Ok(v) => uploaded = Some(v),
                 Err(e) => {
-                    return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("读取文件内容失败: {}", e)}))).into_response();
+                    return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response()
                 }
             }
+        } else {
+            let _ = field.bytes().await;
         }
     }
 
-    if file_name.is_none() || content.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少文件"}))).into_response();
-    }
-
-    if !file_name.as_ref().unwrap().to_lowercase().ends_with(".md") {
+    let file_name = match file_name {
+        Some(f) => f,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少文件"}))).into_response(),
+    };
+    if !file_name.to_lowercase().ends_with(".md") {
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "只支持 Markdown (.md) 文件"}))).into_response();
     }
 
-    let md_path = std::path::PathBuf::from(paths::get_markdown_path(&settings, id));
-    if let Some(parent) = md_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let (temp_upload, upload_size, _hash) = match uploaded {
+        Some(v) => v,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少文件"}))).into_response(),
+    };
+    if upload_size == 0 {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "文件为空"}))).into_response();
     }
-    let md_path_clone = md_path.clone();
-    if let Err(e) = tokio::task::spawn_blocking(move || std::fs::write(&md_path_clone, &content)).await.unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking panicked"))) {
+
+    let md_path = paths::get_markdown_path(&settings, id);
+    if let Err(e) = persist_temp_file(temp_upload, &md_path).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
     }
 
@@ -2963,35 +3113,49 @@ async fn replace_asset(
     }
 
     let mut file_name: Option<String> = None;
-    let mut content: Vec<u8> = Vec::new();
-    while let Ok(Some(field)) = multipart.next_field().await {
-        if field.name() == Some("file") {
-            file_name = field.file_name().map(|s| s.to_string());
-            match field.bytes().await {
-                Ok(bytes) => content = bytes.to_vec(),
+    let mut uploaded: Option<(TempUpload, u64, String)> = None;
+    let temp_dir = upload_temp_dir(&settings);
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let Some(name) = field.name().map(|s| s.to_string()) else {
+            continue;
+        };
+        if name == "file" {
+            let hint = field.file_name().unwrap_or("replace.zip").to_string();
+            file_name = Some(hint.clone());
+            let _ = uploaded.take();
+            match stream_field_to_temp_file(&mut field, &temp_dir, &hint, MAX_DOC_UPLOAD_BYTES).await {
+                Ok(v) => uploaded = Some(v),
                 Err(e) => {
-                    return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("读取文件内容失败: {}", e)}))).into_response();
+                    return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response()
                 }
             }
+        } else {
+            let _ = field.bytes().await;
         }
     }
 
-    if file_name.is_none() || content.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少文件"}))).into_response();
-    }
-
-    if !file_name.as_ref().unwrap().to_lowercase().ends_with(".zip") {
+    let file_name = match file_name {
+        Some(f) => f,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少文件"}))).into_response(),
+    };
+    if !file_name.to_lowercase().ends_with(".zip") {
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "只支持 ZIP 资源包文件"}))).into_response();
     }
 
-    let asset_path = std::path::PathBuf::from(paths::get_asset_path(&settings, id));
-    if let Some(parent) = asset_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let (temp_upload, upload_size, _hash) = match uploaded {
+        Some(v) => v,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少文件"}))).into_response(),
+    };
+    if upload_size == 0 {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "文件为空"}))).into_response();
     }
-    let asset_path_clone = asset_path.clone();
-    if let Err(e) = tokio::task::spawn_blocking(move || std::fs::write(&asset_path_clone, &content)).await.unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking panicked"))) {
+
+    let asset_path = paths::get_asset_path(&settings, id);
+    if let Err(e) = persist_temp_file(temp_upload, &asset_path).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
     }
+    // 资源包已换：立即失效图片缓存（mtime 也可能因精度不足撞车）
+    image_cache::invalidate(id);
 
     // 写时同步：更新文件大小到数据库
     sync_doc_file_sizes(&db, &settings, id).await;
