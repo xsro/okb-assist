@@ -465,7 +465,7 @@ async fn me(
 /// `POST /assist/api/auth/password` —— 修改自己的密码。
 ///
 /// 已有密码时需提供 `old_password`；无密码账号（管理员创建但尚未设密）可直设。
-/// 成功后撤销该用户的全部会话（遗留的 `bootstrap` token 由 `UserStore::set_password` 一并吊销）。
+/// 成功后撤销该用户的全部会话（已签发的个人令牌不受影响）。
 async fn change_password(
     Extension(users): Extension<Arc<UserStore>>,
     Extension(sessions): Extension<Arc<SessionStore>>,
