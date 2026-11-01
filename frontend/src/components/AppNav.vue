@@ -39,6 +39,10 @@ const navItems = computed(() => {
   if (tokenStore.role === 'admin') {
     return allNavItems
   }
-  return allNavItems.filter(item => !adminOnlyPaths.includes(item.path))
+  return allNavItems.filter(item => {
+    if (adminOnlyPaths.includes(item.path)) return false
+    if (item.path === '/assist/upload' && !tokenStore.canUpload) return false
+    return true
+  })
 })
 </script>

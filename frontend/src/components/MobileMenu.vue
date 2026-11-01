@@ -52,7 +52,6 @@ const adminOnlyPaths = [
   '/assist/config',
   '/assist/duplicates',
   '/assist/point',
-  '/assist/mcp-setup',
   '/assist/logs',
   '/assist/drive/admin'
 ]
@@ -67,7 +66,6 @@ const allNavItems = [
   { path: '/assist/config', label: '配置' },
   { path: '/assist/duplicates', label: '去重' },
   { path: '/assist/point', label: '向量库' },
-  { path: '/assist/mcp-setup', label: 'MCP 配置' },
   { path: '/assist/logs', label: '日志' }
 ]
 
@@ -75,7 +73,11 @@ const navItems = computed(() => {
   if (tokenStore.role === 'admin') {
     return allNavItems
   }
-  return allNavItems.filter(item => !adminOnlyPaths.includes(item.path))
+  return allNavItems.filter(item => {
+    if (adminOnlyPaths.includes(item.path)) return false
+    if (item.path === '/assist/upload' && !tokenStore.canUpload) return false
+    return true
+  })
 })
 
 function goLogin() {
