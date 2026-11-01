@@ -420,9 +420,9 @@ async function doTokenLogin() {
   busy.value = true
   error.value = ''
   try {
-    const ok = await store.setToken(token)
-    if (!ok) {
-      error.value = 'Token 无效'
+    const res = await store.setToken(token)
+    if (!res.ok) {
+      error.value = res.detail || 'Token 无效'
       return
     }
     toast.showSuccess('Token 登录成功')

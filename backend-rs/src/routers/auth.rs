@@ -1,8 +1,8 @@
-//! 认证路由：初始化 / 注册 / 登录 / 登出 / 当前用户 / 改密 / 状态 / 凭证检查。
+//! 认证路由：初始化 / 注册 / 登录 / 登出 / 当前用户 / 改密 / 状态。
 //!
-//! 路径都在 `/assist/api/auth/*` 下。其中 `status`、`check`、`login`、`register`、
-//! `bootstrap` 由 `main.rs::token_middleware` 放行（无需凭证），其余需要有效会话或
-//! API token。
+//! 路径都在 `/assist/api/auth/*` 下。其中 `status`、`login`、`register`、`bootstrap`
+//! 由 `main.rs::token_middleware` 放行（无需凭证），其余需要有效会话或 API token ——
+//! 前端用 `me` 做 Token 登录与启动时的会话恢复。
 //!
 //! 凭证模型：
 //! - 密码登录 → 签发服务端会话 token（`sess_...`，见 [`crate::session`]）；
@@ -51,8 +51,6 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/auth/me/", get(me))
         .route("/assist/api/auth/password", post(change_password))
         .route("/assist/api/auth/password/", post(change_password))
-        .route("/assist/api/auth/check", get(check))
-        .route("/assist/api/auth/check/", get(check))
 }
 
 // ── 请求体 ──────────────────────────────────────────────
@@ -89,7 +87,7 @@ struct ChangePasswordBody {
 
 // ── 工具 ────────────────────────────────────────────────
 
-/// 角色 → 前端权限位（`/auth/check` 响应的 `permissions` 形状）
+/// 角色 → 前端权限位（登录与 `me` 响应里的 `permissions` 形状）
 fn permissions_for(role: &Role, mcp: bool) -> Value {
     let admin = *role == Role::Admin;
     json!({
@@ -424,22 +422,21 @@ async fn logout(
 // ── 当前用户 ────────────────────────────────────────────
 
 /// `GET /assist/api/auth/me` —— 当前主体信息（含 token 元数据，不含任何哈希）。
+///
+/// 前端用它做 **Token 登录**与**启动时的会话恢复**（响应里带角色、权限位与
+/// `must_set_password`），因此这里顺带下发静态目录 cookie（与密码登录一致），
+/// 让 `static_dirs` 页面内的相对资源也能带上凭证。
 async fn me(
     Extension(users): Extension<Arc<UserStore>>,
     Extension(principal): Extension<Principal>,
+    headers: HeaderMap,
 ) -> Response {
     let role = principal.role.clone();
-    let body = match users.find_by_id(&principal.user_id) {
-        Some(user) => json!({
-            "user": user.to_public_json(),
-            "role": role.as_str(),
-            "mcp": principal.mcp,
-            "via": principal.via.as_str(),
-            "permissions": permissions_for(&role, principal.mcp),
-        }),
+    let (user_json, must_set_password) = match users.find_by_id(&principal.user_id) {
+        Some(user) => (user.to_public_json(), user.must_set_password),
         // 受信任子网等「非用户」主体
-        None if principal.user_id == "local" => json!({
-            "user": {
+        None if principal.user_id == "local" => (
+            json!({
                 "id": "local",
                 "username": "local",
                 "display_name": "本地网络",
@@ -449,17 +446,34 @@ async fn me(
                 "has_password": false,
                 "must_set_password": false,
                 "api_tokens": [],
-            },
-            "role": role.as_str(),
-            "mcp": principal.mcp,
-            "via": principal.via.as_str(),
-            "permissions": permissions_for(&role, principal.mcp),
-        }),
+            }),
+            false,
+        ),
         None => {
             return err(StatusCode::UNAUTHORIZED, "用户不存在或已被删除");
         }
     };
-    Json(body).into_response()
+
+    let body = json!({
+        "user": user_json,
+        "role": role.as_str(),
+        "mcp": principal.mcp,
+        "via": principal.via.as_str(),
+        "permissions": permissions_for(&role, principal.mcp),
+        "must_set_password": must_set_password,
+    });
+
+    let mut response = Json(body).into_response();
+    let ttl = users.section().session_ttl_hours as i64;
+    if let Some(cookie) = auth::extract_token_from_headers(&headers)
+        .as_deref()
+        .and_then(|t| crate::static_files::session_cookie_header(t, ttl))
+    {
+        response
+            .headers_mut()
+            .insert(axum::http::header::SET_COOKIE, cookie);
+    }
+    response
 }
 
 /// `POST /assist/api/auth/password` —— 修改自己的密码。
@@ -499,76 +513,6 @@ async fn change_password(
         }
         Err(e) => e.into_response(),
     }
-}
-
-// ── 凭证检查端点 ────────────────────────────────────────
-
-/// `GET /assist/api/auth/check` —— 角色/权限探测端点（前端用于 Token 登录与恢复会话）。
-///
-/// 自行解析凭证，返回 `{role, valid, permissions}`
-/// 结构，并额外附带 `user` / `via`。
-async fn check(
-    Extension(users): Extension<Arc<UserStore>>,
-    Extension(sessions): Extension<Arc<SessionStore>>,
-    req: axum::extract::Request,
-) -> Response {
-    let token = auth::extract_token(&req);
-
-    let principal = token
-        .as_deref()
-        .and_then(|t| auth::resolve_principal(t, &users, &sessions));
-
-    let Some(principal) = principal else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "role": null,
-                "valid": false,
-                "detail": "无效的 token"
-            })),
-        )
-            .into_response();
-    };
-
-    let user = users.find_by_id(&principal.user_id);
-    let must_set_password = user.as_ref().map(|u| u.must_set_password).unwrap_or(false);
-
-    // MCP 专属令牌不能用于 Web 登录（Token 登录）：前端会把它当会话用，
-    // 后续所有 `/assist/api/*` 都会 401，所以直接在这里判无效。
-    if !principal.api {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({
-                "role": null,
-                "valid": false,
-                "code": "mcp_only_token",
-                "detail": "该令牌仅用于 MCP，不能用于 Web 登录；请改用权限为 API 的令牌或账号密码登录",
-            })),
-        )
-            .into_response();
-    }
-
-    // 刷新页面 / Token 登录也顺带下发静态目录 cookie（与登录一致）
-    let cookie = token.as_deref().and_then(|t| {
-        crate::static_files::session_cookie_header(t, users.section().session_ttl_hours as i64)
-    });
-
-    let mut response = Json(json!({
-        "role": principal.role.as_str(),
-        "valid": true,
-        "permissions": permissions_for(&principal.role, principal.mcp),
-        "mcp": principal.mcp,
-        "via": principal.via.as_str(),
-        "must_set_password": must_set_password,
-        "user": user.map(|u| u.to_public_json()),
-    }))
-    .into_response();
-    if let Some(cookie) = cookie {
-        response
-            .headers_mut()
-            .insert(axum::http::header::SET_COOKIE, cookie);
-    }
-    response
 }
 
 #[cfg(test)]

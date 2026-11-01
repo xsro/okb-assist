@@ -4,7 +4,7 @@
  * 升级用户体系后，这里从「只存一个 token」变成「存会话 + 当前用户 + 权限位」：
  * - 密码登录 → 后端签发会话 token（`sess_...`），存在 localStorage 的 `okb_token`；
  * - Token 登录 → 直接粘贴会话 token 或用户个人 API token（`okb_...`）；
- * - 刷新页面时 `restore()` 用本地 token 调 `/auth/check` 重新拉取角色与权限。
+ * - 刷新页面时 `restore()` 用本地 token 调 `/auth/me` 重新拉取角色与权限。
  *
  * 另存一份「本浏览器登录过的账号」（`localStorage.okb_accounts`，只有用户名/显示名/角色，**不存凭证**）：
  * 登出后登录页用它列出账号卡片，点一下只自动填用户名，仍需输入密码。
@@ -18,13 +18,13 @@ import type { SavedAccount } from '@/api/client'
 import {
   bootstrap as apiBootstrap,
   changePassword as apiChangePassword,
-  checkAuth,
   getAuthStatus,
   login as apiLogin,
+  getMe,
   logout as apiLogout,
   register as apiRegister
 } from '@/api/auth'
-import type { AuthCheckResponse, AuthStatus, Role, User } from '@/types/auth'
+import type { AuthStatus, MeResponse, Role, User } from '@/types/auth'
 
 export interface AuthInfo {
   role: Role | null
@@ -93,12 +93,12 @@ export const useTokenStore = defineStore('token', {
   },
 
   actions: {
-    /** 应用一份 `/auth/check` 结果 */
-    applyCheck(res: AuthCheckResponse) {
-      this.role = (res.role as Role) || null
+    /** 应用一份 `/auth/me` 结果 */
+    applyMe(res: MeResponse) {
+      this.role = res.role || null
       this.permissions = res.permissions || {}
       this.mcp = res.mcp === true
-      this.user = (res.user as User) || null
+      this.user = res.user || null
       this.via = res.via || ''
       this.mustSetPassword = res.must_set_password === true
       this.rememberAccount()
@@ -116,21 +116,17 @@ export const useTokenStore = defineStore('token', {
       this.accounts = accountStorage.get()
     },
 
-    /** Token 登录：校验并保存（会话 token 或用户 API token 均可） */
-    async setToken(token: string): Promise<boolean> {
+    /** Token 登录：校验并保存（会话 token 或用户 API token 均可）。失败时带回服务端提示 */
+    async setToken(token: string): Promise<{ ok: boolean; detail?: string }> {
       this.token = token.trim()
       tokenStorage.set(this.token)
       try {
-        const res = await checkAuth()
-        if (!res.valid || !res.role) {
-          this.clearToken()
-          return false
-        }
-        this.applyCheck(res)
-        return true
-      } catch {
+        this.applyMe(await getMe())
+        return { ok: true }
+      } catch (e) {
         this.clearToken()
-        return false
+        const err = e as { response?: { data?: { detail?: string } } }
+        return { ok: false, detail: err.response?.data?.detail }
       }
     },
 
@@ -204,13 +200,9 @@ export const useTokenStore = defineStore('token', {
       if (!this.token) return
       this.restoring = true
       try {
-        const res = await checkAuth()
-        if (!res.valid) {
-          this.clearToken()
-          return
-        }
-        this.applyCheck(res)
+        this.applyMe(await getMe())
       } catch {
+        // 令牌过期 / 被撤销 / MCP 专属令牌：静默清掉本地状态
         this.clearToken()
       } finally {
         this.restoring = false

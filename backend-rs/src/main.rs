@@ -411,7 +411,6 @@ async fn error_log_middleware(req: axum::extract::Request, next: Next) -> Respon
 /// 无需凭证即可访问的认证端点（`/assist/api/auth/*`）
 const PUBLIC_AUTH_PATHS: &[&str] = &[
     "/assist/api/auth/status",
-    "/assist/api/auth/check",
     "/assist/api/auth/login",
     "/assist/api/auth/register",
     "/assist/api/auth/bootstrap",
@@ -420,7 +419,6 @@ const PUBLIC_AUTH_PATHS: &[&str] = &[
 /// 系统尚未初始化（还没有任何管理员）时唯一允许访问的端点
 const UNINITIALIZED_ALLOWED_PATHS: &[&str] = &[
     "/assist/api/auth/status",
-    "/assist/api/auth/check",
     "/assist/api/auth/bootstrap",
 ];
 
@@ -428,9 +426,9 @@ const UNINITIALIZED_ALLOWED_PATHS: &[&str] = &[
 ///
 /// 判定顺序：
 /// 1. `/image/` 图片 URL 放行（免 token，注入 `ViewOnly` 角色）；
-/// 2. **未初始化门禁**：还没有 active admin 时，除 `status` / `check` / `bootstrap`
+/// 2. **未初始化门禁**：还没有 active admin 时，除 `status` / `bootstrap`
 ///    外一律 401（避免新装实例裸奔）；
-/// 3. 公开的认证端点（`status` / `check` / `login` / `register` / `bootstrap`）放行；
+/// 3. 公开的认证端点（`status` / `login` / `register` / `bootstrap`）放行；
 /// 4. 受信任子网：仅在 `system.json` 的 `trusted_subnet_enabled = true` 时生效，
 ///    注入「本地用户」主体（角色取 `trusted_subnet_role`，默认 admin）；
 /// 5. 凭证解析（`auth::resolve_principal`）：服务端会话 `sess_...` → 用户 API token；
@@ -468,7 +466,7 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
         return next.run(req).await;
     };
 
-    // 未初始化门禁：只放行 status / check / bootstrap
+    // 未初始化门禁：只放行 status / bootstrap
     if !auth::is_initialized(&user_store) {
         if UNINITIALIZED_ALLOWED_PATHS.contains(&normalized.as_str()) {
             return next.run(req).await;

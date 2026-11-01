@@ -117,7 +117,7 @@ const AUTH_ENDPOINTS_WITHOUT_REDIRECT = [
   '/assist/api/auth/register',
   '/assist/api/auth/bootstrap',
   '/assist/api/auth/status',
-  '/assist/api/auth/check'
+  '/assist/api/auth/me'
 ]
 
 client.interceptors.response.use(

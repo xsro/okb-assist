@@ -1,7 +1,6 @@
 /** 认证 / 账户相关 API */
 import { apiDelete, apiGet, apiPost } from '@/api/client'
 import type {
-  AuthCheckResponse,
   AuthStatus,
   LoginResponse,
   MeResponse,
@@ -44,11 +43,7 @@ export function logout(): Promise<{ ok: boolean; revoked: boolean }> {
   return apiPost('/assist/api/auth/logout')
 }
 
-/** 角色 / 权限探测（也用于 Token 登录与启动时恢复会话） */
-export function checkAuth(): Promise<AuthCheckResponse> {
-  return apiGet<AuthCheckResponse>('/assist/api/auth/check')
-}
-
+/** 当前主体（角色 / 权限位 / 用户）—— Token 登录与启动时恢复会话都用它 */
 export function getMe(): Promise<MeResponse> {
   return apiGet<MeResponse>('/assist/api/auth/me')
 }

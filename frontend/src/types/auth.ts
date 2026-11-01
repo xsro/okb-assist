@@ -53,24 +53,14 @@ export interface LoginResponse {
   user: User
 }
 
-/** `GET /assist/api/auth/check`（角色 / 权限探测） */
-export interface AuthCheckResponse {
-  role: Role | null
-  valid: boolean
-  permissions: Record<string, boolean>
-  mcp?: boolean
-  via?: string
-  must_set_password?: boolean
-  user?: User | null
-}
-
-/** `GET /assist/api/auth/me` */
+/** `GET /assist/api/auth/me`（当前主体：Token 登录与启动恢复共用） */
 export interface MeResponse {
   user: User
   role: Role
   mcp: boolean
   via: string
   permissions: Record<string, boolean>
+  must_set_password: boolean
 }
 
 export interface UsersListResponse {

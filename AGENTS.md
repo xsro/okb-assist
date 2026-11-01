@@ -188,8 +188,8 @@ cargo build --release
 仅保护 `/assist/api/*`，顺序：
 
 1. `/image/` 图片 URL 放行（注入 `ViewOnly`）；
-2. **未初始化门禁**：`auth::is_initialized()` 为 false（没有任何 active admin）时，除 `/auth/status|check|bootstrap` 外一律 401（`code: not_initialized`）；
-3. 公开端点放行：`/assist/api/auth/{status,check,login,register,bootstrap}`；
+2. **未初始化门禁**：`auth::is_initialized()` 为 false（没有任何 active admin）时，除 `/auth/status|bootstrap` 外一律 401（`code: not_initialized`）；
+3. 公开端点放行：`/assist/api/auth/{status,login,register,bootstrap}`；
 4. 受信任子网：**仅当** `system.json` 的 `trusted_subnet_enabled = true` 且 IP 命中 `trusted_subnets` 时，注入 `Principal::local(trusted_subnet_role, true)`；
 5. `auth::resolve_principal()`：`sess_` 前缀 → 会话表；否则按 sha256 匹配用户 `api_tokens`；
 6. 未命中 → 401。
@@ -209,9 +209,8 @@ cargo build --release
 | POST | `/assist/api/auth/register` | 公开（受开关控制） | 自助注册 → 默认 `pending` |
 | POST | `/assist/api/auth/login` | 公开 | 用户名+密码 → 会话 token |
 | POST | `/assist/api/auth/logout` | 已登录 | 撤销当前会话 |
-| GET | `/assist/api/auth/me` | 已登录 | 当前主体（含令牌元数据，无哈希） |
+| GET | `/assist/api/auth/me` | 已登录 | 当前主体（含令牌元数据，无哈希）＋ `permissions` / `must_set_password`；**前端用它做 Token 登录与启动恢复**，成功时顺带下发 `okb_static` cookie |
 | POST | `/assist/api/auth/password` | 已登录 | 改密（撤销该用户全部会话；有密码时需 `old_password`） |
-| GET | `/assist/api/auth/check` | 公开（自行解析凭证） | `{role, valid, permissions}` + `user/mcp/via`（前端用于 Token 登录与恢复会话） |
 | GET/POST | `/assist/api/auth/tokens` | 已登录 | 查看/签发**自己的**令牌（`{label, scope: api\|mcp, token?}`，`token` 留空自动生成） |
 | DELETE | `/assist/api/auth/tokens/:id` | 已登录 | 撤销自己的令牌 |
 | GET | `/assist/api/admin/users` | admin | 用户列表（`?status=`），返回 `count/pending/users` |
@@ -430,14 +429,14 @@ cargo build --release
 - **自动登录跳转**：`auth: true` 且未通过鉴权时 ——
   - 浏览器页面导航（`Accept` 含 `text/html`）→ **302 到 `/assist/login?redirect=<原路径%3Fquery>`**，登录/已登录自动回跳（`LoginView.vue::redirectAfterLogin` 对非 SPA 路径用 `window.location.replace` 整页跳回）；
   - 其他请求（curl / fetch / 下载工具）→ 401 JSON，不会被重定向搞坏。
-- **凭证 cookie（`okb_static`）**：浏览器直接导航带不了 `X-Token`，所以登录成功（`POST /auth/login`）、`GET /auth/check`（刷新页面 / Token 登录）、以及静态目录上用 `?token=` 认证成功时都会下发
+- **凭证 cookie（`okb_static`）**：浏览器直接导航带不了 `X-Token`，所以登录成功（`POST /auth/login`）、`GET /auth/me`（刷新页面 / Token 登录）、以及静态目录上用 `?token=` 认证成功时都会下发
   `Set-Cookie: okb_static=<token>; Path=/; HttpOnly; SameSite=Lax; Max-Age=<session_ttl_hours>`；登出（`POST /auth/logout`）下发 `Max-Age=0` 清除并顺手`revoke` cookie 里的会话。
   **只有 `static_files` 读这个 cookie，`token_middleware` / API 一律不认**（避免扩大 API 鉴权面）；下发时顺带解决页面内相对资源（图片/子页面）的鉴权问题。
 - 重复 `path`、`path` 为 `/`、缺 `path`/`dir` 的条目一律忽略并打 `warn`；**前缀不允许互相嵌套**（`/a` 与 `/a/b` 在 axum 的路由表里会冲突，只保留更长的 `/a/b`），匹配时最长前缀优先。
 
 ## 架构与请求流
 
-1. **Web/API 层**：`backend-rs/src/main.rs` + `backend-rs/src/routers/*`。`TokenMiddleware` 仅对 `/assist/api/*` 校验凭证（`X-Token` 头 → `Authorization: Bearer` → query `token`），放行 `/assist/mcp`、`/assist/assets`（前端静态资源）、`/assist/uploads`、`/assist/file`、`/redirect`，以及 `/assist/api/documents/` 下含 `/image/` 的图片 URL。凭证由 `auth::resolve_principal` 解析成 `Principal`（会话 `sess_…` → 用户 API token `okb_…`）；**系统未初始化（没有任何 active admin）时只允许 `/auth/status|check|bootstrap`**；受信任子网仅在 `trusted_subnet_enabled = true` 时生效。CORS 限定前端来源（开发 `localhost:5173`，生产同源 `localhost:5001`）。
+1. **Web/API 层**：`backend-rs/src/main.rs` + `backend-rs/src/routers/*`。`TokenMiddleware` 仅对 `/assist/api/*` 校验凭证（`X-Token` 头 → `Authorization: Bearer` → query `token`），放行 `/assist/mcp`、`/assist/assets`（前端静态资源）、`/assist/uploads`、`/assist/file`、`/redirect`，以及 `/assist/api/documents/` 下含 `/image/` 的图片 URL。凭证由 `auth::resolve_principal` 解析成 `Principal`（会话 `sess_…` → 用户 API token `okb_…`）；**系统未初始化（没有任何 active admin）时只允许 `/auth/status|bootstrap`**；受信任子网仅在 `trusted_subnet_enabled = true` 时生效。CORS 限定前端来源（开发 `localhost:5173`，生产同源 `localhost:5001`）。
 2. **数据模型**：`Document`（主记录 + 状态）、`DocumentVectorIndex`（每个向量库的索引状态，唯一键 `(document_id, vector_db_id)`）。状态机用 `DocStatus` / `IndexStatus` 枚举（`backend-rs/src/models.rs`）。
 3. **摄取流水线**（`backend-rs/src/routers/pipeline.rs`，核心状态机）：
    - parse（MinerU）→ `parsing` → `markdown_done`
@@ -472,7 +471,7 @@ cargo build --release
 
 - 前端 SPA：`/assist/*` → fallback 到 `frontend/dist/index.html`（由 Vue Router 处理客户端路由）
 - 静态目录挂载：`system.json` 的 `static_dirs[].path` 决定前缀（默认无挂载）
-- API：`/assist/api/documents`、`/assist/api/pipeline`、`/assist/api/chat`、`/assist/api/admin`、`/assist/api/config`、`/assist/api/auth/check`、`/assist/openapi`
+- API：`/assist/api/documents`、`/assist/api/pipeline`、`/assist/api/chat`、`/assist/api/admin`、`/assist/api/config`、`/assist/api/auth/me`、`/assist/openapi`
 - 文件别名（免 token）：`/assist/file/{filename}`
 - MCP：`/assist/mcp/stream`（Streamable HTTP）、`/assist/mcp`（SSE）
 - 上传文件：`/assist/uploads/`（由后端直接 serving）
@@ -632,7 +631,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 
 ## ⚠️ 易错点（编辑前必读）
 
-1. **鉴权现状**：只认 `users` 段（会话 token / 用户个人令牌）。`system.json` 里**没有任何全局凭据字段**；`trusted_subnets` 默认不生效，需 `trusted_subnet_enabled = true`；系统未初始化时只有 `/auth/status|check|bootstrap` 可用。`TokenMiddleware` 仅对 `/assist/api/*` 生效。个人令牌的 `scope` **严格互斥**（api 只能调 API、mcp 只能调 MCP），新增受凭证保护的端点时记得同步判断 `Principal.api` / `Principal.mcp`，不要只看「令牌有效」。
+1. **鉴权现状**：只认 `users` 段（会话 token / 用户个人令牌）。`system.json` 里**没有任何全局凭据字段**；`trusted_subnets` 默认不生效，需 `trusted_subnet_enabled = true`；系统未初始化时只有 `/auth/status|bootstrap` 可用。`TokenMiddleware` 仅对 `/assist/api/*` 生效。个人令牌的 `scope` **严格互斥**（api 只能调 API、mcp 只能调 MCP），新增受凭证保护的端点时记得同步判断 `Principal.api` / `Principal.mcp`，不要只看「令牌有效」。
 2. **配置改动不会自动生效**：`config.json` 改后需 reload；`system.json` 改后需重启进程（进程内缓存）。
 3. **MCP 路由注册顺序有依赖**（`backend-rs/src/main.rs`）：必须在 SSE 挂载之前精确注册 Streamable HTTP 端点。不要"整理"这个顺序。
 4. **没有测试、没有 lint**：编辑后需手动 `cargo build` 确认编译通过，并用 curl 校验端点。
