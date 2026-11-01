@@ -342,21 +342,15 @@ async fn serve_file_alias(
         }
     };
 
-    let doc: Option<crate::models::Document> = sqlx::query_as(
-        "SELECT id, filename, file_hash, title, authors, CAST(NULLIF(year, '') AS INTEGER) AS year, doi, source, journal, \
-         keywords, abstract, category, doc_type, language, title_en, authors_en, \
-         keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
-         progress, qdrant_collection, vector_db_id, created_at, updated_at \
-         FROM documents WHERE id = ?",
-    )
-    .bind(doc_id)
-    .fetch_optional(db.pool())
-    .await
-    .unwrap_or(None);
-
-    let doc = match doc {
-        Some(d) => d,
-        None => return axum::Json(serde_json::json!({"detail": "文件不存在"})).into_response(),
+    // 列清单必须覆盖 `Document` 的全部字段（含 pdf_size/md_size/zip_size），
+    // 否则 `FromRow` 会因缺列报错，导致所有别名链接都返回“文件不存在”。
+    let doc = match crate::routers::documents::fetch_doc(&db, doc_id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return axum::Json(serde_json::json!({"detail": "文件不存在"})).into_response(),
+        Err(e) => {
+            tracing::warn!(doc_id, error = %e, "按别名读取文档失败");
+            return axum::Json(serde_json::json!({"detail": "文件不存在"})).into_response();
+        }
     };
 
     let pdf_path = crate::paths::get_pdf_path(&settings, doc.id);

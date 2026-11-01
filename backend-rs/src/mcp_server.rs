@@ -23,7 +23,8 @@ use crate::services::grep_search::{grep_search as do_grep, parse_doc_ids};
 const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, year, doi, source, journal, \
      keywords, abstract, category, doc_type, language, title_en, authors_en, \
      keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
-     progress, qdrant_collection, vector_db_id, created_at, updated_at";
+     progress, qdrant_collection, vector_db_id, created_at, updated_at, \
+     pdf_size, md_size, zip_size";
 
 /// 分页 offset 上限（防止恶意大 offset 导致全表扫描）。
 const MAX_OFFSET: i64 = 10000;

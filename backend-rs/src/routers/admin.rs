@@ -545,7 +545,8 @@ async fn recalculate_hashes(
         "SELECT id, filename, file_hash, title, authors, CAST(NULLIF(year, '') AS INTEGER) AS year, doi, source, journal, \
          keywords, abstract, category, doc_type, language, title_en, authors_en, \
          keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
-         progress, qdrant_collection, vector_db_id, created_at, updated_at \
+         progress, qdrant_collection, vector_db_id, created_at, updated_at, \
+         pdf_size, md_size, zip_size \
          FROM documents",
     )
     .fetch_all(db.pool())

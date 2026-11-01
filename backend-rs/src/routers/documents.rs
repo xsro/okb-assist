@@ -481,7 +481,7 @@ async fn doc_to_out(doc: &Document, settings: &Settings, db: &Database) -> Docum
     }
 }
 
-async fn fetch_doc(db: &Database, id: i64) -> Result<Option<Document>, String> {
+pub(crate) async fn fetch_doc(db: &Database, id: i64) -> Result<Option<Document>, String> {
     sqlx::query_as::<_, Document>(&format!("SELECT {} FROM documents WHERE id = ?", DOC_COLUMNS))
         .bind(id)
         .fetch_optional(db.pool())
