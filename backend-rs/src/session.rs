@@ -244,7 +244,7 @@ mod tests {
         let store = SessionStore::with_default_ttl();
         // 未签发过
         assert!(store.validate("sess_nope").is_none());
-        // 非会话前缀的 token（API token / 旧 admin token）不应被当成会话
+        // 非会话前缀的 token（用户 API token）不应被当成会话
         assert!(store.validate("okb_abcdef").is_none());
         assert!(store.validate("60b8be6583ac41ab").is_none());
     }

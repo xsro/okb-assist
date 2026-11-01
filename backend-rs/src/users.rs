@@ -36,11 +36,6 @@ pub const MIN_TOKEN_LEN: usize = 8;
 /// 自定义令牌长度上限（字符）
 pub const MAX_TOKEN_LEN: usize = 256;
 
-/// 历史「引导期 token」的 label（旧版本会把 `system.json` 的 `token` 接管为该用户的一条
-/// api_token）。现已不再产生此类令牌，保留仅为了兼容旧安装：该用户**首次设置密码成功后
-/// 会自动吊销**遗留的这类令牌（见 [`UserStore::set_password`]）。
-pub const BOOTSTRAP_TOKEN_LABEL: &str = "bootstrap";
-
 pub const STATUS_PENDING: &str = "pending";
 pub const STATUS_ACTIVE: &str = "active";
 pub const STATUS_DISABLED: &str = "disabled";
@@ -787,8 +782,7 @@ impl UserStore {
 
     /// 设置/重置密码（管理员重置与自己改密都走这里）。
     ///
-    /// 会清除 `must_set_password`、失败计数与锁定；并**自动吊销遗留的引导期 token**
-    /// （`label == "bootstrap"`，旧版本 `system.json.token` 的遗产）。
+    /// 会清除 `must_set_password`、失败计数与锁定。
     /// 撤销已有会话由路由层负责（需要 `SessionStore`）。
     pub fn set_password(&self, id: &str, password: &str) -> Result<User, UserError> {
         validate_password(password)?;
@@ -803,8 +797,6 @@ impl UserStore {
             user.must_set_password = false;
             user.failed_logins = 0;
             user.locked_until = None;
-            user.api_tokens
-                .retain(|t| t.label != BOOTSTRAP_TOKEN_LABEL);
             user.updated_at = now_rfc3339();
             Ok(())
         })?;
@@ -939,110 +931,6 @@ impl UserStore {
             Ok(())
         })?;
         Ok(n)
-    }
-
-    /// 旧 `config.json.permissions` 的一次性迁移（幂等）。
-    ///
-    /// **方案 B（全部失效重发）**：旧 token 一个都不接管（不入库、不落盘），只为每个
-    /// 条目建一个「无凭据占位用户」：
-    ///
-    /// - `username = "legacy-<sha256(token) 前 6 位>"`（重名时追加序号）
-    /// - `role` / `mcp` 沿用原条目（旧字符串格式 `"view-only"` 也支持）
-    /// - `status = pending`、`password_hash = None`、`api_tokens = []`
-    ///
-    /// 迁移后从磁盘删除 `permissions` 键，并打印迁移清单（不含明文 token）。
-    /// 管理员后续可为其重置密码转正，或直接删除。返回迁移数量。
-    pub fn migrate_legacy_permissions(&self) -> usize {
-        let config = self.cm.get_service_config();
-        let Some(perms) = config.get("permissions").and_then(|v| v.as_object()) else {
-            return 0;
-        };
-        if perms.is_empty() {
-            // 空字典也要清掉，避免每次启动都走迁移
-            let _ = self.cm.take_config_key("permissions");
-            return 0;
-        }
-
-        // (token, role, mcp) —— 兼容旧版 `"token": "view-only"` 与新格式
-        let entries: Vec<(String, String, bool)> = perms
-            .iter()
-            .map(|(token, entry)| {
-                let role = if entry.is_string() {
-                    entry.as_str().unwrap_or("").to_string()
-                } else {
-                    entry
-                        .get("access")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string()
-                };
-                let mcp = entry
-                    .get("mcp")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                (token.clone(), role, mcp)
-            })
-            .collect();
-
-        let mut created = 0usize;
-        let result = self.mutate(|section| {
-            for (token, role, mcp) in &entries {
-                let role = if Role::from_str(role).is_some() {
-                    role.clone()
-                } else {
-                    "view-only".to_string()
-                };
-                let suffix = &hash_api_token(token)[..6];
-                let mut username = format!("legacy-{}", suffix);
-                let mut n = 0usize;
-                while section.find_by_username(&username).is_some() {
-                    n += 1;
-                    username = format!("legacy-{}-{}", suffix, n);
-                }
-                let now = now_rfc3339();
-                section.items.push(User {
-                    id: random_user_id(),
-                    username,
-                    display_name: "旧 token 迁移".to_string(),
-                    role,
-                    status: STATUS_PENDING.to_string(),
-                    mcp: *mcp,
-                    password_hash: None,
-                    must_set_password: true,
-                    api_tokens: Vec::new(),
-                    created_at: now.clone(),
-                    updated_at: now,
-                    last_login_at: None,
-                    failed_logins: 0,
-                    locked_until: None,
-                });
-                created += 1;
-            }
-            Ok(())
-        });
-
-        match result {
-            Ok(_) => {
-                let _ = self.cm.take_config_key("permissions");
-                let names: Vec<String> = self
-                    .section()
-                    .items
-                    .into_iter()
-                    .filter(|u| u.username.starts_with("legacy-"))
-                    .map(|u| format!("{}({})", u.username, u.role))
-                    .collect();
-                tracing::warn!(
-                    count = created,
-                    users = ?names,
-                    "旧 permissions 已迁移为无凭据占位用户（pending）：旧 token 全部失效，请为其重置密码或删除"
-                );
-                created
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "旧 permissions 迁移失败，已跳过（原配置保留）");
-                0
-            }
-        }
     }
 
     /// 修改注册策略 / 会话 TTL 等段级标志
@@ -1407,16 +1295,15 @@ mod tests {
     fn register_api_token_is_idempotent_and_revocable_by_label() {
         let (_dir, store, _cm) = test_store();
         let u = store.create(admin()).unwrap();
-        // 引导场景：接管 system.json 的 token
         let t1 = store
-            .register_api_token(&u.id, "legacy-admin-token", BOOTSTRAP_TOKEN_LABEL, TokenScope::Mcp)
+            .register_api_token(&u.id, "fixed-label-token", "zotero", TokenScope::Mcp)
             .unwrap();
         let t2 = store
-            .register_api_token(&u.id, "legacy-admin-token", BOOTSTRAP_TOKEN_LABEL, TokenScope::Mcp)
+            .register_api_token(&u.id, "fixed-label-token", "zotero", TokenScope::Mcp)
             .unwrap();
         assert_eq!(t1.token_sha256, t2.token_sha256);
         assert_eq!(store.find_by_id(&u.id).unwrap().api_tokens.len(), 1, "重复登记应幂等");
-        assert!(store.find_by_api_token("legacy-admin-token").is_some());
+        assert!(store.find_by_api_token("fixed-label-token").is_some());
         // 空 token 拒绝
         assert!(store.register_api_token(&u.id, "  ", "x", TokenScope::Api).is_err());
     }
@@ -1485,113 +1372,6 @@ mod tests {
         assert_eq!(TokenScope::from_str("both"), None);
         assert!(!TokenScope::Mcp.allows_api());
         assert!(!TokenScope::Api.allows_mcp());
-    }
-
-    #[test]
-    fn set_password_revokes_bootstrap_token() {
-        let (_dir, store, _cm) = test_store();
-        // 模拟引导：创建无密码 admin + bootstrap token + 一把普通 token
-        let u = store
-            .create(NewUser {
-                username: "admin".to_string(),
-                role: "admin".to_string(),
-                ..Default::default()
-            })
-            .unwrap();
-        assert!(u.must_set_password);
-        store
-            .register_api_token(&u.id, "system-json-token", BOOTSTRAP_TOKEN_LABEL, TokenScope::Mcp)
-            .unwrap();
-        let (keep, _) = store.issue_api_token(&u.id, "zotero", TokenScope::Api).unwrap();
-
-        store.set_password(&u.id, "new-admin-pass").unwrap();
-
-        assert!(
-            store.find_by_api_token("system-json-token").is_none(),
-            "设置密码后引导 token 必须失效"
-        );
-        assert!(store.find_by_api_token(&keep).is_some(), "普通 token 不受影响");
-    }
-
-    /// 直接把 `permissions` 写进磁盘上的 config.json（模拟已部署实例的旧配置）。
-    ///
-    /// 不能用 `save_config()`：新版本已把 `permissions` 从默认配置里移除，
-    /// 保存服务配置时本来就会把它丢掉（这是给配置页的防护，不是迁移路径）。
-    fn write_legacy_permissions(
-        dir: &tempfile::TempDir,
-        cm: &ConfigManager,
-        value: serde_json::Value,
-    ) {
-        let path = dir.path().join("config.json");
-        let mut raw: serde_json::Value = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or_else(|| json!({}));
-        raw["permissions"] = value;
-        std::fs::write(&path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
-        cm.reload_config();
-    }
-
-    #[test]
-    fn migrate_legacy_permissions_creates_placeholder_users() {
-        let (dir, store, cm) = test_store();
-        write_legacy_permissions(
-            &dir,
-            &cm,
-            json!({
-                "old-token-a": {"access": "view-upload", "mcp": true},
-                "old-token-b": "view-only"
-            }),
-        );
-        assert!(cm.get_service_config().get("permissions").is_some());
-
-        let n = store.migrate_legacy_permissions();
-        assert_eq!(n, 2);
-
-        // 占位用户：pending、无密码、无 token，但保留角色与 mcp
-        let users = store.list();
-        assert_eq!(users.len(), 2);
-        assert!(users.iter().all(|u| u.username.starts_with("legacy-")));
-        assert!(users.iter().all(|u| u.status == STATUS_PENDING));
-        assert!(users.iter().all(|u| u.password_hash.is_none()));
-        assert!(users.iter().all(|u| u.api_tokens.is_empty()));
-
-        let mut roles: Vec<(String, bool)> =
-            users.iter().map(|u| (u.role.clone(), u.mcp)).collect();
-        roles.sort_by(|a, b| a.0.cmp(&b.0));
-        assert!(roles.contains(&("view-only".to_string(), false)));
-        assert!(roles.contains(&("view-upload".to_string(), true)));
-
-        // 旧 token 已彻底失效
-        assert!(store.find_by_api_token("old-token-a").is_none());
-        assert!(store.find_by_api_token("old-token-b").is_none());
-
-        // permissions 已从磁盘移除，二次迁移无操作
-        cm.reload_config();
-        assert!(cm.get_service_config().get("permissions").is_none());
-        assert_eq!(store.migrate_legacy_permissions(), 0);
-        assert_eq!(store.list().len(), 2);
-        // 磁盘上也不应残留旧 token 明文
-        let raw = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
-        assert!(!raw.contains("old-token-a"));
-    }
-
-    #[test]
-    fn migrate_legacy_permissions_handles_duplicate_and_empty() {
-        let (dir, store, cm) = test_store();
-        // 空字典：直接清场，不建用户
-        write_legacy_permissions(&dir, &cm, json!({}));
-        assert_eq!(store.migrate_legacy_permissions(), 0);
-        assert_eq!(store.user_count(), 0);
-        cm.reload_config();
-        assert!(cm.get_service_config().get("permissions").is_none());
-
-        // 非法角色降级为 view-only
-        write_legacy_permissions(&dir, &cm, json!({"t": {"access": "root", "mcp": false}}));
-        assert_eq!(store.migrate_legacy_permissions(), 1);
-        let users = store.list();
-        assert_eq!(users.len(), 1);
-        assert_eq!(users[0].role, "view-only");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! 管理路由。
 //!
-//! 与 Python 版 `app/routers/admin.py` 保持 API 契约一致，
-//! 同时补充前端 `frontend/src/api/admin.ts` 所需的字段。
+//! 提供统计、服务状态与索引重置等管理端点，
+//! 字段与前端 `frontend/src/api/admin.ts` 对应。
 
 use std::sync::Arc;
 
@@ -405,7 +405,13 @@ async fn stats(
         status_counts.insert(status.as_str().to_string(), json!(count));
     }
 
-    let indexed_count = status_counts.get("indexed").and_then(|v| v.as_i64()).unwrap_or(0);
+    // 索引状态记在 document_vector_index 上（documents.status 只表示解析阶段）
+    let indexed_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT document_id) FROM document_vector_index WHERE status = 'indexed'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap_or(0);
     let error_count = status_counts.get("error").and_then(|v| v.as_i64()).unwrap_or(0);
 
     // 从数据库直接汇总文件大小（避免遍历文件系统）
@@ -435,12 +441,10 @@ async fn stats(
     }
 
     Json(json!({
-        // Python 契约字段
         "documents": doc_count,
         "status_counts": status_counts,
         "qdrant_status": qdrant_status,
         "qdrant_collections": qdrant_collections,
-        // 前端契约字段
         "total_documents": doc_count,
         "indexed_count": indexed_count,
         "error_count": error_count,

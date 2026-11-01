@@ -38,8 +38,6 @@ impl std::str::FromStr for DocStatus {
             "parsing" => Ok(DocStatus::Parsing),
             "markdown_done" => Ok(DocStatus::MarkdownDone),
             "error" => Ok(DocStatus::Error),
-            // 向后兼容：旧状态视为 markdown_done
-            "extracting" | "meta_done" | "indexing" | "indexed" => Ok(DocStatus::MarkdownDone),
             _ => Err(format!("Unknown status: {}", s)),
         }
     }
@@ -116,11 +114,8 @@ pub struct Document {
     pub vector_db_id: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
-    #[sqlx(default)]
     pub pdf_size: Option<i64>,
-    #[sqlx(default)]
     pub md_size: Option<i64>,
-    #[sqlx(default)]
     pub zip_size: Option<i64>,
 }
 

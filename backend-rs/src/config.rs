@@ -140,7 +140,7 @@ impl Settings {
                     .as_str()
                     .unwrap_or("local")
                     .to_string(),
-                tier: v["tier"].as_str().or_else(|| v["model_version"].as_str()).unwrap_or("standard").to_string(),
+                tier: v["tier"].as_str().unwrap_or("standard").to_string(),
                 task_timeout: v["task_timeout"].as_u64().unwrap_or(300),
                 max_tasks: v["max_tasks"].as_u64().unwrap_or(3) as usize,
             })
@@ -172,7 +172,7 @@ impl Settings {
         configs.into_iter().next()
     }
 
-    /// 兼容旧接口：返回第一个 MinerU 配置的 URL
+    /// 返回第一个 MinerU 配置的 URL
     pub fn mineru_url(&self) -> String {
         self.mineru_configs()
             .first()
@@ -180,7 +180,7 @@ impl Settings {
             .unwrap_or_else(|| "http://127.0.0.1:8002".to_string())
     }
 
-    /// 兼容旧接口：返回第一个 MinerU 配置的 token
+    /// 返回第一个 MinerU 配置的 token
     pub fn mineru_key(&self) -> String {
         self.mineru_configs()
             .first()
@@ -188,7 +188,7 @@ impl Settings {
             .unwrap_or_else(|| String::new())
     }
 
-    /// 兼容旧接口：返回第一个 MinerU 配置的 type
+    /// 返回第一个 MinerU 配置的 type
     pub fn mineru_type(&self) -> String {
         self.mineru_configs()
             .first()
@@ -228,20 +228,12 @@ impl Settings {
     // `llm_extract` 是信息补全（元数据抽取）实际使用的模型配置，字段留空
     // 即从模型池中 `from` 指定的项（为空取第一项）继承。
 
-    /// `llm.models` 原始数组（缺失时回退到旧的单对象 `llm` / `ollama`）
+    /// `llm.models` 原始数组
     fn llm_models_value(&self) -> Vec<serde_json::Value> {
-        let config = self.get_config();
-        if let Some(models) = config["llm"]["models"].as_array() {
-            return models.clone();
-        }
-        // 兼容未经迁移的内存配置：单对象 llm / 旧的 ollama 键
-        match config.get("llm") {
-            Some(llm) if llm.is_object() => vec![llm.clone()],
-            _ => match config.get("ollama") {
-                Some(old) if old.is_object() => vec![old.clone()],
-                _ => Vec::new(),
-            },
-        }
+        self.get_config()["llm"]["models"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// LLM 模型池（「问答」tab 的可选模型）
@@ -257,14 +249,6 @@ impl Settings {
                 ModelEndpoint::from_value(v, &fallback)
             })
             .collect()
-    }
-
-    /// 模型池的第一项（无任何配置时返回内置默认值）
-    fn first_llm_model(&self) -> ModelEndpoint {
-        self.llm_models()
-            .into_iter()
-            .next()
-            .unwrap_or_default()
     }
 
     /// 按名称从模型池取一项（`name` 为空或未命中时取第一项）
@@ -343,7 +327,7 @@ impl Settings {
     /// 是否允许用抽取结果覆盖/清空已有元数据（默认 true）
     ///
     /// - `true`：模型返回空值即清空该字段（用于“明显不对且正文也没有”的情况）；
-    /// - `false`：只补空字段（旧行为）。
+    /// - `false`：只补空字段。
     pub fn extract_overwrite(&self) -> bool {
         self.llm_extract_section()["overwrite"].as_bool().unwrap_or(true)
     }
@@ -371,36 +355,32 @@ impl Settings {
 
     // ── Embedding ──
     //
-    // embedding 配置完全独立于 LLM：位于各向量库的 `embedding` 段。
-    // `vdb` 为 None 时使用当前启用中的向量库；字段缺失时回退到模型池第一项
-    // （兼容旧版本 embedding 复用 Ollama 配置的行为）。
+    // embedding 配置完全独立于 LLM：位于各向量库的 `embedding` 段，字段缺失时使用
+    // 自身默认值（协议 ollama、地址/密钥为空、模型 nomic-embed-text）。
+    // `vdb` 为 None 时使用当前启用中的向量库。
 
     /// 解析指定向量库的 embedding 配置
     pub fn embedding_config_for(&self, vdb: Option<&serde_json::Value>) -> ModelEndpoint {
         let db = vdb.cloned().or_else(|| self.manager.get_active_vector_db());
-        let emb = db.as_ref().and_then(|d| d.get("embedding")).cloned().unwrap_or_else(|| json!({}));
-        let base = self.first_llm_model();
-
-        // 旧字段 source（"ollama"/"openai"）作为 protocol 的回退
-        let protocol_field = non_empty_str(&emb["protocol"]).or_else(|| non_empty_str(&emb["source"]));
-        let mut resolved = ModelEndpoint::from_value(
-            &json!({
-                "protocol": protocol_field,
-                "url": emb.get("url"),
-                "key": emb.get("key"),
-                "model": emb.get("model"),
-            }),
-            &base,
-        );
+        let emb = db
+            .as_ref()
+            .and_then(|d| d.get("embedding"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let empty = ModelEndpoint {
+            protocol: "ollama".to_string(),
+            url: String::new(),
+            key: String::new(),
+            model: "nomic-embed-text".to_string(),
+            ..Default::default()
+        };
+        let mut resolved = ModelEndpoint::from_value(&emb, &empty);
         resolved.name = String::new();
-        // embedding 模型语义与 LLM 不同，缺失时用固有默认值而非 LLM 模型名
-        if non_empty_str(&emb["model"]).is_none() {
-            resolved.model = "nomic-embed-text".to_string();
-        }
+        resolved.tool_mode = String::new();
         resolved
     }
 
-    // ── Qdrant (兼容旧代码) ──
+    // ── Qdrant ──
     pub fn qdrant_url(&self) -> String {
         if let Some(db) = self.manager.get_active_vector_db() {
             if db["type"].as_str() == Some("qdrant") {
@@ -727,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn embedding_inherits_first_model_when_fields_empty() {
+    fn embedding_does_not_inherit_llm_fields() {
         let s = settings_with(serde_json::json!({
             "llm": { "models": [
                 {"name": "a", "protocol": "openai", "url": "https://api.openai.com", "key": "sk", "model": "gpt"}
@@ -736,10 +716,10 @@ mod tests {
             "vector_dbs": [{"id": "default", "enabled": true, "embedding": {}}]
         }));
         let cfg = s.embedding_config_for(None);
-        assert_eq!(cfg.protocol, "openai");
-        assert_eq!(cfg.url, "https://api.openai.com");
-        assert_eq!(cfg.key, "sk");
-        // model 不回退到 LLM 模型名（语义不同）
+        // embedding 完全独立于 LLM：缺字段使用自身默认值
+        assert_eq!(cfg.protocol, "ollama");
+        assert_eq!(cfg.url, "");
+        assert_eq!(cfg.key, "");
         assert_eq!(cfg.model, "nomic-embed-text");
         // name 对 embedding 无意义，保持为空
         assert_eq!(cfg.name, "");

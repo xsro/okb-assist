@@ -15,9 +15,9 @@ impl Database {
         &self.pool
     }
 
-    /// 将 SQLAlchemy 风格的 sqlite URL 转换为 SQLx 可用的连接串。
-    /// SQLAlchemy: `sqlite:///rel.db`（相对）、`sqlite:////abs.db`（绝对）
-    /// SQLx: `sqlite:rel.db`（相对）、`sqlite:/abs.db`（绝对）
+    /// 将 `sqlite://` 形式的连接串转换为 SQLx 可用的连接串。
+    /// 输入：`sqlite:///rel.db`（相对）、`sqlite:////abs.db`（绝对）
+    /// 输出：`sqlite:rel.db`（相对）、`sqlite:/abs.db`（绝对）
     fn normalize_sqlite_url(database_url: &str) -> String {
         if let Some(rest) = database_url.strip_prefix("sqlite://") {
             if rest.is_empty() {
@@ -105,6 +105,9 @@ impl Database {
                 progress REAL DEFAULT 0.0,
                 qdrant_collection TEXT,
                 vector_db_id TEXT,
+                pdf_size INTEGER,
+                md_size INTEGER,
+                zip_size INTEGER,
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
             )
@@ -112,22 +115,6 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
-
-        // 迁移：添加文件大小列（安全幂等，若列已存在则跳过）
-        for col in &["pdf_size", "md_size", "zip_size"] {
-            let exists: bool = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM pragma_table_info('documents') WHERE name = ?"
-            )
-            .bind(col)
-            .fetch_one(&self.pool)
-            .await
-            .unwrap_or(0)
-                > 0;
-            if !exists {
-                let alter = format!("ALTER TABLE documents ADD COLUMN {} INTEGER", col);
-                sqlx::query(&alter).execute(&self.pool).await?;
-            }
-        }
 
         sqlx::query(
             r#"

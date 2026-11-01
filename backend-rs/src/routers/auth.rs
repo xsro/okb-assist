@@ -1,4 +1,4 @@
-//! 认证路由：初始化 / 注册 / 登录 / 登出 / 当前用户 / 改密 / 状态 / 兼容检查。
+//! 认证路由：初始化 / 注册 / 登录 / 登出 / 当前用户 / 改密 / 状态 / 凭证检查。
 //!
 //! 路径都在 `/assist/api/auth/*` 下。其中 `status`、`check`、`login`、`register`、
 //! `bootstrap` 由 `main.rs::token_middleware` 放行（无需凭证），其余需要有效会话或
@@ -89,7 +89,7 @@ struct ChangePasswordBody {
 
 // ── 工具 ────────────────────────────────────────────────
 
-/// 角色 → 前端权限位（保持与旧 `/auth/check` 完全一致的形状，前端零改造）
+/// 角色 → 前端权限位（`/auth/check` 响应的 `permissions` 形状）
 fn permissions_for(role: &Role, mcp: bool) -> Value {
     let admin = *role == Role::Admin;
     json!({
@@ -408,7 +408,7 @@ async fn logout(
     Extension(sessions): Extension<Arc<SessionStore>>,
     headers: HeaderMap,
 ) -> Response {
-    // 头部凭证优先；同时兼容浏览器静态目录下发的 cookie（否则登出后静态目录仍能打开）
+    // 头部凭证优先；同时接受浏览器静态目录下发的 cookie（否则登出后静态目录仍能打开）
     let token = auth::extract_token_from_headers(&headers)
         .or_else(|| crate::static_files::cookie_token(&headers));
     let revoked = token.map(|t| sessions.revoke(&t)).unwrap_or(false);
@@ -501,11 +501,11 @@ async fn change_password(
     }
 }
 
-// ── 兼容检查端点 ────────────────────────────────────────
+// ── 凭证检查端点 ────────────────────────────────────────
 
-/// `GET /assist/api/auth/check` —— 旧前端使用的角色/权限探测端点。
+/// `GET /assist/api/auth/check` —— 角色/权限探测端点（前端用于 Token 登录与恢复会话）。
 ///
-/// 无需中间件放行之外的处理：自己解析凭证，返回与旧版一致的 `{role, valid, permissions}`
+/// 自行解析凭证，返回 `{role, valid, permissions}`
 /// 结构，并额外附带 `user` / `via`。
 async fn check(
     Extension(users): Extension<Arc<UserStore>>,
@@ -576,7 +576,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn permissions_match_legacy_shape() {
+    fn permissions_match_expected_shape() {
         let admin = permissions_for(&Role::Admin, true);
         assert_eq!(admin["admin"], true);
         assert_eq!(admin["upload"], true);

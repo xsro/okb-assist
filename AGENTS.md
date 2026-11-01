@@ -13,7 +13,7 @@ cargo check
 
 OKB-Assist 是一个**本地学术文献库管理系统**（论文与专著）。流程：上传/登记 PDF → MinerU 解析为 Markdown → Ollama 抽取元数据 → 向量库（默认 Qdrant）语义建索引 → 通过 Web UI 或 MCP 服务检索。
 
-- **后端**：Rust（Axum + SQLx + Tokio），位于 `backend-rs/`，API 接口与旧 Python 版兼容
+- **后端**：Rust（Axum + SQLx + Tokio），位于 `backend-rs/`
 - **前端**：TypeScript + Vue 3（Vite 8 构建），位于 `frontend/`
 - **数据**：SQLx + SQLite（`okb_assist.db`）
 - **向量库**：Qdrant（默认），适配器层同时支持 Milvus / Chroma
@@ -68,7 +68,7 @@ cargo build --release
 |------|------|
 | `backend-rs/src/main.rs` | **入口**：Axum app、路由/MCP/中间件 |
 | `backend-rs/src/auth.rs` | 角色判定（`Role`/`assert_role`）、凭证解析（`Principal`/`resolve_principal`）、首次启动引导 |
-| `backend-rs/src/users.rs` | 用户存储（`config.json` 的 `users` 段，Argon2id 密码、sha256 令牌、最后管理员不变量、旧 `permissions` 迁移） |
+| `backend-rs/src/users.rs` | 用户存储（`config.json` 的 `users` 段，Argon2id 密码、sha256 令牌、最后管理员不变量） |
 | `backend-rs/src/session.rs` | 服务端会话表（`sess_…`，内存态，7 天滑动续期） |
 | `backend-rs/src/logger.rs` | 双日志初始化（文件 + 控制台） |
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`drive.rs`、`openapi.rs`、`mod.rs` |
@@ -110,18 +110,17 @@ cargo build --release
 
 - `llm.models`：**LLM 模型池**（数组，每项 `{name, protocol, url, key, model, tool_mode?}`）。前端「问答」tab（`/assist/chat`）用它在池中选择模型对话（见下方「问答（Chat）」）。`name` 用于其他配置引用；`tool_mode`（`auto`/`native`/`prompt`，缺省 `auto`）控制该模型的工具调用协议。
 - `llm_extract`：**信息补全（元数据抽取）专用模型**，字段 `{from, protocol, url, key, model}`。**留空的字段从 `from` 指定的模型池条目继承**（`from` 为空或未命中则取第一项）；`model` 也可留空继承。
-  同一段还存放与模型无关的**抽取策略**：`prompt`（自定义提示词模板，空 = 内置默认，支持 `{content}` / `{metadata}` 占位符）、`max_input_chars`（送入模型的正文最大字符数，默认 6000）、`max_tokens`（默认 2048）、`overwrite`（默认 `true`；`false` = 只补空字段，旧行为）。
-- `vector_dbs[].embedding`：**Embedding 配置**，字段 `{protocol, url, key, model}`，每个向量库各自一份。缺省字段回退到模型池第一项（兼容旧行为），但 `model` 不回退（缺省为 `nomic-embed-text`，二者语义不同）。
+  同一段还存放与模型无关的**抽取策略**：`prompt`（自定义提示词模板，空 = 内置默认，支持 `{content}` / `{metadata}` 占位符）、`max_input_chars`（送入模型的正文最大字符数，默认 6000）、`max_tokens`（默认 2048）、`overwrite`（默认 `true`；`false` = 只补空字段）。
+- `vector_dbs[].embedding`：**Embedding 配置**，字段 `{protocol, url, key, model}`，每个向量库各自一份，**与 LLM 模型池完全独立**。字段缺失时使用自身默认值（`protocol` = `ollama`、`url`/`key` 为空、`model` = `nomic-embed-text`），不从模型池继承。
 - 解析入口（`backend-rs/src/config.rs`）：`Settings::llm_models()`、`Settings::llm_extract_config()`、`Settings::extract_client()`、`Settings::extract_options(existing)`（提示词模板 + 截断长度 + `overwrite`）、`Settings::embedding_config_for(vdb)`；模型类均返回 `ModelEndpoint`（可 `.client()` 得到 `LlmClient`）。
 - **协议差异由 `LlmClient`（`backend-rs/src/services/llm.rs`）内部处理**，调用方无需关心：
   - Ollama 原生：`/api/generate`、`/api/embed`、`/api/tags`；生成结果取 `response`，向量取 `embeddings`（**元素是裸数组**）。
   - OpenAI 兼容：`/v1/chat/completions`、`/v1/embeddings`、`/v1/models`；生成结果取 `choices[0].message.content`，向量取 `data[].embedding`（按 `index` 排序）。
   - OpenAI 协议的 `url` 未以 `/v1` 结尾时自动补全（如 `http://127.0.0.1:11434` → `http://127.0.0.1:11434/v1`）。
-- **旧配置自动迁移**（`ConfigManager::load_service_config()` → `migrate_legacy_service_config()`，作用于磁盘原始内容、与默认值合并之前，幂等）：
-  - 旧的 `ollama` 对象 / 旧的单对象 `llm`（`{protocol,url,key,model}`）→ 包装为 `llm.models` 的单元素数组（`name` = `default`）；`ollama` 键被移除。
-  - `llm.models` 每项补齐 `name`（`model-N`）与 `protocol`（`ollama`）。
-  - 文件未提供 `llm` 时不凭空创建空池，否则会盖掉默认模型池（`deep_merge` 对数组是整体替换）。
-  - 各向量库 `embedding` 的 `protocol` 依次回退 `embedding.source` → `llm.models[0].protocol`；`url`/`key` 回退 `llm.models[0]`；`model` 缺失补 `nomic-embed-text`。
+- **配置归一化**（`ConfigManager::load_service_config()` → `normalize_service_config()`，作用于磁盘原始内容、与默认值合并之前，幂等）只补齐结构性缺省值，不识别任何历史格式：
+  - `llm.models` 必须是数组，每项补齐 `name`（`model-N`）与 `protocol`（`ollama`）；文件未提供 `llm` 时不凭空创建空池，否则会盖掉默认模型池（`deep_merge` 对数组是整体替换）。
+  - 各向量库 `embedding` 补齐 `protocol`（`ollama`）、`url`/`key`（空串）、`model`（`nomic-embed-text`）。
+  - `users` 段必须是对象、`items` 必须是数组。
 - 前端对应组件：`LlmConfigSection.vue`（模型池增删/排序/单项连接测试）、`LlmExtractConfigSection.vue`（`from` 选择 + 继承占位符 + 生效值预览 + 提示词模板/截断长度/`overwrite` 开关）、`VectorDbConfigSection.vue`（每个向量库的嵌入协议/URL/Key/模型）。连接测试走 `/assist/api/config/test`：`type=llm` 用请求体参数（表单实时测试），`type=llm_extract` 由服务端按已保存配置（含继承）解析。
 - **敏感字段写 `!cat <path>` 引用，不要把密钥写进 JSON**：`mineru[].token` 以及 `llm.models[].key` 都支持以 `!` 开头的值 —— `resolve_token()`（`backend-rs/src/utils.rs`）会读取 `!cat <path>` 指向的文件（路径相对进程 `cwd`，即 `backend-rs/`）并去首尾空白，结果进程内缓存。**LLM 密钥的解析发生在 `ModelEndpoint::client()` 与连接测试的 `test_llm()`**，因此 `config.json` 与 `/assist/api/config` 里只会出现 `!cat ./data/tokens/xxx` 这样的引用，不回显真实密钥；密钥文件放在 `backend-rs/data/tokens/`（已被 git 忽略）。
 - 服务状态端点键为 `llm`（不再是 `ollama`），如 `/assist/api/admin/services/status` 返回 `{mineru, llm, fastembed, vector_dbs, qdrant}`；其中 `llm` 探测的是**信息补全所用的端点**（含 `protocol`/`url`/`model`/`models`）。
@@ -197,10 +196,9 @@ cargo build --release
 
 命中后注入 **三样** Extension：`auth::Principal`（新代码用）、`auth::Role`（兼容既有 40+ 处 `Extension<Role>`）、`auth::OwnerKey`（会话归属，`u:<user_id>`，免鉴权为 `local`）。
 
-#### 启动引导与迁移（`main()`）
+#### 启动引导（`main()`）
 
-1. `users.migrate_legacy_permissions()`：旧 `config.json.permissions` → `legacy-<sha256 前 6 位>` 占位用户（`pending`、无凭据、角色/mcp 沿用），**旧 token 全部失效**，随后从磁盘删除 `permissions` 键（方案 B）。
-2. 首个管理员**只**由前端初始化页调 `POST /assist/api/auth/bootstrap` 创建；`system.json` 的 `token` / `mcp_token` 两个全局凭据字段**已删除**（`ensure_bootstrap` / `Settings::token()` / `Settings::mcp_token()` 均不再存在）。启动时没有 active admin 只打一条 `warn`。
+首个管理员**只**由前端初始化页调 `POST /assist/api/auth/bootstrap` 创建；`system.json` 里没有任何全局凭据字段。启动时没有 active admin 只打一条 `warn`。
 
 #### 接口一览
 
@@ -213,7 +211,7 @@ cargo build --release
 | POST | `/assist/api/auth/logout` | 已登录 | 撤销当前会话 |
 | GET | `/assist/api/auth/me` | 已登录 | 当前主体（含令牌元数据，无哈希） |
 | POST | `/assist/api/auth/password` | 已登录 | 改密（撤销该用户全部会话；有密码时需 `old_password`） |
-| GET | `/assist/api/auth/check` | 公开（自行解析凭证） | 兼容旧前端的 `{role, valid, permissions}` + `user/mcp/via` |
+| GET | `/assist/api/auth/check` | 公开（自行解析凭证） | `{role, valid, permissions}` + `user/mcp/via`（前端用于 Token 登录与恢复会话） |
 | GET/POST | `/assist/api/auth/tokens` | 已登录 | 查看/签发**自己的**令牌（`{label, scope: api\|mcp, token?}`，`token` 留空自动生成） |
 | DELETE | `/assist/api/auth/tokens/:id` | 已登录 | 撤销自己的令牌 |
 | GET | `/assist/api/admin/users` | admin | 用户列表（`?status=`），返回 `count/pending/users` |
@@ -225,7 +223,6 @@ cargo build --release
 | DELETE | `/assist/api/admin/users/:id/tokens/:token_id` | admin | 撤销 |
 | GET/PUT | `/assist/api/admin/users/settings` | admin | 注册策略 / 会话 TTL |
 
-- 旧的 `/assist/api/admin/permissions*` 三个端点**已删除**（P3 迁移）。
 - `GET /assist/api/config` 不再返回 `users` 段，只给 `users_summary: {count, pending, allow_registration}`；`PUT /assist/api/config` 也无法改写 `users`（`ConfigManager` 的 `PROTECTED_CONFIG_SECTIONS`）。
 - CLI 兜底：`okb_assist --reset-password <用户名> --new-password '<密码>'`（省略密码则从 stdin 读）。
 
@@ -322,9 +319,9 @@ cargo build --release
 - **输入包含原元数据**：`MetaRecord::from_doc` 把数据库中的 16 个字段拍成 JSON 一起送入模型，由模型逐字段校对。
 - **输出是纠错结果而非只填空**：`MetaRecord::apply` 按 `overwrite` 合并 ——
   - `overwrite = true`（默认）：模型返回的字段以模型为准；返回 `""` / `[]` / `null` 表示“请清空”（对应“原值明显不对且正文里也没有”的情况）；模型未返回的字段保持原值。
-  - `overwrite = false`：只补空字段（旧行为）。
+  - `overwrite = false`：只补空字段。
   - `type` 走 `normalize_doc_type()` 的 Zotero 标准映射；`year` 只接受 1000–2200。
-- **安全阀**：模型输出全空（`metadata_is_blank`）直接放弃写入；合并后标题与作者同时为空也放弃写入。旧的“已有标题/作者/年份则跳过提取”判断已移除，因此可以对同一文档反复抽取以纠正旧值。
+- **安全阀**：模型输出全空（`metadata_is_blank`）直接放弃写入；合并后标题与作者同时为空也放弃写入。因此可以对同一文档反复抽取以纠正旧值。
 - **日志**：`info!` 依次输出“原元数据 → 模型输出 → 字段变化清单（`字段: 旧 → 新`）→ 更新后元数据”，失败/放弃路径用 `warn!`。
 
 ### 问答（Chat，`/assist/chat`）
@@ -451,11 +448,11 @@ cargo build --release
 4. **文档管理**（`documents.rs`）：CRUD、上传、按路径登记、语义搜索 `/search`、全文搜索 `/grep-search`、`/assist/markdown` 读写、PDF/图片服务、去重。
    - `GET /assist/api/documents/:id/markdown/?line_start&line_count&full&raw` —— 按行切片读取；`raw=1` 返回文件原始内容（不做图片路径重写），供 Markdown 编辑器保证无损读写；响应含 `hash`（文件真实字节的 sha256）。
    - `PUT /assist/api/documents/:id/markdown/lines` —— 按行范围替换源码（admin）。语义：`line_start` 0-based 含端点，`line_count` 为被替换行数（0 = 纯插入），新行数 = `content.split('\n').count()`（与「切片 join('\n')」严格互逆），写入为原子写且不做图片路径还原（与 `raw=1` 配对）。删行必须显式传 `delete: true`（空字符串固定等于 1 个空行，不能表达删行）。
-   - **乐观并发控制**：`PUT .../markdown/` 与 `.../markdown/lines/` 都接受可选 `base_hash`（取自 GET 的 `hash`），不一致时返回 **409** `{code:"conflict", hash, detail}`；不传则跳过校验（向后兼容）。两个写接口的响应都返回写入后的 `hash`。
+   - **乐观并发控制**：`PUT .../markdown/` 与 `.../markdown/lines/` 都接受可选 `base_hash`（取自 GET 的 `hash`），不一致时返回 **409** `{code:"conflict", hash, detail}`；不传则跳过校验。两个写接口的响应都返回写入后的 `hash`。
    - `GET /assist/api/documents/:id/pdf-info` —— PDF 元信息报告：`{pdf: {file_size, pdf_version, page_count, encrypted, info, heuristics}}`。`info` 为 PDF Info 字典原始键值（mupdf feature 下只有标准字段；否则由 `mutool show trailer.Info` 解析，含自定义键如 `/doi`），`heuristics` 复用 `pdf_meta` 的启发式抽取结果。页数取 `trailer/Root/Pages/Count`，回退 `mutool pages` 计数；加密判断取 trailer 的 `/Encrypt`。
    - `GET /assist/api/documents/:id/crossref` —— 读取 `crossref_path` 模板对应的已保存 Crossref 记录，返回 `{exists, path, raw, parsed, modified_at}`（`raw` 为 Crossref API 完整应答，`parsed` 与元数据补全同源）。
    - `GET /assist/api/documents/:id/citation?format=bibtex|gbt7714&source=auto|crossref|document` —— 生成引用条目，返回 `{format, source, key, content}`。默认 `source=auto`：有 Crossref 记录就用它，否则退化为数据库元数据（`source=document`，卷期页会缺失）；`source=crossref` 且无记录时返回 404。引用键为「第一作者姓 + 年份 + 标题首个实词」。
-5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、迁移、索引重置。
+5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、去重、索引重置。
 6. **问答**（`chat.rs`）：`GET /assist/api/chat/models`、`GET /assist/api/chat/tools` 列出模型池与可调用的 MCP 工具，`POST /assist/api/chat` 基于 `llm.models` 做多轮对话，并可在本请求内循环调用 MCP 工具（非流式）。见下方「问答（Chat）」。
 7. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
 8. **MCP 服务**（`mcp_server.rs`）：Streamable HTTP 端点 `/assist/mcp/stream`，SSE 挂载在 `/assist/mcp`；Bearer 认证接受用户会话/个人令牌（`Principal.mcp`）、受信任子网（需 `trusted_subnet_enabled`）。完整工具列表见 `document/mcp.md`。
@@ -635,7 +632,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 
 ## ⚠️ 易错点（编辑前必读）
 
-1. **鉴权现状**：只认 `users` 段（会话 token / 用户个人令牌）。`system.json` 里**没有任何全局凭据字段**（旧 `token` / `mcp_token` 已删除）；`trusted_subnets` 默认不生效，需 `trusted_subnet_enabled = true`；系统未初始化时只有 `/auth/status|check|bootstrap` 可用。`TokenMiddleware` 仅对 `/assist/api/*` 生效。个人令牌的 `scope` **严格互斥**（api 只能调 API、mcp 只能调 MCP），新增受凭证保护的端点时记得同步判断 `Principal.api` / `Principal.mcp`，不要只看「令牌有效」。
+1. **鉴权现状**：只认 `users` 段（会话 token / 用户个人令牌）。`system.json` 里**没有任何全局凭据字段**；`trusted_subnets` 默认不生效，需 `trusted_subnet_enabled = true`；系统未初始化时只有 `/auth/status|check|bootstrap` 可用。`TokenMiddleware` 仅对 `/assist/api/*` 生效。个人令牌的 `scope` **严格互斥**（api 只能调 API、mcp 只能调 MCP），新增受凭证保护的端点时记得同步判断 `Principal.api` / `Principal.mcp`，不要只看「令牌有效」。
 2. **配置改动不会自动生效**：`config.json` 改后需 reload；`system.json` 改后需重启进程（进程内缓存）。
 3. **MCP 路由注册顺序有依赖**（`backend-rs/src/main.rs`）：必须在 SSE 挂载之前精确注册 Streamable HTTP 端点。不要"整理"这个顺序。
 4. **没有测试、没有 lint**：编辑后需手动 `cargo build` 确认编译通过，并用 curl 校验端点。
@@ -649,8 +646,8 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 12. **SQLx 编译时检查**：`sqlx` 默认在 `debug` 模式下会校验 SQL 查询，如果迁移了数据库结构需运行 `cargo sqlx prepare`（需安装 `sqlx-cli`）。
 13. **MinerU Markdown 图片处理**（`backend-rs/src/services/mineru.rs`）：`get_task_result()` 必须优先从 ZIP 输出提取 Markdown（含本地图片引用），而非从独立 Markdown 输出（含 data URI）。`finish_parse_result()` 在 `pipeline.rs` 中还需**复制独立图片文件**到目标目录，否则 Markdown 中的相对路径引用会失效。
 14. **MinerU API 的 output_formats 顺序无关**：`submit_job()` 必须同时请求 `"markdown"` 和 `"zip"` 两个格式。`zip` 格式包含解析结果的完整输出（Markdown + 图片），而 `markdown` 格式是自包含的 data URI 版本。两套输出分别下载后合并处理。
-15. **`users` 段不要手改、不要经 `/assist/api/config` 写入**：`ConfigManager::save_config()` 会跳过 `PROTECTED_CONFIG_SECTIONS = ["users"]` 并从磁盘取回真值；用户写操作必须走 `users::UserStore`（内部 `update_users_section` 原子写 + 写锁）。密码哈希/令牌哈希永不回显。
-16. **删改用户要级联撤销凭据**：禁用/删除用户、重置密码都要 `sessions.revoke_user(&id)`（`routers/users.rs` 已处理）；`set_password` 会自动吊销 `label = "bootstrap"` 的令牌，但**不会**吊销用户自签令牌（需管理员显式 `revoke_tokens`）。
+15. **`users` / `drive` 段不要手改、不要经 `/assist/api/config` 写入**：`ConfigManager::save_config()` 会跳过 `PROTECTED_CONFIG_SECTIONS = ["users", "drive"]` 并从磁盘取回真值；用户写操作必须走 `users::UserStore`（内部 `update_users_section` 原子写 + 写锁）。密码哈希/令牌哈希永不回显。
+16. **删改用户要级联撤销凭据**：禁用/删除用户、重置密码都要 `sessions.revoke_user(&id)`（`routers/users.rs` 已处理）；`set_password` **不会**吊销用户已签发的令牌（需管理员显式 `revoke_tokens`）。
 17. **网盘路径必须过 `resolve_path()`**：任何来自客户端的相对路径都要经 `sanitize_rel_path` + canonicalize 校验，禁止直接 `base.join(user_input)`（防 `../` 与符号链接逃逸）；新增文件操作端点时同样处理。
 18. **`drive` 段是受保护配置**：修改公有文件夹/配额/设置必须走 `/assist/api/admin/drive/*`（内部 `update_section`），不要扩展 `PUT /assist/api/config` 去写它，否则会与 `save_config` 的“从磁盘取回真值”逻辑打架。
 19. **全屏（`meta.bare`）路由的高度链**：`main-content-bare` → `.error-boundary-wrap` → 页面容器 → `AceEditor` 每一层都必须是纵向 flex（`flex:1; min-height:0`）。`App.vue` 用 `.main-content-bare :deep(.error-boundary-wrap)` 补了这一层；漏掉就会让内部 `height:100%/flex:1` 的编辑器塌陷成内容高度（表现为编辑区只有 200px 高、下方一大片空白）。

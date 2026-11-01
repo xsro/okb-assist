@@ -53,7 +53,7 @@ export interface LoginResponse {
   user: User
 }
 
-/** `GET /assist/api/auth/check`（兼容旧前端的角色探测） */
+/** `GET /assist/api/auth/check`（角色 / 权限探测） */
 export interface AuthCheckResponse {
   role: Role | null
   valid: boolean

@@ -99,8 +99,6 @@ fn resolve_status_alias(value: &str) -> &str {
         "uploaded" => "uploaded",
         "parsing" => "parsing",
         "done" | "markdown_done" => "markdown_done",
-        "extracting" => "extracting",
-        "indexing" | "indexed" => "indexed",
         "error" => "error",
         _ => value,
     }

@@ -1,7 +1,6 @@
 //! 配置路由。
 //!
-//! 与 Python 版 `app/routers/config.py` 保持 API 契约一致，
-//! 并补充前端 `frontend/src/api/config.ts` 的 `/test-connection` 端点。
+//! 提供配置读写、重载与连接测试端点，字段与前端 `frontend/src/api/config.ts` 对应。
 
 use std::sync::Arc;
 
@@ -106,12 +105,8 @@ async fn update_config(
         config["mineru"] = Value::Array(mineru.clone());
     }
 
-    // LLM 模型池：新键 `llm`（含 models 数组），同时兼容前端仍提交旧键 `ollama` 的情况
-    let llm_payload = body
-        .get("llm")
-        .and_then(|v| v.as_object())
-        .or_else(|| body.get("ollama").and_then(|v| v.as_object()));
-    if let Some(llm) = llm_payload {
+    // LLM 模型池（`llm.models`）
+    if let Some(llm) = body.get("llm").and_then(|v| v.as_object()) {
         // 校验模型池中每一项都可用（缺 url 或 model 的项无法用于任何调用）
         if let Some(models) = llm.get("models").and_then(|v| v.as_array()) {
             for (i, model) in models.iter().enumerate() {
@@ -258,7 +253,7 @@ async fn test_service(
             // 前端提交的 TestServiceRequest 中 key 字段实际存储的是 mineru type
             Json(test_mineru(&url, "", &mineru_type).await).into_response()
         }
-        "llm" | "ollama" => {
+        "llm" => {
             let url = req.url.unwrap_or_default().trim_end_matches('/').to_string();
             let protocol = req.protocol.clone().unwrap_or_else(|| "ollama".to_string());
             let key = req.key.clone().unwrap_or_default();
@@ -302,7 +297,7 @@ async fn test_connection(
             let mineru_type = settings.mineru_type();
             Json(test_mineru(&url, &key, &mineru_type).await).into_response()
         }
-        "llm" | "ollama" | "llm_extract" => {
+        "llm" | "llm_extract" => {
             let cfg = settings.llm_extract_config();
             Json(test_llm(&cfg.url, &cfg.key, &cfg.model, &cfg.protocol).await).into_response()
         }

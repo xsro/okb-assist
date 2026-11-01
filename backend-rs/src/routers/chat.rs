@@ -1026,8 +1026,8 @@ mod tests {
 
     #[test]
     fn can_access_allows_admin_or_owner_only() {
-        let owner = auth::OwnerKey::from_token("token-a");
-        let other = auth::OwnerKey::from_token("token-b");
+        let owner = auth::OwnerKey::from_user("u_a");
+        let other = auth::OwnerKey::from_user("u_b");
         assert!(can_access(&auth::Role::Admin, other.as_str(), owner.as_str()));
         assert!(can_access(&auth::Role::ViewOnly, owner.as_str(), owner.as_str()));
         assert!(!can_access(&auth::Role::ViewOnly, other.as_str(), owner.as_str()));

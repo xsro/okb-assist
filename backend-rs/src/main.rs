@@ -1,6 +1,6 @@
 //! OKB-Assist 后端 — Rust 重实现。
 //!
-//! 基于 Axum + SQLx + Tokio，保持与 Python 版本 API 接口兼容。
+//! 基于 Axum + SQLx + Tokio。
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -151,10 +151,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 用户 / 会话状态（用户持久化在 config.json 的 users 段，会话在内存）
     let user_store = Arc::new(users::UserStore::new(config_manager.clone()));
-    // 一次性迁移旧的 config.json.permissions → 无凭据占位用户（方案 B：旧 token 全部失效）
-    user_store.migrate_legacy_permissions();
-    // 首个管理员由前端初始化页创建（`POST /assist/api/auth/bootstrap`）；
-    // 不再从 `system.json` 接管任何全局 token。
+    // 首个管理员由前端初始化页创建（`POST /assist/api/auth/bootstrap`）。
     if !auth::is_initialized(&user_store) {
         tracing::warn!("系统尚未初始化：请在 /assist/login 初始化页创建第一个管理员账号");
     }
@@ -441,7 +438,7 @@ const UNINITIALIZED_ALLOWED_PATHS: &[&str] = &[
 ///
 /// 命中后向 request extensions 注入三样东西：
 /// - `auth::Principal`：用户身份（新代码用它取 `user_id` / `username` / `mcp`）；
-/// - `auth::Role`：兼容既有 `Extension<Role>` 处理器；
+/// - `auth::Role`：供既有 `Extension<Role>` 处理器使用；
 /// - `auth::OwnerKey`：会话历史的归属标识（`u:<user_id>`，免鉴权为 `local`）。
 async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
@@ -467,7 +464,7 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
     let sessions = req.extensions().get::<Arc<session::SessionStore>>().cloned();
 
     let (Some(settings), Some(user_store), Some(sessions)) = (settings, user_store, sessions) else {
-        // 状态未注入（理论上不会发生）：退化为放行，保持旧行为
+        // 状态未注入（理论上不会发生）：退化为放行
         return next.run(req).await;
     };
 
@@ -537,7 +534,6 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
 
 /// SPA fallback：命中 frontend/dist 真实文件则返回文件，否则返回 index.html。
 ///
-/// 与 Python `serve_spa` 对齐：
 /// - api/、mcp/、uploads/、file/ 前缀应由其他路由处理，未命中则 404；
 /// - 命中真实文件时按扩展名返回 MIME 与缓存策略；
 /// - 其余客户端路由回退到 index.html。
@@ -551,7 +547,7 @@ async fn spa_fallback(uri: axum::http::Uri) -> Response {
     let full_path = match path.strip_prefix("/assist") {
         Some(rest) => rest.trim_start_matches('/'),
         None => {
-            // 仅处理 /assist 前缀的 SPA 路径，其余 404（对齐 Python）
+            // 仅处理 /assist 前缀的 SPA 路径，其余 404
             return (
                 http::StatusCode::NOT_FOUND,
                 axum::Json(serde_json::json!({"detail": "Not Found"})),
@@ -751,7 +747,7 @@ impl<B> OnResponse<B> for ResponseLog {
     }
 }
 
-/// 与 Python `_get_cache_control` 对齐的缓存策略（静态目录挂载复用）。
+/// 静态资源的缓存策略（静态目录挂载复用）。
 pub(crate) fn cache_control_for(path: &std::path::Path) -> &'static str {
     let basename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();

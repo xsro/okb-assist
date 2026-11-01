@@ -26,7 +26,7 @@ use axum::http::{HeaderMap, HeaderValue};
 use tokio::io::{AsyncSeekExt, AsyncReadExt};
 use crate::utils::{calculate_file_hash_async, now_datetime, now_iso, sha256_hex_async};
 
-/// 全局文件别名表（内存，重启即丢失，与 Python 版一致）
+/// 全局文件别名表（内存，重启即丢失）
 /// 存储格式：alias -> (doc_id, expires_at_unix_timestamp)
 /// 有效期由 config.json 的 alias_expiration_hours 控制，默认 1 小时。
 static FILE_ALIASES: std::sync::OnceLock<RwLock<std::collections::HashMap<String, (i64, u64)>>> =
@@ -174,7 +174,7 @@ pub fn router() -> axum::Router<()> {
         .layer(axum::extract::DefaultBodyLimit::max(200 * 1024 * 1024))
 }
 
-/// 列表查询参数（与 Python 版 /assist/api/documents/ 对齐）
+/// 列表查询参数
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
     pub page: Option<i64>,
@@ -185,7 +185,7 @@ pub struct ListQuery {
     pub search_fields: Option<String>,
     pub sort_by: Option<String>,
     pub sort_order: Option<String>,
-    // 向后兼容旧参数（Python 版无这些，仅作扩展）
+    // 扩展筛选参数（除分页/关键词/排序外的精确条件）
     pub category: Option<String>,
     pub year: Option<i64>,
     pub year_min: Option<i64>,
@@ -371,7 +371,7 @@ async fn next_available_id(db: &Database) -> Option<i64> {
     None
 }
 
-/// 可搜索字段名 → SQL 列名映射（与 Python 版一致）
+/// 可搜索字段名 → SQL 列名映射
 const SEARCHABLE_COLUMNS: &[(&str, &str)] = &[
     ("title", "title"),
     ("authors", "authors"),
@@ -391,7 +391,7 @@ const SEARCHABLE_COLUMNS: &[(&str, &str)] = &[
     ("journal_en", "journal_en"),
 ];
 
-/// 可排序字段名 → SQL 列名映射（与 Python 版一致）
+/// 可排序字段名 → SQL 列名映射
 const SORTABLE_COLUMNS: &[(&str, &str)] = &[
     ("id", "id"),
     ("title", "title"),
@@ -1517,7 +1517,7 @@ async fn semantic_search(
     Json(json!({"results": enriched, "query": q})).into_response()
 }
 
-/// 解析 query 中的布尔值（兼容 Python/Pydantic 的宽松 bool：1/0、true/false、yes/no、on/off 等）。
+/// 解析 query 中的布尔值（宽松取值：1/0、true/false、yes/no、on/off 等）。
 fn de_flexible_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1945,7 +1945,7 @@ async fn get_toc(
 #[derive(Debug, Deserialize)]
 pub struct MarkdownUpdate {
     pub content: String,
-    /// 乐观并发控制：客户端读取时的文件 hash；不传则不做校验（兼容旧调用）
+    /// 乐观并发控制：客户端读取时的文件 hash；不传则不做校验
     #[serde(default)]
     pub base_hash: Option<String>,
 }
@@ -2021,7 +2021,7 @@ pub struct MarkdownLinesUpdate {
     /// 因为空字符串固定等于 1 个空行，删行必须由本字段显式表达。
     #[serde(default)]
     pub delete: Option<bool>,
-    /// 乐观并发控制：客户端加载该行范围时拿到的文件 hash；不传则跳过校验（兼容旧调用）
+    /// 乐观并发控制：客户端加载该行范围时拿到的文件 hash；不传则跳过校验
     #[serde(default)]
     pub base_hash: Option<String>,
 }

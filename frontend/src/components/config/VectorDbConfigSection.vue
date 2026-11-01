@@ -158,17 +158,15 @@ function toggleEmbedKey(idx: number) {
   embedKeyVisible[idx] = !embedKeyVisible[idx]
 }
 
-/** 兼容旧配置：embedding 段缺失字段时按默认值补齐（后端也会做同样处理） */
+/** embedding 段缺失字段时按默认值补齐（后端也会做同样处理） */
 function ensureEmbedding(db: VectorDbConfig): ModelEndpoint {
   if (!db.embedding || typeof db.embedding !== 'object') {
     db.embedding = defaultEmbedding()
   } else {
-    // 旧字段 source（"ollama"/"openai"）作为 protocol 的回退
-    const legacy = db.embedding as ModelEndpoint & { source?: string }
-    legacy.protocol = legacy.protocol || (legacy.source === 'openai' ? 'openai' : 'ollama')
-    legacy.url = legacy.url || ''
-    legacy.key = legacy.key || ''
-    legacy.model = legacy.model || 'nomic-embed-text'
+    db.embedding.protocol = db.embedding.protocol || 'ollama'
+    db.embedding.url = db.embedding.url || ''
+    db.embedding.key = db.embedding.key || ''
+    db.embedding.model = db.embedding.model || 'nomic-embed-text'
   }
   return db.embedding
 }

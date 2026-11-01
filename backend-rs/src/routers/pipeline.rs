@@ -1,8 +1,7 @@
 //! 流水线路由。
 //!
-//! 与 Python 版 `app/routers/pipeline.py` 保持 API 契约一致。
-//! 后台任务使用 `tokio::spawn` + 全局 `Semaphore` 模拟 FastAPI 的 `BackgroundTasks`
-//! + `asyncio.Semaphore`，批量进度与暂停标志为进程内全局状态（重启即丢失）。
+//! 后台任务使用 `tokio::spawn` + 全局 `Semaphore` 控制并发，
+//! 批量进度与暂停标志为进程内全局状态（重启即丢失）。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -39,11 +38,11 @@ const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, year, doi, s
 /// 默认 Qdrant user id（无鉴权）
 const QDRANT_USER_ID: i64 = 0;
 
-/// Markdown 分块默认参数（与 Python qdrant.py 一致）
+/// Markdown 分块默认参数
 const CHUNK_SIZE: usize = 1000;
 const MIN_CHUNK_SIZE: usize = 100;
 
-/// Zotero 标准类型映射（镜像 Python `_TYPE_NORMALIZE`）
+/// Zotero 标准类型映射
 fn normalize_doc_type(raw: &str) -> String {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -68,7 +67,7 @@ fn normalize_doc_type(raw: &str) -> String {
     }
 }
 
-// ── 全局状态（进程内，重启即丢失，与 Python 模块级全局一致） ──
+// ── 全局状态（进程内，重启即丢失） ──
 
 static TASK_SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
 static MINERU_SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
@@ -576,7 +575,7 @@ impl MetaRecord {
     ///
     /// - `overwrite = true`：模型给出了该字段就以模型为准（返回空值 = 清空该字段，
     ///   用于「原值明显不对且正文里也没有」的情况）；模型未返回的字段保持原值。
-    /// - `overwrite = false`：只补空字段，已有值一律不动（旧行为）。
+    /// - `overwrite = false`：只补空字段，已有值一律不动。
     ///
     /// 例外：文档语言为英文时，`*_en` 字段本身没有意义，模型按提示词把它们留空，
     /// 此时保留原值，不禁把已有的英文标题/摘要抹掉。
@@ -835,7 +834,7 @@ fn metadata_is_blank(v: &Value) -> bool {
 
 /// 信息补全（元数据抽取）主流程。
 ///
-/// 与旧版的区别：把数据库里已有的元数据一并送给模型做校对，
+/// 把数据库里已有的元数据一并送给模型做校对，
 /// 模型可以改正与正文矛盾的取值，也可以在「正文里也没有正确值」时把它们清空；
 /// 同时把「原元数据 / 模型输出 / 字段变化 / 最终元数据」写入日志。
 async fn do_extract_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
@@ -2259,7 +2258,7 @@ async fn full(
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
-    // 非 Python 端点：顺序触发 parse → extract → index。
+    // 顺序触发 parse → extract → index。
     let doc = match fetch_doc(&db, id).await {
         Some(d) => d,
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
@@ -2300,7 +2299,7 @@ async fn stop(
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
-    // 非 Python 端点：将运行中的文档标记为 error（暂停其后台进度）。
+    // 将运行中的文档标记为 error（暂停其后台进度）。
     let doc = match fetch_doc(&db, id).await {
         Some(d) => d,
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),

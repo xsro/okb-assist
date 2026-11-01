@@ -65,26 +65,17 @@ pub fn assert_role(role: &Role, required: &[&str]) -> Result<(), Response> {
 ///
 /// **不回传给前端**，仅用于归属比对：
 /// - `u:<user_id>`：登录用户（同一人换浏览器仍能看到自己的会话历史）；
-/// - `local`：免鉴权来源（受信任子网、图片 URL 等）；
-/// - `t:<sha256 前 32 位>`：旧模型（由 token 派生），仅用于兼容历史会话文件。
+/// - `local`：免鉴权来源（受信任子网、图片 URL 等）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnerKey(String);
 
 impl OwnerKey {
-    /// 由 token 派生归属标识（旧模型，保留用于读取历史会话文件）
-    pub fn from_token(token: &str) -> Self {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(token.as_bytes());
-        let hex = hex::encode(digest);
-        Self(format!("t:{}", &hex[..32]))
-    }
-
     /// 免鉴权请求的归属标识
     pub fn local() -> Self {
         Self("local".to_string())
     }
 
-    /// 由**用户 id** 派生归属标识（新模型：会话历史按人归属）
+    /// 由**用户 id** 派生归属标识（会话历史按人归属）
     ///
     /// 同一用户换浏览器 / 换 token 仍能看到自己的会话；不同用户互不可见。
     pub fn from_user(user_id: &str) -> Self {
@@ -96,7 +87,7 @@ impl OwnerKey {
     }
 }
 
-// ── 认证主体（新模型） ──────────────────────────────────
+// ── 认证主体 ────────────────────────────────────────────
 
 /// 凭证来源，便于审计与排障
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,8 +112,8 @@ impl CredentialKind {
 
 /// 已认证的主体。
 ///
-/// 同一个请求既会注入 [`Principal`]（需要用户身份时使用），也会注入旧的 [`Role`]
-/// （兼容既有 `Extension<Role>` 处理器，保持 `assert_role` 判定不变）。
+/// 同一个请求既会注入 [`Principal`]（需要用户身份时使用），也会注入 [`Role`]
+/// （供既有 `Extension<Role>` 处理器使用，保持 `assert_role` 判定不变）。
 #[derive(Clone, Debug)]
 pub struct Principal {
     pub user_id: String,
@@ -187,7 +178,7 @@ pub fn extract_token_from_headers(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-/// 从查询串提取 `?token=...`（兼容旧前端的 iframe/img URL 传参方式）
+/// 从查询串提取 `?token=...`（`<img>` / `<iframe>` 等无法带请求头的场景使用）
 pub fn extract_token_from_query(query: Option<&str>) -> Option<String> {
     for pair in query?.split('&') {
         let Some((k, v)) = pair.split_once('=') else {
@@ -327,26 +318,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn owner_key_is_stable_and_token_specific() {
-        let a = OwnerKey::from_token("token-a");
-        let b = OwnerKey::from_token("token-a");
-        let c = OwnerKey::from_token("token-b");
-
-        // 同一 token 稳定
-        assert_eq!(a, b);
-        // 不同 token 即使角色相同也不同归属
-        assert_ne!(a, c);
-        // 免鉴权请求单独一档
-        assert_ne!(a, OwnerKey::local());
+    fn owner_key_local_is_distinct() {
         assert_eq!(OwnerKey::local().as_str(), "local");
-
-        // t: + 32 位 hex，不包含原始 token
-        assert!(a.as_str().starts_with("t:"));
-        assert_eq!(a.as_str().len(), 34);
-        assert!(!a.as_str().contains("token-a"));
+        assert_ne!(OwnerKey::local(), OwnerKey::from_user("u_1"));
     }
 
-    // ── 新模型：Principal / resolve_principal / 限流 ─────────
+    // ── Principal / resolve_principal / 限流 ───────────────
 
     use std::sync::Arc;
 
@@ -398,7 +375,6 @@ mod tests {
         assert_eq!(a.as_str(), "u:u_1");
         assert_ne!(a, OwnerKey::from_user("u_2"));
         assert_ne!(a, OwnerKey::local());
-        assert_ne!(a, OwnerKey::from_token("u_1"));
     }
 
     #[test]

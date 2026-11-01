@@ -1,7 +1,6 @@
 //! MCP 服务。
 //!
-//! 提供与 Python 版 `app/mcp_server.py` 一致的 MCP 工具集，
-//! 以及 Streamable HTTP JSON-RPC 端点（`/assist/mcp/stream`）。
+//! 提供文献库检索的 MCP 工具集，以及 Streamable HTTP JSON-RPC 端点（`/assist/mcp/stream`）。
 
 use std::sync::Arc;
 
@@ -766,11 +765,19 @@ impl McpServer {
         sorted.sort_by(|a, b| b.1.as_i64().unwrap_or(0).cmp(&a.1.as_i64().unwrap_or(0)));
         let type_counts_sorted: serde_json::Map<String, Value> = sorted.into_iter().collect();
 
+        // 索引状态记在 document_vector_index 上（documents.status 只表示解析阶段）
+        let indexed_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT document_id) FROM document_vector_index WHERE status = 'indexed'",
+        )
+        .fetch_one(self.db.pool())
+        .await
+        .unwrap_or(0);
+
         Self::pretty(&json!({
             "total_documents": total,
             "status_counts": status_counts,
             "type_counts": type_counts_sorted,
-            "indexed_count": status_counts.get("indexed").and_then(|v| v.as_i64()).unwrap_or(0),
+            "indexed_count": indexed_count,
         }))
     }
 

@@ -1,6 +1,4 @@
-//! 纯 Rust 全文搜索服务。
-//!
-//! 替代了旧版外部 `grep` 进程方案。内部使用：
+//! 纯 Rust 全文搜索服务。内部使用：
 //! - **字面量搜索**：`memchr::memmem::Finder`（SIMD 加速，比 grep 的 Boyer-Moore 更快）
 //! - **正则搜索**：`regex::Regex`
 //! - **目录遍历**：`walkdir`（已在依赖树中）
@@ -9,57 +7,25 @@
 use std::collections::HashSet;
 use std::io::BufRead;
 use std::path::Path;
-use std::sync::OnceLock;
 
 use sqlx::Row;
 
-// ── 编译一次的正则：用于提取 doc_id（供旧版兼容调用） ──
-static DOC_ID_RE_1: OnceLock<regex::Regex> = OnceLock::new();
-static DOC_ID_RE_2: OnceLock<regex::Regex> = OnceLock::new();
-static DOC_ID_RE_3: OnceLock<regex::Regex> = OnceLock::new();
-
-fn doc_id_re_1() -> &'static regex::Regex {
-    DOC_ID_RE_1.get_or_init(|| regex::Regex::new(r"/(\d+)\.md$").unwrap())
-}
-fn doc_id_re_2() -> &'static regex::Regex {
-    DOC_ID_RE_2.get_or_init(|| regex::Regex::new(r"/(\d+)/(\d+)\.md$").unwrap())
-}
-fn doc_id_re_3() -> &'static regex::Regex {
-    DOC_ID_RE_3.get_or_init(|| regex::Regex::new(r"/(\d+)/[^/]+\.md$").unwrap())
-}
-
 /// 从文件路径中提取文档 ID。
 ///
-/// 优先用路径解析（零分配），回退到正则。
+/// 先按文件 stem 解析（`{id}.md`），失败则看父目录名（`{id}/xxx.md`）。
 pub fn extract_doc_id(file_path: &str) -> Option<i64> {
     let path = Path::new(file_path);
-    // 从文件 stem 解析
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
         if let Ok(id) = stem.parse::<i64>() {
             return Some(id);
         }
     }
-    // 回退：可能文件名不直接是数字，检查父目录名
     if let Some(parent) = path.parent() {
         if let Some(dir_name) = parent.file_name().and_then(|s| s.to_str()) {
             if let Ok(id) = dir_name.parse::<i64>() {
                 return Some(id);
             }
         }
-    }
-    // 最后用正则（兼容旧路径格式）
-    if let Some(caps) = doc_id_re_1().captures(file_path) {
-        return caps.get(1)?.as_str().parse().ok();
-    }
-    if let Some(caps) = doc_id_re_2().captures(file_path) {
-        let dir_id = caps.get(1)?.as_str();
-        let file_id = caps.get(2)?.as_str();
-        if dir_id == file_id {
-            return dir_id.parse().ok();
-        }
-    }
-    if let Some(caps) = doc_id_re_3().captures(file_path) {
-        return caps.get(1)?.as_str().parse().ok();
     }
     None
 }
@@ -344,7 +310,7 @@ fn search_dir(
     results
 }
 
-/// 执行 grep 搜索（完整对齐旧版 API）。
+/// 执行 grep 搜索。
 ///
 /// 内部完成：期刊/年份元数据预筛 → 与 doc_ids 取交集 → fast 算法候选预筛 →
 /// 构建搜索路径 → 纯 Rust 内部搜索（无外部进程）。
@@ -448,27 +414,6 @@ pub async fn grep_search(
 
     result
 }
-
-/// 列出所有 markdown 文件路径（用于调试 / 兼容旧调用）
-pub fn list_all_markdown_paths(settings: &crate::config::Settings) -> Vec<String> {
-    let sample = crate::paths::get_markdown_path(settings, 0);
-    let dir = match Path::new(&sample).parent() {
-        Some(d) => d,
-        None => return Vec::new(),
-    };
-    if !dir.is_dir() {
-        return Vec::new();
-    }
-    match std::fs::read_dir(dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path().to_string_lossy().to_string())
-            .filter(|p| p.ends_with(".md"))
-            .collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
 /// 元数据预筛候选文档 ID
 pub async fn metadata_candidate_ids(
     db: &sqlx::SqlitePool,

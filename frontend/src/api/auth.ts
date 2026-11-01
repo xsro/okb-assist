@@ -44,7 +44,7 @@ export function logout(): Promise<{ ok: boolean; revoked: boolean }> {
   return apiPost('/assist/api/auth/logout')
 }
 
-/** 角色 / 权限探测（兼容旧接口，也用于 Token 登录与启动时恢复会话） */
+/** 角色 / 权限探测（也用于 Token 登录与启动时恢复会话） */
 export function checkAuth(): Promise<AuthCheckResponse> {
   return apiGet<AuthCheckResponse>('/assist/api/auth/check')
 }

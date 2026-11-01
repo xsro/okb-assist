@@ -71,7 +71,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { getServiceConfig, updateServiceConfig, reloadConfig } from '@/api/config'
 import { getServiceStatus } from '@/api/admin'
 import { useToast } from '@/composables/useToast'
-import type { LlmModelEntry, ServiceConfig } from '@/types/config'
+import type { ServiceConfig } from '@/types/config'
 import BaseUrlSection from '@/components/config/BaseUrlSection.vue'
 import MineruConfigSection from '@/components/config/MineruConfigSection.vue'
 import LlmConfigSection from '@/components/config/LlmConfigSection.vue'
@@ -105,15 +105,9 @@ async function load() {
       raw.mineru = [raw.mineru]
     }
     config.value = raw
-    // 兼容旧配置：llm 模型池、抽取模型、各向量库 embedding 缺失字段时按默认值补齐
-    const rawLlm = raw.llm as { models?: LlmModelEntry[] } & Partial<LlmModelEntry>
-    if (!rawLlm || typeof rawLlm !== 'object') {
+    // 表单缺省值补齐（模型池、抽取模型、各向量库 embedding）
+    if (!Array.isArray(raw.llm?.models)) {
       raw.llm = { models: [] }
-    } else if (!Array.isArray(rawLlm.models)) {
-      // 单对象 llm（{protocol, url, key, model}）→ 模型池单项
-      raw.llm = rawLlm.model !== undefined || rawLlm.url !== undefined
-        ? { models: [{ name: 'default', protocol: rawLlm.protocol || 'ollama', url: rawLlm.url || '', key: rawLlm.key || '', model: rawLlm.model || '' }] }
-        : { models: [] }
     }
     for (const model of config.value.llm.models) {
       model.name = model.name || ''
