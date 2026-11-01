@@ -214,12 +214,21 @@ fn auth_headers(token: &Option<String>) -> reqwest::header::HeaderMap {
 
 // ==================== SHA256 哈希 ====================
 
+/// 流式计算文件 SHA256（不把整份文件读进内存）
 fn sha256_file(path: &Path) -> Result<String> {
-    let data = std::fs::read(path).context(format!("无法读取文件: {}", path.display()))?;
+    let file = std::fs::File::open(path).context(format!("无法打开文件: {}", path.display()))?;
+    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
     let mut hasher = Sha256::new();
-    hasher.update(&data);
-    let result = hasher.finalize();
-    Ok(hex::encode(result))
+    std::io::copy(&mut reader, &mut hasher)
+        .context(format!("无法读取文件: {}", path.display()))?;
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// 在后台线程算哈希（`sha256_file` 是阻塞 IO，不要直接卡在 async 任务里）
+async fn sha256_file_async(path: PathBuf) -> Result<String> {
+    tokio::task::spawn_blocking(move || sha256_file(&path))
+        .await
+        .map_err(|e| anyhow::anyhow!("哈希任务崩溃: {}", e))?
 }
 
 // ==================== API 调用 ====================
@@ -252,57 +261,96 @@ async fn api_diff_hashes(
     }
 }
 
-/// 上传 PDF 文件到服务器（新建文献，默认不触发自动处理）
-async fn api_upload(
-    client: &Client,
-    base_url: &str,
+/// 上传类请求的超时：基础 120s + 每 MB 2s（上限 30 分钟），
+/// 避免大文件走慢链路时被固定 120s 提前掐断。
+fn upload_client(file_size: u64) -> Result<Client> {
+    let extra_secs = (file_size / (1024 * 1024)).saturating_mul(2);
+    let secs = (120 + extra_secs).min(30 * 60);
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(secs))
+        .redirect(reqwest::redirect::Policy::default())
+        .build()
+        .context("无法创建 HTTP 客户端")
+}
+
+/// 截断响应体用于错误提示（按字符边界切，避免中文被切成非法 UTF-8）
+fn truncate_body(body: &str, max_chars: usize) -> String {
+    if body.chars().count() <= max_chars {
+        body.to_string()
+    } else {
+        let head: String = body.chars().take(max_chars).collect();
+        format!("{}…", head)
+    }
+}
+
+/// 流式发送一个 PDF（multipart 的 `file` 字段），不把整份文件读进内存。
+///
+/// `extra_fields` 为附加的表单字段（如 `auto_process=false`）。
+async fn post_pdf(
+    url: &str,
     file_path: &Path,
     token: &Option<String>,
-) -> Option<UploadResult> {
+    extra_fields: &[(&str, &str)],
+) -> Result<reqwest::Response> {
+    let size = tokio::fs::metadata(file_path)
+        .await
+        .with_context(|| format!("无法读取文件信息: {}", file_path.display()))?
+        .len();
+    let file = tokio::fs::File::open(file_path)
+        .await
+        .with_context(|| format!("无法读取文件: {}", file_path.display()))?;
     let filename = file_path
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown.pdf".to_string());
 
-    let file_data = match tokio::fs::read(file_path).await {
-        Ok(data) => data,
+    // 流式 multipart：必须带长度，否则 reqwest 会改成 chunked
+    let part = reqwest::multipart::Part::stream_with_length(
+        reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file)),
+        size,
+    )
+    .file_name(filename)
+    .mime_str("application/pdf")?;
+
+    let mut form = reqwest::multipart::Form::new().part("file", part);
+    for (k, v) in extra_fields {
+        form = form.text((*k).to_string(), (*v).to_string());
+    }
+
+    let client = upload_client(size)?;
+    let mut req = client.post(url).multipart(form);
+    if let Some(t) = token {
+        req = req.header("X-Token", t.as_str());
+    }
+    Ok(req.send().await?)
+}
+
+/// 上传 PDF 文件到服务器（新建文献，默认不触发自动处理）
+async fn api_upload(
+    base_url: &str,
+    file_path: &Path,
+    token: &Option<String>,
+) -> Option<UploadResult> {
+    let url = format!("{}/assist/api/documents/upload", base_url);
+    let resp = match post_pdf(&url, file_path, token, &[("auto_process", "false")]).await {
+        Ok(r) => r,
         Err(e) => {
-            eprintln!("  上传失败: 无法读取文件 {}: {}", file_path.display(), e);
+            eprintln!("  上传失败: {}", e);
             return None;
         }
     };
 
-    let file_part = reqwest::multipart::Part::bytes(file_data)
-        .file_name(filename)
-        .mime_str("application/pdf")
-        .unwrap();
-
-    let form = reqwest::multipart::Form::new()
-        .part("file", file_part)
-        .text("auto_process", "false");
-
-    let url = format!("{}/assist/api/documents/upload", base_url);
-    let mut req = client.post(&url).multipart(form);
-    if let Some(t) = token {
-        req = req.header("X-Token", t.as_str());
-    }
-
-    match req.send().await {
-        Ok(resp) if resp.status() == reqwest::StatusCode::OK => resp.json().await.ok(),
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            eprintln!(
-                "  上传失败: {} - {}",
-                status,
-                &body[..body.len().min(200)]
-            );
-            None
-        }
-        Err(e) => {
-            eprintln!("  上传失败: {}", e);
-            None
-        }
+    let status = resp.status();
+    if status == reqwest::StatusCode::OK {
+        resp.json().await.ok()
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        eprintln!(
+            "  上传失败: {} - {}",
+            status,
+            truncate_body(&body, 200)
+        );
+        None
     }
 }
 
@@ -350,49 +398,31 @@ async fn api_lookup_by_doi(
 
 /// 为已有文档替换/上传 PDF 文件
 async fn api_replace_pdf(
-    client: &Client,
     base_url: &str,
     doc_id: u64,
     file_path: &Path,
     token: &Option<String>,
 ) -> bool {
-    let filename = file_path
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_else(|| "document.pdf".to_string());
-
-    let file_data = match tokio::fs::read(file_path).await {
-        Ok(data) => data,
+    let url = format!("{}/assist/api/documents/{}/pdf", base_url, doc_id);
+    let resp = match post_pdf(&url, file_path, token, &[]).await {
+        Ok(r) => r,
         Err(e) => {
-            eprintln!("  读取文件失败 {}: {}", file_path.display(), e);
+            eprintln!("  更新 PDF 失败: {}", e);
             return false;
         }
     };
 
-    let file_part = reqwest::multipart::Part::bytes(file_data)
-        .file_name(filename)
-        .mime_str("application/pdf")
-        .unwrap();
-    let form = reqwest::multipart::Form::new().part("file", file_part);
-
-    let url = format!("{}/assist/api/documents/{}/pdf", base_url, doc_id);
-    let mut req = client.post(&url).multipart(form);
-    if let Some(t) = token {
-        req = req.header("X-Token", t.as_str());
-    }
-
-    match req.send().await {
-        Ok(resp) if resp.status() == reqwest::StatusCode::OK => true,
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            eprintln!("  更新 PDF 失败: {} - {}", status, &body[..body.len().min(200)]);
-            false
-        }
-        Err(e) => {
-            eprintln!("  更新 PDF 失败: {}", e);
-            false
-        }
+    let status = resp.status();
+    if status == reqwest::StatusCode::OK {
+        true
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        eprintln!(
+            "  更新 PDF 失败: {} - {}",
+            status,
+            truncate_body(&body, 200)
+        );
+        false
     }
 }
 
@@ -586,7 +616,8 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
     for (i, path) in all_pdfs.iter().enumerate() {
         print!("  [{}/{}] 计算哈希: {} ... ", i + 1, total, path.display());
         io::stdout().flush().ok();
-        match sha256_file(path) {
+        // 哈希是阻塞 IO：丢到后台线程，不卡住 tokio worker
+        match sha256_file_async(path.clone()).await {
             Ok(hash) => {
                 pdfs_with_hash.push(LocalPdf {
                     path: path.clone(),
@@ -697,7 +728,7 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
             uploaded += 1;
             continue;
         }
-        match api_upload(&client, &args.base_url, &p.path, &token).await {
+        match api_upload(&args.base_url, &p.path, &token).await {
             Some(result) => {
                 println!("成功 -> id={}", result.id);
                 uploaded += 1;
@@ -1121,7 +1152,7 @@ async fn upload_one_zotero(
         println!("  [dry-run] 跳过上传: {} ({})", d.doi, d.file_path);
         return true;
     }
-    let res = match api_upload(client, base_url, Path::new(&d.file_path), token).await {
+    let res = match api_upload(base_url, Path::new(&d.file_path), token).await {
         Some(r) => r,
         None => {
             println!("  上传失败 {}: 无返回结果", d.doi);
@@ -1230,7 +1261,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     // 预先计算所有本地文件哈希
     let mut docs_with_hash: Vec<LocalDocWithHash> = Vec::new();
     for d in &local_docs {
-        match sha256_file(Path::new(&d.file_path)) {
+        match sha256_file_async(PathBuf::from(&d.file_path)).await {
             Ok(h) => docs_with_hash.push(LocalDocWithHash { doc: d.clone(), local_hash: h }),
             Err(e) => eprintln!("  ! {}: 无法计算哈希 ({})", d.doi, e),
         }
@@ -1400,7 +1431,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         if args.dry_run {
             println!("[dry-run] 跳过");
             updated_pdf += 1;
-        } else if api_replace_pdf(&client, &args.base_url, *server_id, Path::new(&dw.doc.file_path), &token).await {
+        } else if api_replace_pdf(&args.base_url, *server_id, Path::new(&dw.doc.file_path), &token).await {
             if update_meta {
                 api_update_metadata(&client, &args.base_url, *server_id, &dw.doc.meta, &token).await;
                 api_save_info(&client, &args.base_url, *server_id, &dw.doc.info, &token).await;

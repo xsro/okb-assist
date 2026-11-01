@@ -40,7 +40,7 @@ okb-client dir <目录路径> [选项]
 - `--token <TOKEN>`          访问令牌
 - `--dry-run`                试运行，不实际上传
 - `-r, --recursive`          递归搜索子目录
-- `--no-process`             上传后不触发解析流水线
+- `--process`                上传后触发解析流水线（默认不触发）
 
 示例：
 ```
