@@ -54,45 +54,64 @@
         class="upload-queue-item"
         :class="item.status"
       >
-        <div class="file-info">
-          <span class="file-name" :title="item.file.name">{{ item.file.name }}</span>
-          <span class="file-size">{{ formatSize(item.file.size) }}</span>
+        <div class="item-main">
+          <div class="file-info">
+            <span class="file-name" :title="item.file.name">{{ item.file.name }}</span>
+            <span class="file-size">{{ formatSize(item.file.size) }}</span>
+          </div>
+          <div class="file-actions">
+            <button
+              v-if="item.status === 'error' && item.existingId"
+              class="btn btn-sm btn-primary"
+              @click="viewExisting(item)"
+            >
+              查看已有文献
+            </button>
+            <button
+              v-if="item.status === 'error' && item.errorKind === 'duplicate'"
+              class="btn btn-sm btn-outline"
+              @click="forceItem(item)"
+            >
+              强制上传
+            </button>
+            <button
+              v-if="item.status === 'error'"
+              class="btn btn-sm btn-outline"
+              @click="retryItem(item)"
+            >
+              重试
+            </button>
+            <button
+              v-if="item.status === 'pending' || item.status === 'error'"
+              class="btn btn-sm btn-danger"
+              @click="removeItem(item)"
+            >
+              删除
+            </button>
+            <button
+              v-else-if="item.status === 'done'"
+              class="btn btn-sm btn-outline"
+              @click="removeItem(item)"
+            >
+              移除
+            </button>
+          </div>
         </div>
         <div class="file-progress">
-          <div class="progress-bar">
-            <div class="progress-fill" :style="{ width: item.progress + '%' }"></div>
+          <div class="progress-bar" :class="{ indeterminate: isBusyIndeterminate(item) }">
+            <div
+              class="progress-fill"
+              :style="{ width: isBusyIndeterminate(item) ? '100%' : item.progress + '%' }"
+            ></div>
           </div>
-          <span class="file-status">{{ statusText(item) }}</span>
-        </div>
-        <div class="file-actions">
-          <button
-            v-if="item.status === 'error' && item.existingId"
-            class="btn btn-sm btn-primary"
-            @click="viewExisting(item)"
+          <span
+            class="file-status"
+            :class="{ 'status-error': item.status === 'error' }"
+            :title="item.errorDetail || ''"
           >
-            查看已有文献
-          </button>
-          <button
-            v-if="item.status === 'error'"
-            class="btn btn-sm btn-outline"
-            @click="retryItem(item)"
-          >
-            重试
-          </button>
-          <button
-            v-if="item.status === 'pending' || item.status === 'error'"
-            class="btn btn-sm btn-danger"
-            @click="removeItem(item)"
-          >
-            删除
-          </button>
-          <button
-            v-else-if="item.status === 'done'"
-            class="btn btn-sm btn-outline"
-            @click="removeItem(item)"
-          >
-            移除
-          </button>
+            {{ statusText(item) }}
+          </span>
+          <span v-if="item.errorHint" class="file-hint">{{ item.errorHint }}</span>
         </div>
       </div>
     </div>
@@ -102,6 +121,9 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { uploadPdf } from '@/api/documents'
+import type { UploadPhase } from '@/api/documents'
+import { describeUploadError } from '@/utils/uploadError'
+import type { UploadFailureKind } from '@/utils/uploadError'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 
@@ -112,9 +134,20 @@ interface QueueItem {
   id: string
   file: File
   status: 'pending' | 'uploading' | 'done' | 'error'
+  /** 0–100 真实上传进度（服务端处理阶段停在 100） */
   progress: number
+  /** 上传子阶段：算校验值 / 传字节 / 等服务端 */
+  phase?: UploadPhase
+  /** 可读的失败原因 */
   error?: string
+  /** 失败后的处置建议 */
+  errorHint?: string
+  /** 原始 detail（悬停查看） */
+  errorDetail?: string
+  errorKind?: UploadFailureKind
   existingId?: number
+  /** 该文件单独走强制上传（内容重复时的手动确认） */
+  force?: boolean
 }
 
 const isDragover = ref(false)
@@ -145,15 +178,25 @@ function statusText(item: QueueItem) {
     case 'pending':
       return '等待上传'
     case 'uploading':
+      if (item.phase === 'hashing') return '计算校验值（查重准备）…'
+      if (item.phase === 'processing') return '已发送完毕，服务端查重 / 提取元数据 / 落盘中…'
       if (item.progress > 0) return `上传中 ${item.progress}%`
-      return '查重中...'
+      return '正在发送…'
     case 'done':
       return '完成'
     case 'error':
-      return item.error || '失败'
+      return item.error || '上传失败'
     default:
       return ''
   }
+}
+
+/** 算校验值 / 等服务端响应时没有百分比可报，进度条走「不确定」滑动动画 */
+function isBusyIndeterminate(item: QueueItem) {
+  return (
+    item.status === 'uploading' &&
+    (item.phase === 'hashing' || item.phase === 'processing')
+  )
 }
 
 function addFiles(files: FileList | null) {
@@ -204,33 +247,39 @@ function clearCompleted() {
 async function uploadItem(item: QueueItem) {
   item.status = 'uploading'
   item.progress = 0
+  item.phase = 'hashing'
   item.error = undefined
+  item.errorHint = undefined
+  item.errorDetail = undefined
+  item.errorKind = undefined
+  item.existingId = undefined
 
   try {
-    // 模拟进度：文件较小则直接完成，大文件显示渐进进度
-    const progressTimer = window.setInterval(() => {
-      if (item.progress < 90) {
-        item.progress += Math.floor(Math.random() * 10) + 5
-        if (item.progress > 90) item.progress = 90
-      }
-    }, 200)
-
-    await uploadPdf(item.file, forceUpload.value)
-
-    window.clearInterval(progressTimer)
+    await uploadPdf(item.file, item.force ?? forceUpload.value, (p) => {
+      item.phase = p.phase
+      item.progress = p.percent
+    })
+    item.phase = undefined
     item.progress = 100
     item.status = 'done'
-  } catch (e: any) {
+  } catch (e) {
+    // 失败不把进度清零：停在哪一格就显示哪一格，避免「传了 80% 突然回到 0」的错觉
+    const failure = describeUploadError(e)
+    item.phase = undefined
     item.status = 'error'
-    item.progress = 0
-    const data = e?.response?.data
-    if (data?.error === 'duplicate') {
-      item.error = data.message
-      item.existingId = data.existing_id ?? undefined
-    } else {
-      item.error = data?.detail || '上传失败'
-    }
+    item.errorKind = failure.kind
+    item.error = failure.message
+    item.errorHint = failure.hint
+    item.errorDetail = failure.detail
+    item.existingId = failure.existingId
   }
+}
+
+/** 内容重复但用户仍要建新记录：该文件单独走 force 上传 */
+async function forceItem(item: QueueItem) {
+  if (!requireToken()) return
+  item.force = true
+  await uploadItem(item)
 }
 
 async function retryItem(item: QueueItem) {
@@ -263,8 +312,10 @@ async function startUpload() {
   const failed = queue.value.filter((i) => i.status === 'error')
   if (failed.length === 0) {
     showSuccess('全部上传完成')
+  } else if (failed.length === 1) {
+    showError(`上传失败：${failed[0].error}`)
   } else {
-    showError(`${failed.length} 个文件上传失败`)
+    showError(`${failed.length} 个文件上传失败，首个问题：${failed[0].error}`)
   }
 }
 </script>
@@ -356,14 +407,20 @@ async function startUpload() {
 }
 
 .upload-queue-item {
-  display: grid;
-  grid-template-columns: 1fr 180px auto;
-  align-items: center;
-  gap: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   padding: 12px 16px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #fff;
+}
+
+.item-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 .upload-queue-item.uploading {
@@ -420,9 +477,57 @@ async function startUpload() {
   transition: width 0.2s;
 }
 
+/* 算校验值 / 等服务端响应：没有百分比可报，走滑动动画 */
+.progress-bar.indeterminate .progress-fill {
+  width: 100% !important;
+  background-image: linear-gradient(
+    90deg,
+    var(--primary) 0%,
+    #bbdefb 45%,
+    var(--primary) 90%
+  );
+  background-size: 220% 100%;
+  animation: progress-shimmer 1.1s linear infinite;
+}
+
+@keyframes progress-shimmer {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -20% 0;
+  }
+}
+
+.upload-queue-item.error .progress-bar {
+  background: #ffcdd2;
+}
+
+.upload-queue-item.error .progress-fill {
+  background: #ef5350;
+}
+
 .file-status {
   font-size: 12px;
   color: var(--text-secondary);
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.file-status.status-error {
+  color: #c62828;
+  font-weight: 500;
+}
+
+.file-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.upload-queue-item.error .file-hint {
+  color: #b71c1c;
+  opacity: 0.85;
 }
 
 .file-actions {
@@ -449,9 +554,12 @@ async function startUpload() {
   }
 
   .upload-queue-item {
-    grid-template-columns: 1fr;
     gap: 10px;
     padding: 12px;
+  }
+
+  .item-main {
+    flex-wrap: wrap;
   }
 
   .upload-toolbar {

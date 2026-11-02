@@ -81,11 +81,43 @@ export async function checkHashExists(hash: string) {
   }
 }
 
-/** 上传 PDF（上传前先本地算 hash 查重，force 可跳过） */
-export async function uploadPdf(file: File, force = false) {
+/** 上传阶段：hashing（本地算校验值）→ uploading（传输字节）→ processing（服务端查重/抽元数据/落盘） */
+export type UploadPhase = 'hashing' | 'uploading' | 'processing'
+
+export interface UploadProgress {
+  phase: UploadPhase
+  /** 已上传字节（hashing 阶段为 0） */
+  loaded: number
+  /** 文件总字节 */
+  total: number
+  /** 0–100；hashing 阶段为 0，processing 阶段为 100 */
+  percent: number
+}
+
+/**
+ * 上传 PDF（上传前先本地算 hash 查重，force 可跳过）
+ *
+ * `onProgress` 报告的是**真实**的上传字节进度（axios `onUploadProgress`），
+ * 其中 `phase === 'processing'` 表示字节已全部发出、正等服务端处理。
+ */
+export async function uploadPdf(
+  file: File,
+  force = false,
+  onProgress?: (progress: UploadProgress) => void
+) {
   // 非强制模式：先算 hash、先查重，命中则直接拒绝，不上传
   if (!force) {
-    const hash = await computeFileHash(file)
+    onProgress?.({ phase: 'hashing', loaded: 0, total: file.size, percent: 0 })
+    let hash: string
+    try {
+      hash = await computeFileHash(file)
+    } catch (e) {
+      // 读不出文件（被移动/删除、浏览器内存不足）：打上标记让上层能给可读提示
+      throw {
+        code: 'HASH_FAILED',
+        message: e instanceof Error ? e.message : String(e),
+      }
+    }
     const check = await checkHashExists(hash)
     if (check.exists) {
       throw {
@@ -104,7 +136,24 @@ export async function uploadPdf(file: File, force = false) {
   const fd = new FormData()
   fd.append('file', file)
   fd.append('force', String(force))
-  return apiUpload<Document>('/assist/api/documents/upload/', fd)
+
+  onProgress?.({ phase: 'uploading', loaded: 0, total: file.size, percent: 0 })
+  return apiUpload<Document>('/assist/api/documents/upload/', fd, {
+    // 大文件上传可能远超 axios 默认的 30s，这里不设超时（由浏览器/后端决定）
+    timeout: 0,
+    onUploadProgress: (event) => {
+      const total = event.total && event.total > 0 ? event.total : file.size
+      const loaded = event.loaded ?? 0
+      // 字节发完（100%）后还在等服务端响应，这一段没有进度可报
+      const sent = total > 0 && loaded >= total
+      onProgress?.({
+        phase: sent ? 'processing' : 'uploading',
+        loaded,
+        total,
+        percent: total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
+      })
+    },
+  })
 }
 
 /** 按路径登记 */
