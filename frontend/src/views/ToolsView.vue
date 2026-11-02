@@ -8,7 +8,7 @@
         :key="tab.key"
         class="tab"
         :class="{ active: activeTab === tab.key }"
-        @click="activeTab = tab.key"
+        @click="selectTab(tab.key)"
       >
         {{ tab.label }}
       </button>
@@ -145,6 +145,11 @@
       </div>
     </div>
 
+    <!-- 问答（原独立的「问答」页，现并入工具页作为 tab） -->
+    <div v-if="activeTab === 'chat'" class="tab-content">
+      <ChatView embedded />
+    </div>
+
     <!-- 公式编辑 -->
     <div v-if="activeTab === 'formula'" class="tab-content">
       <FormulaEditorView />
@@ -159,12 +164,13 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { grepSearch, semanticSearch } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import McpConfigPanel from '@/components/McpConfigPanel.vue'
 import FormulaEditorView from '@/views/FormulaEditorView.vue'
+import ChatView from '@/views/ChatView.vue'
 import type { SearchResult } from '@/types/document'
 
 const { showError, showSuccess } = useToast()
@@ -173,13 +179,15 @@ const { requireToken } = useRequireToken()
 const tabs = [
   { key: 'grep', label: '全文搜索' },
   { key: 'semantic', label: '语义搜索（暂未实现）' },
+  { key: 'chat', label: '问答' },
   { key: 'formula', label: '公式编辑' },
   { key: 'mcp', label: 'MCP 配置' }
 ]
 const activeTab = ref('grep')
 
-// 支持 ?tab=mcp 直达（旧的 /assist/mcp-setup 路径重定向到这里）
+// 支持 ?tab=chat / ?tab=mcp 直达（旧的 /assist/chat、/assist/mcp-setup 路径重定向到这里）
 const route = useRoute()
+const router = useRouter()
 const TAB_KEYS = tabs.map(t => t.key)
 watch(
   () => route.query.tab,
@@ -189,6 +197,14 @@ watch(
   },
   { immediate: true }
 )
+
+/** 切换 tab 时同步到地址栏，保证刷新 / 分享链接能回到同一个 tab */
+function selectTab(key: string) {
+  activeTab.value = key
+  if (route.query.tab !== key) {
+    void router.replace({ path: route.path, query: { ...route.query, tab: key } })
+  }
+}
 
 const grepPattern = ref('')
 const grepResults = ref<SearchResult[] | null>(null)

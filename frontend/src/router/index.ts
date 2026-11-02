@@ -65,10 +65,9 @@ const routes = [
     meta: { title: '工具面板' }
   },
   {
+    // 问答已并入「工具」页的问答 tab；保留旧路径做重定向（书签/文档链接兼容）
     path: '/assist/chat',
-    name: 'chat',
-    component: () => import('@/views/ChatView.vue'),
-    meta: { title: 'AI 问答' }
+    redirect: { path: '/assist/tools', query: { tab: 'chat' } }
   },
   {
     path: '/assist/admin',

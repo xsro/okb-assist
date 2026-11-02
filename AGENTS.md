@@ -108,7 +108,7 @@ cargo build --release
 
 三套模型配置相互独立，互不影响：
 
-- `llm.models`：**LLM 模型池**（数组，每项 `{name, protocol, url, key, model, tool_mode?}`）。前端「问答」tab（`/assist/chat`）用它在池中选择模型对话（见下方「问答（Chat）」）。`name` 用于其他配置引用；`tool_mode`（`auto`/`native`/`prompt`，缺省 `auto`）控制该模型的工具调用协议。
+- `llm.models`：**LLM 模型池**（数组，每项 `{name, protocol, url, key, model, tool_mode?}`）。前端「问答」tab（工具页 `/assist/tools?tab=chat`）用它在池中选择模型对话（见下方「问答（Chat）」）。`name` 用于其他配置引用；`tool_mode`（`auto`/`native`/`prompt`，缺省 `auto`）控制该模型的工具调用协议。
 - `llm_extract`：**信息补全（元数据抽取）专用模型**，字段 `{from, protocol, url, key, model}`。**留空的字段从 `from` 指定的模型池条目继承**（`from` 为空或未命中则取第一项）；`model` 也可留空继承。
   同一段还存放与模型无关的**抽取策略**：`prompt`（自定义提示词模板，空 = 内置默认，支持 `{content}` / `{metadata}` 占位符）、`max_input_chars`（送入模型的正文最大字符数，默认 6000）、`max_tokens`（默认 2048）、`overwrite`（默认 `true`；`false` = 只补空字段）。
 - `vector_dbs[].embedding`：**Embedding 配置**，字段 `{protocol, url, key, model}`，每个向量库各自一份，**与 LLM 模型池完全独立**。字段缺失时使用自身默认值（`protocol` = `ollama`、`url`/`key` 为空、`model` = `nomic-embed-text`），不从模型池继承。
@@ -334,7 +334,7 @@ cargo build --release
 - **安全阀**：模型输出全空（`metadata_is_blank`）直接放弃写入；合并后标题与作者同时为空也放弃写入。因此可以对同一文档反复抽取以纠正旧值。
 - **日志**：`info!` 依次输出“原元数据 → 模型输出 → 字段变化清单（`字段: 旧 → 新`）→ 更新后元数据”，失败/放弃路径用 `warn!`。
 
-### 问答（Chat，`/assist/chat`）
+### 问答（Chat，工具页「问答」tab：`/assist/tools?tab=chat`）
 
 基于 `llm.models` 模型池的**对话 + MCP 工具调用**（非 RAG：不自动向量检索，改由模型自己选工具查库）。
 
@@ -352,7 +352,7 @@ cargo build --release
   - 取值来源：请求参数 `tool_mode` > 模型条目的 `llm.models[].tool_mode` > `auto`。**注意：没有充分系统提示词时，部分模型（如 dots3-note-prev）不会主动发起工具调用。**
 - **认证与权限**：`GET/POST /assist/api/*` 仍是全局 Token/子网鉴权；chat 本身允许全部已认证角色（含 `view-only`），工具集均为只读查询，不超出只读用户的已有权限。
 - **非流式**：一次请求返回完整回答（前端 axios 超时单独放大到 300s，支持「停止」中止）。前端把 `delta`（含 `assistant.tool_calls` 与 `tool` 结果）追加到本地 transcript 并回传，以保留跨轮工具上下文（裁剪时不能把 `tool` 消息与其前置 `assistant.tool_calls` 拆开）。
-- 前端：`ChatView.vue` + `api/chat.ts` + `types/chat.ts`，导航项「问答」；展示工具调用卡片（工具名/参数/结果预览/失败标记）、本轮协议与降级提示；本地状态存 `localStorage`（`okb_chat_messages` 展示条目、`okb_chat_history` transcript、`okb_chat_model`、`okb_chat_tools`、`okb_chat_tool_mode`、`okb_chat_session` 当前会话绑定）。
+- 前端：`ChatView.vue` + `api/chat.ts` + `types/chat.ts`；已并入「工具」页的问答 tab（`ChatView` 支持 `embedded` 属性：隐藏自带的页面标题、压低高度），导航栏不再单独放「问答」入口；展示工具调用卡片（工具名/参数/结果预览/失败标记）、本轮协议与降级提示；本地状态存 `localStorage`（`okb_chat_messages` 展示条目、`okb_chat_history` transcript、`okb_chat_model`、`okb_chat_tools`、`okb_chat_tool_mode`、`okb_chat_session` 当前会话绑定）。
 
 ### 问答会话历史（显式保存，一个会话一个文件）
 
@@ -524,7 +524,7 @@ cargo build --release
 | `ConfirmDialog.vue` | 确认对话框 |
 | `TokenModal.vue` | 账号面板（当前用户/角色、凭证来源、「退出登录」、跳转账户页）。**不提供页内切换账号** —— 切换走「退出登录 → 登录页选择账号」 |
 | `views/UsersView.vue` | 用户管理（表格/待审核/令牌/注册策略），既可作为独立页面也可 `embedded` 嵌入配置页 tab |
-| `ErrorBoundary.vue` | 错误边界（catch 渲染异常） |
+| `ErrorBoundary.vue` | 错误边界（catch 渲染异常）；默认整块降级，`compact` 模式为页内局部降级（小巧卡片、不渲染全局浮动徽章与错误面板），用于包裹「高级搜索构建器」这类小功能，避免一个字段抛错就把整页卸载 |
 | `SkeletonLoading.vue` | 骨架屏 |
 | `MarkdownViewer.vue` | Markdown 渲染（marked + KaTeX + DOMPurify） |
 | `CollapsiblePanel.vue` | 通用折叠面板（默认收起，首次展开才触发 `open` 事件，供懒加载使用） |
@@ -557,9 +557,9 @@ cargo build --release
 | `/assist/admin` | `AdminView.vue` | 管理面板（含监控、统计） | admin |
 | `/assist/duplicates` | `DuplicatesView.vue` | 去重 | admin |
 | `/assist/point` | `PointView.vue` | 向量库管理 | admin |
-| `/assist/tools` | `ToolsView.vue` | 工具面板（全文/语义搜索、公式编辑、MCP 配置；支持 `?tab=mcp` 直达） | 全部 |
+| `/assist/tools` | `ToolsView.vue` | 工具面板（全文搜索、语义搜索、问答、公式编辑、MCP 配置；支持 `?tab=` 直达，切 tab 同步地址栏） | 全部 |
 | `/assist/mcp-setup` | —（重定向） | 旧路径，重定向到 `/assist/tools?tab=mcp` | 全部 |
-| `/assist/chat` | `ChatView.vue` | 简易问答（LLM 模型池 + Markdown/KaTeX 渲染） | 全部 |
+| `/assist/chat` | —（重定向） | 旧路径，重定向到 `/assist/tools?tab=chat`（问答已并入工具页） | 全部 |
 | `/assist/logs` | `LogViewer.vue` | 日志查看 | admin |
 
 ### AceEditor 编辑器组件（`src/components/AceEditor.vue`）

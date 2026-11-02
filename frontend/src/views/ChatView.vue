@@ -1,7 +1,7 @@
 <template>
-  <div class="chat-view">
+  <div class="chat-view" :class="{ embedded }">
     <div class="chat-header">
-      <h2>AI 问答</h2>
+      <h2 v-if="!embedded">AI 问答</h2>
 
       <div class="chat-controls">
         <label class="control-item">
@@ -175,6 +175,13 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
+
+/**
+ * embedded：嵌入「工具」页作为问答 tab 时使用。
+ * 只隐藏自己的页面标题并适当压低高度（标题与 tab 栏由外层提供），其他逻辑不变。
+ */
+withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
+
 import MarkdownViewer from '@/components/MarkdownViewer.vue'
 import {
   createChatSession,
@@ -586,6 +593,11 @@ onMounted(async () => {
   min-height: 420px;
 }
 
+/* 嵌入工具页的 tab 时，上方还有页面标题 + tab 栏，高度要再减一点 */
+.chat-view.embedded {
+  height: calc(100vh - 260px);
+}
+
 .chat-header {
   display: flex;
   flex-wrap: wrap;
@@ -944,6 +956,10 @@ onMounted(async () => {
 @media (max-width: 768px) {
   .chat-view {
     height: calc(100vh - 180px);
+  }
+
+  .chat-view.embedded {
+    height: calc(100vh - 240px);
   }
 
   .chat-header {
