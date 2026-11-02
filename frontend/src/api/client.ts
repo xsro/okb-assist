@@ -164,14 +164,26 @@ export async function apiDelete<T>(path: string): Promise<T> {
   return res.data
 }
 
+/**
+ * 上传文件，支持可选的上传进度回调。
+ * onUploadProgress 接收 0–100 的百分比，由 axios 的 onUploadProgress 事件驱动。
+ */
 export async function apiUpload<T>(
   path: string,
   formData: FormData,
-  config?: AxiosRequestConfig
+  config?: AxiosRequestConfig & { onUploadProgress?: (percent: number) => void }
 ): Promise<T> {
+  const { onUploadProgress, ...restConfig } = config || {}
   const res = await client.post<T>(path, formData, {
-    ...config,
-    headers: { 'Content-Type': 'multipart/form-data', ...(config?.headers || {}) }
+    ...restConfig,
+    headers: { 'Content-Type': 'multipart/form-data', ...(restConfig.headers || {}) },
+    onUploadProgress: onUploadProgress
+      ? (ev: { loaded: number; total?: number }) => {
+          if (ev.total && ev.total > 0) {
+            onUploadProgress(Math.min(100, Math.round((ev.loaded / ev.total) * 100)))
+          }
+        }
+      : undefined
   })
   return res.data
 }

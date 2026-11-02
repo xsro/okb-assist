@@ -219,25 +219,58 @@ export function rehashDocument(id: number) {
   )
 }
 
-/** 替换文档 PDF */
-export function replacePdf(id: number, file: File) {
+/**
+ * 替换文档 PDF。
+ * onUploadProgress 可选，接收 0–100 的实时上传百分比。
+ */
+export function replacePdf(
+  id: number,
+  file: File,
+  onUploadProgress?: (percent: number) => void
+) {
   const fd = new FormData()
   fd.append('file', file)
-  return apiUpload<Document>(`/assist/api/documents/${id}/pdf/`, fd)
+  return apiUpload<Document>(
+    `/assist/api/documents/${id}/pdf/`,
+    fd,
+    onUploadProgress ? { onUploadProgress } : undefined
+  )
 }
 
-/** 替换文档 Markdown */
-export function replaceMarkdown(id: number, file: File) {
+/**
+ * 替换文档 Markdown。
+ * onUploadProgress 可选，接收 0–100 的实时上传百分比。
+ */
+export function replaceMarkdown(
+  id: number,
+  file: File,
+  onUploadProgress?: (percent: number) => void
+) {
   const fd = new FormData()
   fd.append('file', file)
-  return apiUpload<Document>(`/assist/api/documents/${id}/replace-markdown/`, fd)
+  return apiUpload<Document>(
+    `/assist/api/documents/${id}/replace-markdown/`,
+    fd,
+    onUploadProgress ? { onUploadProgress } : undefined
+  )
 }
 
-/** 替换文档图片资源包 (ZIP) */
-export function replaceAsset(id: number, file: File) {
+/**
+ * 替换文档图片资源包 (ZIP)。
+ * onUploadProgress 可选，接收 0–100 的实时上传百分比。
+ */
+export function replaceAsset(
+  id: number,
+  file: File,
+  onUploadProgress?: (percent: number) => void
+) {
   const fd = new FormData()
   fd.append('file', file)
-  return apiUpload<Document>(`/assist/api/documents/${id}/replace-asset/`, fd)
+  return apiUpload<Document>(
+    `/assist/api/documents/${id}/replace-asset/`,
+    fd,
+    onUploadProgress ? { onUploadProgress } : undefined
+  )
 }
 
 /** 获取 Markdown 内容（行切片） */

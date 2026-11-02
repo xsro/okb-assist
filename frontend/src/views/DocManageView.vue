@@ -86,10 +86,10 @@
       <div class="action-group">
         <span class="action-label">文件管理</span>
         <div class="action-buttons">
-          <button class="btn btn-outline" @click="selectReplacePdf">替换 PDF</button>
-          <button class="btn btn-outline" @click="selectReplaceMarkdown">替换 Markdown</button>
-          <button class="btn btn-outline" @click="selectReplaceAsset">替换图片资源包</button>
-          <button class="btn btn-outline" @click="rehash">重算哈希</button>
+          <button class="btn btn-outline" @click="selectReplacePdf" :disabled="uploading">替换 PDF</button>
+          <button class="btn btn-outline" @click="selectReplaceMarkdown" :disabled="uploading">替换 Markdown</button>
+          <button class="btn btn-outline" @click="selectReplaceAsset" :disabled="uploading">替换图片资源包</button>
+          <button class="btn btn-outline" @click="rehash" :disabled="uploading">重算哈希</button>
           <span v-if="hashResult" class="hash-result">
             {{ hashResult.old_file_hash === hashResult.file_hash ? '哈希一致' : '哈希已更新' }}
           </span>
@@ -114,6 +114,17 @@
             style="display: none"
             @change="onReplaceAssetSelected"
           />
+          <div v-if="uploading" class="upload-progress-wrap">
+            <div class="upload-progress-bar">
+              <div
+                class="upload-progress-fill"
+                :style="{ width: uploadProgress + '%' }"
+              ></div>
+            </div>
+            <span class="upload-progress-text">
+              {{ uploadLabel }} {{ uploadProgress }}%
+            </span>
+          </div>
         </div>
       </div>
 
@@ -237,6 +248,11 @@ const selectedIndexDb = ref('')
 const selectedTargetStatus = ref('uploaded')
 const docIndexes = ref<DocumentIndexInfo[]>([])
 const hashResult = ref<{ file_hash: string; old_file_hash: string | null } | null>(null)
+
+// 上传进度状态
+const uploading = ref(false)
+const uploadLabel = ref('')
+const uploadProgress = ref(0)
 
 const enabledVectorDbs = computed(() =>
   vectorDbs.value.filter((db) => db.enabled !== false)
@@ -382,13 +398,17 @@ async function onReplacePdfSelected(e: Event) {
     input.value = ''
     return
   }
+  uploading.value = true
+  uploadLabel.value = '上传 PDF'
+  uploadProgress.value = 0
   try {
-    doc.value = await replacePdf(id, file)
+    doc.value = await replacePdf(id, file, (p) => { uploadProgress.value = p })
     showSuccess('PDF 已替换')
     load()
   } catch (err) {
     showError(getErrorMessage(err))
   } finally {
+    uploading.value = false
     input.value = ''
   }
 }
@@ -403,13 +423,17 @@ async function onReplaceMarkdownSelected(e: Event) {
     input.value = ''
     return
   }
+  uploading.value = true
+  uploadLabel.value = '上传 Markdown'
+  uploadProgress.value = 0
   try {
-    await replaceMarkdown(id, file)
+    await replaceMarkdown(id, file, (p) => { uploadProgress.value = p })
     showSuccess('Markdown 已替换')
     load()
   } catch (err) {
     showError(getErrorMessage(err))
   } finally {
+    uploading.value = false
     input.value = ''
   }
 }
@@ -424,13 +448,17 @@ async function onReplaceAssetSelected(e: Event) {
     input.value = ''
     return
   }
+  uploading.value = true
+  uploadLabel.value = '上传资源包'
+  uploadProgress.value = 0
   try {
-    await replaceAsset(id, file)
+    await replaceAsset(id, file, (p) => { uploadProgress.value = p })
     showSuccess('图片资源包已替换')
     load()
   } catch (err) {
     showError(getErrorMessage(err))
   } finally {
+    uploading.value = false
     input.value = ''
   }
 }
@@ -596,6 +624,35 @@ function formatFile(size: number | null): string {
   border-radius: 4px;
 }
 
+.upload-progress-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 180px;
+}
+
+.upload-progress-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.upload-progress-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 4px;
+  transition: width 0.2s ease;
+}
+
+.upload-progress-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
 .file-sizes-list {
   display: flex;
   flex-direction: row;
@@ -696,6 +753,11 @@ function formatFile(size: number | null): string {
 
   .detail-header .btn {
     width: 100%;
+  }
+
+  .upload-progress-wrap {
+    width: 100%;
+    min-width: 0;
   }
 }
 
