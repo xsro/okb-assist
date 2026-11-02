@@ -1,17 +1,17 @@
 <template>
-  <div class="error-boundary-wrap">
+  <div class="error-boundary-wrap" :class="{ 'error-boundary-compact': compact }">
     <!-- 错误降级 UI -->
-    <div v-if="caughtError" class="error-fallback">
+    <div v-if="caughtError" class="error-fallback" :class="{ 'error-fallback-compact': compact }">
       <svg class="error-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="10"></circle>
         <line x1="12" y1="8" x2="12" y2="12"></line>
         <line x1="12" y1="16" x2="12.01" y2="16"></line>
       </svg>
-      <h3>组件渲染出错</h3>
+      <h3>{{ compact ? '此功能渲染出错' : '组件渲染出错' }}</h3>
       <p class="error-message">{{ caughtError }}</p>
       <div class="error-actions">
         <button class="btn" @click="retry">重试</button>
-        <button class="btn btn-outline" @click="dismiss">关闭此区域</button>
+        <button class="btn btn-outline" @click="dismiss">{{ compact ? '关闭' : '关闭此区域' }}</button>
       </div>
     </div>
 
@@ -20,9 +20,9 @@
       <slot />
     </template>
 
-    <!-- 错误报告浮动按钮（未确认错误数 > 0 时显示） -->
+    <!-- 错误报告浮动按钮（未确认错误数 > 0 时显示；紧凑模式下由外层边界统一显示） -->
     <div
-      v-if="!caughtError && store.unacknowledgedCount > 0"
+      v-if="!compact && !caughtError && store.unacknowledgedCount > 0"
       class="error-badge"
       @click="showPanel = !showPanel"
       title="查看错误详情"
@@ -32,7 +32,7 @@
     </div>
 
     <!-- 错误详情面板 -->
-    <Teleport to="body">
+    <Teleport v-if="!compact" to="body">
       <div v-if="showPanel" class="error-panel-overlay" @click.self="showPanel = false">
         <div class="error-panel">
           <div class="error-panel-header">
@@ -74,6 +74,12 @@
 import { ref, onErrorCaptured, type ComponentPublicInstance } from 'vue'
 import { useErrorStore } from '@/stores/error'
 
+/**
+ * 紧凑模式：用于包裹页面内的一小块功能（如高级搜索构建器）。
+ * 出错时只替换这一块，不占满整页，也不重复渲染全局浮动错误徽章。
+ */
+const props = withDefaults(defineProps<{ compact?: boolean }>(), { compact: false })
+
 const store = useErrorStore()
 
 /** 当前 ErrorBoundary 是否已降级 */
@@ -87,7 +93,9 @@ onErrorCaptured((err: unknown, instance: ComponentPublicInstance | null, info: s
   store.add({
     message,
     source: 'component',
-    component: instance?.$options?.name || instance?.$el?.tagName || '(unknown)',
+    component:
+      (props.compact ? '[compact] ' : '') +
+      (instance?.$options?.name || instance?.$el?.tagName || '(unknown)'),
     stack: err instanceof Error ? err.stack : undefined
   })
 
@@ -109,6 +117,8 @@ function dismiss() {
   caughtError.value = null
 }
 
+defineExpose({ retry, dismiss })
+
 function formatTime(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
@@ -123,6 +133,37 @@ function formatTime(date: Date): string {
   border: 1px solid var(--danger);
   border-radius: 8px;
   margin: 16px 0;
+}
+
+/* 紧凑模式：页内局部降级，不占满整页 */
+.error-fallback-compact {
+  padding: 16px 16px;
+  margin: 8px 0;
+  text-align: left;
+  border-left: 3px solid var(--danger);
+}
+
+.error-fallback-compact .error-icon {
+  width: 20px;
+  height: 20px;
+  margin-bottom: 6px;
+  float: left;
+  margin-right: 8px;
+}
+
+.error-fallback-compact h3 {
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+.error-fallback-compact .error-message {
+  font-size: 12px;
+  margin: 0 0 10px;
+  max-width: none;
+}
+
+.error-fallback-compact .error-actions {
+  justify-content: flex-start;
 }
 
 .error-icon {

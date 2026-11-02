@@ -295,22 +295,24 @@ interface QueryForm {
   author: string
   journal: string
   doi: string
-  idFrom: string
-  idTo: string
-  yearFrom: string
-  yearTo: string
+  // 注意：以下字段绑定的是 type="number"，Vue 的 v-model 会把输入值转成 number，
+  // 因此类型必须允许 number，读取时统一经 numText() 转字符串后再处理
+  idFrom: string | number
+  idTo: string | number
+  yearFrom: string | number
+  yearTo: string | number
   docType: string
   status: string
   sortBy: string
   sortOrder: string
   pdfSizeOp: string
-  pdfSizeVal: string
+  pdfSizeVal: string | number
   pdfSizeUnit: string
   mdSizeOp: string
-  mdSizeVal: string
+  mdSizeVal: string | number
   mdSizeUnit: string
   zipSizeOp: string
-  zipSizeVal: string
+  zipSizeVal: string | number
   zipSizeUnit: string
 }
 
@@ -341,6 +343,16 @@ const form = reactive<QueryForm>({
 
 let resolveFn: ((query: string | null) => void) | null = null
 
+/**
+ * 把数字输入框的值安全地转成去空白的字符串。
+ * `type="number"` 的 v-model 会把值转成 number（等价 .number 修饰符），
+ * 直接调 `.trim()` 会抛 `xxx.trim is not a function` 并让整个组件渲染失败。
+ */
+function numText(v: string | number | null | undefined): string {
+  if (v === null || v === undefined) return ''
+  return String(v).trim()
+}
+
 /** 生成查询字符串 */
 const generatedQuery = computed(() => {
   const parts: string[] = []
@@ -365,8 +377,8 @@ const generatedQuery = computed(() => {
   if (form.doi.trim()) parts.push(`doi:${form.doi.trim()}`)
 
   // 文献 ID
-  const idf = form.idFrom.trim()
-  const idt = form.idTo.trim()
+  const idf = numText(form.idFrom)
+  const idt = numText(form.idTo)
   if (idf && idt) {
     if (idf === idt) {
       parts.push(`id:${idf}`)
@@ -380,8 +392,8 @@ const generatedQuery = computed(() => {
   }
 
   // 年份
-  const yf = form.yearFrom.trim()
-  const yt = form.yearTo.trim()
+  const yf = numText(form.yearFrom)
+  const yt = numText(form.yearTo)
   if (yf && yt) {
     if (yf === yt) {
       parts.push(`year:${yf}`)
@@ -419,8 +431,9 @@ const generatedQuery = computed(() => {
     { op: form.zipSizeOp, val: form.zipSizeVal, unit: form.zipSizeUnit, prefix: 'filesize_zip' },
   ]
   for (const fs of fileSizeParts) {
-    if (fs.op && fs.val.trim()) {
-      parts.push(`${fs.prefix}:${fs.op}${fs.val.trim()}${fs.unit}`)
+    const val = numText(fs.val)
+    if (fs.op && val) {
+      parts.push(`${fs.prefix}:${fs.op}${val}${fs.unit}`)
     }
   }
 

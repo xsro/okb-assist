@@ -225,13 +225,15 @@
       <router-link v-if="tokenStore.role === 'admin' || tokenStore.role === 'view-upload'" :to="{ name: 'upload' }" class="btn">立即上传</router-link>
     </div>
 
-    <!-- 高级搜索构建器 -->
-    <QueryBuilder
-      ref="queryBuilderRef"
-      :all-columns="allColumns"
-      :visible-columns="visibleColumns"
-      :toggle-column="toggleColumn"
-    />
+    <!-- 高级搜索构建器（用 ErrorBoundary 局部包裹：构建器渲染出错时只降级这一块，不再整页白屏） -->
+    <ErrorBoundary compact>
+      <QueryBuilder
+        ref="queryBuilderRef"
+        :all-columns="allColumns"
+        :visible-columns="visibleColumns"
+        :toggle-column="toggleColumn"
+      />
+    </ErrorBoundary>
   </div>
 </template>
 
@@ -246,6 +248,7 @@ import { usePagination } from '@/composables/usePagination'
 import { useTokenStore } from '@/stores/token'
 import StatusBadge from '@/components/StatusBadge.vue'
 import QueryBuilder from '@/components/QueryBuilder.vue'
+import ErrorBoundary from '@/components/ErrorBoundary.vue'
 import type { Document } from '@/types/document'
 import {
   parseSearchQuery,
