@@ -20,5 +20,6 @@
 - **设计与计划**
   - [用户体系升级计划](user-management-plan.md)
   - [文件大小筛选（计划）](search-filesize-plan.md)
+  - [网盘 WebDAV 同步（计划）](webdav-plan.md)
 - **相关入口**
   - <a href="/assist/" target="_self" data-nosearch>打开 OKB-Assist →</a>

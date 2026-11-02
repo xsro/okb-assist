@@ -100,6 +100,10 @@
     <span class="doc-card__title">文件大小筛选（计划）</span>
     <span class="doc-card__desc">高级搜索按 PDF / Markdown / ZIP 大小过滤</span>
   </a>
+  <a class="doc-card" href="#/webdav-plan">
+    <span class="doc-card__title">网盘 WebDAV 同步（计划）</span>
+    <span class="doc-card__desc">方案对比、认证设计（scope=dav）、代价与分阶段 TODO</span>
+  </a>
 </div>
 
 ## 目录结构
