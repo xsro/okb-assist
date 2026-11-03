@@ -180,7 +180,7 @@ fn inspect_structure(path: &Path) -> Structure {
 
     match Document::open(path) {
         Ok(doc) => Structure {
-            page_count: doc.page_count().ok(),
+            page_count: doc.page_count().ok().map(|n| n as i64),
             encrypted: doc.needs_password().unwrap_or(false),
             tool_unavailable: false,
             error: None,
