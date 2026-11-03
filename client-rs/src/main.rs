@@ -64,9 +64,25 @@ struct ZoteroArgs {
     #[arg(long, default_value_t = false)]
     update_meta: bool,
 
+    /// DOI 已存在时的处理方式：skip 直接跳过（默认）；hash 比对文件哈希，不同则覆盖已有 PDF；
+    /// health-hash 先看已有 PDF 是否健康（`ok` 或从未检查过都算健康），健康则跳过，不健康才比对哈希（不同则覆盖）
+    #[arg(long, value_enum, default_value_t = DupDoiAction::Skip)]
+    dup_doi_action: DupDoiAction,
+
     /// 显示解析出的元数据详情
     #[arg(long)]
     debug: bool,
+}
+
+/// DOI 重复时的处理策略（`--dup-doi-action`）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum DupDoiAction {
+    /// 跳过（默认）：DOI 已存在就什么都不做
+    Skip,
+    /// 比对哈希：哈希不一致（或服务端没有 PDF）则覆盖已有文档的 PDF
+    Hash,
+    /// 健康优先：已有 PDF 健康（含从未检查过 / NULL）则跳过；只有明确不健康才比对哈希，不一致则覆盖
+    HealthHash,
 }
 
 /// 目录扫描参数
@@ -329,10 +345,16 @@ async fn post_pdf(
 async fn api_upload(
     base_url: &str,
     file_path: &Path,
+    doi: Option<&str>,
     token: &Option<String>,
 ) -> Option<UploadResult> {
     let url = format!("{}/assist/api/documents/upload", base_url);
-    let resp = match post_pdf(&url, file_path, token, &[("auto_process", "false")]).await {
+    // 显式带 DOI：服务端不必解析 PDF 就能做 DOI 去重（命中时返回 409 `kind=doi`）
+    let mut fields: Vec<(&str, &str)> = vec![("auto_process", "false")];
+    if let Some(doi) = doi {
+        fields.push(("doi", doi));
+    }
+    let resp = match post_pdf(&url, file_path, token, &fields).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("  上传失败: {}", e);
@@ -345,11 +367,31 @@ async fn api_upload(
         resp.json().await.ok()
     } else {
         let body = resp.text().await.unwrap_or_default();
-        eprintln!(
-            "  上传失败: {} - {}",
-            status,
-            truncate_body(&body, 200)
-        );
+        if status == reqwest::StatusCode::CONFLICT {
+            // 服务端去重命中（kind=hash|doi）：报出已有文档 id，方便人工确认后重跑
+            let parsed: Option<serde_json::Value> = serde_json::from_str(&body).ok();
+            let kind = parsed
+                .as_ref()
+                .and_then(|v| v.get("kind"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let existing_id = parsed
+                .as_ref()
+                .and_then(|v| v.get("existing_id"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            eprintln!(
+                "  上传被服务端去重拦下（kind={}）: 已有文档 id={}（可改用 --dup-doi-action hash 覆盖）",
+                if kind.is_empty() { "unknown" } else { kind },
+                existing_id
+            );
+        } else {
+            eprintln!(
+                "  上传失败: {} - {}",
+                status,
+                truncate_body(&body, 200)
+            );
+        }
         None
     }
 }
@@ -728,7 +770,7 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
             uploaded += 1;
             continue;
         }
-        match api_upload(&args.base_url, &p.path, &token).await {
+        match api_upload(&args.base_url, &p.path, None, &token).await {
             Some(result) => {
                 println!("成功 -> id={}", result.id);
                 uploaded += 1;
@@ -979,6 +1021,38 @@ fn extract_year_from_date(date: &str) -> Option<i32> {
     None
 }
 
+/// 规范化 DOI：去掉 `https://doi.org/` / `doi:` 等前缀与尾部标点。
+///
+/// 与服务端 `services::pdf_meta::normalize_doi` 保持一致 —— 两边都归一化后，
+/// `by-doi` 比对才能命中库里已存的 DOI（否则会误判为「新建」）。
+fn normalize_doi(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let mut s = s.to_string();
+    for prefix in [
+        "https://doi.org/",
+        "http://doi.org/",
+        "https://dx.doi.org/",
+        "http://dx.doi.org/",
+        "doi:",
+    ] {
+        if s.to_lowercase().starts_with(prefix) {
+            s = s[prefix.len()..].trim().to_string();
+            break;
+        }
+    }
+    let s = s
+        .trim_end_matches(|c: char| c == '.' || c == ',' || c == ';' || c == ')')
+        .to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
     let title = row.get("title").filter(|s| !s.is_empty()).cloned();
 
@@ -993,7 +1067,7 @@ fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
         .and_then(|s| s.trim().parse::<i32>().ok())
         .or_else(|| row.get("date").and_then(|d| extract_year_from_date(d)));
 
-    let doi = row.get("doi").filter(|s| !s.is_empty()).cloned();
+    let doi = row.get("doi").and_then(|s| normalize_doi(s));
 
     let item_type = row
         .get("item_type")
@@ -1152,7 +1226,7 @@ async fn upload_one_zotero(
         println!("  [dry-run] 跳过上传: {} ({})", d.doi, d.file_path);
         return true;
     }
-    let res = match api_upload(base_url, Path::new(&d.file_path), token).await {
+    let res = match api_upload(base_url, Path::new(&d.file_path), Some(d.doi.as_str()), token).await {
         Some(r) => r,
         None => {
             println!("  上传失败 {}: 无返回结果", d.doi);
@@ -1178,6 +1252,14 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     println!("Storage root: {}", args.storage_root.clone().unwrap_or_default());
     println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
     println!("更新元数据: {}", if update_meta { "是" } else { "否 (默认)" });
+    println!(
+        "DOI 重复处理: {}",
+        match args.dup_doi_action {
+            DupDoiAction::Skip => "skip（跳过，默认）",
+            DupDoiAction::Hash => "hash（比对哈希，不同则覆盖）",
+            DupDoiAction::HealthHash => "health-hash（健康则跳过，否则比对哈希）",
+        }
+    );
     println!();
 
     let csv_path = Path::new(&args.csv_file);
@@ -1208,10 +1290,11 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
             norm.insert(canon[i].clone(), v);
         }
 
-        let doi = norm.get("doi").cloned().unwrap_or_default();
-        if doi.is_empty() {
-            continue;
-        }
+        // DOI 归一化后再比对：去前缀/尾部标点，否则服务端的 by-doi 精确匹配会漏报
+        let doi = match normalize_doi(norm.get("doi").map(|s| s.as_str()).unwrap_or("")) {
+            Some(d) => d,
+            None => continue,
+        };
         let file_field = norm.get("file").cloned().unwrap_or_default();
         let paths = parse_file_paths(&file_field, &args.storage_root);
         let file_path = match get_newest_file(&paths) {
@@ -1269,26 +1352,72 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
 
     let mut new_entries: Vec<&LocalDocWithHash> = Vec::new();
     let mut to_update_pdf: Vec<(u64, &LocalDocWithHash, String)> = Vec::new();
-    let mut to_skip: Vec<&LocalDocWithHash> = Vec::new();
+    // 跳过项连原因一起记，第二阶段直接列出来，避免用户疑惑「为什么没上传」
+    let mut to_skip: Vec<(&LocalDocWithHash, String)> = Vec::new();
 
     for dw in &docs_with_hash {
-        let server_doc = api_lookup_by_doi(&client, &args.base_url, &dw.doc.doi, &token).await;
+        let (found, server_doc) = api_lookup_by_doi(&client, &args.base_url, &dw.doc.doi, &token).await;
 
-        let (found, server_doc) = server_doc;
         if !found {
             new_entries.push(dw);
-        } else if let Some(server) = server_doc {
-            let server_hash = server.get("file_hash").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let server_id = server["id"].as_u64().unwrap_or(0);
-
-            if server_hash.is_empty() || server_hash != dw.local_hash {
-                to_update_pdf.push((server_id, dw, server_hash));
-            } else {
-                to_skip.push(dw);
-            }
-        } else {
+            continue;
+        }
+        let Some(server) = server_doc else {
             // 服务器返回 found=true 但无 doc 数据，安全起见视为新建
             new_entries.push(dw);
+            continue;
+        };
+
+        let server_id = server["id"].as_u64().unwrap_or(0);
+        let server_hash = server
+            .get("file_hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        // 服务端没有 PDF（哈希为空）时没法比，当成「需要补 PDF」
+        let hash_missing = server_hash.is_empty();
+        let hash_differs = !hash_missing && server_hash != dw.local_hash;
+
+        // `pdf_health`：ok / warning / error / missing；NULL（序列化时字段会被省掉）= 从未检查过。
+        // 未知状态按「健康」处理 —— 没证据说明它坏了就不折腾，只有明确的 warning/error/missing 才走哈希比对。
+        let health = server
+            .get("pdf_health")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let health_unknown = health.is_empty();
+        let healthy = health_unknown || health == "ok";
+        let need_replace = hash_missing || hash_differs;
+
+        match args.dup_doi_action {
+            DupDoiAction::Skip => {
+                to_skip.push((dw, "DOI 已存在（--dup-doi-action=skip）".to_string()));
+            }
+            DupDoiAction::Hash => {
+                if need_replace {
+                    to_update_pdf.push((server_id, dw, server_hash));
+                } else {
+                    to_skip.push((dw, "hash 一致".to_string()));
+                }
+            }
+            DupDoiAction::HealthHash => {
+                if healthy {
+                    to_skip.push((
+                        dw,
+                        if health_unknown {
+                            "PDF 未做过健康检查，按健康处理，跳过".to_string()
+                        } else {
+                            "PDF 健康，跳过".to_string()
+                        },
+                    ));
+                } else if need_replace {
+                    to_update_pdf.push((server_id, dw, server_hash));
+                } else {
+                    to_skip.push((
+                        dw,
+                        format!("PDF 不健康（{}），hash 一致", health),
+                    ));
+                }
+            }
         }
     }
 
@@ -1299,7 +1428,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     println!("比对完成");
     println!("  新建文献:      {}", new_entries.len());
     println!("  更新 PDF:      {}", to_update_pdf.len());
-    println!("  跳过（一致）:   {}", to_skip.len());
+    println!("  跳过:          {}", to_skip.len());
     println!();
 
     // --- 新建文献 ---
@@ -1326,6 +1455,21 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
                 }
             }
             _ => new_choices = vec![false; new_entries.len()],
+        }
+        println!();
+    }
+
+    // --- 跳过（DOI 已存在）---
+    if !to_skip.is_empty() {
+        println!("── 跳过（DOI 已存在）──");
+        for (i, (dw, reason)) in to_skip.iter().enumerate() {
+            println!(
+                "  [{:>3}] {} | {} — {}",
+                i + 1,
+                dw.doc.doi,
+                dw.doc.title.clone().unwrap_or_default(),
+                reason
+            );
         }
         println!();
     }

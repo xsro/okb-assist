@@ -682,6 +682,17 @@ impl MetaRecord {
         list_field!(authors, "authors");
         list_field!(authors_en, "authors_en", en_moot);
         text_field!(doi, "doi");
+        // DOI 归一化：去掉 `https://doi.org/` 等前缀与尾部标点，保证库内写法可用于精确比对
+        if let Some(norm) = normalize_doi(&self.doi) {
+            if norm != self.doi {
+                changes.push(format!(
+                    "doi: {} → {}",
+                    display_text(&self.doi),
+                    display_text(&norm)
+                ));
+                self.doi = norm;
+            }
+        }
         text_field!(source, "source");
         text_field!(journal, "journal");
         text_field!(journal_en, "journal_en", en_moot);
@@ -2439,5 +2450,20 @@ mod meta_tests {
         assert!(parse_str_list(Some("")).is_empty());
         assert_eq!(list_to_db(&["A".to_string()]), "[\"A\"]");
         assert_eq!(list_to_db(&[]), "");
+    }
+
+    #[test]
+    fn doi_is_normalized_on_apply() {
+        // 原值里的前缀/尾部标点会被清掉（即使模型没给 doi）
+        let mut rec = record();
+        rec.doi = "https://doi.org/10.1000/ABC.".to_string();
+        let changes = rec.apply(&json!({}), false);
+        assert_eq!(rec.doi, "10.1000/ABC");
+        assert!(changes.iter().any(|c| c.starts_with("doi:")), "changes={changes:?}");
+
+        // 模型输出的值同样归一化
+        let mut rec = record();
+        rec.apply(&json!({ "doi": "doi:10.5555/xyz." }), true);
+        assert_eq!(rec.doi, "10.5555/xyz");
     }
 }

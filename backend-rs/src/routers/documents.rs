@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, Query};
@@ -761,6 +761,12 @@ async fn update_document(
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
+    // DOI 写入前统一归一化（去 `https://doi.org/` 等前缀、去尾部标点），
+    // 这样按 DOI 比对时才不会被 Zotero/Crossref 的写法差异影响；空串仍表示「清空」。
+    let doi = match body.doi.as_deref() {
+        None => None,
+        Some(raw) => Some(normalize_doi(raw).unwrap_or_default()),
+    };
     let result = sqlx::query(
         "UPDATE documents SET title = COALESCE(?, title), authors = COALESCE(?, authors), \
          year = COALESCE(?, year), doi = COALESCE(?, doi), source = COALESCE(?, source), \
@@ -775,7 +781,7 @@ async fn update_document(
     .bind(&body.title)
     .bind(&body.authors)
     .bind(body.year)
-    .bind(&body.doi)
+    .bind(&doi)
     .bind(&body.source)
     .bind(&body.journal)
     .bind(&body.keywords)
@@ -1070,6 +1076,11 @@ async fn upload_document(
     let mut uploaded: Option<(TempUpload, u64, String)> = None;
     let mut force = false;
     let mut auto_process = true;
+    // 调用方可以显式声明 DOI（客户端从 Zotero 已知），这样服务端不用抽 PDF 元数据就能做 DOI 去重；
+    // 只有显式给出时才会做 DOI 去重（PDF 元数据里抽到的 DOI 不参与去重，避免影响既有上传流程）。
+    let mut doi_field: Option<String> = None;
+    // 命中重复时的行为：error（默认，409）| skip（200 + 已存在文档）| replace（用本次上传覆盖已有 PDF）
+    let mut on_duplicate = "error".to_string();
     let temp_dir = upload_temp_dir(&settings);
 
     while let Ok(Some(mut field)) = multipart.next_field().await {
@@ -1104,6 +1115,28 @@ async fn upload_document(
                 let val = field.bytes().await.unwrap_or_default();
                 auto_process = std::str::from_utf8(&val).unwrap_or("true") != "false";
             }
+            "doi" => {
+                let val = field.bytes().await.unwrap_or_default();
+                doi_field = normalize_doi(&String::from_utf8_lossy(&val));
+            }
+            "on_duplicate" => {
+                let val = field.bytes().await.unwrap_or_default();
+                let v = String::from_utf8_lossy(&val).trim().to_lowercase();
+                on_duplicate = match v.as_str() {
+                    "" | "error" => "error".to_string(),
+                    "skip" => "skip".to_string(),
+                    "replace" => "replace".to_string(),
+                    other => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "detail": format!("on_duplicate 只支持 error / skip / replace，收到: {}", other)
+                            })),
+                        )
+                            .into_response()
+                    }
+                };
+            }
             _ => {
                 // 未知字段：读完丢弃，保持流位置正确
                 let _ = field.bytes().await;
@@ -1128,35 +1161,141 @@ async fn upload_document(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "文件为空"}))).into_response();
     }
 
-    // 提取 PDF 元数据（后台线程读临时文件，不占用请求内存）
+    // ── 去重 ────────────────────────────────────────────────────────────
+    // 1. 哈希去重：只查 `file_hash` 索引，完全不碰 PDF 内容（原来的实现先抽元数据再比对，
+    //    重复上传时要白白拆一次 PDF）；
+    // 2. DOI 去重：只在调用方**显式**传入 `doi` 时做（PDF 里抽到的 DOI 不参与，保持既有行为），
+    //    这样免掉拆 PDF 就能拦住 DOI 重复。
+    // 命中重复时临时文件由 `TempUpload` 的 Drop 自动删除。
+    let mut dup: Option<(Document, &'static str)> = None;
+    if !force {
+        if let Some(existing) = find_doc_by_hash(&db, &file_hash).await {
+            dup = Some((existing, "hash"));
+        } else if let Some(doi) = doi_field.clone() {
+            if let Some(existing) = find_doc_by_doi(&db, &doi).await {
+                dup = Some((existing, "doi"));
+            }
+        }
+    }
+
+    if let Some((existing, kind)) = dup {
+        let existing_id = existing.id;
+        let same_file = existing.file_hash.as_deref() == Some(file_hash.as_str());
+        match on_duplicate.as_str() {
+            // 跳过：直接把已存在文档返回给调用方（200，不新建）
+            "skip" => {
+                let out = doc_to_out(&existing, &settings, &db).await;
+                return (
+                    StatusCode::OK,
+                    Json(json!({
+                        "status": "skipped",
+                        "skipped": true,
+                        "reason": kind,
+                        "existing_id": existing_id,
+                        "same_file": same_file,
+                        // 兼容只读 `id` 的客户端
+                        "id": existing_id,
+                        "doc": out,
+                    })),
+                )
+                    .into_response();
+            }
+            // 覆盖：用本次上传的 PDF 替掉已存在文档的文件（文件完全相同则等价于跳过）
+            "replace" => {
+                if same_file {
+                    let out = doc_to_out(&existing, &settings, &db).await;
+                    return (
+                        StatusCode::OK,
+                        Json(json!({
+                            "status": "skipped",
+                            "skipped": true,
+                            "reason": kind,
+                            "existing_id": existing_id,
+                            "same_file": true,
+                            "id": existing_id,
+                            "doc": out,
+                        })),
+                    )
+                        .into_response();
+                }
+                if let Err(e) = persist_pdf_for_doc(
+                    &db,
+                    &settings,
+                    existing_id,
+                    temp_upload,
+                    &file_hash,
+                    doi_field.clone(),
+                )
+                .await
+                {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e})))
+                        .into_response();
+                }
+                return match fetch_doc(&db, existing_id).await {
+                    Ok(Some(doc)) => (
+                        StatusCode::OK,
+                        Json(json!({
+                            "status": "replaced",
+                            "replaced": true,
+                            "reason": kind,
+                            "existing_id": existing_id,
+                            "id": existing_id,
+                            "doc": doc_to_out(&doc, &settings, &db).await,
+                        })),
+                    )
+                        .into_response(),
+                    _ => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"detail": "文档更新失败"})),
+                    )
+                        .into_response(),
+                };
+            }
+            // 默认：409，把命中的原因与已有文档的关键信息都带回去，方便客户端决策
+            _ => {
+                let message = if kind == "hash" {
+                    format!(
+                        "文件已存在 (hash: {}...)",
+                        &file_hash[..16.min(file_hash.len())]
+                    )
+                } else {
+                    format!(
+                        "DOI 已存在: {}（文档 {}）",
+                        existing.doi.clone().unwrap_or_default(),
+                        existing_id
+                    )
+                };
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "duplicate",
+                        "kind": kind,
+                        "message": message,
+                        "existing_id": existing_id,
+                        "same_file": same_file,
+                        "file_hash": file_hash,
+                        "existing": {
+                            "id": existing_id,
+                            "filename": existing.filename,
+                            "doi": existing.doi,
+                            "file_hash": existing.file_hash,
+                            "pdf_health": existing.pdf_health,
+                            "pdf_health_message": existing.pdf_health_message,
+                        },
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // PDF 元数据（后台线程读临时文件，不占用请求内存）
     let meta = extract_pdf_metadata_from_path_async(
         temp_upload.path().to_string_lossy().to_string(),
         Some(filename.clone()),
         None,
     )
     .await;
-
-    // 检查重复（默认去重，force 可跳过）
-    if !force {
-        let duplicate: Option<(i64,)> = sqlx::query_as(
-            "SELECT id FROM documents WHERE file_hash = ? LIMIT 1",
-        )
-        .bind(&file_hash)
-        .fetch_optional(db.pool())
-        .await
-        .unwrap_or(None);
-        if let Some((existing_id,)) = duplicate {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": "duplicate",
-                    "message": format!("文件已存在 (hash: {}...)", &file_hash[..16.min(file_hash.len())]),
-                    "existing_id": existing_id,
-                })),
-            )
-            .into_response();
-        }
-    }
 
     let mut doc = Document {
         id: 0,
@@ -1165,7 +1304,7 @@ async fn upload_document(
         title: None,
         authors: None,
         year: None,
-        doi: None,
+        doi: doi_field.clone(),
         source: None,
         journal: None,
         keywords: None,
@@ -1818,28 +1957,123 @@ async fn by_hash(
     }
 }
 
+/// DOI 比对键：先归一化（去 `https://doi.org/` 等前缀、去尾部标点）再转小写。
+///
+/// DOI 本身大小写不敏感，而库里既有 `fill_meta_fields` / `pipeline` 归一化后的值，
+/// 也有历史数据里原样保存的 Zotero 写法（可能带 `https://doi.org/` 前缀）。
+/// 比对时统一压平成这个键。
+fn doi_key(raw: &str) -> Option<String> {
+    normalize_doi(raw).map(|d| d.to_lowercase())
+}
+
+/// 按 DOI 查找文档（宽松匹配）。
+///
+/// 1. 先原样精确匹配（走索引，命中已归一化的数据，绝大多数情况在这里返回）；
+/// 2. 未命中则用 `LIKE` 粗筛（SQLite 的 LIKE 对 ASCII 大小写不敏感）+ `doi_key` 校验，
+///    兼容历史数据里的前缀/大小写差异与尾部标点。
+async fn find_doc_by_doi(db: &Database, raw: &str) -> Option<Document> {
+    if let Ok(Some(doc)) = sqlx::query_as::<_, Document>(&format!(
+        "SELECT {} FROM documents WHERE doi = ? LIMIT 1", DOC_COLUMNS
+    ))
+    .bind(raw)
+    .fetch_optional(db.pool())
+    .await
+    {
+        return Some(doc);
+    }
+
+    let target = doi_key(raw)?;
+    // LIKE 的通配符需转义，否则 DOI 里的 `_` 会当成单字符通配
+    let pattern = format!(
+        "%{}%",
+        target
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
+    let rows: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
+        "SELECT {} FROM documents WHERE doi IS NOT NULL AND doi <> '' AND doi LIKE ? ESCAPE '\\' LIMIT 200",
+        DOC_COLUMNS
+    ))
+    .bind(pattern)
+    .fetch_all(db.pool())
+    .await
+    .unwrap_or_default();
+
+    rows.into_iter()
+        .find(|d| d.doi.as_deref().and_then(doi_key).as_deref() == Some(target.as_str()))
+}
+
+/// 按文件哈希查找文档（上传去重使用）。
+///
+/// 这是「便宜」的那一路：只查 `file_hash` 索引，完全不碰 PDF 内容。
+async fn find_doc_by_hash(db: &Database, hash: &str) -> Option<Document> {
+    sqlx::query_as::<_, Document>(&format!(
+        "SELECT {} FROM documents WHERE file_hash = ? LIMIT 1", DOC_COLUMNS
+    ))
+    .bind(hash)
+    .fetch_optional(db.pool())
+    .await
+    .unwrap_or(None)
+}
+
+/// 把已落盘的临时 PDF 应用到**已有**文档：搬文件 → 同步体积 → 重置哈希与健康状态。
+///
+/// 上传命中重复且 `on_duplicate=replace`、以及 `POST /{id}/pdf` 替换 PDF 都走这里，
+/// 保证两处的副作用（`status='uploaded'`、`pdf_health` 置空）完全一致。
+/// `doi` 为 `Some` 时只在该文档原本没有 DOI 时补写（已有 DOI 不覆盖）。
+async fn persist_pdf_for_doc(
+    db: &Database,
+    settings: &Settings,
+    doc_id: i64,
+    temp_upload: TempUpload,
+    file_hash: &str,
+    doi: Option<String>,
+) -> Result<(), String> {
+    let pdf_path = paths::get_pdf_path(settings, doc_id);
+    persist_temp_file(temp_upload, &pdf_path)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 写时同步：更新文件大小到数据库
+    sync_doc_file_sizes(db, settings, doc_id).await;
+
+    if let Err(e) = sqlx::query(
+        "UPDATE documents SET file_hash = ?, status = 'uploaded', \
+         pdf_health = NULL, pdf_health_message = NULL, \
+         doi = COALESCE(NULLIF(doi, ''), ?), updated_at = ? WHERE id = ?",
+    )
+    .bind(file_hash)
+    .bind(doi)
+    .bind(now_iso())
+    .bind(doc_id)
+    .execute(db.pool())
+    .await
+    {
+        return Err(e.to_string());
+    }
+    Ok(())
+}
+
 async fn by_doi(
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(doi): Path<String>,
 ) -> Response {
-    if doi.trim().is_empty() {
+    if doi_key(&doi).is_none() {
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "DOI 不能为空"}))).into_response();
     }
-    let doc: Option<Document> = sqlx::query_as::<_, Document>(&format!(
-        "SELECT {} FROM documents WHERE doi = ? LIMIT 1", DOC_COLUMNS
-    ))
-    .bind(&doi)
-    .fetch_optional(db.pool())
-    .await
-    .unwrap_or(None);
 
-    match doc {
+    match find_doc_by_doi(&db, &doi).await {
         Some(d) => Json(json!({
             "found": true,
             "doc": doc_to_out(&d, &settings, &db).await,
         })).into_response(),
-        None => Json(json!({"found": false, "doi": doi})).into_response(),
+        None => Json(json!({
+            "found": false,
+            "doi": doi,
+            "doi_key": doi_key(&doi),
+        })).into_response(),
     }
 }
 
@@ -2598,15 +2832,19 @@ async fn diff_dois(
 ) -> Response {
     let submitted = payload.dois.iter().filter(|d| !d.trim().is_empty()).map(|d| d.trim().to_string()).collect::<Vec<_>>();
 
+    // 一次性取回库中全部非空 DOI 建归一化键集合，避免逐条查询（也顺带统一了写法差异）
+    let existing: HashSet<String> = sqlx::query_as::<_, (String,)>(
+        "SELECT doi FROM documents WHERE doi IS NOT NULL AND doi <> ''",
+    )
+    .fetch_all(db.pool())
+    .await
+    .map(|rows| rows.into_iter().filter_map(|(d,)| doi_key(&d)).collect())
+    .unwrap_or_default();
+
     let mut present: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
     for doi in &submitted {
-        let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM documents WHERE doi = ? LIMIT 1")
-            .bind(doi)
-            .fetch_optional(db.pool())
-            .await
-            .unwrap_or(None);
-        if exists.is_some() {
+        if doi_key(doi).is_some_and(|k| existing.contains(&k)) {
             present.push(doi.clone());
         } else {
             missing.push(doi.clone());
@@ -3002,25 +3240,9 @@ async fn replace_pdf(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "文件为空"}))).into_response();
     }
 
-    let pdf_path = paths::get_pdf_path(&settings, id);
-    if let Err(e) = persist_temp_file(temp_upload, &pdf_path).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
+    if let Err(e) = persist_pdf_for_doc(&db, &settings, id, temp_upload, &file_hash, None).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response();
     }
-
-    // 写时同步：更新文件大小到数据库
-    sync_doc_file_sizes(&db, &settings, id).await;
-
-    let now = now_iso();
-    if let Err(e) = sqlx::query("UPDATE documents SET file_hash = ?, status = 'uploaded', pdf_health = NULL, pdf_health_message = NULL, updated_at = ? WHERE id = ?")
-        .bind(&file_hash)
-        .bind(&now)
-        .bind(id)
-        .execute(db.pool())
-        .await
-    {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response();
-    }
-
     match fetch_doc(&db, id).await {
         Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response(),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "文档更新失败"}))).into_response(),
@@ -3218,4 +3440,36 @@ async fn rehash_document(
         "old_file_hash": doc.file_hash,
         "updated_at": now,
     }))).into_response()
+}
+
+#[cfg(test)]
+mod doi_tests {
+    use super::*;
+
+    #[test]
+    fn doi_key_strips_prefix_and_punctuation() {
+        for raw in [
+            "10.1000/xyz123",
+            "https://doi.org/10.1000/xyz123",
+            "http://dx.doi.org/10.1000/xyz123",
+            "doi:10.1000/xyz123",
+            "  10.1000/xyz123. ",
+            "10.1000/xyz123)",
+        ] {
+            assert_eq!(doi_key(raw).as_deref(), Some("10.1000/xyz123"), "raw={raw}");
+        }
+    }
+
+    #[test]
+    fn doi_key_ignores_case() {
+        assert_eq!(doi_key("10.1000/ABC"), doi_key("10.1000/abc"));
+        assert_eq!(doi_key("https://doi.org/10.1000/ABC"), doi_key("10.1000/abc"));
+    }
+
+    #[test]
+    fn doi_key_rejects_empty() {
+        assert_eq!(doi_key(""), None);
+        assert_eq!(doi_key("   "), None);
+        assert_eq!(doi_key("."), None);
+    }
 }

@@ -156,6 +156,15 @@ impl Database {
             }
         }
 
+        // 常用查找列建索引：`by-hash` / `by-doi` / 上传去重都是这几列上的等值查询，
+        // 文档数量上去后没索引就退化成全表扇描（幂等，可重复执行）。
+        for ddl in [
+            "CREATE INDEX IF NOT EXISTS idx_documents_file_hash ON documents(file_hash)",
+            "CREATE INDEX IF NOT EXISTS idx_documents_doi ON documents(doi)",
+        ] {
+            sqlx::query(ddl).execute(&self.pool).await?;
+        }
+
         Ok(())
     }
 
