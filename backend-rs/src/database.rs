@@ -108,6 +108,8 @@ impl Database {
                 pdf_size INTEGER,
                 md_size INTEGER,
                 zip_size INTEGER,
+                pdf_health TEXT,
+                pdf_health_message TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
             )
@@ -135,6 +137,34 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
+        // ── 轻量迁移 ─────────────────────────────────
+        // `CREATE TABLE IF NOT EXISTS` 不会给已有库补列，后加的列在这里逐个补齐。
+        // 新增列时：同时改上面的建表语句，并在此追加一行。
+        for (column, ddl) in [
+            (
+                "pdf_health",
+                "ALTER TABLE documents ADD COLUMN pdf_health TEXT",
+            ),
+            (
+                "pdf_health_message",
+                "ALTER TABLE documents ADD COLUMN pdf_health_message TEXT",
+            ),
+        ] {
+            if !Self::has_column(&self.pool, "documents", column).await? {
+                sqlx::query(ddl).execute(&self.pool).await?;
+                tracing::info!("数据库迁移：documents 表补列 {}", column);
+            }
+        }
+
         Ok(())
+    }
+
+    /// 判断某张表是否已有某列（用于轻量迁移）
+    async fn has_column(pool: &SqlitePool, table: &str, column: &str) -> anyhow::Result<bool> {
+        let rows: Vec<(String,)> =
+            sqlx::query_as(&format!("SELECT name FROM pragma_table_info('{}')", table))
+                .fetch_all(pool)
+                .await?;
+        Ok(rows.iter().any(|(name,)| name == column))
     }
 }

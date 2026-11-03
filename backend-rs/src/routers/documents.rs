@@ -389,6 +389,12 @@ pub struct DocumentOut {
     pub pdf_size: Option<i64>,
     pub md_size: Option<i64>,
     pub zip_size: Option<i64>,
+    /// PDF 健康检查结果：`ok` / `warning` / `error` / `missing`（`None` = 未检查）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pdf_health: Option<String>,
+    /// 健康检查原因
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pdf_health_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -399,7 +405,7 @@ const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, CAST(NULLIF(
     keywords, abstract, category, doc_type, language, title_en, authors_en, \
     keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
     progress, qdrant_collection, vector_db_id, created_at, updated_at, \
-    pdf_size, md_size, zip_size";
+    pdf_size, md_size, zip_size, pdf_health, pdf_health_message";
 
 /// 查询文档已索引的向量数据库列表（仅 indexed 状态）
 async fn indexed_dbs(db: &Database, doc_id: i64) -> Option<Vec<String>> {
@@ -476,6 +482,8 @@ async fn doc_to_out(doc: &Document, settings: &Settings, db: &Database) -> Docum
         pdf_size: file_size(&pdf_path),
         md_size: file_size(&md_path),
         zip_size: file_size(&zip_path),
+        pdf_health: doc.pdf_health.clone(),
+        pdf_health_message: doc.pdf_health_message.clone(),
         created_at: doc.created_at.clone(),
         updated_at: doc.updated_at.clone(),
     }
@@ -1181,6 +1189,8 @@ async fn upload_document(
         pdf_size: None,
         md_size: None,
         zip_size: None,
+        pdf_health: None,
+        pdf_health_message: None,
     };
     fill_meta_fields(&mut doc, &meta);
 
@@ -1336,6 +1346,8 @@ async fn register_document_by_path(
         pdf_size: None,
         md_size: None,
         zip_size: None,
+        pdf_health: None,
+        pdf_health_message: None,
     };
     fill_meta_fields(&mut doc, &meta);
 
@@ -2999,7 +3011,7 @@ async fn replace_pdf(
     sync_doc_file_sizes(&db, &settings, id).await;
 
     let now = now_iso();
-    if let Err(e) = sqlx::query("UPDATE documents SET file_hash = ?, status = 'uploaded', updated_at = ? WHERE id = ?")
+    if let Err(e) = sqlx::query("UPDATE documents SET file_hash = ?, status = 'uploaded', pdf_health = NULL, pdf_health_message = NULL, updated_at = ? WHERE id = ?")
         .bind(&file_hash)
         .bind(&now)
         .bind(id)

@@ -28,6 +28,10 @@ export interface Document {
   pdf_size: number | null
   md_size: number | null
   zip_size: number | null
+  /** PDF 健康检查结果（`ok` / `warning` / `error` / `missing`，未检查时为 null/undefined） */
+  pdf_health?: string | null
+  /** 健康检查原因 */
+  pdf_health_message?: string | null
   created_at: string
   updated_at: string
   has_markdown: boolean

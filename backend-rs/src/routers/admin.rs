@@ -45,6 +45,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/admin/qdrant/point/:point_id", get(qdrant_point))
         .route("/assist/api/admin/recalculate-hashes/", post(recalculate_hashes))
         .route("/assist/api/admin/recalculate-hashes", post(recalculate_hashes))
+        .route("/assist/api/admin/check-pdf-health/", post(check_pdf_health_task))
+        .route("/assist/api/admin/check-pdf-health", post(check_pdf_health_task))
         .route("/assist/api/admin/sync-file-sizes/", post(sync_file_sizes))
         .route("/assist/api/admin/sync-file-sizes", post(sync_file_sizes))
         .route("/assist/api/admin/dedup/", post(dedup))
@@ -662,6 +664,131 @@ async fn recalculate_hashes(
 
     Json(json!({
         "detail": "哈希重算任务已提交，后台逐个计算中（进度见「活跃任务」）",
+        "started": true,
+    }))
+}
+
+/// PDF 健康检查后台任务是否正在执行（进程内标记，防止重复提交；重启即复位）。
+static PDF_HEALTH_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// 任务结束（包括 panic）时复位运行标记。
+struct PdfHealthGuard;
+
+impl Drop for PdfHealthGuard {
+    fn drop(&mut self) {
+        PDF_HEALTH_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// POST /assist/api/admin/check-pdf-health —— 批量检查 PDF 健康。
+///
+/// **非阻塞**：请求立即返回，后台**逐个串行**检查（不并发），结果写入
+/// `documents.pdf_health`（`ok` / `warning` / `error` / `missing`）与
+/// `documents.pdf_health_message`（原因）；进度同重算哈希，见「活跃任务」。
+async fn check_pdf_health_task(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+    Extension(settings): Extension<Arc<Settings>>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
+    if PDF_HEALTH_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Json(json!({
+            "detail": "PDF 健康检查已在后台执行中，请等待完成",
+            "started": false,
+        }));
+    }
+
+    tokio::spawn(async move {
+        let _guard = PdfHealthGuard;
+
+        let docs: Vec<(i64,)> = sqlx::query_as("SELECT id FROM documents ORDER BY id")
+            .fetch_all(db.pool())
+            .await
+            .unwrap_or_default();
+        let total = docs.len() as i64;
+        tracing::info!("开始批量 PDF 健康检查：共 {} 条，逐个串行执行", total);
+
+        let mut ok = 0i64;
+        let mut warning = 0i64;
+        let mut error = 0i64;
+        let mut missing = 0i64;
+        let mut prev_doc_id: Option<i64> = None;
+
+        for (idx, (doc_id,)) in docs.iter().enumerate() {
+            let doc_id = *doc_id;
+            crate::routers::pipeline::track_maintenance_task(
+                doc_id,
+                "pdf-health",
+                &format!(
+                    "PDF 健康检查：第 {}/{} 条（正常 {}，警告 {}，异常 {}，缺失 {}）",
+                    idx + 1,
+                    total,
+                    ok,
+                    warning,
+                    error,
+                    missing
+                ),
+                idx as i32,
+                total as i32,
+            );
+            if let Some(prev) = prev_doc_id.take() {
+                crate::routers::pipeline::track_task_end(prev);
+            }
+            prev_doc_id = Some(doc_id);
+
+            let pdf_path = paths::get_pdf_path(&settings, doc_id);
+            let health = crate::services::pdf_health::check_pdf_health(pdf_path.clone()).await;
+
+            match health.status {
+                crate::services::pdf_health::HEALTH_OK => ok += 1,
+                crate::services::pdf_health::HEALTH_WARNING => warning += 1,
+                crate::services::pdf_health::HEALTH_MISSING => missing += 1,
+                _ => error += 1,
+            }
+            if health.status != crate::services::pdf_health::HEALTH_OK {
+                tracing::warn!(
+                    "PDF 健康检查异常 doc_id={} path={} status={} pages={:?} msg={}",
+                    doc_id,
+                    pdf_path,
+                    health.status,
+                    health.page_count,
+                    health.message
+                );
+            }
+
+            if let Err(e) = sqlx::query(
+                "UPDATE documents SET pdf_health = ?, pdf_health_message = ? WHERE id = ?",
+            )
+            .bind(health.status)
+            .bind(&health.message)
+            .bind(doc_id)
+            .execute(db.pool())
+            .await
+            {
+                tracing::warn!("PDF 健康结果写库失败 doc_id={}: {}", doc_id, e);
+            }
+        }
+        if let Some(prev) = prev_doc_id {
+            crate::routers::pipeline::track_task_end(prev);
+        }
+
+        tracing::info!(
+            "PDF 健康检查完成：共 {} 条，正常 {}，警告 {}，异常 {}，缺失 {}",
+            total,
+            ok,
+            warning,
+            error,
+            missing
+        );
+    });
+
+    Json(json!({
+        "detail": "PDF 健康检查任务已提交，后台逐个执行中（进度见「活跃任务」）",
         "started": true,
     }))
 }

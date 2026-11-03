@@ -48,6 +48,7 @@
       <div class="action-buttons">
         <button class="btn btn-outline" @click="batchParse">批量解析已上传</button>
         <button class="btn btn-outline" @click="recalcHashes">重新计算哈希</button>
+        <button class="btn btn-outline" @click="checkPdfHealthBatch">批量检查 PDF 健康</button>
         <button class="btn btn-outline" @click="dedup">文献去重</button>
         <button class="btn btn-outline" @click="goDuplicates">手动去重</button>
         <button class="btn btn-outline" @click="doSyncFileSizes">同步文件信息到数据库</button>
@@ -114,7 +115,7 @@
                         :style="{ width: (task.extracted_pages! / task.total_pages! * 100) + '%' }"
                       ></div>
                     </div>
-                    <span class="progress-text">{{ task.extracted_pages }}/{{ task.total_pages }}{{ task.task_type === 'hash' ? ' 条' : ' 页' }}</span>
+                    <span class="progress-text">{{ task.extracted_pages }}/{{ task.total_pages }}{{ task.task_type === 'parse' ? ' 页' : ' 条' }}</span>
                   </div>
                   <span v-else class="text-muted">-</span>
                 </td>
@@ -170,6 +171,7 @@ import { useRouter } from 'vue-router'
 import {
   getStats,
   recalculateHashes,
+  checkPdfHealth,
   deduplicateDocuments,
   syncFileSizes,
 } from '@/api/admin'
@@ -234,6 +236,17 @@ async function recalcHashes() {
   }
 }
 
+async function checkPdfHealthBatch() {
+  if (!confirm('确定批量检查所有文档的 PDF 健康？任务在后台逐个执行，进度见下方「活跃任务」。')) return
+  try {
+    const res = await checkPdfHealth()
+    if (res.started === false) showInfo(res.detail)
+    else showToast(res.detail, 'success')
+  } catch {
+    showError('PDF 健康检查提交失败')
+  }
+}
+
 async function dedup() {
   if (!confirm('确定按文件哈希去重？相同哈希的文档将保留最早的一个，其余删除。此操作不可逆！')) return
   try {
@@ -269,7 +282,8 @@ function taskTypeLabel(type: string): string {
     index: '索引',
     crossref: 'Crossref',
     'extract-pdf-meta': 'PDF 元数据',
-    hash: '重算哈希'
+    hash: '重算哈希',
+    'pdf-health': 'PDF 健康检查'
   }
   return labels[type] || type
 }

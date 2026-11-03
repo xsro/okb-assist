@@ -117,6 +117,10 @@ pub struct Document {
     pub pdf_size: Option<i64>,
     pub md_size: Option<i64>,
     pub zip_size: Option<i64>,
+    /// PDF 健康检查结果：`ok` / `warning` / `error` / `missing`（`NULL` = 未检查）
+    pub pdf_health: Option<String>,
+    /// 健康检查原因
+    pub pdf_health_message: Option<String>,
 }
 
 impl Document {

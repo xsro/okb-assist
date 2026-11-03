@@ -33,6 +33,13 @@ export function recalculateHashes() {
   )
 }
 
+/** PDF 健康检查（后台任务，进度见「活跃任务」） */
+export function checkPdfHealth() {
+  return apiPost<{ detail: string; started: boolean }>(
+    '/assist/api/admin/check-pdf-health'
+  )
+}
+
 /** 文献去重（按文件哈希合并重复文档） */
 export function deduplicateDocuments() {
   return apiPost<{ message: string; merged_groups: number; deleted_docs: number }>(

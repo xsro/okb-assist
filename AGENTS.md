@@ -482,7 +482,16 @@ cargo build --release
 - **机制**：摄取阶段（parse / extract / crossref / extract-pdf-meta / index / process）及批量端点通过 `tokio::spawn` 提交 Tokio 协程。协程在 HTTP 响应发出后由同一个 Tokio 运行时调度，状态机流转记录在数据库中。
 - **并发限制**：两级信号量独立控制。**全局** `Semaphore(max_concurrent_tasks)`（`system.json` 默认 `3`）限制 extract（Ollama 元数据抽取）和 index（向量索引）的并发。**MinerU 专用** `Semaphore(max_tasks)`（每个配置独立，默认 `3`）限制 PDF 解析并发。两者互不抢占，避免 MinerU 慢解析阻塞其他文档的抽取/索引。
 - **批量进度 / 暂停状态存于进程内存**：模块级全局变量，**进程重启即丢失**。重启后需手动重新触发。
-- **维护类任务也走后台**：`POST /assist/api/admin/recalculate-hashes`（重算 `file_hash`）、`POST /assist/api/admin/sync-file-sizes`（同步文件大小）都立即返回、后台执行。重算哈希**逐个串行**（不并发、不占流水线信号量），每条用 `pipeline::track_maintenance_task()` 登记到「活跃任务」表（`task_type = "hash"`，进度为「第 i/N 条」，文案只存进程内、不写 `documents.status_message`）；进程内有 `HASH_RECALC_RUNNING` 标记防止重复提交，进程重启即中断。
+- **维护类任务也走后台**：`POST /assist/api/admin/recalculate-hashes`（重算 `file_hash`）、`POST /assist/api/admin/check-pdf-health`（批量 PDF 健康检查）、`POST /assist/api/admin/sync-file-sizes`（同步文件大小）都立即返回、后台执行。重算哈希与健康检查都是**逐个串行**（不并发、不占流水线信号量），每条用 `pipeline::track_maintenance_task()` 登记到「活跃任务」表（`task_type = "hash"` / `"pdf-health"`，进度为「第 i/N 条」，文案只存进程内、不写 `documents.status_message`）；进程内各有 `HASH_RECALC_RUNNING` / `PDF_HEALTH_RUNNING` 标记防止重复提交，进程重启即中断。
+
+### PDF 健康检查（`services/pdf_health.rs`）
+
+后台串行检查每篇文档的 PDF 能否使用，结果写 `documents.pdf_health`（`ok` / `warning` / `error` / `missing`，`NULL` = 未检查）与 `documents.pdf_health_message`（原因）。
+
+- 检查顺序：文件存在 → 非空文件 → 文件头 1 KB 含 `%PDF-` → 结构（页数、是否加密，`mupdf` feature 用内置库，否则调 `mutool show` / `mutool pages`）→ 文件尾 2 KB 含 `%%EOF`。
+- 判级：缺文件/空文件/非 PDF/读不出页数 = `error`/`missing`；缺 `%%EOF`、加密、`mutool` 不可用（跳过结构检查）= `warning`。
+- **刻意不复用** `pdf_meta::extract_pdf_report_from_path`：那会整份抽取正文，批量检查太贵；这里只读文件头尾各几 KB + 读一次页数。
+- 替换 PDF（`replace-pdf`）会把这两列重置为 `NULL`（旧结果对新文件无效）。
 - **真·fire-and-forget**：删除文档时，SQLite 记录与本地文件先同步删除，而 Qdrant 中对应向量点的删除通过 `tokio::spawn` 异步执行，**请求不等待、失败也不可见**。
 - **前台（非后台）操作**：连接测试、服务状态、语义/全文搜索、上传、问答（`/assist/api/chat`）均在前端 `await` 内同步完成。MCP 端点也是「收完整请求体 → 返回一个 JSON」，**不是流式长连接**，工具函数内部检索同样是同步 await。
 - **无定时任务**：没有 `APScheduler`/`schedule`/守护线程；后台仅为 Tokio 协程。
@@ -663,6 +672,12 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 10. **移动端导航**：`MobileMenu` 通过 Vue 的 `provide/inject` 机制与 `AppHeader` 通信。`App.vue` 提供 `toggleMobileMenu` / `closeMobileMenu`，`AppHeader` 注入并控制汉堡菜单状态。
 11. **Rust 异步**：后台任务用 `tokio::spawn`，不要在 `async` 块中使用 `std::thread::sleep` 或阻塞 I/O。
 12. **SQLx 编译时检查**：`sqlx` 默认在 `debug` 模式下会校验 SQL 查询，如果迁移了数据库结构需运行 `cargo sqlx prepare`（需安装 `sqlx-cli`）。
+    **给 `documents` 加列的完整清单**（漏一处就会在运行时 `FromRow` 缺列报错/静默取空）：
+   - `database.rs::init()` 的 `CREATE TABLE` + 同一个函数里的**轻量迁移数组**（`CREATE TABLE IF NOT EXISTS` 不会改已有库，新列必须在迁移数组里逐个 `ALTER TABLE`）；
+   - `models.rs::Document` 字段；
+   - 三份 `DOC_COLUMNS`：`routers/documents.rs`、`routers/pipeline.rs`、`mcp_server.rs`（列顺序需与 `Document` 字段顺序一致）；
+   - `documents.rs::DocumentOut` + `doc_to_out()`；
+   - `documents.rs` 里两处 `Document { .. }` 字面量（上传 / 按路径登记）。
 13. **MinerU Markdown 图片处理**（`backend-rs/src/services/mineru.rs`）：`get_task_result()` 必须优先从 ZIP 输出提取 Markdown（含本地图片引用），而非从独立 Markdown 输出（含 data URI）。`finish_parse_result()` 在 `pipeline.rs` 中还需**复制独立图片文件**到目标目录，否则 Markdown 中的相对路径引用会失效。
 14. **MinerU API 的 output_formats 顺序无关**：`submit_job()` 必须同时请求 `"markdown"` 和 `"zip"` 两个格式。`zip` 格式包含解析结果的完整输出（Markdown + 图片），而 `markdown` 格式是自包含的 data URI 版本。两套输出分别下载后合并处理。
 15. **`users` / `drive` 段不要手改、不要经 `/assist/api/config` 写入**：`ConfigManager::save_config()` 会跳过 `PROTECTED_CONFIG_SECTIONS = ["users", "drive"]` 并从磁盘取回真值；用户写操作必须走 `users::UserStore`（内部 `update_users_section` 原子写 + 写锁）。密码哈希/令牌哈希永不回显。
