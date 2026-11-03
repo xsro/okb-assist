@@ -40,6 +40,13 @@
         <tr><th>PDF 文件</th><td>{{ formatFile(doc.pdf_size) }}</td></tr>
         <tr><th>Markdown 文件</th><td>{{ formatFile(doc.md_size) }}</td></tr>
         <tr><th>资源包 ZIP</th><td>{{ formatFile(doc.zip_size) }}</td></tr>
+        <tr>
+          <th>PDF 健康</th>
+          <td>
+            <span class="health-badge" :class="`health-${healthStatus}`">{{ healthLabel }}</span>
+            <span v-if="doc.pdf_health_message" class="health-msg">{{ doc.pdf_health_message }}</span>
+          </td>
+        </tr>
         <tr><th>状态</th><td><StatusBadge :status="doc.status" :status_message="doc.status_message" /></td></tr>
         <tr v-if="doc.status === 'error' && doc.status_message">
           <th>错误详情</th>
@@ -116,6 +123,13 @@
         <div class="info-row">
           <span class="info-label">资源包 ZIP</span>
           <span class="info-value">{{ formatFile(doc.zip_size) }}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">PDF 健康</span>
+          <span class="info-value">
+            <span class="health-badge" :class="`health-${healthStatus}`">{{ healthLabel }}</span>
+            <span v-if="doc.pdf_health_message" class="health-msg">{{ doc.pdf_health_message }}</span>
+          </span>
         </div>
         <div class="info-row">
           <span class="info-label">状态</span>
@@ -217,6 +231,21 @@ function formatFile(size: number | null): string {
   if (size == null) return '❌ 不存在'
   return formatSize(size)
 }
+
+// ── PDF 健康（由管理页「批量检查 PDF 健康」后台任务写入）──
+/** 状态值：ok / warning / error / missing；未检查时为 unchecked */
+const healthStatus = computed(() => doc.value?.pdf_health || 'unchecked')
+
+const healthLabel = computed(() => {
+  const labels: Record<string, string> = {
+    ok: '✓ 正常',
+    warning: '⚠ 警告',
+    error: '✕ 异常',
+    missing: '✕ 缺失',
+    unchecked: '未检查'
+  }
+  return labels[healthStatus.value] || healthStatus.value
+})
 
 async function openPdf() {
   if (!doc.value) return
@@ -355,6 +384,44 @@ onMounted(() => {
   border: 1px solid var(--border);
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+/* PDF 健康徽章 */
+.health-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.health-badge.health-ok {
+  color: #1b7f4b;
+  background: #e8f7ee;
+  border-color: #b7e2c9;
+}
+.health-badge.health-warning {
+  color: #9a6400;
+  background: #fff6e0;
+  border-color: #f0d69b;
+}
+.health-badge.health-error,
+.health-badge.health-missing {
+  color: var(--danger-text);
+  background: #fdecec;
+  border-color: #f3c1c1;
+}
+.health-badge.health-unchecked {
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-color: var(--border);
+}
+.health-msg {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-all;
 }
 .error-message {
   color: var(--danger-text);
