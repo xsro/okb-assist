@@ -3,6 +3,7 @@
 //! 提供统计、服务状态与索引重置等管理端点，
 //! 字段与前端 `frontend/src/api/admin.ts` 对应。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::extract::{Path, Query};
@@ -16,11 +17,11 @@ use serde_json::{json, Value};
 use crate::auth;
 use crate::config::Settings;
 use crate::database::Database;
-use crate::models::{DocStatus, Document};
+use crate::models::DocStatus;
 use crate::paths;
 use crate::services::mineru::MineruType;
 use crate::services::vector_db::get_vector_db;
-use crate::utils::calculate_file_hash;
+use crate::utils::calculate_file_hash_async;
 
 pub fn router() -> axum::Router<()> {
     axum::Router::new()
@@ -533,6 +534,23 @@ async fn qdrant_point(
     }
 }
 
+/// 重算哈希后台任务是否正在执行（进程内标记，防止重复提交；重启即复位）。
+static HASH_RECALC_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// 任务结束（包括 panic）时复位运行标记。
+struct HashRecalcGuard;
+
+impl Drop for HashRecalcGuard {
+    fn drop(&mut self) {
+        HASH_RECALC_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// POST /assist/api/admin/recalculate-hashes —— 重算全部文档的 `file_hash`。
+///
+/// **非阻塞**：请求立即返回，后台**逐个串行**计算（不做并发，避免同时开多个
+/// PDF 读句柄/抢 IO）；每条开始时在「活跃任务」里登记一行，文案带 `第 i/N 条`
+/// 与累计统计，进度可在 `GET /assist/api/pipeline/tasks/active` 查看。
 async fn recalculate_hashes(
     Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
@@ -541,46 +559,110 @@ async fn recalculate_hashes(
     if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
         return Json(json!({"detail": "权限不足"}));
     }
-    let docs: Vec<Document> = sqlx::query_as::<_, Document>(
-        "SELECT id, filename, file_hash, title, authors, CAST(NULLIF(year, '') AS INTEGER) AS year, doi, source, journal, \
-         keywords, abstract, category, doc_type, language, title_en, authors_en, \
-         keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
-         progress, qdrant_collection, vector_db_id, created_at, updated_at, \
-         pdf_size, md_size, zip_size \
-         FROM documents",
-    )
-    .fetch_all(db.pool())
-    .await
-    .unwrap_or_default();
-
-    let mut updated = 0i64;
-    let mut skipped = 0i64;
-    let mut errors: Vec<Value> = Vec::new();
-
-    for doc in &docs {
-        let pdf_path = paths::get_pdf_path(&settings, doc.id);
-        if !std::path::Path::new(&pdf_path).exists() {
-            skipped += 1;
-            continue;
-        }
-        match calculate_file_hash(&pdf_path) {
-            Ok(hash) => {
-                let _ = sqlx::query("UPDATE documents SET file_hash = ? WHERE id = ?")
-                    .bind(&hash)
-                    .bind(doc.id)
-                    .execute(db.pool())
-                    .await;
-                updated += 1;
-            }
-            Err(e) => errors.push(json!({"id": doc.id, "error": e.to_string()})),
-        }
+    if HASH_RECALC_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Json(json!({
+            "detail": "哈希重算已在后台执行中，请等待完成",
+            "started": false,
+        }));
     }
 
+    // 后台执行，不阻塞当前请求
+    tokio::spawn(async move {
+        let _guard = HashRecalcGuard;
+
+        let docs: Vec<(i64, Option<String>)> =
+            sqlx::query_as("SELECT id, file_hash FROM documents ORDER BY id")
+                .fetch_all(db.pool())
+                .await
+                .unwrap_or_default();
+        let total = docs.len() as i64;
+        tracing::info!("开始重算哈希：共 {} 条，逐个串行执行", total);
+
+        let mut updated = 0i64;
+        let mut unchanged = 0i64;
+        let mut skipped = 0i64;
+        let mut errors = 0i64;
+        // 用于「先登记下一行、再撤掉上一行」，保证活跃任务里始终有一条进度可见
+        let mut prev_doc_id: Option<i64> = None;
+
+        for (idx, (doc_id, old_hash)) in docs.iter().enumerate() {
+            let doc_id = *doc_id;
+            crate::routers::pipeline::track_maintenance_task(
+                doc_id,
+                "hash",
+                &format!(
+                    "重算哈希：第 {}/{} 条（已更新 {}，未变 {}，跳过 {}，失败 {}）",
+                    idx + 1,
+                    total,
+                    updated,
+                    unchanged,
+                    skipped,
+                    errors
+                ),
+                idx as i32,
+                total as i32,
+            );
+            if let Some(prev) = prev_doc_id.take() {
+                crate::routers::pipeline::track_task_end(prev);
+            }
+            prev_doc_id = Some(doc_id);
+
+            let pdf_path = paths::get_pdf_path(&settings, doc_id);
+            if !std::path::Path::new(&pdf_path).exists() {
+                skipped += 1;
+                continue;
+            }
+            match calculate_file_hash_async(pdf_path.clone()).await {
+                Ok(hash) => {
+                    // 哈希没变化就不写库，省掉无谓的 SQLite 写
+                    if old_hash.as_deref() == Some(hash.as_str()) {
+                        unchanged += 1;
+                        continue;
+                    }
+                    match sqlx::query("UPDATE documents SET file_hash = ? WHERE id = ?")
+                        .bind(&hash)
+                        .bind(doc_id)
+                        .execute(db.pool())
+                        .await
+                    {
+                        Ok(_) => updated += 1,
+                        Err(e) => {
+                            tracing::warn!("重算哈希写库失败 doc_id={}: {}", doc_id, e);
+                            errors += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "重算哈希失败 doc_id={} path={}: {}",
+                        doc_id,
+                        pdf_path,
+                        e
+                    );
+                    errors += 1;
+                }
+            }
+        }
+        if let Some(prev) = prev_doc_id {
+            crate::routers::pipeline::track_task_end(prev);
+        }
+
+        tracing::info!(
+            "哈希重算完成：共 {} 条，更新 {} 条，未变 {} 条，跳过 {} 条（PDF 缺失），失败 {} 条",
+            total,
+            updated,
+            unchanged,
+            skipped,
+            errors
+        );
+    });
+
     Json(json!({
-        "detail": format!("哈希重算完成: 更新 {} 条，跳过 {} 条", updated, skipped),
-        "updated": updated,
-        "skipped": skipped,
-        "errors": errors,
+        "detail": "哈希重算任务已提交，后台逐个计算中（进度见「活跃任务」）",
+        "started": true,
     }))
 }
 

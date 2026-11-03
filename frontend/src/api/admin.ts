@@ -26,9 +26,9 @@ export function getServiceStatus() {
 
 // ── 维护操作 ────────────────────────────────────────────
 
-/** 重新计算哈希 */
+/** 重新计算哈希（后台任务，进度见「活跃任务」） */
 export function recalculateHashes() {
-  return apiPost<{ message: string }>(
+  return apiPost<{ detail: string; started: boolean }>(
     '/assist/api/admin/recalculate-hashes'
   )
 }

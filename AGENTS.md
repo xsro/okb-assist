@@ -482,6 +482,7 @@ cargo build --release
 - **机制**：摄取阶段（parse / extract / crossref / extract-pdf-meta / index / process）及批量端点通过 `tokio::spawn` 提交 Tokio 协程。协程在 HTTP 响应发出后由同一个 Tokio 运行时调度，状态机流转记录在数据库中。
 - **并发限制**：两级信号量独立控制。**全局** `Semaphore(max_concurrent_tasks)`（`system.json` 默认 `3`）限制 extract（Ollama 元数据抽取）和 index（向量索引）的并发。**MinerU 专用** `Semaphore(max_tasks)`（每个配置独立，默认 `3`）限制 PDF 解析并发。两者互不抢占，避免 MinerU 慢解析阻塞其他文档的抽取/索引。
 - **批量进度 / 暂停状态存于进程内存**：模块级全局变量，**进程重启即丢失**。重启后需手动重新触发。
+- **维护类任务也走后台**：`POST /assist/api/admin/recalculate-hashes`（重算 `file_hash`）、`POST /assist/api/admin/sync-file-sizes`（同步文件大小）都立即返回、后台执行。重算哈希**逐个串行**（不并发、不占流水线信号量），每条用 `pipeline::track_maintenance_task()` 登记到「活跃任务」表（`task_type = "hash"`，进度为「第 i/N 条」，文案只存进程内、不写 `documents.status_message`）；进程内有 `HASH_RECALC_RUNNING` 标记防止重复提交，进程重启即中断。
 - **真·fire-and-forget**：删除文档时，SQLite 记录与本地文件先同步删除，而 Qdrant 中对应向量点的删除通过 `tokio::spawn` 异步执行，**请求不等待、失败也不可见**。
 - **前台（非后台）操作**：连接测试、服务状态、语义/全文搜索、上传、问答（`/assist/api/chat`）均在前端 `await` 内同步完成。MCP 端点也是「收完整请求体 → 返回一个 JSON」，**不是流式长连接**，工具函数内部检索同样是同步 await。
 - **无定时任务**：没有 `APScheduler`/`schedule`/守护线程；后台仅为 Tokio 协程。

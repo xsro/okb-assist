@@ -107,14 +107,14 @@
                   <span v-else class="text-muted">-</span>
                 </td>
                 <td>
-                  <div v-if="task.task_type === 'parse' && task.extracted_pages != null && task.total_pages != null" class="parse-progress">
+                  <div v-if="hasTaskProgress(task)" class="parse-progress">
                     <div class="progress-mini-bar-wrap">
                       <div
                         class="progress-mini-bar"
-                        :style="{ width: (task.extracted_pages / task.total_pages * 100) + '%' }"
+                        :style="{ width: (task.extracted_pages! / task.total_pages! * 100) + '%' }"
                       ></div>
                     </div>
-                    <span class="progress-text">{{ task.extracted_pages }}/{{ task.total_pages }} 页</span>
+                    <span class="progress-text">{{ task.extracted_pages }}/{{ task.total_pages }}{{ task.task_type === 'hash' ? ' 条' : ' 页' }}</span>
                   </div>
                   <span v-else class="text-muted">-</span>
                 </td>
@@ -178,6 +178,7 @@ import { usePipelineStore } from '@/stores/pipeline'
 import { useToast } from '@/composables/useToast'
 import StatusBadge from '@/components/StatusBadge.vue'
 import type { SystemStats } from '@/types/config'
+import type { ActiveTask } from '@/types/pipeline'
 
 const { showToast, showInfo, showError } = useToast()
 const router = useRouter()
@@ -223,12 +224,13 @@ async function batchParse() {
 }
 
 async function recalcHashes() {
-  if (!confirm('确定重新计算所有文档哈希？')) return
+  if (!confirm('确定重新计算所有文档哈希？任务在后台逐个执行，进度见下方「活跃任务」。')) return
   try {
     const res = await recalculateHashes()
-    showToast(res.message, 'success')
+    if (res.started === false) showInfo(res.detail)
+    else showToast(res.detail, 'success')
   } catch {
-    showError('哈希重算失败')
+    showError('哈希重算提交失败')
   }
 }
 
@@ -236,7 +238,7 @@ async function dedup() {
   if (!confirm('确定按文件哈希去重？相同哈希的文档将保留最早的一个，其余删除。此操作不可逆！')) return
   try {
     const res = await deduplicateDocuments()
-    showToast(res.message, 'success')
+    showToast(res.detail, 'success')
   } catch {
     showError('文献去重失败')
   }
@@ -267,8 +269,14 @@ function taskTypeLabel(type: string): string {
     index: '索引',
     crossref: 'Crossref',
     'extract-pdf-meta': 'PDF 元数据',
+    hash: '重算哈希'
   }
   return labels[type] || type
+}
+
+/** 「活跃任务」里是否有可展示的进度（MinerU 为页数，重算哈希为条数） */
+function hasTaskProgress(task: ActiveTask): boolean {
+  return task.extracted_pages != null && task.total_pages != null && task.total_pages > 0
 }
 
 function formatTime(iso: string) {

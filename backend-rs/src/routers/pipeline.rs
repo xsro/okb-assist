@@ -79,6 +79,10 @@ struct ActiveTask {
     task_type: String,
     started_at: String,
     status_message: String,
+    /// `true`：展示时优先用数据库里的 `documents.status_message`（流水线阶段会同步写入进度文案）；
+    /// `false`：一律用本进程内记录的文案（维护类任务如重算哈希不写 DB 状态，
+    /// 否则会显示与该任务无关的旧状态，例如「解析完成」）。
+    prefer_db_message: bool,
     mineru_config_name: Option<String>,
     extracted_pages: Option<i32>,
     total_pages: Option<i32>,
@@ -143,9 +147,35 @@ fn track_task_start(doc_id: i64, task_type: &str, mineru_config_name: Option<Str
             task_type: task_type.to_string(),
             started_at: now_iso(),
             status_message: "正在处理...".to_string(),
+            prefer_db_message: true,
             mineru_config_name,
             extracted_pages: None,
             total_pages: None,
+        },
+    );
+}
+
+/// 登记一个**维护类**后台任务（如重算哈希）：
+/// - 不占用流水线信号量，也不改动 `documents` 的状态字段；
+/// - 文案与进度（`processed` / `total`）只在进程内，「活跃任务」表格里可见；
+/// - `processed` / `total` 供前端进度条使用（与 MinerU 解析的「页」含义不同，这里是「条」）。
+pub(crate) fn track_maintenance_task(
+    doc_id: i64,
+    task_type: &str,
+    message: &str,
+    processed: i32,
+    total: i32,
+) {
+    active_tasks_map().write().unwrap().insert(
+        doc_id,
+        ActiveTask {
+            task_type: task_type.to_string(),
+            started_at: now_iso(),
+            status_message: message.to_string(),
+            prefer_db_message: false,
+            mineru_config_name: None,
+            extracted_pages: Some(processed),
+            total_pages: Some(total),
         },
     );
 }
@@ -169,7 +199,7 @@ fn track_task_set_mineru_config(doc_id: i64, config_name: &str) {
     }
 }
 
-fn track_task_end(doc_id: i64) {
+pub(crate) fn track_task_end(doc_id: i64) {
     active_tasks_map().write().unwrap().remove(&doc_id);
 }
 
@@ -1660,7 +1690,11 @@ async fn active_tasks(
                 "doc_title": doc.title.clone().unwrap_or_else(|| doc.filename.clone()),
                 "task_type": info.task_type,
                 "started_at": info.started_at,
-                "status_message": doc.status_message.clone().unwrap_or(info.status_message),
+                "status_message": if info.prefer_db_message {
+                    doc.status_message.clone().unwrap_or(info.status_message)
+                } else {
+                    info.status_message
+                },
                 "status": doc.status.clone(),
                 "mineru_config_name": info.mineru_config_name,
                 "extracted_pages": info.extracted_pages,
