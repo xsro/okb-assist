@@ -34,13 +34,21 @@
 所以 Zotero 里的写法差异不会导致误判为「新建」。仍建议加 `--update-meta`，让 DOI 真正写入服务端库中
 （否则下次比对只能靠文件哈希去重）。
 
-比对方式是**一次拉全量索引**：客户端先算完本地哈希，再请求 `GET /assist/api/documents/doi-hash-index`
+比对方式是**一次拉全量索引**：请求 `GET /assist/api/documents/doi-hash-index`
 拿到服务端全部文献的 `{id, doi, doi_key, file_hash, pdf_health}`，整库比对在本地完成，
 不再按 DOI 逐条打 `by-doi`（旧实现几百条文献就是几百次往返）。只有该接口不可用时才回退到逐条查询，
 `dir` 子命令同样优先用这份索引，失败才回退到 `diff-hashes`。
 
-哈希阶段逐个打印 `[i/N]`、文件名、哈希前 16 位与**单项耗时**，结束时输出总数与**总耗时**
-（几 GB 的库要算几十秒以上，没有进度看起来就像卡在「第一阶段」）。
+**本地哈希按需计算**（不再先把整库算完）：只有「服务器已有 PDF、且策略确实需要比对哈希」的条目
+才在上传前读文件算 sha256，并当场打印哈希前 16 位与**单项耗时**：
+
+| `--dup-doi-action` | 什么时候算本地哈希 |
+|---|---|
+| `skip`（默认） | 完全不读文件（DOI 已存在就跳过，哈希用不上） |
+| `hash` | 服务器有 PDF 的条目才算 |
+| `health-hash` | 服务器有 PDF 且 PDF 不健康（`warning`/`error`/`missing`）才算 |
+
+服务器没有该 DOI（= 新建）或服务器没有 PDF 时都不算哈希，直接进入新建/更新分支。
 
 ```
 okb-client zotero <csv_file> [选项]
@@ -75,7 +83,16 @@ okb-client zotero data\我的文库.csv --keys NTRNTRLJ,URB2Q2D5   # 只处理�
 
 ### `dir` — 目录 PDF 批量比对上传
 
-扫描指定目录中的 PDF 文件，计算 SHA256 哈希，与服务端比对后交互式上传。
+扫描指定目录中的 PDF 文件，**上传前逐个**计算 SHA256 哈希、与服务端比对，服务器已有的文件自动跳过，
+其余交互式上传。
+
+流程图：扫描目录 → 拉一次服务端哈希索引 → 列出全部本地 PDF → 选择（`a`/`s`/`q`）→
+逐个「`[i/N]` 计算哈希 → 比对 → 上传（或跳过）」。
+
+- 不会先把整个目录的哈希算完再上传：算一个、比一个、传一个，进度与上传实时可见；
+- 哈希比对优先用一次性拉到的全量索引（本地比对），索引拿不到时回退为逐文件 `diff-hashes`；
+  回退模式下单次比对请求失败会打印「本文件未上传（可重试）」，不会默默传重复文件；
+- `--dry-run` 仍会算哈希并比对，输出会列出「服务器已存在，跳过」与「服务器没有该文件（dry-run）」。
 
 ```
 okb-client dir <目录路径> [选项]
@@ -96,6 +113,7 @@ okb-client dir D:\Papers --base-url http://192.168.1.162:5001 -r
 okb-client dir ./downloads --dry-run
 okb-client dir D:\Papers -r --upload-interval 3   # 每次上传之间等 3 秒
 okb-client dir D:\Papers -r --upload-interval 0   # 尽可能快（默认是 1 秒）
+okb-client dir D:\Papers --dry-run                # 算哈希 + 比对，只列出哪些会传
 ```
 
 ## Token 设置

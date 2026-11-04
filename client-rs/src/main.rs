@@ -179,6 +179,10 @@ struct DocMetadata {
 }
 
 /// diff-hashes 接口返回
+///
+/// `invalid` / `present_count` 目前没有消费方（`dir` 改成逐个比对后不再依赖汇总字段），
+/// 但保留结构以便接口变更时有迹可循，故允许 dead_code。
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct HashDiffResult {
     missing: Vec<String>,
@@ -289,18 +293,6 @@ struct LocalDoc {
 }
 
 
-
-/// 本地 PDF 文件（Dir 子命令）
-struct LocalPdf {
-    path: PathBuf,
-    hash: String,
-}
-
-/// 带预计算哈希的 Zotero 条目
-struct LocalDocWithHash {
-    doc: LocalDoc,
-    local_hash: String,
-}
 
 // ==================== 客户端配置（~/.okb/client.json） ====================
 
@@ -908,7 +900,7 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
     println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
     println!();
 
-    // 1. 扫描 PDF
+    // 1. 扫描 PDF（这里**不**计算哈希：哈希与比对放到上传前逐个做，避免先扫全库再上传）
     let all_pdfs = scan_pdfs(Path::new(&args.dir), args.recursive)?;
     let total = all_pdfs.len();
     if total == 0 {
@@ -918,127 +910,50 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
     println!("找到 {} 个 PDF 文件。", total);
     println!();
 
-    // 2. 计算 SHA256 哈希（逐个串行，打印 [i/N] 与单项/总耗时）
-    let hash_started = std::time::Instant::now();
-    let mut pdfs_with_hash: Vec<LocalPdf> = Vec::with_capacity(total);
-    for (i, path) in all_pdfs.iter().enumerate() {
-        print!("  [{}/{}] 计算哈希: {} ... ", i + 1, total, path.display());
-        io::stdout().flush().ok();
-        let item_started = std::time::Instant::now();
-        // 哈希是阻塞 IO：丢到后台线程，不卡住 tokio worker
-        match sha256_file_async(path.clone()).await {
-            Ok(hash) => {
-                pdfs_with_hash.push(LocalPdf {
-                    path: path.clone(),
-                    hash: hash.clone(),
-                });
-                println!(
-                    "{} ({})",
-                    &hash[..16.min(hash.len())],
-                    format_duration(item_started.elapsed())
-                );
-            }
-            Err(e) => {
-                println!("失败: {} ({})", e, format_duration(item_started.elapsed()));
-            }
-        }
-    }
-    if total > 0 {
-        println!(
-            "哈希计算完成: {}/{} 个，用时 {}",
-            pdfs_with_hash.len(),
-            total,
-            format_duration(hash_started.elapsed())
-        );
-    }
-    println!();
-
-    if pdfs_with_hash.is_empty() {
-        println!("没有可读取的 PDF 文件。");
-        return Ok(());
-    }
-
-    // 3. 与服务端比对：优先一次拉全量索引（服务端 1 次查询），失败再回退到 diff-hashes
+    // 2. 拉一次服务端全量哈希索引，供上传前逐个比对（1 次请求；失败则逐文件回退 diff-hashes）
     let client = http_client()?;
     println!("正在获取服务端索引（全部文件哈希）...");
-    let (present_count, to_upload, invalid_count): (usize, Vec<&LocalPdf>, usize) =
-        match api_fetch_server_index(&client, &base_url, &token).await {
-            Some(idx) => {
-                let to_upload: Vec<&LocalPdf> = pdfs_with_hash
-                    .iter()
-                    .filter(|p| !idx.has_hash(&p.hash))
-                    .collect();
-                (
-                    pdfs_with_hash.len() - to_upload.len(),
-                    to_upload,
-                    0,
-                )
-            }
-            None => {
-                println!("  回退为 diff-hashes 比对（较慢）...");
-                let hashes: Vec<String> =
-                    pdfs_with_hash.iter().map(|p| p.hash.clone()).collect();
-                let diff = match api_diff_hashes(&client, &base_url, &hashes, &token).await {
-                    Some(d) => d,
-                    None => {
-                        println!("错误: diff-hashes 请求失败，无法继续。");
-                        return Ok(());
-                    }
-                };
-                let missing_hashes: HashSet<String> = diff.missing.into_iter().collect();
-                let to_upload: Vec<&LocalPdf> = pdfs_with_hash
-                    .iter()
-                    .filter(|p| missing_hashes.contains(&p.hash))
-                    .collect();
-                (
-                    diff.present_count.unwrap_or(total - to_upload.len()),
-                    to_upload,
-                    diff.invalid.len(),
-                )
-            }
-        };
-
-    println!();
-    println!("本地 PDF:         {}", total);
-    println!("服务器已存在:     {}", present_count);
-    println!("待上传（新文件）: {}", to_upload.len());
-    if invalid_count > 0 {
-        println!("（警告: {} 个哈希格式无效，可能未被正确比对）", invalid_count);
+    let server_index = api_fetch_server_index(&client, &base_url, &token).await;
+    match &server_index {
+        Some(idx) => println!(
+            "  服务端索引：{} 篇文献，{} 个可比对哈希（1 次请求）",
+            idx.count,
+            idx.hashes.len()
+        ),
+        None => println!("  ⚠ 无法获取服务端索引，回退为逐个文件 diff-hashes 比对（较慢）"),
     }
     println!();
 
-    if to_upload.is_empty() {
-        println!("所有文件已存在于服务器，无需上传。");
-        return Ok(());
+    // 3. 列出本地文件（文件太多时只列前 200 个，避免刷屏）
+    const LIST_LIMIT: usize = 200;
+    for (i, p) in all_pdfs.iter().take(LIST_LIMIT).enumerate() {
+        println!("  [{:>3}] {}", i + 1, p.display());
     }
-
-    // 4. 列出待上传文件
-    for (i, p) in to_upload.iter().enumerate() {
-        println!("  [{:>3}] {}", i + 1, p.path.display());
+    if all_pdfs.len() > LIST_LIMIT {
+        println!("  …（其余 {} 个未列出）", all_pdfs.len() - LIST_LIMIT);
     }
     println!();
+    println!("提示：上传前会逐个计算哈希并与服务器比对，服务器已有的文件自动跳过。");
+    println!();
 
-    // 5. 交互选择
+    // 4. 交互选择
     print!("请选择 [a] 全部上传  [s] 逐个选择  [q] 退出: ");
     io::stdout().flush().ok();
     let mut choice = String::new();
     io::stdin().read_line(&mut choice).ok();
     let choice = choice.trim().to_lowercase();
 
-    let mut uploaded = 0usize;
-    let mut failed = 0usize;
-
     if choice == "q" {
         println!("已退出。");
         return Ok(());
     }
 
-    let selected: Vec<&&LocalPdf> = if choice == "a" {
-        to_upload.iter().collect()
+    let selected: Vec<&PathBuf> = if choice == "a" {
+        all_pdfs.iter().collect()
     } else if choice == "s" {
         let mut sel = Vec::new();
-        for p in &to_upload {
-            print!("上传 {}？[y/N]: ", p.path.display());
+        for p in &all_pdfs {
+            print!("上传 {}？[y/N]: ", p.display());
             io::stdout().flush().ok();
             let mut ans = String::new();
             io::stdin().read_line(&mut ans).ok();
@@ -1059,32 +974,75 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 6. 执行上传
+    // 5. 逐个文件：计算哈希 -> 与服务端比对 -> 决定是否上传
     println!();
-    println!("开始上传 {} 个文件 ...", selected.len());
+    println!("开始处理 {} 个文件 ...", selected.len());
+    let mut uploaded = 0usize;
+    let mut skipped = 0usize;
+    let mut hash_failed = 0usize;
+    let mut failed = 0usize;
+    // 已执行的上传次数（用于按 `--upload-interval` 节流，首个不等待）
     let mut upload_seq = 0usize;
-    for p in &selected {
+    let loop_started = std::time::Instant::now();
+
+    for (i, path) in selected.iter().enumerate() {
+        // 哈希是阻塞 IO：丢到后台线程，不卡住 tokio worker
+        print!(
+            "  [{}/{}] 计算哈希: {} ... ",
+            i + 1,
+            selected.len(),
+            path.display()
+        );
+        io::stdout().flush().ok();
+        let item_started = std::time::Instant::now();
+        let hash = match sha256_file_async((*path).clone()).await {
+            Ok(h) => {
+                println!(
+                    "{} ({})",
+                    &h[..16.min(h.len())],
+                    format_duration(item_started.elapsed())
+                );
+                h
+            }
+            Err(e) => {
+                println!("失败: {} ({})", e, format_duration(item_started.elapsed()));
+                hash_failed += 1;
+                continue;
+            }
+        };
+
+        // 上传前比对：服务器已有相同哈希则跳过
+        match server_has_hash(&client, &base_url, &token, &server_index, &hash).await {
+            Some(true) => {
+                println!("        -> 服务器已存在该文件，跳过");
+                skipped += 1;
+                continue;
+            }
+            Some(false) => {}
+            None => {
+                println!("        -> ⚠ 哈希比对请求失败，本文件未上传（可重试）");
+                failed += 1;
+                continue;
+            }
+        }
+
         if args.dry_run {
-            print!("  上传 {} ... ", p.path.display());
-            io::stdout().flush().ok();
-            println!("[dry-run] 跳过");
-            uploaded += 1;
+            println!("        -> [dry-run] 服务器没有该文件，跳过上传");
             continue;
         }
+
         // 两次上传之间按 `--upload-interval` 等待（首个不等待）
         args.interval.throttle(upload_seq).await;
         upload_seq += 1;
-        print!("  上传 {} ... ", p.path.display());
+        print!("        上传 ... ");
         io::stdout().flush().ok();
-        match api_upload(&base_url, &p.path, None, &token).await {
+        match api_upload(&base_url, path, None, &token).await {
             Some(result) => {
                 println!("成功 -> id={}", result.id);
                 uploaded += 1;
                 // 触发解析流水线
-                if process {
-                    if api_trigger_pipeline(&client, &base_url, result.id, &token).await {
-                        println!("    -> 已触发流水线");
-                    }
+                if process && api_trigger_pipeline(&client, &base_url, result.id, &token).await {
+                    println!("        -> 已触发流水线");
                 }
             }
             None => {
@@ -1094,14 +1052,39 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
         }
     }
 
-    // 7. 最终统计
+    // 6. 最终统计
     println!();
     println!("==================================================");
-    println!("已上传: {}", uploaded);
-    println!("失败:   {}", failed);
+    println!("本地 PDF:     {}", total);
+    println!("已上传:       {}", uploaded);
+    println!("服务器已存在: {}", skipped);
+    if hash_failed > 0 {
+        println!("哈希失败:     {}", hash_failed);
+    }
+    println!("失败:         {}", failed);
+    println!("用时:         {}", format_duration(loop_started.elapsed()));
     println!("==================================================");
 
     Ok(())
+}
+
+/// 与服务器比对单个文件哈希：`Some(true)` 已存在 / `Some(false)` 缺失 / `None` 比对失败。
+///
+/// 优先用一次性拉到的全量索引在本地比对；索引不可用时回退为单条 `diff-hashes` 请求。
+async fn server_has_hash(
+    client: &Client,
+    base_url: &str,
+    token: &Option<String>,
+    server_index: &Option<ServerIndex>,
+    hash: &str,
+) -> Option<bool> {
+    match server_index {
+        Some(idx) => Some(idx.has_hash(hash)),
+        None => {
+            let diff = api_diff_hashes(client, base_url, &[hash.to_string()], token).await?;
+            Some(!diff.missing.iter().any(|h| h.eq_ignore_ascii_case(hash)))
+        }
+    }
 }
 
 // ==================== 子命令: zotero ====================
@@ -1520,6 +1503,36 @@ fn parse_zotero_row(row: &ZoteroRow) -> DocMetadata {
 
 
 
+/// 哈希前 12 位（便于日志里辨认，不含多字节字符问题）
+fn preview_hash(h: &str) -> String {
+    h.chars().take(12).collect()
+}
+
+/// 上传前按需计算本地 PDF 的 sha256（打印进度与耗时）；返回 `None` 表示读取失败。
+async fn compute_local_hash(d: &LocalDoc) -> Option<String> {
+    let file_name = Path::new(&d.file_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| d.file_path.clone());
+    print!("    计算哈希: {} | {} ... ", d.doi, file_name);
+    io::stdout().flush().ok();
+    let started = std::time::Instant::now();
+    match sha256_file_async(PathBuf::from(&d.file_path)).await {
+        Ok(h) => {
+            println!(
+                "{} ({})",
+                &h[..16.min(h.len())],
+                format_duration(started.elapsed())
+            );
+            Some(h)
+        }
+        Err(e) => {
+            println!("失败 ({}): {}", format_duration(started.elapsed()), e);
+            None
+        }
+    }
+}
+
 async fn upload_one_zotero(
     d: &LocalDoc,
     base_url: &str,
@@ -1728,52 +1741,6 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     println!("第一阶段：与服务端比对 {} 个文献的 DOI ...", local_docs.len());
     println!();
 
-    // 预先计算所有本地文件哈希。
-    // 逐个串行且可能涉及几 GB 磁盘 IO，必须打印 [i/N] 与单项耗时，否则大库看上去像卡死。
-    let hash_total = local_docs.len();
-    let hash_started = std::time::Instant::now();
-    let mut docs_with_hash: Vec<LocalDocWithHash> = Vec::new();
-    for (i, d) in local_docs.iter().enumerate() {
-        let file_name = Path::new(&d.file_path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| d.file_path.clone());
-        print!(
-            "  [{}/{}] 计算哈希: {} | {} ... ",
-            i + 1,
-            hash_total,
-            d.doi,
-            file_name
-        );
-        io::stdout().flush().ok();
-        let item_started = std::time::Instant::now();
-        match sha256_file_async(PathBuf::from(&d.file_path)).await {
-            Ok(h) => {
-                println!(
-                    "{} ({})",
-                    &h[..16.min(h.len())],
-                    format_duration(item_started.elapsed())
-                );
-                docs_with_hash.push(LocalDocWithHash {
-                    doc: d.clone(),
-                    local_hash: h,
-                });
-            }
-            Err(e) => {
-                println!("失败 ({}): {}", format_duration(item_started.elapsed()), e);
-            }
-        }
-    }
-    if hash_total > 0 {
-        println!();
-        println!(
-            "哈希计算完成: {}/{} 个，用时 {}",
-            docs_with_hash.len(),
-            hash_total,
-            format_duration(hash_started.elapsed())
-        );
-    }
-
     // 一次拉取服务端全量 DOI / 哈希索引，整库比对在本地完成（不再逐条 by-doi）
     println!("正在获取服务端索引（全部文献的 DOI / 哈希）...");
     let server_index = api_fetch_server_index(&client, &base_url, &token).await;
@@ -1787,16 +1754,17 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     }
     println!();
 
-    let mut new_entries: Vec<&LocalDocWithHash> = Vec::new();
-    let mut to_update_pdf: Vec<(u64, &LocalDocWithHash, String)> = Vec::new();
+    let mut new_entries: Vec<&LocalDoc> = Vec::new();
+    // (服务端 id, 本地条目, 服务端哈希, 本地哈希)
+    let mut to_update_pdf: Vec<(u64, &LocalDoc, String, Option<String>)> = Vec::new();
     // 跳过项连原因一起记，第二阶段直接列出来，避免用户疑惑「为什么没上传」
-    let mut to_skip: Vec<(&LocalDocWithHash, String)> = Vec::new();
+    let mut to_skip: Vec<(&LocalDoc, String)> = Vec::new();
 
-    for dw in &docs_with_hash {
+    for d in &local_docs {
         // 优先查本地索引；索引不可用时回退到 by-doi 单条查询
         let server: Option<ServerEntry> = match &server_index {
-            Some(idx) => idx.lookup(&dw.doc.doi).cloned(),
-            None => match api_lookup_by_doi(&client, &base_url, &dw.doc.doi, &token).await {
+            Some(idx) => idx.lookup(&d.doi).cloned(),
+            None => match api_lookup_by_doi(&client, &base_url, &d.doi, &token).await {
                 (true, Some(doc)) => Some(ServerEntry {
                     id: doc.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
                     doi: doc.get("doi").and_then(|v| v.as_str()).map(|s| s.to_string()),
@@ -1816,37 +1784,62 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         };
 
         let Some(server) = server else {
-            new_entries.push(dw);
+            // 服务器没有这个 DOI：必然新建，不需要本地哈希
+            new_entries.push(d);
             continue;
         };
 
         let server_id = server.id;
         // 服务端没有 PDF（哈希为空）时没法比，当成「需要补 PDF」
-        let hash_missing = server.hash().is_empty();
-        let hash_differs = !hash_missing && server.hash() != dw.local_hash;
+        let server_hash = server.hash().to_string();
+        let hash_missing = server_hash.is_empty();
 
         // `pdf_health`：ok / warning / error / missing；空串（从未检查过）= 未知。
         // 未知状态按「健康」处理 —— 没证据说明它坏了就不折腾，只有明确的 warning/error/missing 才走哈希比对。
         let health = server.health();
         let health_unknown = health.is_empty();
         let healthy = health_unknown || health == "ok";
-        let need_replace = hash_missing || hash_differs;
+
+        // 本地哈希按需计算：只有「服务器已有 PDF」且策略确实要比哈希时才读文件，
+        // 默认的 `skip` 策略下完全不读取本地文件（旧版会先把整库哈希算完，几 GB 的库要等很久）。
+        let needs_hash = !hash_missing
+            && match args.dup_doi_action {
+                DupDoiAction::Skip => false,
+                DupDoiAction::Hash => true,
+                DupDoiAction::HealthHash => !healthy,
+            };
+
+        let local_hash = if needs_hash {
+            match compute_local_hash(d).await {
+                Some(h) => Some(h),
+                None => {
+                    to_skip.push((d, "本地文件哈希计算失败".to_string()));
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        // 哈希一致 = 服务器与本地都有 PDF 且哈希相同
+        let hash_same = matches!(&local_hash, Some(h) if *h == server_hash);
+        let need_replace = hash_missing || !hash_same;
 
         match args.dup_doi_action {
             DupDoiAction::Skip => {
-                to_skip.push((dw, "DOI 已存在（--dup-doi-action=skip）".to_string()));
+                to_skip.push((d, "DOI 已存在（--dup-doi-action=skip）".to_string()));
             }
             DupDoiAction::Hash => {
                 if need_replace {
-                    to_update_pdf.push((server_id, dw, server.hash().to_string()));
+                    to_update_pdf.push((server_id, d, server_hash, local_hash));
                 } else {
-                    to_skip.push((dw, "hash 一致".to_string()));
+                    to_skip.push((d, "hash 一致".to_string()));
                 }
             }
             DupDoiAction::HealthHash => {
                 if healthy {
                     to_skip.push((
-                        dw,
+                        d,
                         if health_unknown {
                             "PDF 未做过健康检查，按健康处理，跳过".to_string()
                         } else {
@@ -1854,12 +1847,9 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
                         },
                     ));
                 } else if need_replace {
-                    to_update_pdf.push((server_id, dw, server.hash().to_string()));
+                    to_update_pdf.push((server_id, d, server_hash, local_hash));
                 } else {
-                    to_skip.push((
-                        dw,
-                        format!("PDF 不健康（{}），hash 一致", health),
-                    ));
+                    to_skip.push((d, format!("PDF 不健康（{}），hash 一致", health)));
                 }
             }
         }
@@ -1880,7 +1870,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     if !new_entries.is_empty() {
         println!("── 新建文献 ──");
         for (i, dw) in new_entries.iter().enumerate() {
-            println!("  [{:>3}] {} | {}", i + 1, dw.doc.doi, dw.doc.title.clone().unwrap_or_default());
+            println!("  [{:>3}] {} | {}", i + 1, dw.doi, dw.title.clone().unwrap_or_default());
         }
         print!("\n新建策略 [a] 全部新建  [s] 逐个选择  [n] 全部跳过: ");
         io::stdout().flush().ok();
@@ -1891,7 +1881,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
             "n" => new_choices = vec![false; new_entries.len()],
             "s" => {
                 for (i, dw) in new_entries.iter().enumerate() {
-                    print!("  新建 [{}] {} ？[y/N]: ", i + 1, dw.doc.doi);
+                    print!("  新建 [{}] {} ？[y/N]: ", i + 1, dw.doi);
                     io::stdout().flush().ok();
                     let mut ans = String::new();
                     io::stdin().read_line(&mut ans).ok();
@@ -1910,8 +1900,8 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
             println!(
                 "  [{:>3}] {} | {} — {}",
                 i + 1,
-                dw.doc.doi,
-                dw.doc.title.clone().unwrap_or_default(),
+                dw.doi,
+                dw.title.clone().unwrap_or_default(),
                 reason
             );
         }
@@ -1922,15 +1912,15 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     let mut update_choices: Vec<bool> = Vec::new();
     if !to_update_pdf.is_empty() {
         println!("── 更新 PDF ──");
-        for (i, (server_id, dw, server_hash)) in to_update_pdf.iter().enumerate() {
+        for (i, (server_id, dw, server_hash, local_hash)) in to_update_pdf.iter().enumerate() {
             if server_hash.is_empty() {
-                println!("  [{:>3}] ID={} | {} | {}", i + 1, server_id, dw.doc.doi, dw.doc.title.clone().unwrap_or_default());
+                println!("  [{:>3}] ID={} | {} | {}", i + 1, server_id, dw.doi, dw.title.clone().unwrap_or_default());
                 println!("        文献存在但无 PDF 文件");
             } else {
-                println!("  [{:>3}] ID={} | {} | {}", i + 1, server_id, dw.doc.doi, dw.doc.title.clone().unwrap_or_default());
+                println!("  [{:>3}] ID={} | {} | {}", i + 1, server_id, dw.doi, dw.title.clone().unwrap_or_default());
                 println!("        PDF 不同（服务器: {}..., 本地: {}...）",
-                    &server_hash[..16.min(server_hash.len())],
-                    &dw.local_hash[..16.min(dw.local_hash.len())]);
+                    preview_hash(server_hash),
+                    preview_hash(local_hash.as_deref().unwrap_or("")));
             }
         }
         print!("\n更新策略 [a] 全部更新  [s] 逐个选择  [n] 全部跳过: ");
@@ -1941,8 +1931,8 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
             "a" => update_choices = vec![true; to_update_pdf.len()],
             "n" => update_choices = vec![false; to_update_pdf.len()],
             "s" => {
-                for (i, (server_id, dw, _)) in to_update_pdf.iter().enumerate() {
-                    print!("  更新 PDF [{}] ID={} ({}) ？[y/N]: ", i + 1, server_id, dw.doc.doi);
+                for (i, (server_id, dw, _, _)) in to_update_pdf.iter().enumerate() {
+                    print!("  更新 PDF [{}] ID={} ({}) ？[y/N]: ", i + 1, server_id, dw.doi);
                     io::stdout().flush().ok();
                     let mut ans = String::new();
                     io::stdin().read_line(&mut ans).ok();
@@ -1998,7 +1988,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
             continue;
         }
         if args.dry_run {
-            print!("  新建 [{}] {} ... ", i + 1, dw.doc.doi);
+            print!("  新建 [{}] {} ... ", i + 1, dw.doi);
             io::stdout().flush().ok();
             println!("[dry-run] 跳过");
             uploaded += 1;
@@ -2006,9 +1996,9 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         }
         args.interval.throttle(upload_seq).await;
         upload_seq += 1;
-        print!("  新建 [{}] {} ... ", i + 1, dw.doc.doi);
+        print!("  新建 [{}] {} ... ", i + 1, dw.doi);
         io::stdout().flush().ok();
-        if upload_one_zotero(&dw.doc, &base_url, update_meta, false, &client, &token).await {
+        if upload_one_zotero(dw, &base_url, update_meta, false, &client, &token).await {
             println!("✓");
             uploaded += 1;
         } else {
@@ -2018,12 +2008,12 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     }
 
     // 执行更新 PDF
-    for (i, (server_id, dw, _)) in to_update_pdf.iter().enumerate() {
+    for (i, (server_id, dw, _, _)) in to_update_pdf.iter().enumerate() {
         if !update_choices[i] {
             continue;
         }
         if args.dry_run {
-            print!("  更新 PDF [{}] ID={} ({}) ... ", i + 1, server_id, dw.doc.doi);
+            print!("  更新 PDF [{}] ID={} ({}) ... ", i + 1, server_id, dw.doi);
             io::stdout().flush().ok();
             println!("[dry-run] 跳过");
             updated_pdf += 1;
@@ -2031,12 +2021,12 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         }
         args.interval.throttle(upload_seq).await;
         upload_seq += 1;
-        print!("  更新 PDF [{}] ID={} ({}) ... ", i + 1, server_id, dw.doc.doi);
+        print!("  更新 PDF [{}] ID={} ({}) ... ", i + 1, server_id, dw.doi);
         io::stdout().flush().ok();
-        if api_replace_pdf(&base_url, *server_id, Path::new(&dw.doc.file_path), &token).await {
+        if api_replace_pdf(&base_url, *server_id, Path::new(&dw.file_path), &token).await {
             if update_meta {
-                api_update_metadata(&client, &base_url, *server_id, &dw.doc.meta, &token).await;
-                api_save_info(&client, &base_url, *server_id, &dw.doc.info, &token).await;
+                api_update_metadata(&client, &base_url, *server_id, &dw.meta, &token).await;
+                api_save_info(&client, &base_url, *server_id, &dw.info, &token).await;
             }
             println!("✓");
             updated_pdf += 1;
