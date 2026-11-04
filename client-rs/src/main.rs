@@ -103,6 +103,11 @@ struct ZoteroArgs {
     #[arg(long)]
     debug: bool,
 
+    /// 复用 `~/.okb/client/doi-hash.json` 里记录的 DOI→哈希，命中就不再重新读整份 PDF 算哈希
+    /// （仅当本地文件自上次记录后没被替换/修改过时才可靠）
+    #[arg(long, default_value_t = false)]
+    reuse_hash: bool,
+
     #[command(flatten)]
     interval: UploadIntervalArgs,
 }
@@ -276,10 +281,14 @@ impl ServerIndex {
     }
 }
 
-/// 上传响应
+/// 上传响应（`doi` / `file_hash` 用于记进 DOI→哈希记录，服务端没返回就为空）
 #[derive(Debug, Deserialize)]
 struct UploadResult {
     id: u64,
+    #[serde(default)]
+    doi: Option<String>,
+    #[serde(default)]
+    file_hash: Option<String>,
 }
 
 /// 本地可上传文档（Zotero）
@@ -375,6 +384,115 @@ fn save_docs_cache(raw: &str) -> Option<PathBuf> {
         return None;
     }
     Some(path)
+}
+
+// ==================== DOI → 哈希记录（~/.okb/client/doi-hash.json） ====================
+
+/// `~/.okb/client/doi-hash.json` 路径（DOI → 文件 sha256 的本地记录，供 `--reuse-hash` 复用）
+fn hash_doi_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".okb").join("client").join("doi-hash.json"))
+}
+
+/// DOI → sha256 记录（文件内容是一个 JSON 对象，key 为归一化小写 DOI，value 为 sha256 hex）
+///
+/// 目的：整库 PDF 动辄几 GB，每次运行都把每份文件重读一遍算哈希很慢，
+/// 记录一次后可用 `--reuse-hash` 直接复用。**文件被替换后记录会过期**，
+/// 所以只有确定本地文件没换过时才该开 `--reuse-hash`。
+struct HashDoiStore {
+    path: Option<PathBuf>,
+    map: HashMap<String, String>,
+    dirty: bool,
+}
+
+impl HashDoiStore {
+    /// 读取记录；文件不存在 = 空记录，解析失败只警告（不阻断运行）
+    fn load() -> Self {
+        let path = hash_doi_path();
+        let mut map = HashMap::new();
+        if let Some(p) = &path {
+            match std::fs::read_to_string(p) {
+                Ok(text) => match serde_json::from_str::<HashMap<String, String>>(&text) {
+                    Ok(m) => map = m,
+                    Err(e) => eprintln!("警告: {} 解析失败（按空记录继续）: {}", p.display(), e),
+                },
+                Err(e) => {
+                    if e.kind() != io::ErrorKind::NotFound {
+                        eprintln!("警告: 无法读取 {}: {}", p.display(), e);
+                    }
+                }
+            }
+        }
+        Self {
+            path,
+            map,
+            dirty: false,
+        }
+    }
+
+    /// DOI → 记录用的 key（去 `https://doi.org/` 等前缀后转小写）
+    fn key(doi: &str) -> Option<String> {
+        normalize_doi(doi).map(|d| d.to_lowercase())
+    }
+
+    fn get(&self, doi: &str) -> Option<&str> {
+        let key = Self::key(doi)?;
+        self.map.get(&key).map(|s| s.as_str())
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// 记录一条 DOI → 哈希（DOI 无效或哈希为空时忽略；已记录的相同值不重复写盘）
+    fn record(&mut self, doi: &str, hash: &str) {
+        let hash = hash.trim();
+        if hash.is_empty() {
+            return;
+        }
+        let Some(key) = Self::key(doi) else {
+            return;
+        };
+        if self.map.get(&key).map(|h| h.as_str()) == Some(hash) {
+            return;
+        }
+        self.map.insert(key, hash.to_string());
+        self.dirty = true;
+    }
+
+    /// 有改动时原子写回（先写 `doi-hash.json.tmp` 再 rename）
+    fn flush(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        let Some(path) = self.path.clone() else {
+            eprintln!("警告: 无法定位 ~/.okb/client/doi-hash.json，哈希记录未保存");
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("警告: 无法创建目录 {}: {}", parent.display(), e);
+                return;
+            }
+        }
+        let body = match serde_json::to_string_pretty(&self.map) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("警告: 哈希记录序列化失败: {}", e);
+                return;
+            }
+        };
+        let tmp = path.with_extension("rs.tmp");
+        if let Err(e) = std::fs::write(&tmp, &body) {
+            eprintln!("警告: 无法写入 {}: {}", tmp.display(), e);
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            eprintln!("警告: 无法保存 {}: {}", path.display(), e);
+            let _ = std::fs::remove_file(&tmp);
+            return;
+        }
+        self.dirty = false;
+    }
 }
 
 // ==================== Token 读取 ====================
@@ -892,6 +1010,8 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
     let token = read_token(args.token.as_deref(), cfg.token.as_deref());
     let base_url = args.base_url.clone().unwrap_or_else(|| cfg.base_url());
     let process = args.process;
+    // `dir` 不知道 DOI（要等上传后服务端返回），所以只做记录：上传成功后写回 `~/.okb/client/doi-hash.json`
+    let mut hash_store = HashDoiStore::load();
 
     println!("扫描目录: {}", args.dir);
     println!("递归搜索: {}", if args.recursive { "是" } else { "否" });
@@ -1039,6 +1159,12 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
         match api_upload(&base_url, path, None, &token).await {
             Some(result) => {
                 println!("成功 -> id={}", result.id);
+                // 记下 DOI → 哈希（服务端算的与本地一致，优先用服务端返回值），供 `zotero --reuse-hash` 复用
+                if let Some(doi) = result.doi.as_deref().filter(|s| !s.trim().is_empty()) {
+                    let h = result.file_hash.as_deref().unwrap_or(hash.as_str());
+                    hash_store.record(doi, h);
+                    hash_store.flush();
+                }
                 uploaded += 1;
                 // 触发解析流水线
                 if process && api_trigger_pipeline(&client, &base_url, result.id, &token).await {
@@ -1509,11 +1635,29 @@ fn preview_hash(h: &str) -> String {
 }
 
 /// 上传前按需计算本地 PDF 的 sha256（打印进度与耗时）；返回 `None` 表示读取失败。
-async fn compute_local_hash(d: &LocalDoc) -> Option<String> {
+///
+/// `reuse` 为真时先查 DOI→哈希记录（`~/.okb/client/doi-hash.json`），命中就完全不读文件；
+/// 真正算出哈希后会写回记录，方便下次 `--reuse-hash` 复用。
+async fn compute_local_hash(
+    d: &LocalDoc,
+    reuse: bool,
+    store: &mut HashDoiStore,
+) -> Option<String> {
     let file_name = Path::new(&d.file_path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| d.file_path.clone());
+    if reuse {
+        if let Some(h) = store.get(&d.doi) {
+            println!(
+                "    复用已记录哈希: {} | {} -> {}",
+                d.doi,
+                file_name,
+                preview_hash(h)
+            );
+            return Some(h.to_string());
+        }
+    }
     print!("    计算哈希: {} | {} ... ", d.doi, file_name);
     io::stdout().flush().ok();
     let started = std::time::Instant::now();
@@ -1524,6 +1668,8 @@ async fn compute_local_hash(d: &LocalDoc) -> Option<String> {
                 &h[..16.min(h.len())],
                 format_duration(started.elapsed())
             );
+            store.record(&d.doi, &h);
+            store.flush();
             Some(h)
         }
         Err(e) => {
@@ -1588,6 +1734,17 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
             DupDoiAction::Skip => "skip（跳过，默认）",
             DupDoiAction::Hash => "hash（比对哈希，不同则覆盖）",
             DupDoiAction::HealthHash => "health-hash（健康则跳过，否则比对哈希）",
+        }
+    );
+    // DOI → 哈希记录：默认只写；开 `--reuse-hash` 时优先复用，省掉重新读整份 PDF
+    let mut hash_store = HashDoiStore::load();
+    println!(
+        "哈希记录: {} 条（{}）",
+        hash_store.len(),
+        if args.reuse_hash {
+            "复用开启，命中则跳过重新计算"
+        } else {
+            "仅记录，不复用"
         }
     );
     println!();
@@ -1810,7 +1967,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
             };
 
         let local_hash = if needs_hash {
-            match compute_local_hash(d).await {
+            match compute_local_hash(d, args.reuse_hash, &mut hash_store).await {
                 Some(h) => Some(h),
                 None => {
                     to_skip.push((d, "本地文件哈希计算失败".to_string()));
@@ -2054,5 +2211,47 @@ async fn main() -> Result<()> {
     match &cli.command {
         Command::Zotero(args) => run_zotero(args).await,
         Command::Dir(args) => run_dir(args).await,
+    }
+}
+#[cfg(test)]
+mod hash_doi_tests {
+    use super::*;
+
+    #[test]
+    fn reuse_by_normalized_doi() {
+        let mut s = HashDoiStore { path: None, map: HashMap::new(), dirty: false };
+        s.record("https://doi.org/10.1000/XYZ", "abc123");
+        assert_eq!(s.get("10.1000/xyz"), Some("abc123"));
+        assert_eq!(s.get("DOI:10.1000/xyz."), Some("abc123"));
+        assert_eq!(s.get("10.1000/other"), None);
+        // 空哈希 / 空 DOI 不记录
+        s.record("10.1000/empty", "  ");
+        s.record("", "deadbeef");
+        assert_eq!(s.len(), 1);
+        // 相同值不重复标记 dirty
+        s.dirty = false;
+        s.record("10.1000/xyz", "abc123");
+        assert!(!s.dirty);
+        // JSON 往返
+        let body = serde_json::to_string_pretty(&s.map).unwrap();
+        let back: HashMap<String, String> = serde_json::from_str(&body).unwrap();
+        assert_eq!(back.get("10.1000/xyz").map(|v| v.as_str()), Some("abc123"));
+    }
+
+    #[test]
+    fn flush_then_reload() {
+        let dir = std::env::temp_dir().join(format!("okb-hashdoi-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doi-hash.json");
+        let _ = std::fs::remove_file(&path);
+        let mut s = HashDoiStore { path: Some(path.clone()), map: HashMap::new(), dirty: false };
+        s.record("10.2000/AAA", "cafebabe");
+        s.flush();
+        assert!(path.is_file());
+        assert!(!path.with_extension("rs.tmp").exists());
+        let text = std::fs::read_to_string(&path).unwrap();
+        let m: HashMap<String, String> = serde_json::from_str(&text).unwrap();
+        assert_eq!(m.get("10.2000/aaa").map(|v| v.as_str()), Some("cafebabe"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

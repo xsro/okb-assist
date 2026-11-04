@@ -24,6 +24,22 @@
 `~/.okb/client/docs.json`（原子写，先写 `.tmp` 再 rename），方便离线查看或被其他工具复用。
 内容就是接口返回的 `{count, with_doi, with_hash, generated_at, documents:[...]}`（4 千篇左右约 700 KB）。
 
+**DOI → 哈希记录**：客户端算过/传过的文件哈希会按 DOI 记到 `~/.okb/client/doi-hash.json`
+（原子写：先写 `doi-hash.json.tmp` 再 rename）。文件内容是 JSON 对象，key 为归一化小写 DOI，value 为 sha256 hex：
+
+```json
+{
+  "10.1000/xyz123": "9f2c…（64 位）"
+}
+```
+
+- 写入时机：`zotero` 流程真正算出本地哈希时（`--dup-doi-action hash|health-hash`），
+  以及 `dir` 流程上传成功、服务端返回了 `doi` 时（取服务端算的 `file_hash`）；
+- 读取时机：只有加 `--reuse-hash`（目前仅 `zotero` 子命令）才读，命中就直接复用记录里的哈希，
+  **完全不读本地 PDF**，省掉几 GB 库每次重算的时间；未命中仍按原逻辑计算并记回文件。
+- 注意：记录不含文件大小/mtime，**本地 PDF 被替换后旧记录会过期**（会误判为 hash 一致）。
+  换过文件就删掉对应条目，或别加 `--reuse-hash`（默认行为就是重新计算）。
+
 ## 子命令
 
 ### `zotero` — Zotero CSV 导入
@@ -68,6 +84,8 @@ okb-client zotero <csv_file> [选项]
   或用逗号分隔（`--keys A,B`），大小写不敏感。过滤在 DOI/附件判定之前执行，
   阶段一之前会报告「CSV 里找不到的 key」与「命中但因缺 DOI/缺 PDF 被跳过的条目」
 - `--debug`                  显示解析出的元数据详情
+- `--reuse-hash`             复用 `~/.okb/client/doi-hash.json` 里记录的 DOI→哈希：命中则跳过重新读文件算哈希
+  （需要比对哈希的策略才有意义：`--dup-doi-action hash` / `health-hash`）。文件没换过时才可靠
 - `--upload-interval <SECONDS>` 每次上传之间的间隔秒数（默认 `1`；可写小数如 `0.5`，`0` 表示不等待）。
   新建上传与「更新 PDF」共用同一个计数，两次上传之间才等待，首个上传不等待
 
@@ -78,6 +96,7 @@ okb-client zotero data\我的文库.csv --storage-root D:\Zotero\storage
 okb-client zotero data\我的文库.csv --update-meta   # 更新 PDF 同时更新元数据
 okb-client zotero data\我的文库.csv --dup-doi-action hash        # DOI 相同但 PDF 不同则覆盖
 okb-client zotero data\我的文库.csv --dup-doi-action health-hash # 只修复不健康的 PDF
+okb-client zotero data\我的文库.csv --dup-doi-action hash --reuse-hash  # 复用上次算好的哈希，不重读 PDF
 okb-client zotero data\我的文库.csv --keys NTRNTRLJ,URB2Q2D5   # 只处理这两条
 ```
 
@@ -93,6 +112,8 @@ okb-client zotero data\我的文库.csv --keys NTRNTRLJ,URB2Q2D5   # 只处理�
 - 哈希比对优先用一次性拉到的全量索引（本地比对），索引拿不到时回退为逐文件 `diff-hashes`；
   回退模式下单次比对请求失败会打印「本文件未上传（可重试）」，不会默默传重复文件；
 - `--dry-run` 仍会算哈希并比对，输出会列出「服务器已存在，跳过」与「服务器没有该文件（dry-run）」。
+- 上传成功且服务端返回了 DOI 时，会把「DOI → 哈希」写进 `~/.okb/client/doi-hash.json`（供 `zotero --reuse-hash` 复用）。
+  `dir` 流程在算哈希前并不知道 DOI，所以这里**只记录、不复用**。
 
 ```
 okb-client dir <目录路径> [选项]
