@@ -38,6 +38,32 @@ enum Command {
     Dir(DirArgs),
 }
 
+/// 上传节流参数（`zotero` / `dir` 两个子命令共用）
+#[derive(clap::Args, Debug, Clone)]
+struct UploadIntervalArgs {
+    /// 每次上传之间的间隔秒数（默认 1 秒；可写小数，0 表示不等待）
+    #[arg(long, value_name = "SECONDS", default_value_t = 1.0)]
+    upload_interval: f64,
+}
+
+impl UploadIntervalArgs {
+    /// 第 `seq` 次上传（从 0 开始）前的等待：首个不等待，间隔 <= 0 也不等待
+    async fn throttle(&self, seq: usize) {
+        if seq > 0 && self.upload_interval > 0.0 {
+            tokio::time::sleep(std::time::Duration::from_secs_f64(self.upload_interval)).await;
+        }
+    }
+
+    /// 头部提示用的可读描述
+    fn describe(&self) -> String {
+        if self.upload_interval > 0.0 {
+            format!("{} 秒", self.upload_interval)
+        } else {
+            "无间隔".to_string()
+        }
+    }
+}
+
 /// Zotero CSV 导入参数
 #[derive(Parser, Debug)]
 struct ZoteroArgs {
@@ -76,6 +102,9 @@ struct ZoteroArgs {
     /// 显示解析出的元数据详情
     #[arg(long)]
     debug: bool,
+
+    #[command(flatten)]
+    interval: UploadIntervalArgs,
 }
 
 /// DOI 重复时的处理策略（`--dup-doi-action`）
@@ -114,6 +143,9 @@ struct DirArgs {
     /// 上传后触发解析流水线（需要显式指定）
     #[arg(long)]
     process: bool,
+
+    #[command(flatten)]
+    interval: UploadIntervalArgs,
 }
 
 // ==================== 数据类型 ====================
@@ -871,6 +903,7 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
 
     println!("扫描目录: {}", args.dir);
     println!("递归搜索: {}", if args.recursive { "是" } else { "否" });
+    println!("上传间隔: {}", args.interval.describe());
     println!("服务地址: {}", base_url);
     println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
     println!();
@@ -1029,14 +1062,20 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
     // 6. 执行上传
     println!();
     println!("开始上传 {} 个文件 ...", selected.len());
+    let mut upload_seq = 0usize;
     for p in &selected {
-        print!("  上传 {} ... ", p.path.display());
-        io::stdout().flush().ok();
         if args.dry_run {
+            print!("  上传 {} ... ", p.path.display());
+            io::stdout().flush().ok();
             println!("[dry-run] 跳过");
             uploaded += 1;
             continue;
         }
+        // 两次上传之间按 `--upload-interval` 等待（首个不等待）
+        args.interval.throttle(upload_seq).await;
+        upload_seq += 1;
+        print!("  上传 {} ... ", p.path.display());
+        io::stdout().flush().ok();
         match api_upload(&base_url, &p.path, None, &token).await {
             Some(result) => {
                 println!("成功 -> id={}", result.id);
@@ -1526,6 +1565,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     println!("Storage root: {}", storage_root.clone().unwrap_or_default());
     println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
     println!("更新元数据: {}", if update_meta { "是" } else { "否 (默认)" });
+    println!("上传间隔: {}", args.interval.describe());
     if !args.keys.is_empty() {
         println!("只处理 key: {}", args.keys.join(", "));
     }
@@ -1949,18 +1989,26 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     let mut uploaded = 0usize;
     let mut updated_pdf = 0usize;
     let mut failed = 0usize;
+    // 已执行的上传/替换次数（用于按 `--upload-interval` 节流，首个不等待）
+    let mut upload_seq = 0usize;
 
     // 执行新建
     for (i, dw) in new_entries.iter().enumerate() {
         if !new_choices[i] {
             continue;
         }
-        print!("  新建 [{}] {} ... ", i + 1, dw.doc.doi);
-        io::stdout().flush().ok();
         if args.dry_run {
+            print!("  新建 [{}] {} ... ", i + 1, dw.doc.doi);
+            io::stdout().flush().ok();
             println!("[dry-run] 跳过");
             uploaded += 1;
-        } else if upload_one_zotero(&dw.doc, &base_url, update_meta, false, &client, &token).await {
+            continue;
+        }
+        args.interval.throttle(upload_seq).await;
+        upload_seq += 1;
+        print!("  新建 [{}] {} ... ", i + 1, dw.doc.doi);
+        io::stdout().flush().ok();
+        if upload_one_zotero(&dw.doc, &base_url, update_meta, false, &client, &token).await {
             println!("✓");
             uploaded += 1;
         } else {
@@ -1974,12 +2022,18 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         if !update_choices[i] {
             continue;
         }
-        print!("  更新 PDF [{}] ID={} ({}）... ", i + 1, server_id, dw.doc.doi);
-        io::stdout().flush().ok();
         if args.dry_run {
+            print!("  更新 PDF [{}] ID={} ({}) ... ", i + 1, server_id, dw.doc.doi);
+            io::stdout().flush().ok();
             println!("[dry-run] 跳过");
             updated_pdf += 1;
-        } else if api_replace_pdf(&base_url, *server_id, Path::new(&dw.doc.file_path), &token).await {
+            continue;
+        }
+        args.interval.throttle(upload_seq).await;
+        upload_seq += 1;
+        print!("  更新 PDF [{}] ID={} ({}) ... ", i + 1, server_id, dw.doc.doi);
+        io::stdout().flush().ok();
+        if api_replace_pdf(&base_url, *server_id, Path::new(&dw.doc.file_path), &token).await {
             if update_meta {
                 api_update_metadata(&client, &base_url, *server_id, &dw.doc.meta, &token).await;
                 api_save_info(&client, &base_url, *server_id, &dw.doc.info, &token).await;

@@ -60,6 +60,8 @@ okb-client zotero <csv_file> [选项]
   或用逗号分隔（`--keys A,B`），大小写不敏感。过滤在 DOI/附件判定之前执行，
   阶段一之前会报告「CSV 里找不到的 key」与「命中但因缺 DOI/缺 PDF 被跳过的条目」
 - `--debug`                  显示解析出的元数据详情
+- `--upload-interval <SECONDS>` 每次上传之间的间隔秒数（默认 `1`；可写小数如 `0.5`，`0` 表示不等待）。
+  新建上传与「更新 PDF」共用同一个计数，两次上传之间才等待，首个上传不等待
 
 示例：
 ```
@@ -85,11 +87,15 @@ okb-client dir <目录路径> [选项]
 - `--dry-run`                试运行，不实际上传
 - `-r, --recursive`          递归搜索子目录
 - `--process`                上传后触发解析流水线（默认不触发）
+- `--upload-interval <SECONDS>` 每次上传之间的间隔秒数（默认 `1`；可写小数如 `0.5`，`0` 表示不等待），
+  适合服务端限速或不想一次压满带宽的场景
 
 示例：
 ```
 okb-client dir D:\Papers --base-url http://192.168.1.162:5001 -r
 okb-client dir ./downloads --dry-run
+okb-client dir D:\Papers -r --upload-interval 3   # 每次上传之间等 3 秒
+okb-client dir D:\Papers -r --upload-interval 0   # 尽可能快（默认是 1 秒）
 ```
 
 ## Token 设置
