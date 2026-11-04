@@ -40,6 +40,24 @@ export function checkPdfHealth() {
   )
 }
 
+/** 单篇 PDF 健康检查（同步返回，结果同时写回数据库） */
+export interface PdfHealthResult {
+  id: number
+  /** ok / warning / error / missing */
+  status: string
+  message: string
+  page_count: number | null
+  /** 实际使用的解析引擎：mutool / mupdf */
+  engine: string
+  pdf_path: string
+}
+
+export function checkDocumentPdfHealth(id: number) {
+  return apiPost<PdfHealthResult>(
+    `/assist/api/admin/documents/${id}/check-pdf-health`
+  )
+}
+
 /** 文献去重（按文件哈希合并重复文档） */
 export function deduplicateDocuments() {
   return apiPost<{ message: string; merged_groups: number; deleted_docs: number }>(

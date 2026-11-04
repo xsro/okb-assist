@@ -52,6 +52,17 @@ async fn get_config(
     if let Some(obj) = config.as_object_mut() {
         obj.remove("users");
         obj.insert("users_summary".to_string(), cm.users_summary());
+        // PDF 解析引擎能力（前端据此禁用「内置 mupdf」选项）
+        // - `mupdf` 需编入 `mupdf` feature；`mutool` 总是可选（系统里没装时健康检查会报 warning）
+        obj.insert(
+            "pdf_capabilities".to_string(),
+            json!({
+                "mutool": true,
+                "mupdf": crate::services::pdf_engine::MUPDF_AVAILABLE,
+                // 实际生效的引擎（配置为 mupdf 但未编入 feature 时会回退为 mutool）
+                "active": crate::services::pdf_engine::active().as_str(),
+            }),
+        );
     }
     Json(config).into_response()
 }
@@ -167,6 +178,37 @@ async fn update_config(
             }
         }
         config["vector_dbs"] = Value::Array(vector_dbs.clone());
+    }
+
+    // PDF 解析引擎（`pdf.engine`）：mutool 命令行 / 内置 mupdf（需 --features mupdf）
+    if let Some(pdf) = body.get("pdf").and_then(|v| v.as_object()) {
+        if let Some(engine) = pdf.get("engine").and_then(|v| v.as_str()) {
+            let engine = engine.trim().to_ascii_lowercase();
+            if engine != "mutool" && engine != "mupdf" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"detail": format!("不支持的 PDF 解析引擎: {engine}（只支持 mutool / mupdf）")})),
+                )
+                    .into_response();
+            }
+            if engine == "mupdf" && !crate::services::pdf_engine::MUPDF_AVAILABLE {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"detail": "当前二进制未启用 mupdf feature（需用 --features mupdf 编译），只能使用 mutool 命令行"})),
+                )
+                    .into_response();
+            }
+            let base = config
+                .get("pdf")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            let mut merged = serde_json::Map::new();
+            merged.extend(base);
+            merged.extend(pdf.clone());
+            merged.insert("engine".to_string(), json!(engine));
+            config["pdf"] = Value::Object(merged);
+        }
     }
 
     if let Err(e) = cm.save_config(&config) {

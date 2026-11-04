@@ -12,6 +12,9 @@ I use pi agent to code this and test this.
 - release中的版本将mupdf的功能内置了
 - 如果编译的时候未启用 `mupdf` feature ，则需要系统 PATH 中需包含 `mutool` 
   - **mutool**：来自 MuPDF 工具集，安装方式见 <https://mupdf.com/downloads/>
+- 用哪个引擎在**配置页「PDF 解析引擎」**里选（写入 `config.json` 的 `pdf.engine`，保存即生效）：
+  - `mutool`（默认）：调用外部命令行，能检出 xref 损坏/截断等结构问题；
+  - `mupdf`：使用内置库，只有 `--features mupdf` 编出来的二进制才能选（否则配置页里该项置灰）。
 
 ## 后端（Rust）
 

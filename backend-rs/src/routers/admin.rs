@@ -47,6 +47,14 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/admin/recalculate-hashes", post(recalculate_hashes))
         .route("/assist/api/admin/check-pdf-health/", post(check_pdf_health_task))
         .route("/assist/api/admin/check-pdf-health", post(check_pdf_health_task))
+        .route(
+            "/assist/api/admin/documents/:id/check-pdf-health/",
+            post(check_document_pdf_health),
+        )
+        .route(
+            "/assist/api/admin/documents/:id/check-pdf-health",
+            post(check_document_pdf_health),
+        )
         .route("/assist/api/admin/sync-file-sizes/", post(sync_file_sizes))
         .route("/assist/api/admin/sync-file-sizes", post(sync_file_sizes))
         .route("/assist/api/admin/dedup/", post(dedup))
@@ -791,6 +799,79 @@ async fn check_pdf_health_task(
         "detail": "PDF 健康检查任务已提交，后台逐个执行中（进度见「活跃任务」）",
         "started": true,
     }))
+}
+
+/// POST /assist/api/admin/documents/:id/check-pdf-health —— **单篇同步**健康检查。
+///
+/// 与批量端点不同，这个接口**当场返回结果**（单文件几十毫秒），并写回
+/// `documents.pdf_health` / `pdf_health_message`。用于文档管理页的「检查 PDF 健康」按钮。
+///
+/// 响应：`{id, status, message, page_count, engine, pdf_path}`，
+/// `status` 为 `ok` / `warning` / `error` / `missing`。
+async fn check_document_pdf_health(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+    Extension(settings): Extension<Arc<Settings>>,
+    Path(id): Path<i64>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
+
+    // 文档必须存在（否则 pdf_path 模板也能拼出一个不存在的路径，报“缺失”会误导）
+    let found: Result<Option<(i64,)>, _> = sqlx::query_as("SELECT id FROM documents WHERE id = ?")
+        .bind(id)
+        .fetch_optional(db.pool())
+        .await;
+    match found {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"detail": format!("文档 {id} 不存在")})))
+                .into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": format!("查询文档失败: {e}")})),
+            )
+                .into_response()
+        }
+    }
+
+    let pdf_path = paths::get_pdf_path(&settings, id);
+    let health = crate::services::pdf_health::check_pdf_health(pdf_path.clone()).await;
+
+    if let Err(e) = sqlx::query(
+        "UPDATE documents SET pdf_health = ?, pdf_health_message = ? WHERE id = ?",
+    )
+    .bind(health.status)
+    .bind(&health.message)
+    .bind(id)
+    .execute(db.pool())
+    .await
+    {
+        tracing::warn!("PDF 健康结果写库失败 doc_id={}: {}", id, e);
+    }
+
+    tracing::info!(
+        "单篇 PDF 健康检查 doc_id={} path={} status={} pages={:?} engine={} msg={}",
+        id,
+        pdf_path,
+        health.status,
+        health.page_count,
+        crate::services::pdf_engine::active().as_str(),
+        health.message
+    );
+
+    Json(json!({
+        "id": id,
+        "status": health.status,
+        "message": health.message,
+        "page_count": health.page_count,
+        "engine": crate::services::pdf_engine::active().as_str(),
+        "pdf_path": pdf_path,
+    }))
+    .into_response()
 }
 
 /// POST /assist/api/admin/sync-file-sizes —— 同步所有文档的文件大小信息到数据库。

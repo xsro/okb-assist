@@ -85,6 +85,23 @@ fn normalize_service_config(mut raw: serde_json::Value) -> serde_json::Value {
         }
     }
 
+    // pdf 段归一化：engine 只能是 mutool / mupdf（未知取值当 mutool）。
+    // 注意：不在这里做「是否编入 mupdf」的能力兜底，配置值原样保留
+    // （换回带 feature 的二进制后仍按原选择走，见 services::pdf_engine::active）。
+    if !raw.get("pdf").map(|v| v.is_object()).unwrap_or(false) {
+        raw["pdf"] = serde_json::json!({});
+    }
+    if let Some(pdf) = raw.get_mut("pdf").and_then(|v| v.as_object_mut()) {
+        let engine_ok = pdf
+            .get("engine")
+            .and_then(|v| v.as_str())
+            .map(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "mutool" | "mupdf"))
+            .unwrap_or(false);
+        if !engine_ok {
+            pdf.insert("engine".to_string(), serde_json::json!("mutool"));
+        }
+    }
+
     raw
 }
 
@@ -93,6 +110,8 @@ pub fn default_config() -> serde_json::Value {
     serde_json::json!({
         "base_url": "",
         "alias_expiration_hours": 1,
+        // PDF 解析引擎："mutool"（外部命令行，默认）/ "mupdf"（内置库，需 --features mupdf）
+        "pdf": { "engine": "mutool" },
         "active_mineru": "",
         "mineru": [
             {

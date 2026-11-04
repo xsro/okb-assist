@@ -11,7 +11,6 @@ use std::path::Path;
 #[cfg(feature = "mupdf")]
 use mupdf::{Document, MetadataName, TextExtractOptions};
 
-#[cfg(not(feature = "mupdf"))]
 use std::process::Command;
 
 // ── 公共 API ──────────────────────────────────────────────
@@ -56,9 +55,24 @@ pub async fn extract_pdf_metadata_from_path_async(
     .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
 }
 
-/// 从磁盘上的 PDF 提取元数据
-#[cfg(feature = "mupdf")]
+/// 从磁盘上的 PDF 提取元数据（按运行时引擎分发）
 pub fn extract_pdf_metadata_from_path(
+    path: &Path,
+    filename: Option<&str>,
+    doc_id: Option<i64>,
+) -> serde_json::Value {
+    match crate::services::pdf_engine::active() {
+        #[cfg(feature = "mupdf")]
+        crate::services::pdf_engine::PdfEngine::Mupdf => {
+            extract_pdf_metadata_from_path_mupdf(path, filename, doc_id)
+        }
+        _ => extract_pdf_metadata_from_path_mutool(path, filename, doc_id),
+    }
+}
+
+/// 从磁盘上的 PDF 提取元数据（内置 mupdf）
+#[cfg(feature = "mupdf")]
+fn extract_pdf_metadata_from_path_mupdf(
     path: &Path,
     filename: Option<&str>,
     doc_id: Option<i64>,
@@ -80,9 +94,8 @@ pub fn extract_pdf_metadata_from_path(
     serde_json::Value::Object(result)
 }
 
-/// 从磁盘上的 PDF 提取元数据（回退方案：直接让 mutool 读原文件，无需临时副本）
-#[cfg(not(feature = "mupdf"))]
-pub fn extract_pdf_metadata_from_path(
+/// 从磁盘上的 PDF 提取元数据（外部 mutool：直接读原文件，无需临时副本）
+fn extract_pdf_metadata_from_path_mutool(
     path: &Path,
     filename: Option<&str>,
     doc_id: Option<i64>,
@@ -131,8 +144,23 @@ pub async fn extract_pdf_report_from_path_async(
 /// }
 /// ```
 /// `info` 为 PDF Info 字典原始键值；`heuristics` 为现有启发式抽取结果。
-#[cfg(feature = "mupdf")]
 pub fn extract_pdf_report_from_path(
+    path: &Path,
+    filename: Option<&str>,
+    doc_id: Option<i64>,
+) -> serde_json::Value {
+    match crate::services::pdf_engine::active() {
+        #[cfg(feature = "mupdf")]
+        crate::services::pdf_engine::PdfEngine::Mupdf => {
+            extract_pdf_report_from_path_mupdf(path, filename, doc_id)
+        }
+        _ => extract_pdf_report_from_path_mutool(path, filename, doc_id),
+    }
+}
+
+/// 生成 PDF 元信息报告（内置 mupdf）
+#[cfg(feature = "mupdf")]
+fn extract_pdf_report_from_path_mupdf(
     path: &Path,
     filename: Option<&str>,
     doc_id: Option<i64>,
@@ -184,9 +212,8 @@ pub fn extract_pdf_report_from_path(
     serde_json::Value::Object(report)
 }
 
-/// 生成 PDF 元信息报告（回退方案：直接让 mutool 读原文件）
-#[cfg(not(feature = "mupdf"))]
-pub fn extract_pdf_report_from_path(
+/// 生成 PDF 元信息报告（外部 mutool：直接读原文件）
+fn extract_pdf_report_from_path_mutool(
     path: &Path,
     filename: Option<&str>,
     doc_id: Option<i64>,
@@ -308,7 +335,6 @@ fn extract_from_info_dict(
 
 // ── mutool 路径：Info 字典提取 ────────────────────────────
 
-#[cfg(not(feature = "mupdf"))]
 struct InfoDict {
     title: Option<String>,
     author: Option<String>,
@@ -317,7 +343,6 @@ struct InfoDict {
     creation_date: Option<String>,
 }
 
-#[cfg(not(feature = "mupdf"))]
 fn extract_info_dict_from_path(path: &Path) -> Option<InfoDict> {
     let stdout = mutool_show(path, &["trailer.Info"])?;
     let entries = parse_pdf_dict_entries(&stdout);
@@ -325,7 +350,6 @@ fn extract_info_dict_from_path(path: &Path) -> Option<InfoDict> {
 }
 
 /// 调用 `mutool show <pdf> <path...>` 并返回 stdout
-#[cfg(not(feature = "mupdf"))]
 fn mutool_show(path: &std::path::Path, args: &[&str]) -> Option<String> {
     let mutool_path = crate::settings::get_settings().mutool_path();
     let output = Command::new(&mutool_path)
@@ -341,7 +365,6 @@ fn mutool_show(path: &std::path::Path, args: &[&str]) -> Option<String> {
 }
 
 /// 读取 PDF 页数（优先 Page tree 的 /Count，回退到 `mutool pages` 计数）
-#[cfg(not(feature = "mupdf"))]
 fn mutool_page_count(path: &std::path::Path) -> Option<i64> {
     if let Some(out) = mutool_show(path, &["trailer/Root/Pages/Count"]) {
         if let Ok(n) = out.trim().parse::<i64>() {
@@ -369,7 +392,6 @@ fn mutool_page_count(path: &std::path::Path) -> Option<i64> {
 }
 
 /// 是否加密（trailer 中存在 /Encrypt）
-#[cfg(not(feature = "mupdf"))]
 fn mutool_encrypted(path: &std::path::Path) -> bool {
     match mutool_show(path, &["trailer/Encrypt"]) {
         Some(out) => {
@@ -381,7 +403,6 @@ fn mutool_encrypted(path: &std::path::Path) -> bool {
 }
 
 /// 从解析出的 Info 字典条目构造结构化 `InfoDict`（键名大小写不敏感）
-#[cfg(not(feature = "mupdf"))]
 fn info_dict_from_entries(entries: &[(String, String)]) -> Option<InfoDict> {
     if entries.is_empty() {
         return None;
@@ -416,7 +437,6 @@ fn is_pdf_delimiter(c: char) -> bool {
 ///
 /// 支持字面量字符串 `(..)`、十六进制字符串 `<..>`、名字 `/Name`、
 /// 数字与布尔字面量；嵌套字典的键值会被跳过（Info 字典里极少出现）。
-#[cfg(not(feature = "mupdf"))]
 fn parse_pdf_dict_entries(output: &str) -> Vec<(String, String)> {
     let chars: Vec<char> = output.chars().collect();
     let n = chars.len();
@@ -456,7 +476,6 @@ fn parse_pdf_dict_entries(output: &str) -> Vec<(String, String)> {
 }
 
 /// 读取一个 PDF 值，返回 (解码后的字符串, 下一个位置)
-#[cfg(not(feature = "mupdf"))]
 #[allow(dead_code)]
 fn read_pdf_value(chars: &[char], start: usize) -> (Option<String>, usize) {
     let n = chars.len();
@@ -645,7 +664,6 @@ fn decode_pdf_bytes(bytes: &[u8]) -> String {
     }
 }
 
-#[cfg(not(feature = "mupdf"))]
 fn extract_from_info_dict_parsed(
     info: &InfoDict,
     filename: Option<&str>,
@@ -716,7 +734,6 @@ fn extract_full_text(doc: &Document, doc_id: Option<i64>) -> Option<String> {
     }
 }
 
-#[cfg(not(feature = "mupdf"))]
 fn extract_full_text_from_path(path: &Path, doc_id: Option<i64>) -> Option<String> {
     let mutool_path = crate::settings::get_settings().mutool_path();
     let output = Command::new(&mutool_path)

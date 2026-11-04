@@ -565,6 +565,17 @@ impl Settings {
             .to_string()
     }
 
+    /// PDF 解析引擎配置值（`config.json` 的 `pdf.engine`）：`mutool` / `mupdf`。
+    ///
+    /// 只返回**配置值**（缺省 `mutool`）；把「当前二进制是否支持 mupdf」
+    /// 算进来的是 [`crate::services::pdf_engine::active`]。
+    pub fn pdf_engine_name(&self) -> String {
+        self.get_config()["pdf"]["engine"]
+            .as_str()
+            .unwrap_or("mutool")
+            .to_string()
+    }
+
     /// 静态目录挂载配置（`system.json` 的 `static_dirs` 段，原始 JSON 数组）。
     ///
     /// 解析与校验见 [`crate::static_files`]；此段需重启进程生效。

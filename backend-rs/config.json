@@ -2,6 +2,13 @@
   "active_mineru": "官方标准（需要token）",
   "alias_expiration_hours": 1,
   "base_url": "http://127.0.0.1:5001/",
+  "drive": {
+    "default_quota_mb": 0,
+    "enabled": true,
+    "max_upload_mb": 200,
+    "public_folders": [],
+    "quota_overrides": {}
+  },
   "llm": {
     "models": [
       {
@@ -61,6 +68,9 @@
       "url": "https://www.datalab.to"
     }
   ],
+  "pdf": {
+    "engine": "mutool"
+  },
   "users": {
     "allow_registration": true,
     "items": [

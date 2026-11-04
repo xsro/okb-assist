@@ -73,6 +73,7 @@ cargo build --release
 | `backend-rs/src/logger.rs` | 双日志初始化（文件 + 控制台） |
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`drive.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/drive.rs` | 用户网盘：路径安全、角色阈值、配额统计、目录列举、Content-Type 推断 |
+| `backend-rs/src/services/pdf_engine.rs` | PDF 解析引擎运行时选择（`mutool` 命令行 / 内置 `mupdf`，含能力兜底） |
 | `backend-rs/src/services/` | 后端适配器：`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
@@ -125,6 +126,25 @@ cargo build --release
 - **敏感字段写 `!cat <path>` 引用，不要把密钥写进 JSON**：`mineru[].token` 以及 `llm.models[].key` 都支持以 `!` 开头的值 —— `resolve_token()`（`backend-rs/src/utils.rs`）会读取 `!cat <path>` 指向的文件（路径相对进程 `cwd`，即 `backend-rs/`）并去首尾空白，结果进程内缓存。**LLM 密钥的解析发生在 `ModelEndpoint::client()` 与连接测试的 `test_llm()`**，因此 `config.json` 与 `/assist/api/config` 里只会出现 `!cat ./data/tokens/xxx` 这样的引用，不回显真实密钥；密钥文件放在 `backend-rs/data/tokens/`（已被 git 忽略）。
 - 服务状态端点键为 `llm`（不再是 `ollama`），如 `/assist/api/admin/services/status` 返回 `{mineru, llm, fastembed, vector_dbs, qdrant}`；其中 `llm` 探测的是**信息补全所用的端点**（含 `protocol`/`url`/`model`/`models`）。
 - `PUT /assist/api/config` 会校验 `llm.models` 每项都有非空 `url` 与 `model`，否则返回 400。`llm_extract` 不做校验（空值即继承）。
+
+### PDF 解析引擎（`config.json` 的 `pdf` 段）
+
+PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF 健康检查**）有两套实现，**运行时**按配置选：
+
+```json
+{ "pdf": { "engine": "mutool" } }
+```
+
+| `engine` | 实现 | 何时可选 |
+|---|---|---|
+| `mutool`（默认） | 外部命令行 `mutool`（`system.json` 的 `mutool_path`） | 永远可选 |
+| `mupdf` | 内置 `mupdf` 库 | 仅当二进制用 `--features mupdf` 编译 |
+
+- 解析入口：`services/pdf_engine.rs` —— `configured()`（只反映配置值）、`active()`（配置值 + 编译特性兜底，选 `mupdf` 但没编入 feature 时自动回退 `mutool`）、`MUPDF_AVAILABLE`（`cfg!(feature = "mupdf")`）。
+- **两套实现始终编译**（mutool 路径只依赖 `std::process::Command`），`pdf_meta` / `pdf_health` 的公共入口按 `active()` 分发；`mupdf` 那份仍在 `#[cfg(feature = "mupdf")]` 下。
+- 保存时校验：`engine` 只接受 `mutool` / `mupdf`，否则 400；选了 `mupdf` 但当前二进制没编入 feature 也返回 400（回退只用于「配置值来自换过的二进制」这种场景，不在写入口悄悄改写用户选择）。
+- `GET /assist/api/config` 额外下发只读的 `pdf_capabilities: {mutool: true, mupdf: bool, active: "mutool"|"mupdf"}`，前端据此禁用「内置 mupdf」选项并标出实际生效的引擎。
+- 前端：`components/config/PdfEngineSection.vue`（单选卡片 + 生效中/不可用标记；选 mupdf 时提示「检不出可修复的 xref 损坏」）。
 
 ### 用户与认证（`config.json` 的 `users` 段）
 
@@ -490,9 +510,13 @@ cargo build --release
 
 后台串行检查每篇文档的 PDF 能否使用，结果写 `documents.pdf_health`（`ok` / `warning` / `error` / `missing`，`NULL` = 未检查）与 `documents.pdf_health_message`（原因）。
 
-- 检查顺序：文件存在 → 非空文件 → 文件头 1 KB 含 `%PDF-` → 结构（页数、是否加密，`mupdf` feature 用内置库，否则调 `mutool show` / `mutool pages`）→ 文件尾 2 KB 含 `%%EOF`。
-- 判级：缺文件/空文件/非 PDF/读不出页数 = `error`/`missing`；缺 `%%EOF`、加密、`mutool` 不可用（跳过结构检查）= `warning`。
-- **刻意不复用** `pdf_meta::extract_pdf_report_from_path`：那会整份抽取正文，批量检查太贵；这里只读文件头尾各几 KB + 读一次页数。
+- 两个入口：批量 `POST /assist/api/admin/check-pdf-health`（后台串行，见上）；**单篇** `POST /assist/api/admin/documents/:id/check-pdf-health`（**同步**返回 `{id,status,message,page_count,engine,pdf_path}` 并回写这两列，供文档管理页「PDF 健康」按钮使用，仅 admin）。
+- 检查顺序：文件存在 → 非空文件 → 文件头 1 KB 含 `%PDF-` → 结构（页数、是否加密，按 `config.json` 的 `pdf.engine` 用 `mutool show` / `mutool pages` 或内置 mupdf）→ 文件尾 2 KB 含 `%%EOF` → **解析器 stderr 诊断**。
+- 判级：缺文件/空文件/非 PDF/读不出页数 = `error`/`missing`；缺 `%%EOF`、加密、`mutool` 不可用（跳过结构检查）= `warning`；**结构损坏但解析器自动修复成功（stderr 有诊断）= `warning`**。
+- **必须看 mutool 的 stderr，不能只看页数**：`startxref` 偏移错误 / xref 表偏移全错这类文件，mutool 会打印 `format error: cannot recognize xref format`、`warning: trying to repair broken xref`、`warning: repairing PDF document` 到 stderr，然后**自动修复**并正常输出页数，**退出码仍是 0**。旧实现只看页数，会把这类「已损坏」的文件误判成 `ok`（实测 `data/pdfs/1016/1016.pdf`、`3613.pdf` 就是这种：startxref 指向 xref 表中段）。
+- 诊断处理：`push_diagnostics()` 去重收集 stderr 行（探活/`trailer/Encrypt`/`Pages/Count`/`pages` 四次调用都收），`summarize_diagnostics()` 归为「交叉引用表(xref)损坏 / 数据被截断 / 对象语法错误 / 对象引用无效」并附原始首行；只要诊断非空就判 `warning`，消息写明损坏类型与「严格阅读器可能打不开」。**正常文件 mutool 的 stderr 为空**，因此误报率低（实测本库 13 个文件只有上述 2 个触发）。
+- 限制：内置 `mupdf` 引擎（`pdf.engine = "mupdf"`）没有回传修复警告的接口，只能拿到页数，检不出「xref 损坏但能自动修复」；查看这类问题请把引擎切回 `mutool`。
+- **刻意不复用** `pdf_meta::extract_pdf_report_from_path`：那会整份抽取正文，批量检查太贵；这里只读文件头尾各几 KB + 读一次页数 + 收一次 stderr（单文件几十毫秒）。
 - 替换 PDF（`replace-pdf`）会把这两列重置为 `NULL`（旧结果对新文件无效）。
 - **真·fire-and-forget**：删除文档时，SQLite 记录与本地文件先同步删除，而 Qdrant 中对应向量点的删除通过 `tokio::spawn` 异步执行，**请求不等待、失败也不可见**。
 - **前台（非后台）操作**：连接测试、服务状态、语义/全文搜索、上传、问答（`/assist/api/chat`）均在前端 `await` 内同步完成。MCP 端点也是「收完整请求体 → 返回一个 JSON」，**不是流式长连接**，工具函数内部检索同样是同步 await。
@@ -547,7 +571,7 @@ cargo build --release
 | `AceEditor.vue` | Markdown 编辑器（ace-builds 1.44.0），编辑+自适应分屏预览+KaTeX（桌面左右 / 移动上下，可拖拽比例）；`showToolbar` / `showPreviewControls` / `readOnly` 可裁剪为纯源码编辑器 |
 | `McpConfigPanel.vue` | MCP 配置面板 |
 | `McpSkillPanel.vue` | MCP Skill 面板 |
-| `config/` | 配置子组件：`BaseUrlSection.vue`、`MineruConfigSection.vue`、`LlmConfigSection.vue`、`LlmExtractConfigSection.vue`、`VectorDbConfigSection.vue` |
+| `config/` | 配置子组件：`BaseUrlSection.vue`、`PdfEngineSection.vue`、`MineruConfigSection.vue`、`LlmConfigSection.vue`、`LlmExtractConfigSection.vue`、`VectorDbConfigSection.vue` |
 
 ### 路由与视图（`src/router/index.ts` + `src/views/`）
 
@@ -565,7 +589,7 @@ cargo build --release
 | `/assist/markdown/:id` | `MarkdownView.vue` | Markdown 阅读（浮动设置按钮收纳全部工具；行号默认开、移动端默认关；设置面板的「源码编辑」跳到编辑器并从当前阅读行开始载入） | 全部 |
 | `/assist/markdown/:id/edit` | `MarkdownEditView.vue` | Markdown 编辑（AceEditor）；支持 `?line=a-b` 只载入指定行范围，阅读页「源码编辑」即跳到这里 | admin |
 | `/assist/upload` | `UploadView.vue` | 上传 PDF | admin / view-upload |
-| `/assist/doc/:id` | `DocManageView.vue` | 文档管理 | 全部 |
+| `/assist/doc/:id` | `DocManageView.vue` | 文档管理（含「PDF 健康」单篇检查，仅 admin 可见） | 全部 |
 | `/assist/admin` | `AdminView.vue` | 管理面板（含监控、统计） | admin |
 | `/assist/duplicates` | `DuplicatesView.vue` | 去重 | admin |
 | `/assist/point` | `PointView.vue` | 向量库管理 | admin |
@@ -693,11 +717,13 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 20. **前端启动重定向必须先 `await router.isReady()`**（`App.vue`）：硬导航（直接输入 URL / 外链）时 `route` 还是初始 `START_LOCATION`，`route.fullPath` 是 `/`，不等待会把 `?redirect=` 覆盖成 `/`，导致“登录后回跳”失效。
 21. **大文件唯一路径是流式**：上传/解析链路里 **禁止** `tokio::fs::read(整份 PDF)`、`field.bytes()`、`resp.bytes().to_vec()` 之后只为了“顺手算个哈希/交给下一个函数”。哈希用 `utils::calculate_file_hash_async`（流式）或 `stream_field_to_temp_file` 里顺带算；上传请求体用 `reqwest::Body::wrap_stream(ReaderStream::new(file))` **并显式给 `Content-Length`**（否则退化成 chunked，OSS 预签名 URL 会校验失败）；multipart 用 `Part::stream_with_length`。
 22. **日志查看是“从文件尾反向读”**：`GET /assist/api/admin/logs` 用 `utils::ReverseLines`（`LOG_TAIL_MAX_BYTES = 32 MB` 回扫上限）逐行向前读，凑够 `lines` 条就停，**不再 `read_to_string` 整份 JSONL**。响应里的 `total` / `displayed` 现在是“本次返回条数”，`scanned_bytes` / `scan_truncated` 才是回扫情况（命中上限时前端会提示更早日志未加载）；别把它改回“读全文再过滤”。
+23. **PDF 引擎是运行时选择，不是编译期开关**：`pdf_meta` / `pdf_health` 的公共入口一律先 `services::pdf_engine::active()` 再分发，mutool 那套实现**必须始终编译**（不要再加 `#[cfg(not(feature = "mupdf"))]`）。新增 PDF 能力时要两套实现都补，否则切引擎后会静默失能；另外 `mupdf` 引擎拿不到 stderr 诊断，依赖诊断的功能（如「损坏但可修复」判定）要在 UI 上提示用户切回 `mutool`。
 
 ## 入口与关键文件速查
 
 - 后端入口：`backend-rs/src/main.rs`
 - 配置：`backend-rs/config.json`、`backend-rs/system.json`、`backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs`
+- PDF 引擎选择：`backend-rs/src/services/pdf_engine.rs`（`mutool` / `mupdf`，`config.json` 的 `pdf.engine`）
 - 架构核心：`backend-rs/src/routers/pipeline.rs`、`backend-rs/src/routers/documents.rs`、`backend-rs/src/models.rs`、`backend-rs/src/services/vector_db.rs`、`backend-rs/src/mcp_server.rs`
 - 前端：`frontend/`（Vue 3 + TypeScript + Vite 8）
 - MCP 工具参考：`document/mcp.md`

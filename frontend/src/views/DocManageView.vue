@@ -128,6 +128,19 @@
         </div>
       </div>
 
+      <!-- PDF 健康（仅 admin：与批量检查共用同一套判定） -->
+      <div v-if="tokenStore.isAdmin" class="action-group">
+        <span class="action-label">PDF 健康</span>
+        <div class="action-buttons">
+          <button class="btn btn-outline" :disabled="healthChecking" @click="checkHealth">
+            {{ healthChecking ? '检查中…' : '检查 PDF 健康' }}
+          </button>
+          <span class="health-badge" :class="`health-${healthStatus}`">{{ healthLabel }}</span>
+          <span v-if="healthMeta" class="health-meta">{{ healthMeta }}</span>
+        </div>
+        <p v-if="healthMessage" class="health-detail">{{ healthMessage }}</p>
+      </div>
+
       <!-- 文件大小 -->
       <div class="action-group">
         <span class="action-label">文件大小</span>
@@ -229,6 +242,8 @@ import {
 } from '@/api/pipeline'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
+import { useTokenStore } from '@/stores/token'
+import { checkDocumentPdfHealth } from '@/api/admin'
 import type { Document } from '@/types/document'
 import type { VectorDbConfig } from '@/types/config'
 import type { DocumentIndexInfo } from '@/types/pipeline'
@@ -237,6 +252,7 @@ const route = useRoute()
 const router = useRouter()
 const { showSuccess, showError } = useToast()
 const { requireToken } = useRequireToken()
+const tokenStore = useTokenStore()
 
 const doc = ref<Document | null>(null)
 const form = ref<Partial<Document>>({})
@@ -248,6 +264,60 @@ const selectedIndexDb = ref('')
 const selectedTargetStatus = ref('uploaded')
 const docIndexes = ref<DocumentIndexInfo[]>([])
 const hashResult = ref<{ file_hash: string; old_file_hash: string | null } | null>(null)
+
+// PDF 健康检查（单篇，admin）
+const healthChecking = ref(false)
+const healthResult = ref<{
+  status: string
+  message: string
+  page_count: number | null
+  engine: string
+} | null>(null)
+
+/** 状态值：ok / warning / error / missing；未检查时为 unchecked */
+const healthStatus = computed(
+  () => healthResult.value?.status || doc.value?.pdf_health || 'unchecked'
+)
+const healthLabel = computed(() => {
+  const labels: Record<string, string> = {
+    ok: '✓ 正常',
+    warning: '⚠ 警告',
+    error: '✕ 异常',
+    missing: '✕ 缺失',
+    unchecked: '未检查'
+  }
+  return labels[healthStatus.value] || healthStatus.value
+})
+/** 本次检查后的附加信息（引擎 + 页数） */
+const healthMeta = computed(() => {
+  const r = healthResult.value
+  if (!r) return ''
+  const parts: string[] = []
+  if (r.page_count != null) parts.push(`${r.page_count} 页`)
+  if (r.engine) parts.push(`引擎：${r.engine}`)
+  return parts.join(' · ')
+})
+const healthMessage = computed(() => healthResult.value?.message || doc.value?.pdf_health_message || '')
+
+async function checkHealth() {
+  const id = parseInt(route.params.id as string)
+  healthChecking.value = true
+  try {
+    const res = await checkDocumentPdfHealth(id)
+    healthResult.value = res
+    if (doc.value) {
+      doc.value.pdf_health = res.status
+      doc.value.pdf_health_message = res.message
+    }
+    const ok = res.status === 'ok'
+    if (ok) showSuccess(`PDF 健康：正常（${res.page_count ?? '-'} 页）`)
+    else showError(`PDF 健康：${res.status} — ${res.message}`)
+  } catch (err) {
+    showError(getErrorMessage(err))
+  } finally {
+    healthChecking.value = false
+  }
+}
 
 // 上传进度状态
 const uploading = ref(false)
@@ -283,6 +353,7 @@ async function load() {
   try {
     doc.value = await getDocument(id)
     form.value = { ...doc.value }
+    healthResult.value = null
     await loadIndexes()
   } catch (err) {
     showError(getErrorMessage(err))
@@ -622,6 +693,56 @@ function formatFile(size: number | null): string {
   padding: 4px 8px;
   background: var(--bg-secondary);
   border-radius: 4px;
+}
+
+/* ── PDF 健康 ── */
+.health-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+.health-badge.health-ok {
+  color: #1b7f4b;
+  background: #e8f7ee;
+  border-color: #b7e2c9;
+}
+.health-badge.health-warning {
+  color: #9a6400;
+  background: #fff6e0;
+  border-color: #f0d69b;
+}
+.health-badge.health-error,
+.health-badge.health-missing {
+  color: var(--danger-text);
+  background: #fdecec;
+  border-color: #f3c1c1;
+}
+.health-badge.health-unchecked {
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-color: var(--border);
+}
+.health-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.health-detail {
+  flex: 1 0 100%;
+  margin: 0 0 0 106px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+@media (max-width: 768px) {
+  .health-detail {
+    margin-left: 0;
+  }
 }
 
 .upload-progress-wrap {

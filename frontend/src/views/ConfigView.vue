@@ -24,6 +24,8 @@
     <div v-if="config" class="config-form">
       <BaseUrlSection v-model="config" />
 
+      <PdfEngineSection v-model="config" />
+
       <MineruConfigSection
         ref="mineruSectionRef"
         :configs="config.mineru"
@@ -73,6 +75,7 @@ import { getServiceStatus } from '@/api/admin'
 import { useToast } from '@/composables/useToast'
 import type { ServiceConfig } from '@/types/config'
 import BaseUrlSection from '@/components/config/BaseUrlSection.vue'
+import PdfEngineSection from '@/components/config/PdfEngineSection.vue'
 import MineruConfigSection from '@/components/config/MineruConfigSection.vue'
 import LlmConfigSection from '@/components/config/LlmConfigSection.vue'
 import LlmExtractConfigSection from '@/components/config/LlmExtractConfigSection.vue'
@@ -103,6 +106,12 @@ async function load() {
     const raw = await getServiceConfig()
     if (!Array.isArray(raw.mineru)) {
       raw.mineru = [raw.mineru]
+    }
+    // PDF 解析引擎：缺省按 mutool（服务端也会补齐，这里只是保证表单可控）
+    if (!raw.pdf || typeof raw.pdf !== 'object') {
+      raw.pdf = { engine: 'mutool' }
+    } else {
+      raw.pdf.engine = raw.pdf.engine === 'mupdf' ? 'mupdf' : 'mutool'
     }
     config.value = raw
     // 表单缺省值补齐（模型池、抽取模型、各向量库 embedding）

@@ -56,10 +56,32 @@ export interface MinerUConfig {
   max_tasks?: number
 }
 
+/** PDF 解析引擎：外部 mutool 命令行 或 内置 mupdf 库（需 --features mupdf） */
+export type PdfEngineName = 'mutool' | 'mupdf'
+
+/** PDF 解析引擎配置（`config.json` 的 `pdf` 段） */
+export interface PdfEngineConfig {
+  engine: PdfEngineName
+}
+
+/** 当前二进制的引擎能力（`GET /assist/api/config` 额外下发，不可写入） */
+export interface PdfCapabilities {
+  /** mutool 命令行总是可选（系统未安装时健康检查会报 warning） */
+  mutool: boolean
+  /** 内置 mupdf 是否编入（`--features mupdf`） */
+  mupdf: boolean
+  /** 实际生效的引擎（配置为 mupdf 但未编入 feature 时回退为 mutool） */
+  active: PdfEngineName
+}
+
 export interface ServiceConfig {
   base_url: string
   active_mineru?: string
   mineru: MinerUConfig[]
+  /** PDF 解析引擎（mutool 命令行 / 内置 mupdf） */
+  pdf?: PdfEngineConfig
+  /** 引擎能力（只读，服务端按编译特性下发） */
+  pdf_capabilities?: PdfCapabilities
   /** LLM 模型池（「问答」tab 的可选模型） */
   llm: { models: LlmModelEntry[] }
   /** 信息补全（元数据抽取）使用的模型 */
