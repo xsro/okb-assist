@@ -1232,7 +1232,9 @@ pub async fn mcp_stream_handler(
         return (StatusCode::ACCEPTED, "").into_response();
     }
 
-    debug!(method, client_ip, "MCP request");
+    // 每个 JSON-RPC 调用开始时打一条 info 日志（HTTP 层的「请求开始」由
+    // `main.rs::request_start_log_middleware` 记录，这里补上具体方法名）。
+    info!(method = %method, client_ip = %client_ip, "MCP 调用开始");
 
     let response = match method.as_str() {
         "initialize" => {

@@ -268,6 +268,8 @@ fn create_app(
         .layer(Extension(user_store))
         .layer(Extension(session_store))
         .layer(middleware::from_fn(error_log_middleware))
+        // 请求开始日志放在 token_middleware 外侧：即使被 401 拒绝也能看到调用记录
+        .layer(middleware::from_fn(request_start_log_middleware))
         .layer(middleware::from_fn(token_middleware));
 
     let app = axum::Router::new()
@@ -400,6 +402,83 @@ async fn error_log_middleware(req: axum::extract::Request, next: Next) -> Respon
     }
 
     axum::response::Response::from_parts(parts, axum::body::Body::from(body_bytes))
+}
+
+/// 请求开始日志中间件：每次 API（`/assist/api/*`）与 MCP（`/assist/mcp*`）调用开始时打一条 info 日志。
+///
+/// 位于 `TraceLayer` 的 span 内部，因此 JSONL 里这条记录会带上 `IpMakeSpan` 采集的
+/// 客户端 IP / User-Agent / Referer 等字段；查询串中的凭证类参数（`token`、`password` 等）
+/// 会被 `sanitize_query` 脱敏，避免令牌落进日志文件。
+///
+/// 注意：放在 `token_middleware` **外侧**是有意的 —— 未授权（401）、未初始化等
+/// 早期拒绝也会留下「调用开始」记录，便于排查是谁在调、调了什么。
+async fn request_start_log_middleware(req: axum::extract::Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let kind = if path.starts_with("/assist/api/") {
+        Some("api")
+    } else if path.starts_with("/assist/mcp") {
+        Some("mcp")
+    } else {
+        None
+    };
+
+    if let Some(kind) = kind {
+        let method = req.method().clone();
+        let client_ip = extract_client_ip(&req);
+        let query = sanitize_query(req.uri().query());
+        tracing::info!(
+            kind,
+            client_ip = %client_ip,
+            method = %method,
+            path = %path,
+            query = %query,
+            "请求开始"
+        );
+    }
+
+    next.run(req).await
+}
+
+/// 日志用的 URI 脱敏：路径原样保留，查询串交给 `sanitize_query`。
+fn redact_uri(uri: &axum::http::Uri) -> String {
+    let query = sanitize_query(uri.query());
+    if query.is_empty() {
+        uri.path().to_string()
+    } else {
+        format!("{}?{}", uri.path(), query)
+    }
+}
+
+/// 日志用的查询串脱敏：把 `token` / `key` / `password` 之类的值替换成 `***`。
+fn sanitize_query(query: Option<&str>) -> String {
+    const SENSITIVE_KEYS: &[&str] = &[
+        "token",
+        "key",
+        "password",
+        "old_password",
+        "new_password",
+        "secret",
+        "api_key",
+    ];
+
+    let Some(query) = query else {
+        return String::new();
+    };
+
+    query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((name, _))
+                if SENSITIVE_KEYS
+                    .iter()
+                    .any(|s| name.eq_ignore_ascii_case(s)) =>
+            {
+                format!("{}***", name)
+            }
+            _ => pair.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 /// 无需凭证即可访问的认证端点（`/assist/api/auth/*`）
@@ -699,7 +778,7 @@ impl<B> MakeSpan<B> for IpMakeSpan {
             "request",
             client_ip = %client_ip,
             method = %req.method(),
-            uri = %req.uri(),
+            uri = %redact_uri(req.uri()),
             user_agent = %user_agent,
             referer = %referer,
             content_type = %content_type,
