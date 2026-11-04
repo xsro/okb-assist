@@ -5,12 +5,12 @@
 然后询问用户是否将结果上传回文献服务器。
 
 用法:
-    # 使用默认参数（192.168.1.122:5001 + token 60b8be...）
+    # 使用默认参数（192.168.1.162:5001 + token 60b8be...）
     python scripts/mineru_result_fetcher.py
 
     # 指定自定义参数
     python scripts/mineru_result_fetcher.py \
-        --base-url http://192.168.1.122:5001 \
+        --base-url http://192.168.1.162:5001 \
         --token 60b8be6583ac41abb3af63e01151bd86 \
         --mineru-url http://192.168.1.185:8002 \
         --output-dir data/mineru_result
@@ -28,7 +28,7 @@ import requests
 
 # ── 默认参数 ──────────────────────────────────────────────────────
 
-DEFAULT_BASE_URL = "http://192.168.1.122:5001"
+DEFAULT_BASE_URL = "http://192.168.1.162:5001"
 DEFAULT_TOKEN = "60b8be6583ac41abb3af63e01151bd86"
 DEFAULT_MINERU_URL = "http://192.168.1.185:8002"
 DEFAULT_OUTPUT_DIR = "data/mineru_result"

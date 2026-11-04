@@ -273,6 +273,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/diff-dois", post(diff_dois))
         .route("/assist/api/documents/diff-hashes/", post(diff_hashes))
         .route("/assist/api/documents/diff-hashes", post(diff_hashes))
+        .route("/assist/api/documents/doi-hash-index/", get(doi_hash_index))
+        .route("/assist/api/documents/doi-hash-index", get(doi_hash_index))
         .route("/assist/api/documents/:id/", get(get_document).put(update_document).delete(delete_document))
         .route("/assist/api/documents/:id", get(get_document).put(update_document).delete(delete_document))
         .route("/assist/api/documents/:id/info/", get(get_document_info).post(save_document_info))
@@ -1225,6 +1227,8 @@ async fn upload_document(
                     temp_upload,
                     &file_hash,
                     doi_field.clone(),
+                    // 去重覆盖沿用历史行为：文件换了，状态退回「已上传」等待重新解析
+                    true,
                 )
                 .await
                 {
@@ -2017,10 +2021,14 @@ async fn find_doc_by_hash(db: &Database, hash: &str) -> Option<Document> {
     .unwrap_or(None)
 }
 
-/// 把已落盘的临时 PDF 应用到**已有**文档：搬文件 → 同步体积 → 重置哈希与健康状态。
+/// 把已落盘的临时 PDF 应用到**已有**文档：搬文件 → 同步体积 → 更新哈希与健康状态。
 ///
-/// 上传命中重复且 `on_duplicate=replace`、以及 `POST /{id}/pdf` 替换 PDF 都走这里，
-/// 保证两处的副作用（`status='uploaded'`、`pdf_health` 置空）完全一致。
+/// 上传命中重复且 `on_duplicate=replace`、以及 `POST /{id}/pdf` 替换 PDF 都走这里。
+/// `pdf_health` 一律置空（旧结果对新文件无效）；
+/// `status` 只在 `reset_status = true` 时才重置为 `uploaded`：
+/// - 管理界面「替换 PDF」（`POST /{id}/pdf`）默认 **保留** 原状态（已解析的文档替换扫描件后
+///   不应退回「已上传」），显式传 `reset_status=1` 才重置；
+/// - 上传去重时的 `on_duplicate=replace` 保持历史行为（重置为 `uploaded`）。
 /// `doi` 为 `Some` 时只在该文档原本没有 DOI 时补写（已有 DOI 不覆盖）。
 async fn persist_pdf_for_doc(
     db: &Database,
@@ -2029,6 +2037,7 @@ async fn persist_pdf_for_doc(
     temp_upload: TempUpload,
     file_hash: &str,
     doi: Option<String>,
+    reset_status: bool,
 ) -> Result<(), String> {
     let pdf_path = paths::get_pdf_path(settings, doc_id);
     persist_temp_file(temp_upload, &pdf_path)
@@ -2038,11 +2047,17 @@ async fn persist_pdf_for_doc(
     // 写时同步：更新文件大小到数据库
     sync_doc_file_sizes(db, settings, doc_id).await;
 
-    if let Err(e) = sqlx::query(
+    // `status` 按调用方意图决定是否重置（见函数文档）
+    let sql = if reset_status {
         "UPDATE documents SET file_hash = ?, status = 'uploaded', \
          pdf_health = NULL, pdf_health_message = NULL, \
-         doi = COALESCE(NULLIF(doi, ''), ?), updated_at = ? WHERE id = ?",
-    )
+         doi = COALESCE(NULLIF(doi, ''), ?), updated_at = ? WHERE id = ?"
+    } else {
+        "UPDATE documents SET file_hash = ?, \
+         pdf_health = NULL, pdf_health_message = NULL, \
+         doi = COALESCE(NULLIF(doi, ''), ?), updated_at = ? WHERE id = ?"
+    };
+    if let Err(e) = sqlx::query(sql)
     .bind(file_hash)
     .bind(doi)
     .bind(now_iso())
@@ -2775,6 +2790,51 @@ async fn file_alias(
     }
 }
 
+/// GET /assist/api/documents/doi-hash-index/ —— 一次性导出库内全部文献的 DOI / 文件哈希 / PDF 健康状态
+///
+/// 客户端（`client-rs` 的 Zotero 导入）拉一次即可在本地完成整库比对，
+/// 不必再按 DOI 逐条打 `by-doi`（几百条文献就是几百次往返）。
+/// 只返回比对必需的最小字段，不带标题/摘要这类大文本。
+async fn doi_hash_index(axum::Extension(db): axum::Extension<Arc<Database>>) -> Response {
+    let rows: Vec<(i64, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, doi, file_hash, pdf_health FROM documents ORDER BY id",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap_or_default();
+
+    let mut documents: Vec<Value> = Vec::with_capacity(rows.len());
+    let mut with_doi = 0usize;
+    let mut with_hash = 0usize;
+    for (id, doi, file_hash, pdf_health) in rows {
+        let doi = doi.filter(|d| !d.trim().is_empty());
+        let key = doi.as_deref().and_then(doi_key);
+        if key.is_some() {
+            with_doi += 1;
+        }
+        let file_hash = file_hash.filter(|h| !h.trim().is_empty());
+        if file_hash.is_some() {
+            with_hash += 1;
+        }
+        documents.push(json!({
+            "id": id,
+            "doi": doi,
+            "doi_key": key,
+            "file_hash": file_hash,
+            "pdf_health": pdf_health,
+        }));
+    }
+
+    Json(json!({
+        "count": documents.len(),
+        "with_doi": with_doi,
+        "with_hash": with_hash,
+        "generated_at": now_iso(),
+        "documents": documents,
+    }))
+    .into_response()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DiffDoisRequest {
     pub dois: Vec<String>,
@@ -3203,6 +3263,8 @@ async fn replace_pdf(
 
     let mut file_name: Option<String> = None;
     let mut uploaded: Option<(TempUpload, u64, String)> = None;
+    // 默认保留原状态（替换扫描件不等于重新走一遍解析流水线）；显式 reset_status=1 才重置为 uploaded
+    let mut reset_status = false;
     let temp_dir = upload_temp_dir(&settings);
     while let Ok(Some(mut field)) = multipart.next_field().await {
         let Some(name) = field.name().map(|s| s.to_string()) else {
@@ -3217,6 +3279,11 @@ async fn replace_pdf(
                 Err(e) => {
                     return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response()
                 }
+            }
+        } else if name == "reset_status" {
+            if let Ok(bytes) = field.bytes().await {
+                let v = String::from_utf8_lossy(&bytes).trim().to_ascii_lowercase();
+                reset_status = matches!(v.as_str(), "1" | "true" | "t" | "yes" | "y" | "on");
             }
         } else {
             let _ = field.bytes().await;
@@ -3240,7 +3307,9 @@ async fn replace_pdf(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "文件为空"}))).into_response();
     }
 
-    if let Err(e) = persist_pdf_for_doc(&db, &settings, id, temp_upload, &file_hash, None).await {
+    if let Err(e) =
+        persist_pdf_for_doc(&db, &settings, id, temp_upload, &file_hash, None, reset_status).await
+    {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response();
     }
     match fetch_doc(&db, id).await {

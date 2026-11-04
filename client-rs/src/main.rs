@@ -45,7 +45,7 @@ struct ZoteroArgs {
     csv_file: String,
 
     /// OKB-Assist 服务地址
-    #[arg(long, default_value = "http://192.168.1.122:5001")]
+    #[arg(long, default_value = "http://192.168.1.162:5001")]
     base_url: String,
 
     /// 访问令牌（也可通过 OKB_ASSIST_TOKEN 环境变量或 ~/.okb_assist_token 文件设置）
@@ -68,6 +68,10 @@ struct ZoteroArgs {
     /// health-hash 先看已有 PDF 是否健康（`ok` 或从未检查过都算健康），健康则跳过，不健康才比对哈希（不同则覆盖）
     #[arg(long, value_enum, default_value_t = DupDoiAction::Skip)]
     dup_doi_action: DupDoiAction,
+
+    /// 只处理这些 Zotero 条目（CSV 的 Key 列），可重复或用逗号分隔，大小写不敏感
+    #[arg(long, value_delimiter = ',', value_name = "KEY")]
+    keys: Vec<String>,
 
     /// 显示解析出的元数据详情
     #[arg(long)]
@@ -92,7 +96,7 @@ struct DirArgs {
     dir: String,
 
     /// OKB-Assist 服务地址
-    #[arg(long, default_value = "http://192.168.1.122:5001")]
+    #[arg(long, default_value = "http://192.168.1.162:5001")]
     base_url: String,
 
     /// 访问令牌
@@ -149,6 +153,91 @@ struct HashDiffResult {
     invalid: Vec<String>,
     #[serde(default)]
     present_count: Option<usize>,
+}
+
+/// doi-hash-index 接口返回的单条记录
+#[derive(Debug, Clone, Deserialize)]
+struct ServerEntry {
+    #[serde(default)]
+    id: u64,
+    #[serde(default)]
+    doi: Option<String>,
+    #[serde(default)]
+    doi_key: Option<String>,
+    #[serde(default)]
+    file_hash: Option<String>,
+    #[serde(default)]
+    pdf_health: Option<String>,
+}
+
+impl ServerEntry {
+    /// 服务端文件哈希（空串 = 服务端没有 PDF）
+    fn hash(&self) -> &str {
+        self.file_hash.as_deref().unwrap_or("")
+    }
+
+    /// PDF 健康状态（空串 = 从未检查过）
+    fn health(&self) -> &str {
+        self.pdf_health.as_deref().unwrap_or("")
+    }
+}
+
+/// doi-hash-index 接口返回
+#[derive(Debug, Deserialize)]
+struct ServerIndexResponse {
+    #[serde(default)]
+    count: Option<usize>,
+    #[serde(default)]
+    documents: Vec<ServerEntry>,
+}
+
+/// 服务端索引的本地视图：一次拉全量，后续比对全在本地完成。
+struct ServerIndex {
+    /// 服务端文献总数（含没有 DOI / 没有 PDF 的）
+    count: usize,
+    /// DOI 归一化键 → 记录
+    by_doi: HashMap<String, ServerEntry>,
+    /// 服务端已有文件的哈希（小写）
+    hashes: HashSet<String>,
+}
+
+impl ServerIndex {
+    fn from_response(resp: ServerIndexResponse) -> Self {
+        let count = resp.count.unwrap_or(resp.documents.len());
+        let mut by_doi: HashMap<String, ServerEntry> = HashMap::new();
+        let mut hashes: HashSet<String> = HashSet::new();
+        for entry in resp.documents {
+            if let Some(h) = entry.file_hash.as_deref().filter(|h| !h.is_empty()) {
+                hashes.insert(h.to_lowercase());
+            }
+            // 服务端已给归一化键就直接用；旧版服务端没这个字段时本地补算
+            let key = entry.doi_key.clone().or_else(|| {
+                entry
+                    .doi
+                    .as_deref()
+                    .and_then(normalize_doi)
+                    .map(|d| d.to_lowercase())
+            });
+            if let Some(k) = key {
+                by_doi.entry(k).or_insert(entry);
+            }
+        }
+        ServerIndex {
+            count,
+            by_doi,
+            hashes,
+        }
+    }
+
+    /// 按 DOI 查服务端记录（与服务端同一套归一化）
+    fn lookup(&self, doi: &str) -> Option<&ServerEntry> {
+        let key = normalize_doi(doi)?.to_lowercase();
+        self.by_doi.get(&key)
+    }
+
+    fn has_hash(&self, hash: &str) -> bool {
+        self.hashes.contains(&hash.to_lowercase())
+    }
 }
 
 /// 上传响应
@@ -272,6 +361,38 @@ async fn api_diff_hashes(
         }
         Err(e) => {
             eprintln!("错误: 无法连接服务器进行 diff-hashes: {}", e);
+            None
+        }
+    }
+}
+
+/// 一次性拉取服务端全部文献的 DOI / 文件哈希（本地比对，避免逐条 by-doi 往返）
+async fn api_fetch_server_index(
+    client: &Client,
+    base_url: &str,
+    token: &Option<String>,
+) -> Option<ServerIndex> {
+    let url = format!("{}/assist/api/documents/doi-hash-index", base_url);
+    let mut req = client.get(&url);
+    if let Some(t) = token {
+        req = req.header("X-Token", t.as_str());
+    }
+    match req.send().await {
+        Ok(resp) if resp.status() == reqwest::StatusCode::OK => {
+            match resp.json::<ServerIndexResponse>().await {
+                Ok(body) => Some(ServerIndex::from_response(body)),
+                Err(e) => {
+                    eprintln!("  服务端索引解析失败: {}", e);
+                    None
+                }
+            }
+        }
+        Ok(resp) => {
+            eprintln!("  服务端索引请求失败: {}", resp.status());
+            None
+        }
+        Err(e) => {
+            eprintln!("  服务端索引请求失败: {}", e);
             None
         }
     }
@@ -679,31 +800,52 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 3. 与服务端比对
+    // 3. 与服务端比对：优先一次拉全量索引（服务端 1 次查询），失败再回退到 diff-hashes
     let client = http_client()?;
-    let hashes: Vec<String> = pdfs_with_hash.iter().map(|p| p.hash.clone()).collect();
-    println!("正在与服务器比对 {} 个文件哈希 ...", hashes.len());
-    let diff = match api_diff_hashes(&client, &args.base_url, &hashes, &token).await {
-        Some(d) => d,
-        None => {
-            println!("错误: diff-hashes 请求失败，无法继续。");
-            return Ok(());
-        }
-    };
+    println!("正在获取服务端索引（全部文件哈希）...");
+    let (present_count, to_upload, invalid_count): (usize, Vec<&LocalPdf>, usize) =
+        match api_fetch_server_index(&client, &args.base_url, &token).await {
+            Some(idx) => {
+                let to_upload: Vec<&LocalPdf> = pdfs_with_hash
+                    .iter()
+                    .filter(|p| !idx.has_hash(&p.hash))
+                    .collect();
+                (
+                    pdfs_with_hash.len() - to_upload.len(),
+                    to_upload,
+                    0,
+                )
+            }
+            None => {
+                println!("  回退为 diff-hashes 比对（较慢）...");
+                let hashes: Vec<String> =
+                    pdfs_with_hash.iter().map(|p| p.hash.clone()).collect();
+                let diff = match api_diff_hashes(&client, &args.base_url, &hashes, &token).await {
+                    Some(d) => d,
+                    None => {
+                        println!("错误: diff-hashes 请求失败，无法继续。");
+                        return Ok(());
+                    }
+                };
+                let missing_hashes: HashSet<String> = diff.missing.into_iter().collect();
+                let to_upload: Vec<&LocalPdf> = pdfs_with_hash
+                    .iter()
+                    .filter(|p| missing_hashes.contains(&p.hash))
+                    .collect();
+                (
+                    diff.present_count.unwrap_or(total - to_upload.len()),
+                    to_upload,
+                    diff.invalid.len(),
+                )
+            }
+        };
 
-    let missing_hashes: HashSet<String> = diff.missing.into_iter().collect();
-    let to_upload: Vec<&LocalPdf> = pdfs_with_hash
-        .iter()
-        .filter(|p| missing_hashes.contains(&p.hash))
-        .collect();
-
-    let present_count = diff.present_count.unwrap_or(total - to_upload.len());
     println!();
     println!("本地 PDF:         {}", total);
     println!("服务器已存在:     {}", present_count);
     println!("待上传（新文件）: {}", to_upload.len());
-    if !diff.invalid.is_empty() {
-        println!("（警告: {} 个哈希格式无效，可能未被正确比对）", diff.invalid.len());
+    if invalid_count > 0 {
+        println!("（警告: {} 个哈希格式无效，可能未被正确比对）", invalid_count);
     }
     println!();
 
@@ -1252,6 +1394,9 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     println!("Storage root: {}", args.storage_root.clone().unwrap_or_default());
     println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
     println!("更新元数据: {}", if update_meta { "是" } else { "否 (默认)" });
+    if !args.keys.is_empty() {
+        println!("只处理 key: {}", args.keys.join(", "));
+    }
     println!(
         "DOI 重复处理: {}",
         match args.dup_doi_action {
@@ -1279,6 +1424,24 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         .collect();
     let canon: Vec<String> = headers.iter().map(|h| canonical_key(h)).collect();
 
+    // `--keys`：只处理指定 Zotero 条目（CSV 的 Key 列，大小写不敏感）
+    let key_filter: HashSet<String> = args
+        .keys
+        .iter()
+        .map(|k| k.trim().to_lowercase())
+        .filter(|k| !k.is_empty())
+        .collect();
+    if !key_filter.is_empty() && !canon.iter().any(|c| c == "key") {
+        bail!(
+            "--keys 需要 CSV 中包含 Key 列（当前表头: {}）",
+            headers.join(", ")
+        );
+    }
+    // 命中过滤的 key（小写），用于事后报告「指定的 key 没在 CSV 里找到」
+    let mut matched_keys: HashSet<String> = HashSet::new();
+    // 命中过滤但被跳过的行（缺 DOI / 缺附件），带原因，方便排查
+    let mut filtered_out: Vec<(String, String)> = Vec::new();
+
     let mut local_docs: Vec<LocalDoc> = Vec::new();
     for record in rdr.records() {
         let record = record?;
@@ -1290,16 +1453,38 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
             norm.insert(canon[i].clone(), v);
         }
 
+        // `--keys` 过滤：不匹配的行直接跳过（先于 DOI/附件判定，保证「命中的 key」报告准确）
+        let item_key = norm
+            .get("key")
+            .map(|s| s.trim().to_lowercase())
+            .unwrap_or_default();
+        if !key_filter.is_empty() {
+            if item_key.is_empty() || !key_filter.contains(&item_key) {
+                continue;
+            }
+            matched_keys.insert(item_key.clone());
+        }
+
         // DOI 归一化后再比对：去前缀/尾部标点，否则服务端的 by-doi 精确匹配会漏报
         let doi = match normalize_doi(norm.get("doi").map(|s| s.as_str()).unwrap_or("")) {
             Some(d) => d,
-            None => continue,
+            None => {
+                if !key_filter.is_empty() {
+                    filtered_out.push((item_key.clone(), "缺少 DOI".to_string()));
+                }
+                continue;
+            }
         };
         let file_field = norm.get("file").cloned().unwrap_or_default();
         let paths = parse_file_paths(&file_field, &args.storage_root);
         let file_path = match get_newest_file(&paths) {
             Some(f) => f,
-            None => continue,
+            None => {
+                if !key_filter.is_empty() {
+                    filtered_out.push((item_key.clone(), "没有可用的 PDF 附件".to_string()));
+                }
+                continue;
+            }
         };
         let meta = parse_zotero_row(&norm);
         let info: ZoteroRow = raw
@@ -1314,6 +1499,36 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
             meta,
             info,
         });
+    }
+
+    // `--keys` 的事后报告：CSV 里没有的 key、命中但因故被跳过的行
+    if !key_filter.is_empty() {
+        let mut missing_keys: Vec<&String> = key_filter
+            .iter()
+            .filter(|k| !matched_keys.contains(*k))
+            .collect();
+        missing_keys.sort();
+        if !missing_keys.is_empty() {
+            println!();
+            println!(
+                "⚠ CSV 中没有这些 key（共 {} 个）: {}",
+                missing_keys.len(),
+                missing_keys
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if !filtered_out.is_empty() {
+            println!();
+            println!("⚠ 命中但被跳过（共 {} 条）:", filtered_out.len());
+            for (k, reason) in &filtered_out {
+                println!("  {} — {}", k, reason);
+            }
+        }
+        println!();
+        println!("指定 key 命中 {} 个，其中可上传 {} 个", matched_keys.len(), local_docs.len());
     }
 
     if local_docs.is_empty() {
@@ -1336,7 +1551,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     let client = http_client()?;
 
     // =========================================================
-    // 第一阶段：逐个查询 DOI，收集比对结果
+    // 第一阶段：与服务端比对，收集比对结果
     // =========================================================
     println!("第一阶段：与服务端比对 {} 个文献的 DOI ...", local_docs.len());
     println!();
@@ -1350,40 +1565,60 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         }
     }
 
+    // 一次拉取服务端全量 DOI / 哈希索引，整库比对在本地完成（不再逐条 by-doi）
+    println!("正在获取服务端索引（全部文献的 DOI / 哈希）...");
+    let server_index = api_fetch_server_index(&client, &args.base_url, &token).await;
+    match &server_index {
+        Some(idx) => println!(
+            "服务端索引：{} 篇文献，{} 个可比对 DOI（1 次请求）",
+            idx.count,
+            idx.by_doi.len()
+        ),
+        None => println!("⚠ 无法获取服务端索引，回退为逐个 DOI 查询（较慢）"),
+    }
+    println!();
+
     let mut new_entries: Vec<&LocalDocWithHash> = Vec::new();
     let mut to_update_pdf: Vec<(u64, &LocalDocWithHash, String)> = Vec::new();
     // 跳过项连原因一起记，第二阶段直接列出来，避免用户疑惑「为什么没上传」
     let mut to_skip: Vec<(&LocalDocWithHash, String)> = Vec::new();
 
     for dw in &docs_with_hash {
-        let (found, server_doc) = api_lookup_by_doi(&client, &args.base_url, &dw.doc.doi, &token).await;
+        // 优先查本地索引；索引不可用时回退到 by-doi 单条查询
+        let server: Option<ServerEntry> = match &server_index {
+            Some(idx) => idx.lookup(&dw.doc.doi).cloned(),
+            None => match api_lookup_by_doi(&client, &args.base_url, &dw.doc.doi, &token).await {
+                (true, Some(doc)) => Some(ServerEntry {
+                    id: doc.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
+                    doi: doc.get("doi").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    doi_key: None,
+                    file_hash: doc
+                        .get("file_hash")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    pdf_health: doc
+                        .get("pdf_health")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                }),
+                // 查询失败或 found=true 但无 doc：安全起见视为新建
+                _ => None,
+            },
+        };
 
-        if !found {
-            new_entries.push(dw);
-            continue;
-        }
-        let Some(server) = server_doc else {
-            // 服务器返回 found=true 但无 doc 数据，安全起见视为新建
+        let Some(server) = server else {
             new_entries.push(dw);
             continue;
         };
 
-        let server_id = server["id"].as_u64().unwrap_or(0);
-        let server_hash = server
-            .get("file_hash")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let server_id = server.id;
         // 服务端没有 PDF（哈希为空）时没法比，当成「需要补 PDF」
-        let hash_missing = server_hash.is_empty();
-        let hash_differs = !hash_missing && server_hash != dw.local_hash;
+        let hash_missing = server.hash().is_empty();
+        let hash_differs = !hash_missing && server.hash() != dw.local_hash;
 
-        // `pdf_health`：ok / warning / error / missing；NULL（序列化时字段会被省掉）= 从未检查过。
+        // `pdf_health`：ok / warning / error / missing；空串（从未检查过）= 未知。
         // 未知状态按「健康」处理 —— 没证据说明它坏了就不折腾，只有明确的 warning/error/missing 才走哈希比对。
-        let health = server
-            .get("pdf_health")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let health = server.health();
         let health_unknown = health.is_empty();
         let healthy = health_unknown || health == "ok";
         let need_replace = hash_missing || hash_differs;
@@ -1394,7 +1629,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
             }
             DupDoiAction::Hash => {
                 if need_replace {
-                    to_update_pdf.push((server_id, dw, server_hash));
+                    to_update_pdf.push((server_id, dw, server.hash().to_string()));
                 } else {
                     to_skip.push((dw, "hash 一致".to_string()));
                 }
@@ -1410,7 +1645,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
                         },
                     ));
                 } else if need_replace {
-                    to_update_pdf.push((server_id, dw, server_hash));
+                    to_update_pdf.push((server_id, dw, server.hash().to_string()));
                 } else {
                     to_skip.push((
                         dw,

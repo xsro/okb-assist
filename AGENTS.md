@@ -491,6 +491,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
    - `GET /assist/api/documents/:id/crossref` —— 读取 `crossref_path` 模板对应的已保存 Crossref 记录，返回 `{exists, path, raw, parsed, modified_at}`（`raw` 为 Crossref API 完整应答，`parsed` 与元数据补全同源）。
    - `GET /assist/api/documents/:id/citation?format=bibtex|gbt7714&source=auto|crossref|document` —— 生成引用条目，返回 `{format, source, key, content}`。默认 `source=auto`：有 Crossref 记录就用它，否则退化为数据库元数据（`source=document`，卷期页会缺失）；`source=crossref` 且无记录时返回 404。引用键为「第一作者姓 + 年份 + 标题首个实词」。
    - **DOI 比对统一归一化**：`doi_key()`（`normalize_doi` 去 `https://doi.org/` 等前缀与尾部标点 + 转小写）用于 `GET /documents/by-doi/:doi`（先精确匹配，未命中再 `LIKE` 粗筛 + `doi_key` 校验，兼容历史数据里带前缀/大小写不一致的值）与 `POST /documents/diff-dois`；写入口也归一化 —— `PUT /documents/:id`（`update_document`）与 `pipeline` 的 `MetaRecord::apply`。新增 DOI 写/比对照旧走这几个入口，别再直接字符串相等比较。
+   - **全量比对索引**（`GET /documents/doi-hash-index`）：一次返回库内全部文献的 `{count, with_doi, with_hash, generated_at, documents:[{id, doi, doi_key, file_hash, pdf_health}]}`（`doi_key` 已归一化小写，空 DOI/空哈希为 `null`），供 `client-rs` 批量比对；客户端拉一次就完成整库比对，不再按 DOI 逐条请求 `by-doi`。只返回比对必需字段（不带 title/abstract），新增字段时注意保持轻量。
    - **上传去重**（`POST /documents/upload`，`upload_document`）：先用 `find_doc_by_hash`（只查 `file_hash` 索引，**不抽 PDF 元数据**）比哈希；未命中且请求里**显式**给了 `doi` 表单字段时再用 `find_doc_by_doi` 比 DOI（PDF 里抽到的 DOI 不参与去重，保持既有行为）。命中重复的行为由 `on_duplicate` 控制：`error`（默认，409 `{error:"duplicate", kind:"hash"|"doi", existing_id, existing:{file_hash,pdf_health,…}}`）/ `skip`（200 `{status:"skipped", existing_id, id, doc}`）/ `replace`（同哈希则等价 skip，否则用本次文件覆盖已有文档的 PDF，200 `{status:"replaced", existing_id, doc}`，复用 `persist_pdf_for_doc`，与 `POST /{id}/pdf` 同一套副作用）。`force=true` 跳过全部去重检查。新文档的 `doi` 直接取显式字段（`fill_meta_fields` 只补空）。去重依赖 `database.rs::init` 建的 `idx_documents_file_hash` / `idx_documents_doi`（`CREATE INDEX IF NOT EXISTS`，幂等），新增按列等值查找的功能时同步补索引。
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、去重、索引重置。
 6. **问答**（`chat.rs`）：`GET /assist/api/chat/models`、`GET /assist/api/chat/tools` 列出模型池与可调用的 MCP 工具，`POST /assist/api/chat` 基于 `llm.models` 做多轮对话，并可在本请求内循环调用 MCP 工具（非流式）。见下方「问答（Chat）」。
@@ -517,10 +518,25 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 - 诊断处理：`push_diagnostics()` 去重收集 stderr 行（探活/`trailer/Encrypt`/`Pages/Count`/`pages` 四次调用都收），`summarize_diagnostics()` 归为「交叉引用表(xref)损坏 / 数据被截断 / 对象语法错误 / 对象引用无效」并附原始首行；只要诊断非空就判 `warning`，消息写明损坏类型与「严格阅读器可能打不开」。**正常文件 mutool 的 stderr 为空**，因此误报率低（实测本库 13 个文件只有上述 2 个触发）。
 - 限制：内置 `mupdf` 引擎（`pdf.engine = "mupdf"`）没有回传修复警告的接口，只能拿到页数，检不出「xref 损坏但能自动修复」；查看这类问题请把引擎切回 `mutool`。
 - **刻意不复用** `pdf_meta::extract_pdf_report_from_path`：那会整份抽取正文，批量检查太贵；这里只读文件头尾各几 KB + 读一次页数 + 收一次 stderr（单文件几十毫秒）。
-- 替换 PDF（`replace-pdf`）会把这两列重置为 `NULL`（旧结果对新文件无效）。
+- 替换 PDF（`POST /assist/api/documents/:id/pdf`）会把这两列重置为 `NULL`（旧结果对新文件无效），但**不再改 `status`**：已解析的文档替换扫描件后仍是 `markdown_done`；只有显式带 multipart 字段 `reset_status=1` 才退回 `uploaded`（上传去重 `on_duplicate=replace` 仍沿用旧行为会重置为 `uploaded`）。
 - **真·fire-and-forget**：删除文档时，SQLite 记录与本地文件先同步删除，而 Qdrant 中对应向量点的删除通过 `tokio::spawn` 异步执行，**请求不等待、失败也不可见**。
 - **前台（非后台）操作**：连接测试、服务状态、语义/全文搜索、上传、问答（`/assist/api/chat`）均在前端 `await` 内同步完成。MCP 端点也是「收完整请求体 → 返回一个 JSON」，**不是流式长连接**，工具函数内部检索同样是同步 await。
 - **无定时任务**：没有 `APScheduler`/`schedule`/守护线程；后台仅为 Tokio 协程。
+
+### 文档状态批量修正（运维端点）
+
+`POST /assist/api/admin/documents/status`（admin，**同步**、只改 `documents.status`，不碰文件/流水线/向量库）：
+
+```bash
+curl -X POST -H "X-Token: <admin-token>" -H "Content-Type: application/json" \
+  -d '{"from":"uploaded","to":"markdown_done","dry_run":true}' \
+  http://127.0.0.1:5001/assist/api/admin/documents/status
+```
+
+- 请求体：`{ from?, ids?, to, dry_run? }` —— `to` 必填且不能是 `parsing`（该状态由后台流水线持有）；`from` 与 `ids` 至少给一个（防无条件改写全库），两者同时给即「这些 id 中处于 from 状态的」。
+- `dry_run: true` 只返回会被影响的 `ids` / `matched` 不写库；返回 `{detail, from, to, matched, updated, ids}`。
+- 写库时 `to = markdown_done` 顺带把 `status_message = 'PDF 解析完成'`、`progress = 100`，其他状态清空这两列，并更新 `updated_at`。
+- 用途：修正历史上「PDF 被替换后状态退回 `uploaded`，但 Markdown 早已解析完成」这类不一致记录。**部署前的老版本没有这个端点**，此时可临时用 `POST /assist/api/documents/:id/parse-result`（body `{content}`，`uploaded/parsing/error` → `markdown_done`，且原样回写 Markdown）逐条升级，再用 `?raw=1&full=1` 读回内容保证无损。
 
 ## 路由前缀
 

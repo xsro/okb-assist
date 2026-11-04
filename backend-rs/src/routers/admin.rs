@@ -57,6 +57,8 @@ pub fn router() -> axum::Router<()> {
         )
         .route("/assist/api/admin/sync-file-sizes/", post(sync_file_sizes))
         .route("/assist/api/admin/sync-file-sizes", post(sync_file_sizes))
+        .route("/assist/api/admin/documents/status/", post(fix_document_status))
+        .route("/assist/api/admin/documents/status", post(fix_document_status))
         .route("/assist/api/admin/dedup/", post(dedup))
         .route("/assist/api/admin/dedup", post(dedup))
         .route("/assist/api/admin/logs/", get(get_logs))
@@ -903,6 +905,194 @@ async fn sync_file_sizes(
     });
 
     Json(json!({"detail": "文件大小同步任务已提交，后台执行中"}))
+}
+
+// ── 文档状态批量修正（运维） ─────────────────────────────
+
+/// 批量修正文档状态的请求体。
+///
+/// 只改 `documents.status`（不碰流水线、文件、向量库），用于修正历史数据里状态与实际
+/// 文件不符的记录（例如 PDF 被替换后状态退回 `uploaded`，而 Markdown 早已解析完成）。
+#[derive(Debug, Deserialize)]
+pub struct StatusFixBody {
+    /// 只改这些 id（缺省 = 该 `from` 状态的全部文档）
+    #[serde(default)]
+    pub ids: Option<Vec<i64>>,
+    /// 匹配的旧状态（`uploaded` / `parsing` / `markdown_done` / `error`）；缺省则必须给 `ids`
+    #[serde(default)]
+    pub from: Option<String>,
+    /// 目标状态（必填）
+    #[serde(default)]
+    pub to: Option<String>,
+    /// 只统计不写入（默认 false）
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// POST /assist/api/admin/documents/status —— 批量修正文档状态
+///
+/// - `to` 必填，且不能是 `parsing`（该状态由后台流水线持有，手改会被覆盖）
+/// - `from` 与 `ids` 至少给一个，两者都给时是「这些 id 中处于 from 状态的」
+/// - `dry_run = true` 只返回会被影响的文档，不写库
+async fn fix_document_status(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+    Json(body): Json<StatusFixBody>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
+
+    let to = match body.to.as_deref().map(|s| s.trim().parse::<DocStatus>()) {
+        Some(Ok(DocStatus::Parsing)) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "detail": "不能把状态改成 parsing（该状态由后台流水线维护）"
+            })))
+                .into_response();
+        }
+        Some(Ok(s)) => s.as_str().to_string(),
+        Some(Err(_)) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "detail": "to 必须是 uploaded / parsing / markdown_done / error 之一"
+            })))
+                .into_response();
+        }
+        None => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少 to"}))).into_response()
+        }
+    };
+
+    let from = match body.from.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(s) => match s.parse::<DocStatus>() {
+            Ok(st) => Some(st.as_str().to_string()),
+            Err(_) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({
+                    "detail": "from 必须是 uploaded / parsing / markdown_done / error 之一"
+                })))
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+
+    let ids: Vec<i64> = body
+        .ids
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|i| *i > 0)
+        .collect();
+
+    if from.is_none() && ids.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "detail": "from 与 ids 至少要提供一个，避免无条件改写全库"
+        })))
+            .into_response();
+    }
+
+    // 拼 WHERE：ids 用占位符逐个绑定（不接受任何客户端拼进来的 SQL 片段）
+    let mut where_parts: Vec<String> = Vec::new();
+    if !ids.is_empty() {
+        let ph = vec!["?"; ids.len()].join(", ");
+        where_parts.push(format!("id IN ({})", ph));
+    }
+    if from.is_some() {
+        where_parts.push("status = ?".to_string());
+    }
+    let where_sql = where_parts.join(" AND ");
+
+    // 先查受影响集合，便于 dry_run 与回显
+    let select_sql = format!("SELECT id FROM documents WHERE {} ORDER BY id", where_sql);
+    let mut q = sqlx::query_as::<_, (i64,)>(&select_sql);
+    if !ids.is_empty() {
+        for id in &ids {
+            q = q.bind(id);
+        }
+    }
+    if let Some(f) = &from {
+        q = q.bind(f);
+    }
+    let matched: Vec<i64> = match q.fetch_all(db.pool()).await {
+        Ok(rows) => rows.into_iter().map(|(id,)| id).collect(),
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
+                .into_response()
+        }
+    };
+
+    if body.dry_run {
+        return Json(json!({
+            "detail": "dry_run：未写库",
+            "dry_run": true,
+            "from": from,
+            "to": to,
+            "matched": matched.len(),
+            "updated": 0,
+            "ids": matched,
+        }))
+        .into_response();
+    }
+
+    if matched.is_empty() {
+        return Json(json!({
+            "detail": "没有匹配的文档",
+            "from": from,
+            "to": to,
+            "matched": 0,
+            "updated": 0,
+            "ids": [],
+        }))
+        .into_response();
+    }
+
+    // markdown_done 是「解析完成」，进度按 100 收尾；其他状态清空流水线残留
+    let (message, progress): (Option<&str>, i64) = match to.as_str() {
+        "markdown_done" => (Some("PDF 解析完成"), 100),
+        _ => (None, 0),
+    };
+
+    let update_sql = format!(
+        "UPDATE documents SET status = ?, status_message = ?, progress = ?, updated_at = ? \
+         WHERE {}",
+        where_sql
+    );
+    let mut u = sqlx::query(&update_sql)
+        .bind(&to)
+        .bind(message)
+        .bind(progress)
+        .bind(crate::utils::now_iso());
+    if !ids.is_empty() {
+        for id in &ids {
+            u = u.bind(id);
+        }
+    }
+    if let Some(f) = &from {
+        u = u.bind(f);
+    }
+    let result = match u.execute(db.pool()).await {
+        Ok(r) => r,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
+                .into_response()
+        }
+    };
+    let updated = result.rows_affected() as i64;
+    tracing::info!(
+        "批量修正文档状态: {} -> {}，匹配 {} 条，写入 {} 条",
+        from.as_deref().unwrap_or("(ids)"),
+        to,
+        matched.len(),
+        updated
+    );
+
+    Json(json!({
+        "detail": format!("已把 {} 条文档状态改为 {}", updated, to),
+        "from": from,
+        "to": to,
+        "matched": matched.len(),
+        "updated": updated,
+        "ids": matched,
+    }))
+    .into_response()
 }
 
 // ── 日志查看 ────────────────────────────────────────────
