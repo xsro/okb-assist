@@ -497,6 +497,16 @@ async fn api_fetch_server_index(
     }
 }
 
+/// 人性化耗时（<1 秒用毫秒，否则秒）
+fn format_duration(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1000 {
+        format!("{} ms", ms)
+    } else {
+        format!("{:.1} s", d.as_secs_f64())
+    }
+}
+
 /// 上传类请求的超时：基础 120s + 每 MB 2s（上限 30 分钟），
 /// 避免大文件走慢链路时被固定 120s 提前掐断。
 fn upload_client(file_size: u64) -> Result<Client> {
@@ -875,11 +885,13 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
     println!("找到 {} 个 PDF 文件。", total);
     println!();
 
-    // 2. 计算 SHA256 哈希
+    // 2. 计算 SHA256 哈希（逐个串行，打印 [i/N] 与单项/总耗时）
+    let hash_started = std::time::Instant::now();
     let mut pdfs_with_hash: Vec<LocalPdf> = Vec::with_capacity(total);
     for (i, path) in all_pdfs.iter().enumerate() {
         print!("  [{}/{}] 计算哈希: {} ... ", i + 1, total, path.display());
         io::stdout().flush().ok();
+        let item_started = std::time::Instant::now();
         // 哈希是阻塞 IO：丢到后台线程，不卡住 tokio worker
         match sha256_file_async(path.clone()).await {
             Ok(hash) => {
@@ -887,12 +899,24 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
                     path: path.clone(),
                     hash: hash.clone(),
                 });
-                println!("{}", &hash[..16]);
+                println!(
+                    "{} ({})",
+                    &hash[..16.min(hash.len())],
+                    format_duration(item_started.elapsed())
+                );
             }
             Err(e) => {
-                println!("失败: {}", e);
+                println!("失败: {} ({})", e, format_duration(item_started.elapsed()));
             }
         }
+    }
+    if total > 0 {
+        println!(
+            "哈希计算完成: {}/{} 个，用时 {}",
+            pdfs_with_hash.len(),
+            total,
+            format_duration(hash_started.elapsed())
+        );
     }
     println!();
 
@@ -1664,13 +1688,50 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     println!("第一阶段：与服务端比对 {} 个文献的 DOI ...", local_docs.len());
     println!();
 
-    // 预先计算所有本地文件哈希
+    // 预先计算所有本地文件哈希。
+    // 逐个串行且可能涉及几 GB 磁盘 IO，必须打印 [i/N] 与单项耗时，否则大库看上去像卡死。
+    let hash_total = local_docs.len();
+    let hash_started = std::time::Instant::now();
     let mut docs_with_hash: Vec<LocalDocWithHash> = Vec::new();
-    for d in &local_docs {
+    for (i, d) in local_docs.iter().enumerate() {
+        let file_name = Path::new(&d.file_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| d.file_path.clone());
+        print!(
+            "  [{}/{}] 计算哈希: {} | {} ... ",
+            i + 1,
+            hash_total,
+            d.doi,
+            file_name
+        );
+        io::stdout().flush().ok();
+        let item_started = std::time::Instant::now();
         match sha256_file_async(PathBuf::from(&d.file_path)).await {
-            Ok(h) => docs_with_hash.push(LocalDocWithHash { doc: d.clone(), local_hash: h }),
-            Err(e) => eprintln!("  ! {}: 无法计算哈希 ({})", d.doi, e),
+            Ok(h) => {
+                println!(
+                    "{} ({})",
+                    &h[..16.min(h.len())],
+                    format_duration(item_started.elapsed())
+                );
+                docs_with_hash.push(LocalDocWithHash {
+                    doc: d.clone(),
+                    local_hash: h,
+                });
+            }
+            Err(e) => {
+                println!("失败 ({}): {}", format_duration(item_started.elapsed()), e);
+            }
         }
+    }
+    if hash_total > 0 {
+        println!();
+        println!(
+            "哈希计算完成: {}/{} 个，用时 {}",
+            docs_with_hash.len(),
+            hash_total,
+            format_duration(hash_started.elapsed())
+        );
     }
 
     // 一次拉取服务端全量 DOI / 哈希索引，整库比对在本地完成（不再逐条 by-doi）
