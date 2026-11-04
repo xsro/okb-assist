@@ -44,15 +44,15 @@ struct ZoteroArgs {
     /// Zotero 导出的 CSV 文件路径
     csv_file: String,
 
-    /// OKB-Assist 服务地址
-    #[arg(long, default_value = "http://192.168.1.162:5001")]
-    base_url: String,
+    /// OKB-Assist 服务地址（缺省取 `~/.okb/client.json` 的 `url`）
+    #[arg(long)]
+    base_url: Option<String>,
 
-    /// 访问令牌（也可通过 OKB_ASSIST_TOKEN 环境变量或 ~/.okb_assist_token 文件设置）
+    /// 访问令牌（缺省取 `~/.okb/client.json` 的 `token`；也可用 OKB_ASSIST_TOKEN 环境变量）
     #[arg(long)]
     token: Option<String>,
 
-    /// Zotero storage 文件夹的本地路径，用于把 Windows 附件路径映射到本地
+    /// Zotero storage 文件夹的本地路径，用于把 Windows 附件路径映射到本地（缺省取 `~/.okb/client.json` 的 `storage_root`）
     #[arg(long)]
     storage_root: Option<String>,
 
@@ -95,11 +95,11 @@ struct DirArgs {
     /// 要扫描的目录路径（包含 PDF 文件）
     dir: String,
 
-    /// OKB-Assist 服务地址
-    #[arg(long, default_value = "http://192.168.1.162:5001")]
-    base_url: String,
+    /// OKB-Assist 服务地址（缺省取 `~/.okb/client.json` 的 `url`）
+    #[arg(long)]
+    base_url: Option<String>,
 
-    /// 访问令牌
+    /// 访问令牌（缺省取 `~/.okb/client.json` 的 `token`）
     #[arg(long)]
     token: Option<String>,
 
@@ -270,10 +270,93 @@ struct LocalDocWithHash {
     local_hash: String,
 }
 
+// ==================== 客户端配置（~/.okb/client.json） ====================
+
+/// 没有配置文件时使用的默认服务地址
+const DEFAULT_BASE_URL: &str = "http://192.168.1.162:5001";
+
+/// `~/.okb/client.json` 的内容。字段全部可选，缺什么就用默认/命令行值。
+#[derive(Debug, Default, Deserialize)]
+struct ClientConfig {
+    /// 服务地址（`url` 与 `base_url` 两种写法都接受）
+    #[serde(default, alias = "base_url")]
+    url: Option<String>,
+    /// 访问令牌
+    #[serde(default)]
+    token: Option<String>,
+    /// Zotero storage 根目录（可被 `--storage-root` 覆盖）
+    #[serde(default)]
+    storage_root: Option<String>,
+}
+
+impl ClientConfig {
+    fn base_url(&self) -> String {
+        self.url
+            .clone()
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
+    }
+}
+
+/// `~/.okb/client.json` 路径
+fn config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".okb").join("client.json"))
+}
+
+/// `~/.okb/client/docs.json` 路径（服务端 doi-hash 索引的本地缓存）
+fn docs_cache_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".okb").join("client").join("docs.json"))
+}
+
+/// 读取配置；文件不存在直接返回默认值，解析失败只打警告（不阻断运行）
+fn load_config() -> ClientConfig {
+    let Some(path) = config_path() else {
+        return ClientConfig::default();
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            if e.kind() != io::ErrorKind::NotFound {
+                eprintln!("警告: 无法读取 {}: {}", path.display(), e);
+            }
+            return ClientConfig::default();
+        }
+    };
+    match serde_json::from_str::<ClientConfig>(&text) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("警告: {} 解析失败（按默认配置继续）: {}", path.display(), e);
+            ClientConfig::default()
+        }
+    }
+}
+
+/// 把服务端索引的原始响应写入 `~/.okb/client/docs.json`（原子写：先写 `.tmp` 再 rename）
+fn save_docs_cache(raw: &str) -> Option<PathBuf> {
+    let path = docs_cache_path()?;
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("警告: 无法创建目录 {}: {}", parent.display(), e);
+            return None;
+        }
+    }
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, raw) {
+        eprintln!("警告: 无法写入 {}: {}", tmp.display(), e);
+        return None;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        eprintln!("警告: 无法保存 {}: {}", path.display(), e);
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
+    Some(path)
+}
+
 // ==================== Token 读取 ====================
 
-/// 按优先级读取 token: 参数 > 环境变量 > 文件
-fn read_token(arg_token: Option<&str>) -> Option<String> {
+/// 按优先级读取 token: 参数 > 环境变量 > `~/.okb/client.json` 的 `token` > 旧版 `~/.okb_assist_token`
+fn read_token(arg_token: Option<&str>, config_token: Option<&str>) -> Option<String> {
     if let Some(t) = arg_token {
         if !t.is_empty() {
             return Some(t.to_string());
@@ -283,6 +366,9 @@ fn read_token(arg_token: Option<&str>) -> Option<String> {
         if !t.is_empty() {
             return Some(t);
         }
+    }
+    if let Some(t) = config_token.map(|t| t.trim()).filter(|t| !t.is_empty()) {
+        return Some(t.to_string());
     }
     let token_file = dirs::home_dir()?.join(".okb_assist_token");
     let content = std::fs::read_to_string(&token_file).ok()?;
@@ -379,13 +465,26 @@ async fn api_fetch_server_index(
     }
     match req.send().await {
         Ok(resp) if resp.status() == reqwest::StatusCode::OK => {
-            match resp.json::<ServerIndexResponse>().await {
-                Ok(body) => Some(ServerIndex::from_response(body)),
+            let raw = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("  服务端索引读取失败: {}", e);
+                    return None;
+                }
+            };
+            let body = match serde_json::from_str::<ServerIndexResponse>(&raw) {
+                Ok(b) => b,
                 Err(e) => {
                     eprintln!("  服务端索引解析失败: {}", e);
-                    None
+                    return None;
                 }
+            };
+            // 自动落盘一份原始索引（~/.okb/client/docs.json），方便离线查看/被其他工具复用
+            match save_docs_cache(&raw) {
+                Some(p) => println!("  服务端索引已保存: {}", p.display()),
+                None => eprintln!("  警告: 服务端索引未能保存到本地缓存"),
             }
+            Some(ServerIndex::from_response(body))
         }
         Ok(resp) => {
             eprintln!("  服务端索引请求失败: {}", resp.status());
@@ -755,12 +854,14 @@ fn scan_pdfs(dir: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
 }
 
 async fn run_dir(args: &DirArgs) -> Result<()> {
-    let token = read_token(args.token.as_deref());
+    let cfg = load_config();
+    let token = read_token(args.token.as_deref(), cfg.token.as_deref());
+    let base_url = args.base_url.clone().unwrap_or_else(|| cfg.base_url());
     let process = args.process;
 
     println!("扫描目录: {}", args.dir);
     println!("递归搜索: {}", if args.recursive { "是" } else { "否" });
-    println!("服务地址: {}", args.base_url);
+    println!("服务地址: {}", base_url);
     println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
     println!();
 
@@ -804,7 +905,7 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
     let client = http_client()?;
     println!("正在获取服务端索引（全部文件哈希）...");
     let (present_count, to_upload, invalid_count): (usize, Vec<&LocalPdf>, usize) =
-        match api_fetch_server_index(&client, &args.base_url, &token).await {
+        match api_fetch_server_index(&client, &base_url, &token).await {
             Some(idx) => {
                 let to_upload: Vec<&LocalPdf> = pdfs_with_hash
                     .iter()
@@ -820,7 +921,7 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
                 println!("  回退为 diff-hashes 比对（较慢）...");
                 let hashes: Vec<String> =
                     pdfs_with_hash.iter().map(|p| p.hash.clone()).collect();
-                let diff = match api_diff_hashes(&client, &args.base_url, &hashes, &token).await {
+                let diff = match api_diff_hashes(&client, &base_url, &hashes, &token).await {
                     Some(d) => d,
                     None => {
                         println!("错误: diff-hashes 请求失败，无法继续。");
@@ -912,13 +1013,13 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
             uploaded += 1;
             continue;
         }
-        match api_upload(&args.base_url, &p.path, None, &token).await {
+        match api_upload(&base_url, &p.path, None, &token).await {
             Some(result) => {
                 println!("成功 -> id={}", result.id);
                 uploaded += 1;
                 // 触发解析流水线
                 if process {
-                    if api_trigger_pipeline(&client, &args.base_url, result.id, &token).await {
+                    if api_trigger_pipeline(&client, &base_url, result.id, &token).await {
                         println!("    -> 已触发流水线");
                     }
                 }
@@ -1386,12 +1487,19 @@ async fn upload_one_zotero(
 }
 
 async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
-    let token = read_token(args.token.as_deref());
+    let cfg = load_config();
+    let token = read_token(args.token.as_deref(), cfg.token.as_deref());
+    let base_url = args.base_url.clone().unwrap_or_else(|| cfg.base_url());
+    let storage_root = args
+        .storage_root
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| cfg.storage_root.clone());
     let update_meta = args.update_meta;
 
-    println!("服务地址: {}", args.base_url);
+    println!("服务地址: {}", base_url);
     println!("CSV 文件: {}", args.csv_file);
-    println!("Storage root: {}", args.storage_root.clone().unwrap_or_default());
+    println!("Storage root: {}", storage_root.clone().unwrap_or_default());
     println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
     println!("更新元数据: {}", if update_meta { "是" } else { "否 (默认)" });
     if !args.keys.is_empty() {
@@ -1476,7 +1584,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
             }
         };
         let file_field = norm.get("file").cloned().unwrap_or_default();
-        let paths = parse_file_paths(&file_field, &args.storage_root);
+        let paths = parse_file_paths(&file_field, &storage_root);
         let file_path = match get_newest_file(&paths) {
             Some(f) => f,
             None => {
@@ -1567,7 +1675,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
 
     // 一次拉取服务端全量 DOI / 哈希索引，整库比对在本地完成（不再逐条 by-doi）
     println!("正在获取服务端索引（全部文献的 DOI / 哈希）...");
-    let server_index = api_fetch_server_index(&client, &args.base_url, &token).await;
+    let server_index = api_fetch_server_index(&client, &base_url, &token).await;
     match &server_index {
         Some(idx) => println!(
             "服务端索引：{} 篇文献，{} 个可比对 DOI（1 次请求）",
@@ -1587,7 +1695,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         // 优先查本地索引；索引不可用时回退到 by-doi 单条查询
         let server: Option<ServerEntry> = match &server_index {
             Some(idx) => idx.lookup(&dw.doc.doi).cloned(),
-            None => match api_lookup_by_doi(&client, &args.base_url, &dw.doc.doi, &token).await {
+            None => match api_lookup_by_doi(&client, &base_url, &dw.doc.doi, &token).await {
                 (true, Some(doc)) => Some(ServerEntry {
                     id: doc.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
                     doi: doc.get("doi").and_then(|v| v.as_str()).map(|s| s.to_string()),
@@ -1791,7 +1899,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         if args.dry_run {
             println!("[dry-run] 跳过");
             uploaded += 1;
-        } else if upload_one_zotero(&dw.doc, &args.base_url, update_meta, false, &client, &token).await {
+        } else if upload_one_zotero(&dw.doc, &base_url, update_meta, false, &client, &token).await {
             println!("✓");
             uploaded += 1;
         } else {
@@ -1810,10 +1918,10 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         if args.dry_run {
             println!("[dry-run] 跳过");
             updated_pdf += 1;
-        } else if api_replace_pdf(&args.base_url, *server_id, Path::new(&dw.doc.file_path), &token).await {
+        } else if api_replace_pdf(&base_url, *server_id, Path::new(&dw.doc.file_path), &token).await {
             if update_meta {
-                api_update_metadata(&client, &args.base_url, *server_id, &dw.doc.meta, &token).await;
-                api_save_info(&client, &args.base_url, *server_id, &dw.doc.info, &token).await;
+                api_update_metadata(&client, &base_url, *server_id, &dw.doc.meta, &token).await;
+                api_save_info(&client, &base_url, *server_id, &dw.doc.info, &token).await;
             }
             println!("✓");
             updated_pdf += 1;

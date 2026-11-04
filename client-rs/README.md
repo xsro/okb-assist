@@ -2,6 +2,28 @@
 
 命令行工具，用于向 OKB-Assist 服务上传文献。
 
+## 配置文件（`~/.okb/client.json`）
+
+默认从 `~/.okb/client.json` 读服务地址与令牌，不必每条命令都写 `--base-url` / `--token`：
+
+```json
+{
+  "url": "http://192.168.1.162:5001",
+  "token": "okb_xxxxxxxx",
+  "storage_root": "D:\\Zotero\\storage"
+}
+```
+
+- `url`（也接受 `base_url`）服务地址，缺省 `http://192.168.1.162:5001`；
+- `token` 令牌，优先级：`--token` > `OKB_ASSIST_TOKEN` 环境变量 > `client.json` > 旧版 `~/.okb_assist_token`；
+- `storage_root` 仅 `zotero` 子命令使用，可被 `--storage-root` 覆盖。
+
+文件不存在或字段缺失时用命令行参数/内置默认值；JSON 写错只打一条警告，不阻断运行。
+
+**索引缓存**：每次成功拉到服务端的 doi-hash 全量索引，都会把原始响应原样写入
+`~/.okb/client/docs.json`（原子写，先写 `.tmp` 再 rename），方便离线查看或被其他工具复用。
+内容就是接口返回的 `{count, with_doi, with_hash, generated_at, documents:[...]}`（4 千篇左右约 700 KB）。
+
 ## 子命令
 
 ### `zotero` — Zotero CSV 导入
@@ -22,9 +44,9 @@ okb-client zotero <csv_file> [选项]
 ```
 
 选项：
-- `--base-url <URL>`         服务地址（默认 http://192.168.1.162:5001）
-- `--token <TOKEN>`          访问令牌
-- `--storage-root <PATH>`    Zotero storage 文件夹本地路径
+- `--base-url <URL>`         服务地址（缺省取 `~/.okb/client.json` 的 `url`）
+- `--token <TOKEN>`          访问令牌（缺省取 `~/.okb/client.json` 的 `token`）
+- `--storage-root <PATH>`    Zotero storage 文件夹本地路径（缺省取 `~/.okb/client.json` 的 `storage_root`）
 - `--dry-run`                试运行，不实际上传
 - `--update-meta`            同时更新元数据和原始 CSV 信息（默认仅替换 PDF）
 - `--dup-doi-action <MODE>`  DOI 已存在时的处理方式（默认 `skip`）：
@@ -55,8 +77,8 @@ okb-client dir <目录路径> [选项]
 ```
 
 选项：
-- `--base-url <URL>`         服务地址（默认 http://192.168.1.162:5001）
-- `--token <TOKEN>`          访问令牌
+- `--base-url <URL>`         服务地址（缺省取 `~/.okb/client.json` 的 `url`）
+- `--token <TOKEN>`          访问令牌（缺省取 `~/.okb/client.json` 的 `token`）
 - `--dry-run`                试运行，不实际上传
 - `-r, --recursive`          递归搜索子目录
 - `--process`                上传后触发解析流水线（默认不触发）
@@ -72,7 +94,8 @@ okb-client dir ./downloads --dry-run
 按以下优先级读取：
 1. `--token` 命令行参数
 2. `OKB_ASSIST_TOKEN` 环境变量
-3. `~/.okb_assist_token` 文件内容
+3. `~/.okb/client.json` 的 `token` 字段
+4. 旧版 `~/.okb_assist_token` 文件内容
 
 ## 构建
 

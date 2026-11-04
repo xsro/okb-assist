@@ -82,7 +82,7 @@ cargo build --release
 | `backend-rs/src/settings.rs`、`backend-rs/src/utils.rs` | 全局 Settings 单例、工具函数（含 `resolve_token`：解析 `!cat <path>` 形式的敏感值） |
 | `backend-rs/config.json` | 服务配置（MinerU/LLM/向量库），可由 UI 编辑 |
 | `backend-rs/system.json` | 系统配置（token、MCP token、白名单、DB URL、上传路径、路径模板），需手动改 |
-| `client-rs/` | Zotero CSV 导入客户端（Rust） |
+| `client-rs/` | Zotero CSV 导入客户端（Rust）。配置默认读 `~/.okb/client.json`（`url`/`base_url`、`token`、`storage_root`），成功拉到的 doi-hash 全量索引会自动写到 `~/.okb/client/docs.json` |
 | `frontend/src/components/` | Vue 组件 — 见下方「前端架构 → 组件一览」 |
 | `frontend/src/views/` | 页面视图 — 见下方「前端架构 → 路由」 |
 | `frontend/src/router/index.ts` | Vue Router 配置（14 路由，`base: '/assist/'`） |
