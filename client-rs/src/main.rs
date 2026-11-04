@@ -296,6 +296,8 @@ struct UploadResult {
 struct LocalDoc {
     doi: String,
     file_path: String,
+    /// 该条目全部可用的 PDF 附件（`file_path` 是从中挑出来的一个；用于 409 时提示用户换附件）
+    attachments: Vec<String>,
     title: Option<String>,
     meta: DocMetadata,
     info: HashMap<String, String>,
@@ -713,13 +715,30 @@ async fn post_pdf(
     Ok(req.send().await?)
 }
 
+/// 上传结果（区分「新建成功」与「409 去重命中」，后者需要把服务端已有文档的信息报给用户）
+enum UploadOutcome {
+    /// 新建成功
+    Created(UploadResult),
+    /// 409 去重命中；`kind` = `hash`（文件内容已在库中）/ `doi`（DOI 已在库中）
+    Duplicate {
+        kind: String,
+        existing_id: u64,
+        existing_doi: Option<String>,
+        existing_filename: Option<String>,
+        same_file: bool,
+        message: String,
+    },
+    /// 其它失败（原因已打印）
+    Failed,
+}
+
 /// 上传 PDF 文件到服务器（新建文献，默认不触发自动处理）
 async fn api_upload(
     base_url: &str,
     file_path: &Path,
     doi: Option<&str>,
     token: &Option<String>,
-) -> Option<UploadResult> {
+) -> UploadOutcome {
     let url = format!("{}/assist/api/documents/upload", base_url);
     // 显式带 DOI：服务端不必解析 PDF 就能做 DOI 去重（命中时返回 409 `kind=doi`）
     let mut fields: Vec<(&str, &str)> = vec![("auto_process", "false")];
@@ -729,43 +748,57 @@ async fn api_upload(
     let resp = match post_pdf(&url, file_path, token, &fields).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("  上传失败: {}", e);
-            return None;
+            eprintln!("    上传失败: {}", e);
+            return UploadOutcome::Failed;
         }
     };
 
     let status = resp.status();
     if status == reqwest::StatusCode::OK {
-        resp.json().await.ok()
-    } else {
-        let body = resp.text().await.unwrap_or_default();
-        if status == reqwest::StatusCode::CONFLICT {
-            // 服务端去重命中（kind=hash|doi）：报出已有文档 id，方便人工确认后重跑
-            let parsed: Option<serde_json::Value> = serde_json::from_str(&body).ok();
-            let kind = parsed
+        return match resp.json().await {
+            Ok(r) => UploadOutcome::Created(r),
+            Err(e) => {
+                eprintln!("    上传响应解析失败: {}", e);
+                UploadOutcome::Failed
+            }
+        };
+    }
+
+    let body = resp.text().await.unwrap_or_default();
+    if status == reqwest::StatusCode::CONFLICT {
+        // 服务端去重命中（kind=hash|doi）：把已有文档的 DOI/文件名带回来，方便判断是「本地挂错附件」还是「库里记录有误」
+        let parsed: Option<serde_json::Value> = serde_json::from_str(&body).ok();
+        let get_str = |ptr: &str| -> Option<String> {
+            parsed
                 .as_ref()
-                .and_then(|v| v.get("kind"))
+                .and_then(|v| v.pointer(ptr))
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let existing_id = parsed
+                .map(|s| s.to_string())
+        };
+        return UploadOutcome::Duplicate {
+            kind: get_str("/kind").unwrap_or_else(|| "unknown".to_string()),
+            existing_id: parsed
                 .as_ref()
                 .and_then(|v| v.get("existing_id"))
                 .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            eprintln!(
-                "  上传被服务端去重拦下（kind={}）: 已有文档 id={}（可改用 --dup-doi-action hash 覆盖）",
-                if kind.is_empty() { "unknown" } else { kind },
-                existing_id
-            );
-        } else {
-            eprintln!(
-                "  上传失败: {} - {}",
-                status,
-                truncate_body(&body, 200)
-            );
-        }
-        None
+                .unwrap_or(0),
+            existing_doi: get_str("/existing/doi"),
+            existing_filename: get_str("/existing/filename"),
+            same_file: parsed
+                .as_ref()
+                .and_then(|v| v.get("same_file"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            message: get_str("/message").unwrap_or_default(),
+        };
     }
+
+    eprintln!(
+        "    上传失败: {} - {}",
+        status,
+        truncate_body(&body, 200)
+    );
+    UploadOutcome::Failed
 }
 
 /// 通过 DOI 查询服务器上已有的文献。
@@ -1157,7 +1190,7 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
         print!("        上传 ... ");
         io::stdout().flush().ok();
         match api_upload(&base_url, path, None, &token).await {
-            Some(result) => {
+            UploadOutcome::Created(result) => {
                 println!("成功 -> id={}", result.id);
                 // 记下 DOI → 哈希（服务端算的与本地一致，优先用服务端返回值），供 `zotero --reuse-hash` 复用
                 if let Some(doi) = result.doi.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -1171,7 +1204,37 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
                     println!("        -> 已触发流水线");
                 }
             }
-            None => {
+            UploadOutcome::Duplicate {
+                kind,
+                existing_id,
+                existing_doi,
+                existing_filename,
+                same_file,
+                message,
+            } => {
+                println!("被服务端去重拦下");
+                println!(
+                    "        已有文档: id={} | DOI={} | 文件名={}",
+                    existing_id,
+                    existing_doi.as_deref().unwrap_or("（空）"),
+                    existing_filename.as_deref().unwrap_or("（未知）")
+                );
+                if kind == "hash" {
+                    println!(
+                        "        原因: 这份 PDF 的内容（sha256）已在库中{}，与本次要登记的新文献是两条不同记录",
+                        if same_file { "" } else { "（另一条记录）" }
+                    );
+                    println!(
+                        "        处理: 多为库里那条记录的 PDF 装错（或你本地这份文件本来就是另一篇）——先确认 id={} 的真实内容再决定重传 PDF 或删掉它",
+                        existing_id
+                    );
+                } else {
+                    println!("        原因: {}", if message.is_empty() { "DOI 已存在" } else { message.as_str() });
+                    println!("        处理: 用 --dup-doi-action hash 可改走「比对哈希、不同则覆盖已有 PDF」的路子");
+                }
+                failed += 1;
+            }
+            UploadOutcome::Failed => {
                 println!("失败");
                 failed += 1;
             }
@@ -1384,16 +1447,94 @@ fn parse_file_paths(file_field: &str, storage_root: &Option<String>) -> Vec<Stri
     paths
 }
 
-fn get_newest_file(paths: &[String]) -> Option<String> {
-    paths
+/// 从附件候选里挑一个 PDF。
+///
+/// 只有 1 个直接用；**多个时不再只按 mtime 选**（Zotero 条目挂错/多挂附件时会把别的论文传上去），
+/// 而是按「文件名与条目标题/作者的词重合度」打分，同分再取最新 mtime；并打印全部候选与得分。
+fn pick_attachment(paths: &[String], title: &str, authors: &str, label: &str) -> Option<String> {
+    let existing: Vec<String> = paths
         .iter()
         .filter(|p| Path::new(p).exists())
-        .max_by_key(|p| {
-            std::fs::metadata(p)
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        })
         .cloned()
+        .collect();
+    match existing.len() {
+        0 => None,
+        1 => Some(existing[0].clone()),
+        _ => {
+            let tokens = title_tokens(title, authors);
+            let mut scored: Vec<(usize, std::time::SystemTime, String)> = existing
+                .iter()
+                .map(|p| {
+                    let stem = Path::new(p)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_lowercase())
+                        .unwrap_or_default();
+                    let score = tokens.iter().filter(|t| stem.contains(t.as_str())).count();
+                    let mtime = std::fs::metadata(p)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    (score, mtime, p.clone())
+                })
+                .collect();
+            println!(
+                "        ⚠ {} 有 {} 个 PDF 附件，按标题/作者匹配挑选（不再只看修改时间）:",
+                label,
+                existing.len()
+            );
+            for (score, _, p) in &scored {
+                println!(
+                    "            [匹配 {} 词] {}",
+                    score,
+                    Path::new(p)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.clone())
+                );
+            }
+            // 匹配词多者优先；同分取 mtime 新的（保持旧行为）
+            scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+            let (score, _, picked) = scored[0].clone();
+            if score == 0 {
+                println!("            ⚠ 标题/作者未匹配到任何候选，按最新修改时间选择，可能选错——请在 Zotero 里确认附件");
+            }
+            println!(
+                "            -> 选用: {}",
+                Path::new(&picked)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| picked.clone())
+            );
+            Some(picked)
+        }
+    }
+}
+
+/// 从标题与作者字段提取用于匹配文件名的词（小写、长度 >= 4、去停用词）
+fn title_tokens(title: &str, authors: &str) -> Vec<String> {
+    const STOP: [&str; 12] = [
+        "the", "and", "for", "with", "from", "based", "using", "this", "that", "into",
+        "via", "under",
+    ];
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |raw: &str| {
+        for w in raw
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() >= 4 && !STOP.contains(w))
+        {
+            if !out.iter().any(|x| x == w) {
+                out.push(w.to_string());
+            }
+        }
+    };
+    push(title);
+    // 作者字段形如 `Last, First; Last2, First2`：取逗号前的姓
+    for a in authors.split(';') {
+        if let Some(last) = a.split(',').next() {
+            push(last);
+        }
+    }
+    out
 }
 
 fn parse_authors(author_field: &str) -> Vec<String> {
@@ -1679,6 +1820,66 @@ async fn compute_local_hash(
     }
 }
 
+/// 把「409 去重命中」的动机讲清楚（旧版只说 id + 一个不相关的 `--dup-doi-action` 提示）
+fn describe_duplicate(
+    d: &LocalDoc,
+    kind: &str,
+    existing_id: u64,
+    existing_doi: Option<&str>,
+    existing_filename: Option<&str>,
+    same_file: bool,
+    message: &str,
+) {
+    let _ = same_file;
+    println!(
+        "    已有文档: id={} | DOI={} | 文件名={}",
+        existing_id,
+        existing_doi.unwrap_or("（空）"),
+        existing_filename.unwrap_or("（未知）")
+    );
+    println!(
+        "    本条记录: DOI={} | 文件={}",
+        d.doi,
+        Path::new(&d.file_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| d.file_path.clone())
+    );
+    if kind == "hash" {
+        println!(
+            "    含义: 本地这份 PDF 的 sha256 与库中 id={} 的文件完全相同（内容一样，只是登记成了另一篇）。",
+            existing_id
+        );
+        println!("    常见原因:");
+        println!("      a) Zotero 条目挂错了附件（同一篇的 PDF 被挂到了别的条目上）；");
+        println!("      b) 库里 id={} 这条记录的 PDF 装错了（DOI/元数据是 A，PDF 是 B）。", existing_id);
+        if d.attachments.len() > 1 {
+            println!("    该条目共有 {} 个 PDF 附件:", d.attachments.len());
+            for (i, p) in d.attachments.iter().enumerate() {
+                println!(
+                    "      [{}]{}",
+                    i + 1,
+                    if *p == d.file_path { "（本次选用）" } else { "" }
+                );
+                println!("          {}", p);
+            }
+            println!("    处理: 在 Zotero 里删掉错的那个附件，或在 CSV 的「File Attachments」列只保留对的路径后重跑。");
+        } else {
+            println!("    处理: 先确认 id={} 那条记录的真实内容（详情页可下载 PDF），再决定是替换它还是换本地文件。", existing_id);
+        }
+    } else {
+        println!(
+            "    含义: {}",
+            if message.is_empty() {
+                "该 DOI 在库中已存在"
+            } else {
+                message
+            }
+        );
+        println!("    处理: 加 --dup-doi-action hash 可改为「比对哈希，不同则覆盖已有 PDF」。");
+    }
+}
+
 async fn upload_one_zotero(
     d: &LocalDoc,
     base_url: &str,
@@ -1692,9 +1893,29 @@ async fn upload_one_zotero(
         return true;
     }
     let res = match api_upload(base_url, Path::new(&d.file_path), Some(d.doi.as_str()), token).await {
-        Some(r) => r,
-        None => {
-            println!("  上传失败 {}: 无返回结果", d.doi);
+        UploadOutcome::Created(r) => r,
+        UploadOutcome::Duplicate {
+            kind,
+            existing_id,
+            existing_doi,
+            existing_filename,
+            same_file,
+            message,
+        } => {
+            println!("被服务端去重拦下");
+            describe_duplicate(
+                d,
+                &kind,
+                existing_id,
+                existing_doi.as_deref(),
+                existing_filename.as_deref(),
+                same_file,
+                &message,
+            );
+            return false;
+        }
+        UploadOutcome::Failed => {
+            println!("上传失败 {}", d.doi);
             return false;
         }
     };
@@ -1819,7 +2040,10 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         };
         let file_field = norm.get("file").cloned().unwrap_or_default();
         let paths = parse_file_paths(&file_field, &storage_root);
-        let file_path = match get_newest_file(&paths) {
+        let row_title = norm.get("title").cloned().unwrap_or_default();
+        let row_authors = norm.get("author").cloned().unwrap_or_default();
+        let label = format!("{} ({})", item_key, doi);
+        let file_path = match pick_attachment(&paths, &row_title, &row_authors, &label) {
             Some(f) => f,
             None => {
                 if !key_filter.is_empty() {
@@ -1828,6 +2052,11 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
                 continue;
             }
         };
+        let available: Vec<String> = paths
+            .iter()
+            .filter(|p| Path::new(p.as_str()).exists())
+            .cloned()
+            .collect();
         let meta = parse_zotero_row(&norm);
         let info: ZoteroRow = raw
             .iter()
@@ -1837,6 +2066,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         local_docs.push(LocalDoc {
             doi,
             file_path,
+            attachments: available,
             title: meta.title.clone(),
             meta,
             info,
@@ -2253,5 +2483,42 @@ mod hash_doi_tests {
         let m: HashMap<String, String> = serde_json::from_str(&text).unwrap();
         assert_eq!(m.get("10.2000/aaa").map(|v| v.as_str()), Some("cafebabe"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn picks_attachment_matching_title_not_newest() {
+        let dir = std::env::temp_dir().join(format!("okb-attach-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wrong = dir.join("1-s2.0-S0016003223006038-main.pdf");
+        let right = dir.join("Brogliato - 2016 - Nonsmooth Mechanics Models, Dynamics and Control.pdf");
+        std::fs::write(&wrong, b"wrong").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&right, b"right").unwrap();
+        // 让「错的那个」成为最新文件，模拟原来的 bug 场景
+        let newer = std::fs::File::options().write(true).open(&wrong).unwrap();
+        newer.set_modified(std::time::SystemTime::now()).unwrap();
+        drop(newer);
+        let paths = vec![
+            wrong.to_string_lossy().to_string(),
+            right.to_string_lossy().to_string(),
+        ];
+        let picked = pick_attachment(
+            &paths,
+            "Nonsmooth mechanics: models, dynamics and control",
+            "Brogliato, Bernard",
+            "X3SM5EK9 (10.1007/978-3-319-28664-8)",
+        )
+        .unwrap();
+        assert!(picked.ends_with("Brogliato - 2016 - Nonsmooth Mechanics Models, Dynamics and Control.pdf"), "picked: {picked}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn title_tokens_skip_stopwords_and_keep_surnames() {
+        let t = title_tokens("Nonsmooth mechanics: models, dynamics and control", "Brogliato, Bernard; Utkin, Vadim");
+        assert!(t.contains(&"nonsmooth".to_string()));
+        assert!(t.contains(&"brogliato".to_string()));
+        assert!(t.contains(&"utkin".to_string()));
+        assert!(!t.iter().any(|w| w == "and" || w == "the"));
     }
 }

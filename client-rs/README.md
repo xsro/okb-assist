@@ -66,6 +66,25 @@
 
 服务器没有该 DOI（= 新建）或服务器没有 PDF 时都不算哈希，直接进入新建/更新分支。
 
+**多个附件的取舍**：一个 Zotero 条目挂了多个 PDF 时，不再只按「最新修改时间」选（会把别篇论文当成本条目附件传上去），
+而是按「文件名与标题/作者词的匹配数」选，并打印全部候选与得分：
+
+```
+⚠ x3sm5ek9 (10.1007/978-3-319-28664-8) 有 2 个 PDF 附件，按标题/作者匹配挑选（不再只看修改时间）:
+    [匹配 0 词] 1-s2.0-S0016003223006038-main.pdf
+    [匹配 6 词] Brogliato - 2016 - Nonsmooth Mechanics Models, Dynamics and Control.pdf
+    -> 选用: Brogliato - 2016 - Nonsmooth Mechanics Models, Dynamics and Control.pdf
+```
+
+得分全是 0 时会回退到「最新修改时间」并提示可能选错。
+
+**409 去重命中**：服务端按文件内容 sha256 / DOI 拦下时，客户端会打印库里已有文档的
+`id` / DOI / 文件名、本条记录的 DOI 与文件，并分情况给建议：
+
+- `kind=hash`：本地这份 PDF 的**内容**已在库中（登记成了另一篇）。常见原因是 Zotero 条目挂错附件，
+  或库里那条记录装错了 PDF。多个附件时会列出全部候选，提示去 Zotero / CSV 里删掉错的；
+- `kind=doi`：DOI 已存在，`--dup-doi-action hash` 可改走「比对哈希，不同则覆盖已有 PDF」。
+
 ```
 okb-client zotero <csv_file> [选项]
 ```
