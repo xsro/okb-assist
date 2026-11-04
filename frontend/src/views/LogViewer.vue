@@ -7,45 +7,59 @@
         <span class="version-detail">{{ versionInfo.build_profile }} · {{ versionInfo.rustc }}</span>
         <span class="version-date">构建于 {{ versionInfo.build_time }}</span>
       </div>
-      <span class="log-file" v-if="logFile">📄 {{ logFile }}</span>
+      <span
+        class="log-file"
+        v-if="logFile"
+        :title="`页面只显示进程内最近 ${capacity} 条；更早的历史日志请直接查看该文件`"
+      >📄 {{ logFile }}</span>
     </div>
 
     <!-- 过滤栏 -->
     <div class="log-filters">
       <div class="filter-row">
-        <select v-model="levelFilter" class="filter-select" @change="loadLogs">
-          <option value="">所有级别</option>
-          <option value="trace">TRACE</option>
-          <option value="debug">DEBUG</option>
-          <option value="info">INFO</option>
-          <option value="warn">WARN</option>
-          <option value="error">ERROR</option>
+        <select v-model="levelFilter" class="filter-select" @change="reload">
+          <option v-for="item in LOG_LEVELS" :key="item.value" :value="item.value">
+            {{ item.label }}
+          </option>
         </select>
         <input
           v-model="keywordFilter"
           type="text"
           class="filter-input"
-          placeholder="搜索日志内容..."
-          @keyup.enter="loadLogs"
+          placeholder="在当前列表中搜索（即时过滤）..."
         />
-        <select v-model="lineCount" class="filter-select filter-lines" @change="loadLogs">
-          <option :value="50">50 条</option>
-          <option :value="100">100 条</option>
-          <option :value="200">200 条</option>
-          <option :value="500">500 条</option>
-          <option :value="1000">1000 条</option>
-        </select>
-        <button class="btn btn-outline" @click="loadLogs" :disabled="loading">
+        <label class="filter-check" title="把 /assist/api/admin/logs 自身的请求日志也显示出来（默认隐藏，避免自己刷屏）">
+          <input type="checkbox" v-model="includeSelf" @change="reload" />
+          含本页请求
+        </label>
+        <button class="btn btn-outline" @click="reload" :disabled="loading">
           {{ loading ? '加载中...' : '刷新' }}
         </button>
-        <button class="btn btn-outline" @click="autoRefresh = !autoRefresh">
+        <button
+          class="btn btn-outline"
+          :class="{ 'btn-active': autoRefresh }"
+          :title="`自动模式：每 ${AUTO_REFRESH_MS / 1000} 秒增量拉取新增日志（页面隐藏时暂停）`"
+          @click="toggleAutoRefresh"
+        >
           {{ autoRefresh ? '⏸ 暂停' : '▶ 自动' }}
         </button>
-        <span class="log-count" v-if="totalLogs > 0">
-          共 {{ totalLogs }} 条，显示 {{ displayedLogs }} 条
-          <span v-if="scanTruncated" class="log-scan-hint" :title="scanHint">
-            （已回扫至上限，更早的日志未加载）
+        <button class="btn btn-outline" @click="clearLogs" title="清空当前列表（服务端缓冲不受影响）">
+          🗑 清空
+        </button>
+        <span class="log-count" v-if="visibleLogs.length > 0">
+          显示 {{ visibleLogs.length }} 条
+          <span v-if="keywordFilter" class="log-hint">（共 {{ logs.length }} 条）</span>
+          <span v-if="cappedHint" class="log-hint" title="列表只保留最近的日志，更早的请用「刷新」重新载入">
+            （超出上限仅保留最近 {{ MAX_ENTRIES }} 条）
           </span>
+          <span v-if="lostTotal > 0" class="log-hint" title="生产日志的速度超过拉取速度，且已超出服务端缓冲跨度">
+            （中间有 {{ lostTotal }} 条被丢弃）
+          </span>
+        </span>
+        <span class="log-status">
+          <span v-if="loadError" class="log-error">{{ loadError }}</span>
+          <span v-else-if="lastUpdated">最后更新 {{ lastUpdated }}</span>
+          <span v-if="autoRefresh" class="log-live-dot" title="自动轮询中">●</span>
         </span>
       </div>
     </div>
@@ -53,25 +67,36 @@
     <!-- 日志列表 -->
     <div class="log-list" ref="logListRef">
       <div v-if="loading" class="log-loading">加载中...</div>
-      <div v-else-if="logs.length === 0" class="log-empty">
-        暂无日志
+      <div v-else-if="visibleLogs.length === 0" class="log-empty">
+        {{ logs.length === 0 ? '暂无日志（等待新的日志输出...）' : '当前关键词下没有匹配的日志' }}
       </div>
       <div
-        v-for="(entry, i) in logs"
-        :key="i"
+        v-for="(entry, i) in visibleLogs"
+        :key="entry.seq ?? `i-${i}`"
         class="log-entry"
         :class="'level-' + (entry.level || 'info').toLowerCase()"
       >
-        <div class="log-entry-main" @click="toggleExpand(i)">
+        <div class="log-entry-main" @click="toggleExpand(entry)">
           <span class="log-timestamp">{{ formatTimestamp(entry.timestamp) }}</span>
           <span class="log-target" v-if="entry.target">{{ entry.target }}</span>
           <span class="log-arrow">→</span>
+          <span class="log-request" v-if="requestPath(entry)">
+            <span class="log-method" v-if="stringField(entry, 'method')" :class="'method-' + methodClass(entry)">
+              {{ stringField(entry, 'method') }}
+            </span>
+            <span class="log-path" :title="fullPath(entry)">
+              {{ requestPath(entry) }}<template v-if="stringField(entry, 'query')">?{{ stringField(entry, 'query') }}</template>
+            </span>
+          </span>
           <span class="log-message">{{ entry.fields?.message || entry.message }}</span>
-          <span class="log-expand-icon">{{ expandedIndex === i ? '▼' : '▶' }}</span>
+          <span class="log-expand-icon">{{ isExpanded(entry) ? '▼' : '▶' }}</span>
         </div>
         <!-- 展开详情：原始 JSON -->
-        <div v-if="expandedIndex === i" class="log-detail">
-          <pre class="detail-json">{{ formatJson(entry) }}</pre>
+        <div v-if="isExpanded(entry)" class="log-detail">
+          <div class="log-detail-actions">
+            <button class="btn btn-sm" @click.stop="openDetail(entry)">⤢ 大图查看</button>
+          </div>
+          <pre class="detail-json">{{ formatJson(asRecord(entry)) }}</pre>
         </div>
       </div>
     </div>
@@ -81,7 +106,7 @@
         <div class="json-modal-header">
           <span class="json-modal-title">
             {{ detailEntry.level?.toUpperCase() || 'INFO' }} -
-            {{ detailEntry.message?.slice(0, 80) }}
+            {{ messageOf(detailEntry)?.slice(0, 80) }}
           </span>
           <div class="json-modal-actions">
             <button class="btn-copy" @click="copyJson" :title="copied ? '已复制' : '复制 JSON'">
@@ -90,7 +115,7 @@
             <button class="json-modal-close" @click="closeDetail">×</button>
           </div>
         </div>
-        <pre class="json-modal-body">{{ formatJson(detailEntry) }}</pre>
+        <pre class="json-modal-body">{{ formatJson(asRecord(detailEntry)) }}</pre>
         <div class="json-modal-footer">
           <button class="btn btn-sm" @click="closeDetail">关闭</button>
         </div>
@@ -100,11 +125,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted } from 'vue'
-import { getLogs } from '@/api/admin'
+import { computed, ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { getLogs, LOG_LEVELS } from '@/api/admin'
 import { useRequireToken } from '@/composables/useRequireToken'
 import { apiGet } from '@/api/client'
-import type { LogEntry } from '@/api/admin'
+import type { LogEntry, LogLevel } from '@/api/admin'
 
 interface VersionInfo {
   name: string
@@ -118,30 +143,97 @@ interface VersionInfo {
 
 const { requireToken } = useRequireToken()
 
+/**
+ * 自动轮询间隔（毫秒）。
+ *
+ * 后端只提供「进程内环形缓冲」的增量接口（不读日志文件），每次请求都是纯内存操作，
+ * 因此 1 秒一次的开销可忽略。
+ */
+const AUTO_REFRESH_MS = 1000
+/** 列表最多保留的条数：超出后从最旧的开始丢，避免长时间开页把 DOM 撑爆。 */
+const MAX_ENTRIES = 2000
+/** 单次请求的条数上限：命中更多时后端置 `truncated`，前端立刻再拉一次追平。 */
+const PAGE_LIMIT = 500
+
 const logs = ref<LogEntry[]>([])
 const loading = ref(false)
-const levelFilter = ref('')
+/** 服务端等级阈值（「该等级及以上」） */
+const levelFilter = ref<LogLevel>('info')
+/** 关键词只在当前列表里过滤，即时生效，不触发请求 */
 const keywordFilter = ref('')
-const lineCount = ref(100)
-const totalLogs = ref(0)
-const displayedLogs = ref(0)
-/** 后端是否因回扫字节上限而没读到文件开头 */
-const scanTruncated = ref(false)
-const scannedBytes = ref(0)
-const scanHint = computed(() =>
-  `本次从文件尾回扫 ${(scannedBytes.value / 1024 / 1024).toFixed(1)} MB（上限固定），更早的日志需要调大上限或先清理日志`
-)
+/** 自动模式（定时增量拉取）；默认开启 */
+const autoRefresh = ref(true)
+/** 增量游标：上次响应的 `next_seq` */
+const since = ref(0)
+const lastUpdated = ref('')
+const loadError = ref('')
+/** 日志文件路径（后端只回显路径，供提示历史日志位置） */
 const logFile = ref('')
-const autoRefresh = ref(false)
+/** 服务端环形缓冲容量 */
+const capacity = ref(2000)
+/** 累计被服务端环形缓冲丢弃的条数 */
+const lostTotal = ref(0)
+/** 是否显示「本接口自身请求」的日志（服务端过滤，改动需重载） */
+const includeSelf = ref(false)
+/** 是否因列表超过 MAX_ENTRIES 丢了最旧的条目 */
+const cappedHint = ref(false)
 const logListRef = ref<HTMLElement | null>(null)
 const versionInfo = ref<VersionInfo | null>(null)
 const detailEntry = ref<LogEntry | null>(null)
-const expandedIndex = ref<number | null>(null)
+/** 展开的是哪一条：按日志 `seq` 记录，追加新日志时不会错位或自动折叠 */
+const expandedSeq = ref<number | null>(null)
 const copied = ref(false)
-let refreshTimer: ReturnType<typeof setInterval> | null = null
+let pollTimer: ReturnType<typeof setInterval> | null = null
+/** 防抖：上一次请求未返回时不叠加新请求 */
+let inFlight = false
 
-function toggleExpand(i: number) {
-  expandedIndex.value = expandedIndex.value === i ? null : i
+/** 关键词过滤后的展示列表（纯客户端过滤） */
+const visibleLogs = computed(() => {
+  const kw = keywordFilter.value.trim().toLowerCase()
+  if (!kw) return logs.value
+  return logs.value.filter((entry) => JSON.stringify(entry).toLowerCase().includes(kw))
+})
+
+/** 取 `fields` 里的字符串字段（请求类日志才有 method / path / query） */
+function stringField(entry: LogEntry, name: string): string {
+  const fields = entry.fields as Record<string, unknown> | undefined
+  const value = fields?.[name]
+  return typeof value === 'string' ? value : ''
+}
+
+/** 请求路径：请求开始/错误中间件写 `fields.path`，TraceLayer 的响应日志写 `fields.uri` */
+function requestPath(entry: LogEntry): string {
+  return stringField(entry, 'path') || stringField(entry, 'uri')
+}
+
+/** 完整请求目标（含查询串），用于 hover 提示 */
+function fullPath(entry: LogEntry): string {
+  const path = requestPath(entry)
+  const query = stringField(entry, 'query')
+  return query ? `${path}?${query}` : path
+}
+
+/** 方法名 → 着色用的类名 */
+function methodClass(entry: LogEntry): string {
+  return stringField(entry, 'method').toLowerCase() || 'other'
+}
+
+function messageOf(entry: LogEntry): string {
+  const nested = (entry.fields as Record<string, unknown> | undefined)?.message
+  return typeof nested === 'string' ? nested : String(entry.message ?? '')
+}
+
+/** LogEntry 带索引签名，转成纯对象给 JSON.stringify / 模态框用 */
+function asRecord(entry: LogEntry): Record<string, unknown> {
+  return entry as unknown as Record<string, unknown>
+}
+
+function isExpanded(entry: LogEntry): boolean {
+  return entry.seq != null && expandedSeq.value === entry.seq
+}
+
+function toggleExpand(entry: LogEntry) {
+  expandedSeq.value = isExpanded(entry) ? null : (entry.seq ?? null)
 }
 
 function openDetail(entry: LogEntry) {
@@ -159,7 +251,7 @@ function formatJson(obj: Record<string, unknown>): string {
 
 function copyJson() {
   if (!detailEntry.value) return
-  navigator.clipboard.writeText(formatJson(detailEntry.value))
+  navigator.clipboard.writeText(formatJson(asRecord(detailEntry.value)))
   copied.value = true
   setTimeout(() => { copied.value = false }, 1500)
 }
@@ -183,34 +275,147 @@ function formatTimestamp(ts: string): string {
   }
 }
 
-async function loadLogs() {
+/** 用户是否已经在列表底部（在底部才自动跟随最新日志，否则保持阅读位置） */
+function isAtBottom(): boolean {
+  const el = logListRef.value
+  if (!el) return true
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 48
+}
+
+function scrollToBottom() {
+  nextTick(() => {
+    const el = logListRef.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
+}
+
+/** 列表超过上限时丢掉最旧的 */
+function capLogs() {
+  if (logs.value.length > MAX_ENTRIES) {
+    logs.value.splice(0, logs.value.length - MAX_ENTRIES)
+    cappedHint.value = true
+  }
+}
+
+/**
+ * 拉取日志。
+ *
+ * 服务端数据源是进程内环形缓冲（最近 N 条，进程重启即清空），接口是纯增量的：
+ * - `reset = true`：游标归零，重新从缓冲区里最早的记录开始（刷新 / 换等级）；
+ * - 否则只取 `since` 之后的新记录并追加到列表。
+ */
+async function loadLogs(opts: { reset?: boolean } = {}) {
   if (!requireToken()) return
-  loading.value = true
+  if (inFlight) return
+  const reset = opts.reset === true
+  inFlight = true
+  if (reset) loading.value = true
+  const stick = isAtBottom()
+  let needMore = false
   try {
     const res = await getLogs({
-      lines: lineCount.value,
-      level: levelFilter.value || undefined,
-      q: keywordFilter.value || undefined
+      since: reset ? 0 : since.value,
+      level: levelFilter.value,
+      limit: PAGE_LIMIT,
+      includeSelf: includeSelf.value
     })
-    logs.value = res.entries
-    totalLogs.value = res.total
-    displayedLogs.value = res.displayed
-    scanTruncated.value = res.scan_truncated === true
-    scannedBytes.value = res.scanned_bytes || 0
-    logFile.value = res.file
-  } catch {
-    logs.value = []
-    totalLogs.value = 0
-    displayedLogs.value = 0
-    scanTruncated.value = false
-    scannedBytes.value = 0
+    if (reset) {
+      logs.value = []
+      lostTotal.value = 0
+      cappedHint.value = false
+      expandedSeq.value = null
+    }
+    if (res.entries.length) {
+      logs.value.push(...res.entries)
+      capLogs()
+      // 展开状态按 `seq` 记录，追加新日志时保持不变（用户能继续看展开的那条）
+      if (stick) scrollToBottom()
+    }
+    if (res.lost > 0) lostTotal.value += res.lost
+    since.value = res.next_seq ?? since.value
+    logFile.value = res.file || logFile.value
+    capacity.value = res.capacity || capacity.value
+    lastUpdated.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+    loadError.value = ''
+    // 命中数超过单次上限：立刻再拉一次把落后的部分追平
+    needMore = res.truncated === true
+  } catch (err) {
+    // 增量失败保留已有日志（下一轮自动重试）；重置失败才清空
+    if (reset) {
+      logs.value = []
+      lostTotal.value = 0
+      cappedHint.value = false
+    }
+    const status = (err as { response?: { status?: number } })?.response?.status
+    if (status === 401 || status === 403) {
+      // 凭证失效 / 权限不足：继续每秒重试没有意义，停掉轮询等用户处理
+      autoRefresh.value = false
+      stopPolling()
+      loadError.value =
+        status === 401 ? '登录状态已失效，请重新登录' : '权限不足（仅管理员可查看日志）'
+    } else {
+      loadError.value = '日志加载失败'
+    }
   } finally {
     loading.value = false
+    inFlight = false
+  }
+  if (needMore) void loadLogs()
+}
+
+/** 手动刷新 / 切换等级：从缓冲区最早处重新载入 */
+function reload() {
+  since.value = 0
+  void loadLogs({ reset: true })
+}
+
+/** 只清空页面上的列表（不改变游标，之后只显示新日志） */
+function clearLogs() {
+  logs.value = []
+  expandedSeq.value = null
+  lostTotal.value = 0
+  cappedHint.value = false
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+function startPolling() {
+  stopPolling()
+  if (!autoRefresh.value) return
+  pollTimer = setInterval(() => {
+    // 页面隐藏时暂停拉取，回前台由 visibilitychange 立即补一次
+    if (document.visibilityState === 'hidden' || inFlight) return
+    void loadLogs()
+  }, AUTO_REFRESH_MS)
+}
+
+function toggleAutoRefresh() {
+  autoRefresh.value = !autoRefresh.value
+  if (autoRefresh.value) {
+    startPolling()
+    void loadLogs()
+  } else {
+    stopPolling()
+  }
+}
+
+/** 从后台切回前台：立即补一次增量，再恢复定时器 */
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible' && autoRefresh.value) {
+    void loadLogs()
+    startPolling()
   }
 }
 
 onMounted(async () => {
-  loadLogs()
+  void loadLogs({ reset: true })
+  startPolling()
+  document.addEventListener('visibilitychange', onVisibilityChange)
   try {
     const info = await apiGet<VersionInfo>('/assist/api/admin/')
     versionInfo.value = info
@@ -218,10 +423,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (refreshTimer) {
-    clearInterval(refreshTimer)
-    refreshTimer = null
-  }
+  stopPolling()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 </script>
 
@@ -267,7 +470,7 @@ onUnmounted(() => {
   background: var(--bg);
   padding: 2px 8px;
   border-radius: 4px;
-  margin-left: auto;
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
 }
 
 .log-filters {
@@ -313,8 +516,19 @@ onUnmounted(() => {
   box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.12);
 }
 
-.filter-lines {
-  width: 100px;
+.filter-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+  min-height: 34px;
+}
+
+.filter-check input {
+  cursor: pointer;
 }
 
 .log-count {
@@ -323,8 +537,38 @@ onUnmounted(() => {
   margin-left: auto;
 }
 
-/* 回扫上限提示（更早的日志未加载） */
-.log-scan-hint {
+/* 最后更新时间 / 加载失败 / 自动模式指示灯 */
+.log-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.log-error {
+  color: var(--error, #d33);
+}
+
+.log-live-dot {
+  color: #2ecc71;
+  font-size: 10px;
+  animation: log-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes log-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+/* 自动模式开启时高亮按钮 */
+.btn-active {
+  border-color: var(--primary, #2ecc71);
+  color: var(--primary, #2ecc71);
+}
+
+/* 列表超限 / 丢弃日志提示 */
+.log-hint {
   color: var(--warning, #c98a00);
   margin-left: 4px;
 }
@@ -537,6 +781,46 @@ onUnmounted(() => {
   font-size: 11px;
 }
 
+/* 请求类日志：METHOD + PATH（消息里只有「请求开始」，靠这两个字段看是哪次调用） */
+.log-request {
+  flex-shrink: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 46%;
+}
+
+.log-method {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: #333;
+  color: #9cdcfe;
+  line-height: 1.6;
+}
+
+.method-get { color: #4fc3f7; }
+.method-post { color: #c3e88d; }
+.method-put { color: #ffcb6b; }
+.method-patch { color: #f78c6c; }
+.method-delete { color: #f07178; }
+.method-options,
+.method-head { color: #888; }
+
+.log-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #9cdcfe;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .log-message {
   flex: 1;
   word-break: break-word;
@@ -555,6 +839,12 @@ onUnmounted(() => {
   background: #252526;
   border-top: 1px solid #333;
   font-size: 12px;
+}
+
+.log-detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
 }
 
 .detail-json {
@@ -591,8 +881,27 @@ onUnmounted(() => {
   .log-target {
     max-width: 120px;
   }
-  .log-count {
+  .filter-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+  min-height: 34px;
+}
+
+.filter-check input {
+  cursor: pointer;
+}
+
+.log-count {
     margin-left: 0;
+  }
+  .log-request {
+    max-width: 100%;
+    flex: 1 1 100%;
   }
   .log-detail {
     padding-left: 12px;

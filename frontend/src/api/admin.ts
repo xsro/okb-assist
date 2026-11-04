@@ -93,9 +93,11 @@ export function getQdrantCollections() {
   )
 }
 
-// ── 日志查看 ────────────────────────────────────────────
+// ── 实时日志（短轮询环形缓冲，不读日志文件） ──────────────
 
 export interface LogEntry {
+  /** 服务端环形缓冲里的序号（稳定标识，用于渲染 key 与展开状态） */
+  seq?: number
   message: string
   level: string
   timestamp: string
@@ -105,23 +107,54 @@ export interface LogEntry {
   [key: string]: unknown
 }
 
+/** 可选的日志等级（服务端按「该等级及以上」过滤） */
+export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error'
+
+export const LOG_LEVELS: { value: LogLevel; label: string }[] = [
+  { value: 'error', label: 'ERROR 及以上' },
+  { value: 'warn', label: 'WARN 及以上' },
+  { value: 'info', label: 'INFO 及以上' },
+  { value: 'debug', label: 'DEBUG 及以上' },
+  { value: 'trace', label: '全部（含 TRACE）' }
+]
+
 export interface LogResponse {
+  /** 本次返回的日志（时间正序，结构与日志文件里的一行一致） */
   entries: LogEntry[]
-  total: number
+  /** entries 的条数 */
+  count: number
+  /** 满足过滤条件的总条数（大于 count 说明被 limit 截断） */
+  matched: number
+  /** 下次请求用的游标（服务端「最新序号 + 1」） */
+  next_seq: number
+  latest_seq: number
+  /** 缓冲里最旧记录的序号（缓冲区为空时为 null） */
+  oldest_seq: number | null
+  /** since 之后被挤出缓冲区的条数（>0 表示中间有日志被丢弃） */
+  lost: number
+  /** true = 命中数超过 limit，应立刻再拉一次 */
+  truncated: boolean
+  /** 服务端实际使用的等级阈值 */
+  level: LogLevel
+  /** 环形缓冲容量 */
+  capacity: number
+  /** 日志文件路径（仅供提示"历史日志在这里"，服务端不读它） */
   file: string
-  displayed: number
-  error?: string
-  /** 本次从文件尾实际回扫的字节数 */
-  scanned_bytes?: number
-  /** true = 回扫字节预算用尽，文件开头还有更早的日志未加载 */
-  scan_truncated?: boolean
+  server_time?: string
 }
 
-/** 获取日志 */
+/** 拉取日志增量：`since` 为上次的 `next_seq`（不传 = 从缓冲区最早开始） */
 export function getLogs(params: {
-  lines?: number
-  level?: string
-  q?: string
+  since?: number
+  level?: LogLevel
+  limit?: number
+  /** 是否包含「本接口自身的请求日志」（默认服务端隐藏） */
+  includeSelf?: boolean
 }) {
-  return apiGet<LogResponse>('/assist/api/admin/logs', params)
+  return apiGet<LogResponse>('/assist/api/admin/logs', {
+    since: params.since,
+    level: params.level,
+    limit: params.limit,
+    include_self: params.includeSelf ? 1 : undefined
+  })
 }

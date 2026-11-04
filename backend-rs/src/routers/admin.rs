@@ -1178,23 +1178,60 @@ async fn fix_document_status(
     .into_response()
 }
 
-// ── 日志查看 ────────────────────────────────────────────
+// ── 实时日志（短轮询环形缓冲） ───────────────────────────
 
-/// 日志查看从文件尾反向回扫的字节上限（32 MB）。
-/// 超过后不再继续往文件头方向扫，避免超大日志 + 过滤条件时长时间扫盘。
-const LOG_TAIL_MAX_BYTES: u64 = 32 * 1024 * 1024;
+/// 单次返回的默认条数（前端可传 `limit` 调整）
+const LOG_DEFAULT_LIMIT: usize = 500;
 
-/// 日志查询参数
+/// 日志查询参数。
+///
+/// 数据源是 `logger` 的进程内环形缓冲（最近 [`crate::logger::RING_CAPACITY`] 条），
+/// **不再读日志文件**；历史日志请直接看 `system.json` 的 `log_path` 指向的文件。
 #[derive(Debug, Deserialize)]
 pub struct LogQuery {
-    /// 返回最近多少行（默认 100）
-    pub lines: Option<usize>,
-    /// 按日志级别过滤（trace / debug / info / warn / error）
+    /// 增量游标：取自上次响应的 `next_seq`（只返回序号更大的记录）。
+    /// 缺省 / 0 = 从缓冲区里最早的记录开始。
+    pub since: Option<u64>,
+    /// 最低等级：trace / debug / info / warn / error（缺省 info，语义为「该等级及以上」）
     pub level: Option<String>,
-    /// 文本关键词过滤
-    pub q: Option<String>,
+    /// 单次返回上限（默认 500，上限 = 环形缓冲容量）
+    pub limit: Option<usize>,
+    /// 是否把「本接口自身的请求日志」也算进来（默认隐藏，避免看日志时被自己的轮询刷屏）。
+    /// 取 `1` / `true` / `yes` / `on` 时包含。
+    pub include_self: Option<String>,
 }
 
+/// 本接口自身的请求路径：默认把它产生的日志过滤掉。
+const SELF_LOG_PATH: &str = "/assist/api/admin/logs";
+
+/// 判定一条日志是否属于「本接口自身的请求」。
+///
+/// 三种来源都要覆盖：
+/// - `request_start_log_middleware`：`fields.path`；
+/// - `TraceLayer` 的响应日志：`fields.uri`；
+/// - 上面两者都挂在 `request` span 上，span 字段里也有 `uri`。
+fn is_self_request_log(entry: &Value) -> bool {
+    let matches_path = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .is_some_and(|s| s.starts_with(SELF_LOG_PATH))
+    };
+    if matches_path(entry.pointer("/fields/path")) || matches_path(entry.pointer("/fields/uri")) {
+        return true;
+    }
+    entry
+        .get("spans")
+        .and_then(Value::as_array)
+        .is_some_and(|spans| spans.iter().any(|span| matches_path(span.get("uri"))))
+}
+
+/// `GET /assist/api/admin/logs?since=&level=&limit=`
+///
+/// 前端每 1 秒用 `since` 拉一次增量即可（纯内存操作，无磁盘 IO）。
+/// 响应字段：
+/// - `entries`：按时间正序的日志条目（结构与 JSONL 文件里的一行完全一致）；
+/// - `next_seq`：下次请求用的游标；
+/// - `truncated`：命中条数超过 `limit`，前端应立刻再拉一次把落后的部分追平；
+/// - `lost`：`since` 之后被挤出缓冲区的条数（前端提示「中间有日志被丢弃」）。
 async fn get_logs(
     Extension(role): Extension<auth::Role>,
     Extension(settings): Extension<Arc<Settings>>,
@@ -1203,86 +1240,47 @@ async fn get_logs(
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
-    let log_path_raw = settings.log_path();
-    let log_path = std::path::PathBuf::from(
-        crate::config_manager::ConfigManager::substitute_path_variables(&log_path_raw, 0)
+
+    let since = params.since.unwrap_or(0);
+    let min_level = params
+        .level
+        .as_deref()
+        .and_then(crate::logger::level_from_name)
+        .unwrap_or(tracing::Level::INFO);
+    let limit = params
+        .limit
+        .unwrap_or(LOG_DEFAULT_LIMIT)
+        .clamp(1, crate::logger::RING_CAPACITY);
+
+    // 默认把「本接口自身的请求日志」过滤掉（否则每拉一次就多一条自己的请求日志）
+    let include_self = params
+        .include_self
+        .as_deref()
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on" | "include"))
+        .unwrap_or(false);
+    let snapshot = crate::logger::store().snapshot(since, min_level, limit, |entry| {
+        include_self || !is_self_request_log(entry)
+    });
+
+    // 日志文件路径只用于前端提示「历史日志在这里」，处理器不读它
+    let log_file = crate::config_manager::ConfigManager::substitute_path_variables(
+        &settings.log_path(),
+        0,
     );
 
-    if !log_path.exists() {
-        return (StatusCode::NOT_FOUND, Json(json!({
-            "entries": [],
-            "total": 0,
-            "file": log_path.to_string_lossy().to_string(),
-            "error": "日志文件不存在"
-        }))).into_response();
-    }
-
-    let max_lines = params.lines.unwrap_or(100).min(5000);
-    let level_filter = params.level.as_deref().unwrap_or("").to_lowercase();
-    let keyword = params.q.as_deref().unwrap_or("").to_lowercase();
-
-    // 从文件尾反向读行：只要最后 N 条，不再把整份 JSONL 读进内存。
-    // `LOG_TAIL_MAX_BYTES` 是回扫上限，避免超大文件在过滤密度低时长时间扫盘。
-    let mut iter = match crate::utils::ReverseLines::open(&log_path, LOG_TAIL_MAX_BYTES) {
-        Ok(it) => it,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "entries": [],
-                "total": 0,
-                "file": log_path.to_string_lossy().to_string(),
-                "error": format!("读取日志文件失败: {}", e)
-            }))).into_response();
-        }
-    };
-
-    // 逆序收集（最新在前），凑够 max_lines 条就停
-    let mut entries_rev: Vec<Value> = Vec::new();
-    while let Some(line) = iter.next() {
-        let line = line.trim();
-        if line.is_empty() { continue; }
-
-        // 尝试解析 JSONL；非 JSONL 行（进程启动消息等）按纯文本条目处理
-        let entry: Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => json!({
-                "message": line,
-                "level": "info",
-                "timestamp": "",
-                "target": ""
-            }),
-        };
-
-        // 按级别过滤
-        if !level_filter.is_empty() {
-            let lvl = entry["level"].as_str().unwrap_or("").to_lowercase();
-            if lvl != level_filter { continue; }
-        }
-
-        // 按关键词过滤
-        if !keyword.is_empty() {
-            let raw = serde_json::to_string(&entry).unwrap_or_default().to_lowercase();
-            if !raw.contains(&keyword) { continue; }
-        }
-
-        entries_rev.push(entry);
-        if entries_rev.len() >= max_lines {
-            break;
-        }
-    }
-
-    let scanned_bytes = iter.read_bytes();
-    // 回扫字节预算用尽且没退到文件头 → 更早的日志未加载（可能还有匹配项）
-    let scan_truncated = scanned_bytes >= LOG_TAIL_MAX_BYTES && !iter.at_start();
-
-    let total = entries_rev.len();
-    entries_rev.reverse();
-
     Json(json!({
-        "entries": entries_rev,
-        "total": total,
-        "file": log_path.to_string_lossy().to_string(),
-        "displayed": total,
-        "scanned_bytes": scanned_bytes,
-        "scan_truncated": scan_truncated,
-    })).into_response()
+        "entries": snapshot.entries,
+        "count": snapshot.entries.len(),
+        "matched": snapshot.matched,
+        "next_seq": snapshot.next_seq,
+        "latest_seq": snapshot.latest_seq,
+        "oldest_seq": snapshot.oldest_seq,
+        "lost": snapshot.lost,
+        "truncated": snapshot.truncated,
+        "level": crate::logger::level_name(min_level),
+        "capacity": crate::logger::RING_CAPACITY,
+        "file": log_file,
+        "server_time": chrono::Utc::now().to_rfc3339(),
+    }))
+    .into_response()
 }

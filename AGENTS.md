@@ -70,7 +70,7 @@ cargo build --release
 | `backend-rs/src/auth.rs` | 角色判定（`Role`/`assert_role`）、凭证解析（`Principal`/`resolve_principal`）、首次启动引导 |
 | `backend-rs/src/users.rs` | 用户存储（`config.json` 的 `users` 段，Argon2id 密码、sha256 令牌、最后管理员不变量） |
 | `backend-rs/src/session.rs` | 服务端会话表（`sess_…`，内存态，7 天滑动续期） |
-| `backend-rs/src/logger.rs` | 双日志初始化（文件 + 控制台） |
+| `backend-rs/src/logger.rs` | 三路日志：文件 + 控制台 + **进程内环形缓冲**（实时日志数据源，见易错点 22） |
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`drive.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/drive.rs` | 用户网盘：路径安全、角色阈值、配额统计、目录列举、Content-Type 推断 |
 | `backend-rs/src/services/pdf_engine.rs` | PDF 解析引擎运行时选择（`mutool` 命令行 / 内置 `mupdf`，含能力兜底） |
@@ -732,7 +732,14 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 19. **静态目录的鉴权与内置路由不同**：它不走 `token_middleware`（后者只覆盖 `/assist/api/*`），而是在处理器内自己判（`static_files::authorize`：`okb_static` cookie / 会话・用户令牌 / 受信任子网），所以新增挂载时要保留这条判定，不能直接读文件。另外：`axum::body::Body` **不是 `Sync`**，`serve_mount` 里不能把 `&Request` 跨 `await` 传给 helper，否则整个 future 不再是 `Send`，axum 会报 `Handler` 未实现（现已改成传 `&str` / `&StaticMount`）。
 20. **前端启动重定向必须先 `await router.isReady()`**（`App.vue`）：硬导航（直接输入 URL / 外链）时 `route` 还是初始 `START_LOCATION`，`route.fullPath` 是 `/`，不等待会把 `?redirect=` 覆盖成 `/`，导致“登录后回跳”失效。
 21. **大文件唯一路径是流式**：上传/解析链路里 **禁止** `tokio::fs::read(整份 PDF)`、`field.bytes()`、`resp.bytes().to_vec()` 之后只为了“顺手算个哈希/交给下一个函数”。哈希用 `utils::calculate_file_hash_async`（流式）或 `stream_field_to_temp_file` 里顺带算；上传请求体用 `reqwest::Body::wrap_stream(ReaderStream::new(file))` **并显式给 `Content-Length`**（否则退化成 chunked，OSS 预签名 URL 会校验失败）；multipart 用 `Part::stream_with_length`。
-22. **日志查看是“从文件尾反向读”**：`GET /assist/api/admin/logs` 用 `utils::ReverseLines`（`LOG_TAIL_MAX_BYTES = 32 MB` 回扫上限）逐行向前读，凑够 `lines` 条就停，**不再 `read_to_string` 整份 JSONL**。响应里的 `total` / `displayed` 现在是“本次返回条数”，`scanned_bytes` / `scan_truncated` 才是回扫情况（命中上限时前端会提示更早日志未加载）；别把它改回“读全文再过滤”。
+22. **日志查看只读进程内环形缓冲，不读日志文件**：`logger.rs` 在文件层 / stdout 层之外多挂了一个 `fmt::layer().json()`（`RingBufferWriter`）——每条事件写完（写入器的 `Drop`）把**整行 JSON** 追加进 `LogStore` 的 `VecDeque`（`RING_CAPACITY = 2000`，进程重启即清空）。因为与 JSONL 文件层同源，缓冲里的行与 `okb-log.jsonl` 里的行逐字节一致。
+    - `GET /assist/api/admin/logs?since=&level=&limit=&include_self=` 是**纯内存**增量接口（无 `spawn_blocking`、无磁盘 IO）：`since` 传上次响应的 `next_seq`，返回 `seq > since` 且不低于 `level` 的条目；`truncated = true` 表示命中数超过 `limit`（前端应立刻再拉一次追平），`lost` 是 `since` 之后被挤出缓冲区的条数。
+    - **默认过滤掉本接口自身的请求日志**（`SELF_LOG_PATH = "/assist/api/admin/logs"`，匹配 `fields.path` / `fields.uri` / `spans[].uri`），否则前端每秒轮询会把自己的请求日志刷进列表；要看它们就传 `include_self=1`。过滤谓词在 `LogStore::snapshot` 内生效，`matched` / `truncated` / 游标都按过滤后的结果算，不会卡住游标。
+    - 每条返回的条目都会补一个 `seq` 字段：前端拿它做 `v-for` 的 key 和「展开哪一条」的标识，**不要改回用数组下标**（追加新日志会让展开项错位，历史 bug 就是展开后自动折叠）。
+    - 环层的序列化**不受 `--log-level` 限制**（`EnvFilter` 用 `.with_filter()` 只贴在文件层与 stdout 层上），否则前端把等级切到 debug/trace 会永远是空的。`--log-level` 依旧只决定落盘/终端能看到什么。
+    - 前端 `LogViewer.vue` 每 1 秒拉一次增量、`MAX_ENTRIES = 2000` 封顶（页面隐藏时暂停、回前台补一次），关键词过滤是纯客户端 `computed`（不触发请求、不重连），改等级 = 重置游标重新载入。
+    - **不要再改回读日志文件**（旧的 `ReverseLines` / 字节游标 `since` / 半行处理 / `scanned_bytes` 已随 `get_logs` 一并删除）；历史日志的去处是 `system.json` 的 `log_path` 文件，页面只回显路径。
+
 23. **PDF 引擎是运行时选择，不是编译期开关**：`pdf_meta` / `pdf_health` 的公共入口一律先 `services::pdf_engine::active()` 再分发，mutool 那套实现**必须始终编译**（不要再加 `#[cfg(not(feature = "mupdf"))]`）。新增 PDF 能力时要两套实现都补，否则切引擎后会静默失能；另外 `mupdf` 引擎拿不到 stderr 诊断，依赖诊断的功能（如「损坏但可修复」判定）要在 UI 上提示用户切回 `mutool`。
 
 ## 入口与关键文件速查
