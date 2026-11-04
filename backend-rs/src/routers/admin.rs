@@ -37,6 +37,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/admin/reconnect", post(reconnect_services))
         .route("/assist/api/admin/stats/", get(stats))
         .route("/assist/api/admin/stats", get(stats))
+        .route("/assist/api/admin/pdf-health/", get(pdf_health_overview))
+        .route("/assist/api/admin/pdf-health", get(pdf_health_overview))
         .route("/assist/api/admin/mineru/tasks/", get(mineru_tasks))
         .route("/assist/api/admin/mineru/tasks", get(mineru_tasks))
         .route("/assist/api/admin/qdrant/collections/", get(qdrant_collections))
@@ -444,6 +446,28 @@ async fn stats(
         .unwrap_or(0);
     let total_size: i64 = total_pdf_size + total_md_size + total_zip_size;
 
+    // PDF 健康分布（ok / warning / error / missing；NULL 或空串 = 从未检查）
+    let mut pdf_health_counts = serde_json::Map::new();
+    for health in [
+        crate::services::pdf_health::HEALTH_OK,
+        crate::services::pdf_health::HEALTH_WARNING,
+        crate::services::pdf_health::HEALTH_ERROR,
+        crate::services::pdf_health::HEALTH_MISSING,
+    ] {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents WHERE pdf_health = ?")
+            .bind(health)
+            .fetch_one(db.pool())
+            .await
+            .unwrap_or(0);
+        pdf_health_counts.insert(health.to_string(), json!(count));
+    }
+    let pdf_health_unchecked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM documents WHERE pdf_health IS NULL OR pdf_health = ''",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap_or(0);
+
     // Qdrant 状态
     let mut qdrant_status = "connected".to_string();
     let mut qdrant_collections: Vec<String> = Vec::new();
@@ -467,6 +491,92 @@ async fn stats(
         "pdf_size": total_pdf_size,
         "md_size": total_md_size,
         "zip_size": total_zip_size,
+        "pdf_health_counts": pdf_health_counts,
+        "pdf_health_unchecked": pdf_health_unchecked,
+    }))
+}
+
+/// PDF 健康概览（admin）：分布计数 + 异常文档清单。
+///
+/// `pdf_health` 取值 `ok` / `warning` / `error` / `missing`，`NULL` / 空串表示从未检查。
+/// 清单只返回非 `ok` 的文档（最严重 error → missing → warning 排序），最多 200 条，
+/// 供「监控面板」直接展示并可跳到文档管理页。
+async fn pdf_health_overview(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足"}));
+    }
+
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents")
+        .fetch_one(db.pool())
+        .await
+        .unwrap_or(0);
+
+    let mut counts = serde_json::Map::new();
+    for health in [
+        crate::services::pdf_health::HEALTH_OK,
+        crate::services::pdf_health::HEALTH_WARNING,
+        crate::services::pdf_health::HEALTH_ERROR,
+        crate::services::pdf_health::HEALTH_MISSING,
+    ] {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents WHERE pdf_health = ?")
+            .bind(health)
+            .fetch_one(db.pool())
+            .await
+            .unwrap_or(0);
+        counts.insert(health.to_string(), json!(count));
+    }
+
+    let unchecked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM documents WHERE pdf_health IS NULL OR pdf_health = ''",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap_or(0);
+
+    const PROBLEM_LIMIT: i64 = 200;
+    // 异常清单：error → missing → warning，同级别按 id
+    let rows: Vec<(i64, Option<String>, String, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT id, title, filename, pdf_health, pdf_health_message FROM documents \
+             WHERE pdf_health IN ('error', 'missing', 'warning') \
+             ORDER BY CASE pdf_health WHEN 'error' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END, id \
+             LIMIT ?",
+        )
+        .bind(PROBLEM_LIMIT)
+        .fetch_all(db.pool())
+        .await
+        .unwrap_or_default();
+
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, title, filename, health, message)| {
+            json!({
+                "id": id,
+                "title": title,
+                "filename": filename,
+                "pdf_health": health,
+                "pdf_health_message": message,
+            })
+        })
+        .collect();
+
+    let problem_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM documents WHERE pdf_health IN ('error', 'missing', 'warning')",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap_or(0);
+
+    Json(json!({
+        "total": total,
+        "counts": counts,
+        "unchecked": unchecked,
+        "problem_count": problem_count,
+        "limit": PROBLEM_LIMIT,
+        "items": items,
     }))
 }
 

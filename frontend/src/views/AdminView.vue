@@ -1,6 +1,6 @@
 <template>
   <div class="admin-view">
-    <h2>管理后台</h2>
+    <h2>监控面板</h2>
 
     <!-- 统计卡片 -->
     <div class="stats-grid">
@@ -39,6 +39,68 @@
       <div class="stat-card">
         <span class="stat-value">{{ formatSize(stats?.zip_size || 0) }}</span>
         <span class="stat-label">资源包大小</span>
+      </div>
+    </div>
+
+    <!-- PDF 健康 -->
+    <div class="section">
+      <div class="section-header">
+        <h3>PDF 健康</h3>
+        <button class="btn btn-sm btn-outline" @click="loadPdfHealth" :disabled="healthLoading">
+          刷新
+        </button>
+      </div>
+
+      <div class="stats-grid">
+        <div
+          v-for="card in healthCards"
+          :key="card.key"
+          class="stat-card health-card"
+          :class="`health-${card.key}`"
+        >
+          <span class="stat-value">{{ card.value }}</span>
+          <span class="stat-label">{{ card.label }}</span>
+        </div>
+      </div>
+
+      <div class="subsection">
+        <h4>异常 PDF（{{ health?.problem_count ?? 0 }}）</h4>
+        <div v-if="healthItems.length > 0" class="table-wrap">
+          <table class="doc-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>标题</th>
+                <th>健康</th>
+                <th>说明</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in healthItems" :key="item.id">
+                <td>{{ item.id }}</td>
+                <td>{{ item.title || item.filename || '(无标题)' }}</td>
+                <td>
+                  <span
+                    class="health-badge"
+                    :class="`health-${item.pdf_health || 'unchecked'}`"
+                    :title="item.pdf_health_message || undefined"
+                  >{{ healthLabel(item.pdf_health) }}</span>
+                </td>
+                <td class="health-message">{{ item.pdf_health_message || '-' }}</td>
+                <td>
+                  <button class="btn btn-sm btn-outline" @click="openDoc(item.id)">管理</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-if="(health?.problem_count ?? 0) > healthItems.length" class="empty-hint">
+            仅显示前 {{ healthItems.length }} 条（共 {{ health?.problem_count }} 条），可到「文档管理」逐条查看。
+          </div>
+        </div>
+        <div v-else class="empty-hint">
+          {{ health ? '没有异常 PDF' : '暂无数据' }}
+        </div>
       </div>
     </div>
 
@@ -185,6 +247,7 @@ import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   getStats,
+  getPdfHealthOverview,
   recalculateHashes,
   checkPdfHealth,
   deduplicateDocuments,
@@ -196,6 +259,7 @@ import { useToast } from '@/composables/useToast'
 import StatusBadge from '@/components/StatusBadge.vue'
 import type { SystemStats } from '@/types/config'
 import type { ActiveTask } from '@/types/pipeline'
+import type { PdfHealthOverview } from '@/api/admin'
 
 const { showToast, showInfo, showError } = useToast()
 const router = useRouter()
@@ -206,6 +270,22 @@ const loading = computed(() => pipelineStore.loading)
 const queue = computed(() => pipelineStore.queue)
 const activeTasks = computed(() => pipelineStore.activeTasks)
 const batchProgress = computed(() => pipelineStore.batchProgress)
+
+// PDF 健康概览（分布计数 + 异常文档清单）
+const health = ref<PdfHealthOverview | null>(null)
+const healthLoading = ref(false)
+const healthItems = computed(() => health.value?.items ?? [])
+
+const healthCards = computed(() => {
+  const counts = health.value?.counts ?? {}
+  return [
+    { key: 'ok', label: '检查正常', value: counts.ok ?? 0 },
+    { key: 'warning', label: '有警告', value: counts.warning ?? 0 },
+    { key: 'error', label: '无法解析', value: counts.error ?? 0 },
+    { key: 'missing', label: '文件缺失', value: counts.missing ?? 0 },
+    { key: 'unchecked', label: '未检查', value: health.value?.unchecked ?? 0 }
+  ]
+})
 
 const progressPercent = computed(() => {
   const p = batchProgress.value
@@ -228,6 +308,34 @@ async function load() {
   } catch (e) {
     showError('加载失败')
   }
+}
+
+/** 加载 PDF 健康概览（计数 + 异常清单） */
+async function loadPdfHealth() {
+  healthLoading.value = true
+  try {
+    health.value = await getPdfHealthOverview()
+  } catch {
+    showError('PDF 健康数据加载失败')
+  } finally {
+    healthLoading.value = false
+  }
+}
+
+/** PDF 健康状态 → 中文标签 */
+function healthLabel(status?: string | null): string {
+  const labels: Record<string, string> = {
+    ok: '✓ 正常',
+    warning: '⚠ 警告',
+    error: '✕ 无法解析',
+    missing: '✕ 缺失',
+    unchecked: '未检查'
+  }
+  return labels[status || 'unchecked'] || (status || '未检查')
+}
+
+function openDoc(id: number) {
+  router.push(`/assist/doc/${id}`)
 }
 
 async function batchParse() {
@@ -323,6 +431,7 @@ async function recalcMissingHashes() {
 
 function refresh() {
   pipelineStore.fetchStatus()
+  loadPdfHealth()
 }
 
 function taskTypeLabel(type: string): string {
@@ -349,6 +458,7 @@ function formatTime(iso: string) {
 
 onMounted(() => {
   load()
+  loadPdfHealth()
   pipelineStore.fetchStatus()
   pipelineStore.startPolling(3000)
 })
@@ -378,6 +488,70 @@ onUnmounted(() => {
 
 .table-wrap {
   overflow-x: auto;
+}
+
+/* ── PDF 健康 ── */
+.health-card .stat-value {
+  color: var(--text-primary);
+}
+
+.health-card.health-ok .stat-value {
+  color: #1b7f4b;
+}
+
+.health-card.health-warning .stat-value {
+  color: #9a6400;
+}
+
+.health-card.health-error .stat-value,
+.health-card.health-missing .stat-value {
+  color: var(--danger-text);
+}
+
+.health-card.health-unchecked .stat-value {
+  color: var(--text-secondary);
+}
+
+.health-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px solid transparent;
+}
+
+.health-badge.health-ok {
+  color: #1b7f4b;
+  background: #e8f7ee;
+  border-color: #b7e2c9;
+}
+
+.health-badge.health-warning {
+  color: #9a6400;
+  background: #fff6e0;
+  border-color: #f0d69b;
+}
+
+.health-badge.health-error,
+.health-badge.health-missing {
+  color: var(--danger-text);
+  background: #fdecec;
+  border-color: #f3c1c1;
+}
+
+.health-badge.health-unchecked {
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-color: var(--border);
+}
+
+.health-message {
+  font-size: 12px;
+  color: var(--text-secondary);
+  max-width: 320px;
+  word-break: break-all;
 }
 
 .tool-tag {

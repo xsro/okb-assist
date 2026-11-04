@@ -73,7 +73,7 @@ const routes = [
     path: '/assist/admin',
     name: 'admin',
     component: () => import('@/views/AdminView.vue'),
-    meta: { title: '管理后台', requiresAdmin: true }
+    meta: { title: '监控面板', requiresAdmin: true }
   },
   {
     path: '/assist/config',

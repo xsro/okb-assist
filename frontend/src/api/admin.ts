@@ -12,11 +12,43 @@ export interface SystemStats {
   md_size: number
   zip_size: number
   status_counts: Record<string, number>
+  /** PDF 健康分布：ok / warning / error / missing */
+  pdf_health_counts?: Record<string, number>
+  /** 从未做过健康检查（pdf_health 为空）的文档数 */
+  pdf_health_unchecked?: number
 }
 
 /** 获取统计信息 */
 export function getStats() {
   return apiGet<SystemStats>('/assist/api/admin/stats')
+}
+
+// ── PDF 健康概览 ───────────────────────────────────────
+
+export interface PdfHealthItem {
+  id: number
+  title?: string | null
+  filename?: string | null
+  /** ok / warning / error / missing */
+  pdf_health?: string | null
+  pdf_health_message?: string | null
+}
+
+export interface PdfHealthOverview {
+  total: number
+  counts: Record<string, number>
+  /** 未检查数量 */
+  unchecked: number
+  /** 非 ok 的文档总数（可能大于 items.length） */
+  problem_count: number
+  /** 清单上限 */
+  limit: number
+  items: PdfHealthItem[]
+}
+
+/** PDF 健康概览（分布计数 + 异常文档清单） */
+export function getPdfHealthOverview() {
+  return apiGet<PdfHealthOverview>('/assist/api/admin/pdf-health')
 }
 
 /** 获取服务状态 */

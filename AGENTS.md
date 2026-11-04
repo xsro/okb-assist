@@ -608,7 +608,7 @@ curl -X POST -H "X-Token: <admin-token>" -H "Content-Type: application/json" \
 | `/assist/markdown/:id/edit` | `MarkdownEditView.vue` | Markdown 编辑（AceEditor）；支持 `?line=a-b` 只载入指定行范围，阅读页「源码编辑」即跳到这里 | admin |
 | `/assist/upload` | `UploadView.vue` | 上传 PDF | admin / view-upload |
 | `/assist/doc/:id` | `DocManageView.vue` | 文档管理（含「PDF 健康」单篇检查，仅 admin 可见） | 全部 |
-| `/assist/admin` | `AdminView.vue` | 管理面板（含监控、统计） | admin |
+| `/assist/admin` | `AdminView.vue` | 监控面板（统计 + PDF 健康概览 + 维护操作 + 流水线监控） | admin |
 | `/assist/duplicates` | `DuplicatesView.vue` | 去重 | admin |
 | `/assist/point` | `PointView.vue` | 向量库管理 | admin |
 | `/assist/tools` | `ToolsView.vue` | 工具面板（全文搜索、语义搜索、问答、公式编辑、MCP 配置；支持 `?tab=` 直达，切 tab 同步地址栏） | 全部 |
