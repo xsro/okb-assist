@@ -25,11 +25,12 @@ okb-version-manager.py — 管理 OKB-Assist 多版本
   HTTPS_PROXY    同 --proxy
   YES            设为 1 跳过确认
 
-Token 来源 (la 需要):
+Token 来源 (la 需要，401 时自动尝试下一个)：
   1. 环境变量 GH_TOKEN
   2. 环境变量 GITHUB_TOKEN
   3. ~/.okb/github_token 文件
-  4. gh auth token (gh CLI 已安装时)
+  4. gh auth token (gh CLI >= 2.11)
+  5. ~/.config/gh/hosts.yml 中的 oauth_token (老版本 gh 兜底)
 
 目录结构:
   ~/.okb/cache/               下载的压缩包缓存
@@ -139,17 +140,49 @@ def check_basic_deps():
 
 # ── 认证工具 ──
 
-def get_github_token() -> str | None:
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    if token:
-        return token
+# 最近一次真正通过认证的令牌（401 自动切换后回填，下载 artifact 时复用）
+_TOKEN_STATE: dict[str, str | None] = {"label": None, "token": None}
+
+
+def _gh_hosts_token() -> str | None:
+    """从 gh CLI 的 hosts.yml 读取令牌。
+
+    旧版 gh（< 2.11）没有 `gh auth token` 子命令，但 hosts.yml 里存了 oauth_token；
+    这里用极简逐行解析，避免引入 PyYAML 依赖。
+    """
+    config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    hosts = Path(config_home) / "gh" / "hosts.yml"
+    if not hosts.exists():
+        return None
+    try:
+        text = hosts.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("oauth_token:"):
+            value = stripped.split(":", 1)[1].strip().strip("'\"")
+            if value:
+                return value
+    return None
+
+
+def get_github_token_candidates() -> list[tuple[str, str]]:
+    """按优先级返回 [(来源说明, 令牌), ...]，相同令牌只保留首个来源。"""
+    candidates: list[tuple[str, str]] = []
+
+    def add(label: str, raw: str | None):
+        token = (raw or "").strip()
+        if token and all(token != existing for _, existing in candidates):
+            candidates.append((label, token))
+
+    add("环境变量 GH_TOKEN", os.environ.get("GH_TOKEN"))
+    add("环境变量 GITHUB_TOKEN", os.environ.get("GITHUB_TOKEN"))
 
     token_file = OKB_DIR / "github_token"
     if token_file.exists():
         try:
-            token = token_file.read_text().strip()
-            if token:
-                return token
+            add(f"{token_file} 文件", token_file.read_text())
         except OSError:
             pass
 
@@ -160,13 +193,19 @@ def get_github_token() -> str | None:
                 capture_output=True, text=True, timeout=10,
             )
             if result.returncode == 0:
-                token = result.stdout.strip()
-                if token:
-                    return token
+                add("gh auth token", result.stdout)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
+        # 旧版 gh 没有 `auth token` 子命令，直接读配置文件兜底
+        add("gh 配置 hosts.yml", _gh_hosts_token())
 
-    return None
+    return candidates
+
+
+def get_github_token() -> str | None:
+    """返回优先级最高的令牌（其余候选在请求失败时自动尝试）。"""
+    candidates = get_github_token_candidates()
+    return candidates[0][1] if candidates else None
 
 
 # ── 代理工具 ──
@@ -209,111 +248,227 @@ def confirm(prompt: str) -> bool:
 
 # ── 通用 API 请求 ──
 
-def _curl_get_json(url: str, token: str | None = None) -> str:
+_HTTP_STATUS_MARKER = "__OKB_HTTP_STATUS__"
+
+
+def _token_candidates_for(token: str | None) -> list[tuple[str, str | None]]:
+    """构造本次请求可用的令牌序列（调用方指定的排在最前）。"""
+    candidates: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
+
+    def add(label: str, raw: str | None):
+        value = (raw or "").strip()
+        if value.lower() in seen:
+            return
+        seen.add(value.lower())
+        candidates.append((label, value or None))
+
+    if token:
+        add("当前令牌", token)
+    for label, value in get_github_token_candidates():
+        add(label, value)
+    if not token:
+        add("匿名请求", None)
+    return candidates
+
+
+def _curl_get_status(url: str, token: str | None = None,
+                     timeout: int = 30) -> tuple[int, str]:
+    """GET 请求（先代理后直连），返回 (HTTP 状态码, 响应体)；0 = 网络层失败。"""
     def build_cmd(use_proxy: bool) -> list[str]:
-        cmd = ["curl", "-sSfL"]
-        if use_proxy:
-            p = proxy_url()
-            if p:
-                cmd += ["-x", p]
+        cmd = ["curl", "-sSL", "--max-time", str(timeout),
+               "-w", f"\n{_HTTP_STATUS_MARKER}%{{http_code}}"]
+        p = proxy_url() if use_proxy else None
+        if p:
+            cmd += ["-x", p]
         if token:
             cmd += ["-H", f"Authorization: Bearer {token}"]
-        cmd += [url]
+        cmd.append(url)
         return cmd
 
-    proxy = proxy_url()
-    for attempt in range(1, RETRY_COUNT + 1):
-        if attempt > 1:
-            warn(f"重试第 {attempt} 次 ...")
-            time.sleep(RETRY_DELAY)
-
-        if proxy:
-            try:
-                result = subprocess.run(
-                    build_cmd(True), capture_output=True, text=True,
-                    timeout=30, check=True)
-                return result.stdout
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-                warn(f"代理请求失败: {e}")
-                proxy = None
-                continue
-
+    use_proxies = [True, False] if proxy_url() else [False]
+    last_error = ""
+    for use_proxy in use_proxies:
         try:
             result = subprocess.run(
-                build_cmd(False), capture_output=True, text=True,
-                timeout=30, check=True)
-            return result.stdout
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            if attempt < RETRY_COUNT:
-                warn(f"直连请求失败: {e}")
-                continue
-            raise RuntimeError(f"API 请求失败，已重试 {RETRY_COUNT} 次: {url}")
+                build_cmd(use_proxy), capture_output=True, text=True,
+                timeout=timeout + 10)
+        except FileNotFoundError:
+            raise RuntimeError("curl 未安装，请先安装 curl")
+        except subprocess.TimeoutExpired:
+            last_error = f"请求超时（{timeout}s）"
+            continue
 
-    raise RuntimeError(f"API 请求失败: {url}")
+        out = result.stdout
+        index = out.rfind(_HTTP_STATUS_MARKER)
+        if index < 0:
+            last_error = ((result.stderr or "").strip()
+                          or f"curl 退出码 {result.returncode}")
+            continue
+        code = out[index + len(_HTTP_STATUS_MARKER):].strip()
+        if code.isdigit() and code != "0":
+            return int(code), out[:index]
+        last_error = (result.stderr or "").strip() or "无法连接"
+    return 0, last_error
+
+
+def _api_error_detail(body: str) -> str:
+    """从 GitHub 的错误响应里取出 message 字段。"""
+    text = (body or "").strip()
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        data = None
+    if isinstance(data, dict) and data.get("message"):
+        return str(data["message"])
+    return text[:200]
+
+
+def _curl_get_json(url: str, token: str | None = None) -> str:
+    """请求 GitHub API，返回 JSON 文本。
+
+    - 401/403（令牌无效、过期或无权限）自动换下一个候选令牌，不再重试同一个坏令牌；
+    - 网络层错误在代理与直连之间回退，最多重试 RETRY_COUNT 次；
+    - 其它状态码直接抛出可读错误（不再只报“已重试 N 次”）。
+    """
+    candidates = _token_candidates_for(token)
+    rejected: list[str] = []
+    last_network_error = ""
+
+    for label, value in candidates:
+        for attempt in range(1, RETRY_COUNT + 1):
+            if attempt > 1:
+                warn(f"重试第 {attempt} 次 ...")
+                time.sleep(RETRY_DELAY)
+
+            status, body = _curl_get_status(url, value)
+            if status == 0:
+                last_network_error = body or "网络不可用"
+                warn(f"请求失败（{label}）: {last_network_error}")
+                continue
+            if status == 200:
+                if value:
+                    _TOKEN_STATE["label"] = label
+                    _TOKEN_STATE["token"] = value
+                return body
+            if status in (401, 403):
+                detail = _api_error_detail(body)
+                rejected.append(f"{label}: HTTP {status} {detail}")
+                warn(f"令牌不可用（{label}）: HTTP {status} {detail}")
+                break
+            raise RuntimeError(
+                f"GitHub API 返回 HTTP {status}: {_api_error_detail(body)}"
+                f" ({url})"
+            )
+
+    if rejected:
+        raise RuntimeError(
+            "GitHub 令牌无效、已过期或无权限，已尝试所有来源：\n    "
+            + "\n    ".join(rejected)
+            + f"\n  请更新 {OKB_DIR / 'github_token'}，"
+            "或执行 `gh auth login` 后重试。"
+        )
+    raise RuntimeError(
+        f"API 请求失败（网络不可用，已重试 {RETRY_COUNT} 次）: "
+        f"{last_network_error or '未知错误'} ({url})"
+    )
 
 
 # ── 通用下载 ──
 
+class _DownloadAuthError(RuntimeError):
+    """下载返回 401/403：令牌无效或权限不足，可换下一个候选令牌重试。"""
+
+
 def _do_curl_download(curl_cmd: list[str],
-                      timeout: int | None = None) -> None:
+                      timeout: int | None = None) -> int:
+    """执行一次下载，返回 HTTP 状态码（0 = 没拿到响应）。"""
     try:
-        subprocess.run(curl_cmd, stdout=subprocess.DEVNULL,
-                       timeout=timeout, check=True)
+        result = subprocess.run(
+            curl_cmd + ["-w", "%{http_code}"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=timeout)
     except FileNotFoundError:
         raise RuntimeError("curl 未安装，请先安装 curl")
     except subprocess.TimeoutExpired:
         raise RuntimeError("下载超时")
-    except subprocess.CalledProcessError:
-        raise RuntimeError("下载失败，请检查网络或代理设置")
+    code = result.stdout.strip()
+    return int(code) if code.isdigit() else 0
 
 
 def _download_with_retry(download_url: str, output_path: Path,
                          extra_headers: list[str] | None = None,
-                         timeout: int | None = None) -> Path:
+                         timeout: int | None = None,
+                         token_candidates: list[tuple[str, str | None]]
+                         | None = None) -> Path:
+    """下载文件；401/403 时自动换下一个候选令牌重试。"""
+    candidates = token_candidates or [(None, None)]
+    last_error = "未知错误"
+
+    for label, token in candidates:
+        try:
+            return _download_with_token(download_url, output_path,
+                                        extra_headers, timeout,
+                                        token, label)
+        except _DownloadAuthError as e:
+            last_error = str(e)
+            warn(last_error)
+            continue
+    raise RuntimeError(f"下载失败: {last_error}")
+
+
+def _download_with_token(download_url: str, output_path: Path,
+                         extra_headers: list[str] | None,
+                         timeout: int | None,
+                         token: str | None,
+                         label: str) -> Path:
     def build_cmd(use_proxy: bool) -> list[str]:
         cmd = ["curl", "-SfL"]
-        if use_proxy:
-            p = proxy_url()
-            if p:
-                cmd += ["-x", p]
+        p = proxy_url() if use_proxy else None
+        if p:
+            cmd += ["-x", p]
+        if token:
+            cmd += ["-H", f"Authorization: Bearer {token}"]
         if extra_headers:
             for h in extra_headers:
                 cmd += ["-H", h]
         cmd += ["-o", str(output_path), download_url]
         return cmd
 
-    proxy = proxy_url()
-    for attempt in range(1, RETRY_COUNT + 1):
-        if attempt > 1:
-            warn(f"重试第 {attempt} 次 ...")
-            time.sleep(RETRY_DELAY)
+    use_proxies = [True, False] if proxy_url() else [False]
+    last_error = "未知错误"
+    for use_proxy in use_proxies:
+        p = proxy_url() if use_proxy else None
+        if p:
+            info(f"使用代理: {p}")
+        for attempt in range(1, RETRY_COUNT + 1):
+            if attempt > 1:
+                warn(f"重试第 {attempt} 次 ...")
+                time.sleep(RETRY_DELAY)
 
-        if proxy:
-            info(f"使用代理: {proxy}")
             try:
-                _do_curl_download(build_cmd(True), timeout=timeout)
-                if output_path.stat().st_size > 1000:
-                    break
+                status = _do_curl_download(build_cmd(use_proxy),
+                                           timeout=timeout)
             except RuntimeError as e:
-                warn(f"代理下载失败: {e}")
-                info("回退到直连下载 ...")
-                proxy = None
+                last_error = f"{e}（{'代理' if use_proxy else '直连'}）"
+                warn(last_error)
                 continue
 
-        try:
-            _do_curl_download(build_cmd(False), timeout=timeout)
-        except RuntimeError as e:
-            if attempt < RETRY_COUNT:
-                warn(f"直连下载失败: {e}")
-                continue
-            raise RuntimeError(f"下载失败，已重试 {RETRY_COUNT} 次")
+            size = output_path.stat().st_size if output_path.exists() else 0
+            if status in (200, 206) and size > 1000:
+                ok("下载完成")
+                return output_path
+            if status in (401, 403):
+                raise _DownloadAuthError(
+                    f"下载被拒绝（{label or '匿名'}）: HTTP {status}"
+                )
+            last_error = f"HTTP {status or '无响应'}，收到 {size} 字节"
+            warn(f"下载失败: {last_error}")
 
-        if output_path.stat().st_size > 1000:
-            break
-        warn(f"下载内容异常（仅 {output_path.stat().st_size} 字节），重试 ...")
+        if use_proxy:
+            info("回退到直连下载 ...")
 
-    ok("下载完成")
-    return output_path
+    raise RuntimeError(f"下载失败，已重试 {RETRY_COUNT} 次: {last_error}")
 
 
 # ── 解压 ──
@@ -417,9 +572,11 @@ def download_artifact(artifact_id: int, output_path: Path,
         f"https://api.github.com/repos/{repo}/actions/artifacts"
         f"/{artifact_id}/zip"
     )
-    headers = [f"Authorization: Bearer {token}"]
-    return _download_with_retry(download_url, output_path,
-                                extra_headers=headers, timeout=timeout)
+    # 优先用 API 请求阶段真正认证成功的令牌（_TOKEN_STATE），并带上所有候选
+    resolved = _TOKEN_STATE.get("token") or token
+    return _download_with_retry(
+        download_url, output_path, timeout=timeout,
+        token_candidates=_token_candidates_for(resolved))
 
 
 # ── Release 操作 ──
@@ -599,6 +756,8 @@ def cmd_install_artifact():
         err(f"或创建文件 {OKB_DIR / 'github_token'} 并写入 token")
         err("或安装并认证 gh CLI: gh auth login")
         sys.exit(1)
+    for label, _value in get_github_token_candidates():
+        info(f"令牌来源候选: {label}")
 
     artifact = get_latest_artifact_info(token)
     head_sha = artifact["head_sha"]
@@ -646,7 +805,8 @@ def cmd_install_artifact():
             err(str(e))
             err(f"下载 URL: {download_url}")
             err(f"目标路径: {cache_path}")
-            err("请使用 GH_TOKEN/GITHUB_TOKEN 环境变量或 gh CLI 认证后重试")
+            err("请用有效的 GH_TOKEN/GITHUB_TOKEN 环境变量，更新 "
+                f"{OKB_DIR / 'github_token'}，或执行 gh auth login 后重试")
             sys.exit(1)
 
     extract_zip(cache_path, version_dir)
@@ -817,7 +977,9 @@ def main():
             "  1. 环境变量 GH_TOKEN\n"
             "  2. 环境变量 GITHUB_TOKEN\n"
             f"  3. {OKB_DIR / 'github_token'} 文件\n"
-            "  4. gh auth token (gh CLI 已安装时)"
+            "  4. gh auth token (gh CLI >= 2.11)\n"
+            "  5. gh 配置 ~/.config/gh/hosts.yml 中的 oauth_token (老版本 gh 兜底)\n"
+            "  令牌无效(401)时自动尝试下一个来源"
         ),
     )
     parser.add_argument("-p", "--proxy",

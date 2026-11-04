@@ -46,6 +46,24 @@
       </div>
     </div>
 
+    <!-- 总体进度条（上传中时显示） -->
+    <div v-if="isUploading && totalBytes > 0" class="overall-progress">
+      <div class="overall-progress-bar">
+        <div
+          class="overall-progress-fill"
+          :style="{ width: overallPercent + '%' }"
+        ></div>
+      </div>
+      <div class="overall-progress-info">
+        <span class="overall-text">{{ formatSize(uploadedBytes) }} / {{ formatSize(totalBytes) }}</span>
+        <span class="overall-text">{{ overallPercent }}%</span>
+      </div>
+      <div v-if="uploadSpeed > 0" class="overall-speed">
+        {{ formatSpeed(uploadSpeed) }}
+        <span v-if="eta > 0">· 剩余约 {{ formatDuration(eta) }}</span>
+      </div>
+    </div>
+
     <!-- 文件队列 -->
     <div v-if="queue.length > 0" class="upload-queue section">
       <div
@@ -140,6 +158,8 @@ interface QueueItem {
   status: 'pending' | 'uploading' | 'done' | 'error'
   /** 0–100 真实上传进度（服务端处理阶段停在 100） */
   progress: number
+  /** 当前已上传字节（用于总体进度汇总） */
+  loaded: number
   /** 上传子阶段：算校验值 / 传字节 / 等服务端 */
   phase?: UploadPhase
   /** 可读的失败原因 */
@@ -160,11 +180,51 @@ const queue = ref<QueueItem[]>([])
 const isUploading = ref(false)
 const forceUpload = ref(false)
 
+// 总体进度跟踪
+const uploadSpeed = ref(0) // 字节/秒
+const lastProgressTime = ref(0)
+const lastProgressBytes = ref(0)
+
 const canUpload = computed(() =>
   queue.value.some((item) => item.status === 'pending' || item.status === 'error')
 )
 const completedCount = computed(() => queue.value.filter((i) => i.status === 'done').length)
 const failedCount = computed(() => queue.value.filter((i) => i.status === 'error').length)
+
+/** 待上传的总字节数（pending + error + uploading 状态的文件） */
+const totalBytes = computed(() => {
+  let sum = 0
+  for (const item of queue.value) {
+    if (item.status !== 'done') {
+      sum += item.file.size
+    }
+  }
+  return sum
+})
+
+/** 已上传的总字节（uploading 的 loaded + done 的完整大小） */
+const uploadedBytes = computed(() => {
+  let sum = 0
+  for (const item of queue.value) {
+    if (item.status === 'uploading' || item.status === 'done') {
+      sum += item.loaded
+    }
+  }
+  return sum
+})
+
+/** 总体上传百分比（0–100） */
+const overallPercent = computed(() => {
+  if (totalBytes.value === 0) return 0
+  return Math.min(100, Math.round((uploadedBytes.value / totalBytes.value) * 100))
+})
+
+/** 预计剩余时间（秒），0 表示无法估算 */
+const eta = computed(() => {
+  if (uploadSpeed.value <= 0 || uploadedBytes.value >= totalBytes.value) return 0
+  const remaining = totalBytes.value - uploadedBytes.value
+  return Math.round(remaining / uploadSpeed.value)
+})
 
 function generateId() {
   return Math.random().toString(36).slice(2, 10)
@@ -175,6 +235,21 @@ function formatSize(bytes: number) {
   const units = ['B', 'KB', 'MB', 'GB']
   const i = Math.floor(Math.log(bytes) / Math.log(1024))
   return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`
+}
+
+/** 格式化上传速度（字节/秒 → 可读单位） */
+function formatSpeed(bytesPerSec: number): string {
+  if (bytesPerSec <= 0) return ''
+  return `${formatSize(bytesPerSec)}/s`
+}
+
+/** 格式化剩余时间（秒 → 分:秒） */
+function formatDuration(seconds: number): string {
+  if (seconds <= 0) return ''
+  const m = Math.floor(seconds / 60)
+  const s = Math.floor(seconds % 60)
+  if (m > 0) return `${m}分${s}秒`
+  return `${s}秒`
 }
 
 function statusText(item: QueueItem) {
@@ -251,6 +326,7 @@ function clearCompleted() {
 async function uploadItem(item: QueueItem) {
   item.status = 'uploading'
   item.progress = 0
+  item.loaded = 0
   item.phase = 'hashing'
   item.error = undefined
   item.errorHint = undefined
@@ -262,9 +338,23 @@ async function uploadItem(item: QueueItem) {
     await uploadPdf(item.file, item.force ?? forceUpload.value, (p) => {
       item.phase = p.phase
       item.progress = p.percent
+      item.loaded = p.loaded
+
+      // 更新上传速度（每 500ms 采样一次）
+      const now = Date.now()
+      const elapsed = now - lastProgressTime.value
+      if (elapsed >= 500) {
+        const bytesDelta = p.loaded - lastProgressBytes.value
+        if (bytesDelta > 0 && elapsed > 0) {
+          uploadSpeed.value = Math.round((bytesDelta / elapsed) * 1000)
+        }
+        lastProgressTime.value = now
+        lastProgressBytes.value = p.loaded
+      }
     })
     item.phase = undefined
     item.progress = 100
+    item.loaded = item.file.size
     item.status = 'done'
   } catch (e) {
     // 失败不把进度清零：停在哪一格就显示哪一格，避免「传了 80% 突然回到 0」的错觉
@@ -299,6 +389,10 @@ async function startUpload() {
   if (pending.length === 0) return
 
   isUploading.value = true
+  uploadSpeed.value = 0
+  lastProgressTime.value = Date.now()
+  lastProgressBytes.value = 0
+
   const concurrency = 3
   let index = 0
 
@@ -313,6 +407,8 @@ async function startUpload() {
   await Promise.all(workers)
 
   isUploading.value = false
+  uploadSpeed.value = 0
+
   const failed = queue.value.filter((i) => i.status === 'error')
   if (failed.length === 0) {
     showSuccess('全部上传完成')
@@ -406,6 +502,53 @@ async function startUpload() {
 
 .force-checkbox input {
   width: auto;
+}
+
+/* 总体进度条 */
+.overall-progress {
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  background: #f8fafc;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.overall-progress-bar {
+  height: 8px;
+  background: #e0e0e0;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.overall-progress-fill {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.3s ease;
+  border-radius: 4px;
+}
+
+.overall-progress-info {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.overall-progress-info span:first-child {
+  font-variant-numeric: tabular-nums;
+}
+
+.overall-progress-info span:last-child {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.overall-speed {
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .upload-queue {
