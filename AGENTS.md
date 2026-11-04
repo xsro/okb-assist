@@ -505,7 +505,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 - **机制**：摄取阶段（parse / extract / crossref / extract-pdf-meta / index / process）及批量端点通过 `tokio::spawn` 提交 Tokio 协程。协程在 HTTP 响应发出后由同一个 Tokio 运行时调度，状态机流转记录在数据库中。
 - **并发限制**：两级信号量独立控制。**全局** `Semaphore(max_concurrent_tasks)`（`system.json` 默认 `3`）限制 extract（Ollama 元数据抽取）和 index（向量索引）的并发。**MinerU 专用** `Semaphore(max_tasks)`（每个配置独立，默认 `3`）限制 PDF 解析并发。两者互不抢占，避免 MinerU 慢解析阻塞其他文档的抽取/索引。
 - **批量进度 / 暂停状态存于进程内存**：模块级全局变量，**进程重启即丢失**。重启后需手动重新触发。
-- **维护类任务也走后台**：`POST /assist/api/admin/recalculate-hashes`（重算 `file_hash`）、`POST /assist/api/admin/check-pdf-health`（批量 PDF 健康检查）、`POST /assist/api/admin/sync-file-sizes`（同步文件大小）都立即返回、后台执行。重算哈希与健康检查都是**逐个串行**（不并发、不占流水线信号量），每条用 `pipeline::track_maintenance_task()` 登记到「活跃任务」表（`task_type = "hash"` / `"pdf-health"`，进度为「第 i/N 条」，文案只存进程内、不写 `documents.status_message`）；进程内各有 `HASH_RECALC_RUNNING` / `PDF_HEALTH_RUNNING` 标记防止重复提交，进程重启即中断。
+- **维护类任务也走后台**：`POST /assist/api/admin/recalculate-hashes`（重算 `file_hash`）、`POST /assist/api/admin/check-pdf-health`（批量 PDF 健康检查）、`POST /assist/api/admin/sync-file-sizes`（同步文件大小）都立即返回、后台执行。三者都支持 `?only_missing=1`（也接受 `true` / `yes` / `on`）：只处理对应字段为空（`file_hash` / `pdf_health` / `pdf_size·md_size·zip_size` 任一为 `NULL`）的文档，即「补缺」而非全量重做，返回体里的 `only_missing` 回显实际模式；管理页「维护操作」里「补充缺失 …」与「… 全部」按钮成对使用同一端点。重算哈希与健康检查都是**逐个串行**（不并发、不占流水线信号量），每条用 `pipeline::track_maintenance_task()` 登记到「活跃任务」表（`task_type = "hash"` / `"pdf-health"`，进度为「第 i/N 条」，文案只存进程内、不写 `documents.status_message`）；进程内各有 `HASH_RECALC_RUNNING` / `PDF_HEALTH_RUNNING` 标记防止重复提交，进程重启即中断。
 
 ### PDF 健康检查（`services/pdf_health.rs`）
 

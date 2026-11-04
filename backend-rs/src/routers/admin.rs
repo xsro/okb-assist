@@ -558,15 +558,43 @@ impl Drop for HashRecalcGuard {
     }
 }
 
-/// POST /assist/api/admin/recalculate-hashes —— 重算全部文档的 `file_hash`。
+/// 维护任务的筛选参数（`recalculate-hashes` / `check-pdf-health` / `sync-file-sizes` 共用）
+///
+/// `?only_missing=1` 只处理该任务对应字段为空（`NULL` / 空串）的文档：
+/// 「补缺」不影响已有数据，适合日常点一下；不带参数则是全量重做。
+#[derive(Debug, Deserialize)]
+pub struct MaintenanceQuery {
+    #[serde(default, deserialize_with = "de_flag")]
+    pub only_missing: bool,
+}
+
+/// 查询参数里的布尔开关：接受 `1` / `true` / `yes` / `on`（不区分大小写），
+/// 空值（`?only_missing`）也当作 `true`，其余都被视为 `false`。
+fn de_flag<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(match raw.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+        None => false,
+        Some(s) if s.is_empty() => true,
+        Some(s) => matches!(s.as_str(), "1" | "true" | "yes" | "on"),
+    })
+}
+
+/// POST /assist/api/admin/recalculate-hashes —— 重算文档的 `file_hash`。
 ///
 /// **非阻塞**：请求立即返回，后台**逐个串行**计算（不做并发，避免同时开多个
 /// PDF 读句柄/抢 IO）；每条开始时在「活跃任务」里登记一行，文案带 `第 i/N 条`
 /// 与累计统计，进度可在 `GET /assist/api/pipeline/tasks/active` 查看。
+///
+/// `?only_missing=1` 时只处理 `file_hash` 为 `NULL` / 空串的文档。
 async fn recalculate_hashes(
     Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
+    Query(q): Query<MaintenanceQuery>,
 ) -> Json<Value> {
     if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
         return Json(json!({"detail": "权限不足"}));
@@ -581,17 +609,27 @@ async fn recalculate_hashes(
         }));
     }
 
+    let only_missing = q.only_missing;
+
     // 后台执行，不阻塞当前请求
     tokio::spawn(async move {
         let _guard = HashRecalcGuard;
 
-        let docs: Vec<(i64, Option<String>)> =
-            sqlx::query_as("SELECT id, file_hash FROM documents ORDER BY id")
-                .fetch_all(db.pool())
-                .await
-                .unwrap_or_default();
+        let sql = if only_missing {
+            "SELECT id, file_hash FROM documents WHERE file_hash IS NULL OR file_hash = '' ORDER BY id"
+        } else {
+            "SELECT id, file_hash FROM documents ORDER BY id"
+        };
+        let docs: Vec<(i64, Option<String>)> = sqlx::query_as(sql)
+            .fetch_all(db.pool())
+            .await
+            .unwrap_or_default();
         let total = docs.len() as i64;
-        tracing::info!("开始重算哈希：共 {} 条，逐个串行执行", total);
+        tracing::info!(
+            "开始重算哈希（{}）：共 {} 条，逐个串行执行",
+            if only_missing { "只补缺失" } else { "全量" },
+            total
+        );
 
         let mut updated = 0i64;
         let mut unchanged = 0i64;
@@ -673,8 +711,13 @@ async fn recalculate_hashes(
     });
 
     Json(json!({
-        "detail": "哈希重算任务已提交，后台逐个计算中（进度见「活跃任务」）",
+        "detail": if only_missing {
+            "缺失哈希补齐任务已提交，后台逐个计算中（进度见「活跃任务」）"
+        } else {
+            "哈希重算任务已提交，后台逐个计算中（进度见「活跃任务」）"
+        },
         "started": true,
+        "only_missing": only_missing,
     }))
 }
 
@@ -695,10 +738,13 @@ impl Drop for PdfHealthGuard {
 /// **非阻塞**：请求立即返回，后台**逐个串行**检查（不并发），结果写入
 /// `documents.pdf_health`（`ok` / `warning` / `error` / `missing`）与
 /// `documents.pdf_health_message`（原因）；进度同重算哈希，见「活跃任务」。
+///
+/// `?only_missing=1` 时只检查 `pdf_health` 为 `NULL` / 空串（从未检查过）的文档。
 async fn check_pdf_health_task(
     Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
+    Query(q): Query<MaintenanceQuery>,
 ) -> Json<Value> {
     if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
         return Json(json!({"detail": "权限不足"}));
@@ -713,15 +759,26 @@ async fn check_pdf_health_task(
         }));
     }
 
+    let only_missing = q.only_missing;
+
     tokio::spawn(async move {
         let _guard = PdfHealthGuard;
 
-        let docs: Vec<(i64,)> = sqlx::query_as("SELECT id FROM documents ORDER BY id")
+        let sql = if only_missing {
+            "SELECT id FROM documents WHERE pdf_health IS NULL OR pdf_health = '' ORDER BY id"
+        } else {
+            "SELECT id FROM documents ORDER BY id"
+        };
+        let docs: Vec<(i64,)> = sqlx::query_as(sql)
             .fetch_all(db.pool())
             .await
             .unwrap_or_default();
         let total = docs.len() as i64;
-        tracing::info!("开始批量 PDF 健康检查：共 {} 条，逐个串行执行", total);
+        tracing::info!(
+            "开始批量 PDF 健康检查（{}）：共 {} 条，逐个串行执行",
+            if only_missing { "只补缺失" } else { "全量" },
+            total
+        );
 
         let mut ok = 0i64;
         let mut warning = 0i64;
@@ -798,8 +855,13 @@ async fn check_pdf_health_task(
     });
 
     Json(json!({
-        "detail": "PDF 健康检查任务已提交，后台逐个执行中（进度见「活跃任务」）",
+        "detail": if only_missing {
+            "缺失 PDF 健康信息补齐任务已提交，后台逐个执行中（进度见「活跃任务」）"
+        } else {
+            "PDF 健康检查任务已提交，后台逐个执行中（进度见「活跃任务」）"
+        },
         "started": true,
+        "only_missing": only_missing,
     }))
 }
 
@@ -876,35 +938,56 @@ async fn check_document_pdf_health(
     .into_response()
 }
 
-/// POST /assist/api/admin/sync-file-sizes —— 同步所有文档的文件大小信息到数据库。
-/// 非阻塞：请求立即返回，后台遍历所有文档执行 stat。
+/// POST /assist/api/admin/sync-file-sizes —— 同步文档的文件大小信息到数据库。
+/// 非阻塞：请求立即返回，后台遍历文档执行 stat。
+///
+/// `?only_missing=1` 时只处理 `pdf_size` / `md_size` / `zip_size` 中有 `NULL` 的文档。
 async fn sync_file_sizes(
     Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
+    Query(q): Query<MaintenanceQuery>,
 ) -> Json<Value> {
     if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
         return Json(json!({"detail": "权限不足"}));
     }
 
+    let only_missing = q.only_missing;
+
     // 后台执行，不阻塞当前请求
     let db_clone = db.clone();
     let settings_clone = settings.clone();
     tokio::spawn(async move {
-        let docs: Vec<(i64,)> = sqlx::query_as("SELECT id FROM documents")
+        // 「补缺」按「任一项为空」筛选：三项都是有文件才有值，缺文件的项会一直是 NULL，
+        // 重复处理也只是几次 stat，代价可以忽略。
+        let sql = if only_missing {
+            "SELECT id FROM documents WHERE pdf_size IS NULL OR md_size IS NULL OR zip_size IS NULL ORDER BY id"
+        } else {
+            "SELECT id FROM documents ORDER BY id"
+        };
+        let docs: Vec<(i64,)> = sqlx::query_as(sql)
             .fetch_all(db_clone.pool())
             .await
             .unwrap_or_default();
         let total = docs.len();
-        let mut updated = 0i64;
         for (doc_id,) in &docs {
             crate::routers::documents::sync_doc_file_sizes(&db_clone, &settings_clone, *doc_id).await;
-            updated += 1;
         }
-        tracing::info!("文件大小同步完成: {} 条", updated);
+        tracing::info!(
+            "文件大小同步完成（{}）: {} 条",
+            if only_missing { "只补缺失" } else { "全量" },
+            total
+        );
     });
 
-    Json(json!({"detail": "文件大小同步任务已提交，后台执行中"}))
+    Json(json!({
+        "detail": if only_missing {
+            "缺失文件大小补齐任务已提交，后台执行中"
+        } else {
+            "文件大小同步任务已提交，后台执行中"
+        },
+        "only_missing": only_missing,
+    }))
 }
 
 // ── 文档状态批量修正（运维） ─────────────────────────────

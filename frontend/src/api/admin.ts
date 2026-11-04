@@ -26,17 +26,26 @@ export function getServiceStatus() {
 
 // ── 维护操作 ────────────────────────────────────────────
 
-/** 重新计算哈希（后台任务，进度见「活跃任务」） */
-export function recalculateHashes() {
+/** 维护任务选项：`onlyMissing` = 只处理对应字段缺失（NULL/空）的文档 */
+export interface MaintenanceOptions {
+  onlyMissing?: boolean
+}
+
+function maintenancePath(path: string, opts: MaintenanceOptions = {}) {
+  return opts.onlyMissing ? `${path}?only_missing=1` : path
+}
+
+/** 重算哈希（后台任务，进度见「活跃任务」）；`onlyMissing` = 只补没有 file_hash 的文档 */
+export function recalculateHashes(opts: MaintenanceOptions = {}) {
   return apiPost<{ detail: string; started: boolean }>(
-    '/assist/api/admin/recalculate-hashes'
+    maintenancePath('/assist/api/admin/recalculate-hashes', opts)
   )
 }
 
-/** PDF 健康检查（后台任务，进度见「活跃任务」） */
-export function checkPdfHealth() {
+/** PDF 健康检查（后台任务，进度见「活跃任务」）；`onlyMissing` = 只检查从未检查过的文档 */
+export function checkPdfHealth(opts: MaintenanceOptions = {}) {
   return apiPost<{ detail: string; started: boolean }>(
-    '/assist/api/admin/check-pdf-health'
+    maintenancePath('/assist/api/admin/check-pdf-health', opts)
   )
 }
 
@@ -65,10 +74,10 @@ export function deduplicateDocuments() {
   )
 }
 
-/** 同步文件信息到数据库（PDF/MD/ZIP 文件大小） */
-export function syncFileSizes() {
+/** 同步文件信息到数据库（PDF/MD/ZIP 文件大小）；`onlyMissing` = 只补有空缺的文档 */
+export function syncFileSizes(opts: MaintenanceOptions = {}) {
   return apiPost<{ detail: string }>(
-    '/assist/api/admin/sync-file-sizes'
+    maintenancePath('/assist/api/admin/sync-file-sizes', opts)
   )
 }
 

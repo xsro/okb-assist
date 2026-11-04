@@ -47,11 +47,26 @@
       <h3>维护操作</h3>
       <div class="action-buttons">
         <button class="btn btn-outline" @click="batchParse">批量解析已上传</button>
-        <button class="btn btn-outline" @click="recalcHashes">重新计算哈希</button>
-        <button class="btn btn-outline" @click="checkPdfHealthBatch">批量检查 PDF 健康</button>
+        <button
+          class="btn btn-outline"
+          title="只为 PDF/Markdown/资源包 大小为空（NULL）的文档补写大小，不动已有数据"
+          @click="syncMissingFileSizes"
+        >补充缺失的大小信息</button>
+        <button
+          class="btn btn-outline"
+          title="只检查从未做过健康检查（pdf_health 为空）的文档"
+          @click="checkMissingPdfHealth"
+        >补充缺失的 PDF 健康信息</button>
+        <button
+          class="btn btn-outline"
+          title="只为没有 file_hash 的文档计算哈希"
+          @click="recalcMissingHashes"
+        >补充缺失的哈希信息</button>
+        <button class="btn btn-outline" @click="doSyncFileSizes">同步全部文件大小</button>
+        <button class="btn btn-outline" @click="checkPdfHealthBatch">检查全部 PDF 健康</button>
+        <button class="btn btn-outline" @click="recalcHashes">重算全部哈希</button>
         <button class="btn btn-outline" @click="dedup">文献去重</button>
         <button class="btn btn-outline" @click="goDuplicates">手动去重</button>
-        <button class="btn btn-outline" @click="doSyncFileSizes">同步文件信息到数据库</button>
       </div>
     </div>
 
@@ -268,6 +283,41 @@ async function doSyncFileSizes() {
     showToast(res.detail, 'success')
   } catch {
     showError('同步文件信息失败')
+  }
+}
+
+/** 只补大小信息为空的文档（不动已有数据） */
+async function syncMissingFileSizes() {
+  if (!confirm('确定只为「大小信息缺失」的文档补写 PDF/Markdown/资源包 大小？任务在后台执行。')) return
+  try {
+    const res = await syncFileSizes({ onlyMissing: true })
+    showToast(res.detail, 'success')
+  } catch {
+    showError('补充文件大小失败')
+  }
+}
+
+/** 只检查尚未做过健康检查的文档 */
+async function checkMissingPdfHealth() {
+  if (!confirm('确定只检查「从未做过健康检查」的文档？任务在后台逐个执行，进度见下方「活跃任务」。')) return
+  try {
+    const res = await checkPdfHealth({ onlyMissing: true })
+    if (res.started === false) showInfo(res.detail)
+    else showToast(res.detail, 'success')
+  } catch {
+    showError('PDF 健康检查提交失败')
+  }
+}
+
+/** 只为缺少 file_hash 的文档计算哈希 */
+async function recalcMissingHashes() {
+  if (!confirm('确定只为「缺少 file_hash」的文档计算哈希？任务在后台逐个执行，进度见下方「活跃任务」。')) return
+  try {
+    const res = await recalculateHashes({ onlyMissing: true })
+    if (res.started === false) showInfo(res.detail)
+    else showToast(res.detail, 'success')
+  } catch {
+    showError('哈希补齐提交失败')
   }
 }
 
