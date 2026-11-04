@@ -340,6 +340,13 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
     let primary_client = MinerUClient::new(&active_config);
     let uploads_folder = settings.uploads_folder();
     let pdf_path = paths::get_pdf_path(&settings, doc_id);
+    // 没有 PDF 的文档（例如 BibTeX 批量新建的「仅条目」记录）直接跳过：
+    // 否则 MinerU 会报错，把记录打成 `error`，元数据反而被埋掉。
+    if !std::path::Path::new(&pdf_path).exists() {
+        warn!("文档 {} 解析跳过：PDF 不存在（{}）", doc_id, pdf_path);
+        update_doc_status(&db, doc_id, DocStatus::Uploaded, Some("PDF 缺失，请先上传 PDF"), None).await;
+        return;
+    }
     let abs_file_path = absolute_path(&pdf_path);
     let output_dir = std::path::Path::new(&uploads_folder).join(doc_id.to_string());
     let _ = std::fs::create_dir_all(&output_dir);

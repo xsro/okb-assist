@@ -21,6 +21,7 @@ use crate::services::pdf_meta::{
     extract_pdf_metadata_from_path_async, extract_pdf_report_from_path_async, normalize_doi,
 };
 use crate::services::image_cache;
+use crate::services::bibtex;
 use crate::services::citation::{self, CitationRecord};
 use crate::auth;
 use crate::routers::pipeline::run_crossref_override;
@@ -251,6 +252,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/upload", post(upload_document))
         .route("/assist/api/documents/register/", post(register_document_by_path))
         .route("/assist/api/documents/register", post(register_document_by_path))
+        .route("/assist/api/documents/import-bibtex/", post(import_bibtex))
+        .route("/assist/api/documents/import-bibtex", post(import_bibtex))
         .route("/assist/api/documents/similar-titles/", get(find_similar_titles))
         .route("/assist/api/documents/similar-titles", get(find_similar_titles))
         .route("/assist/api/documents/merge/", post(merge_documents))
@@ -1514,6 +1517,409 @@ async fn register_document_by_path(
     match fetch_doc(&db, doc_id).await {
         Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response(),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "文档创建失败"}))).into_response(),
+    }
+}
+
+
+// ── BibTeX 批量新建条目 ──────────────────────────────────
+
+/// `.bib` 文本内容上限（纯文本，8 MB 足够放下几万条）
+const MAX_BIBTEX_BYTES: usize = 8 * 1024 * 1024;
+/// 单次导入处理的条目上限（防止一个巨型文件长时间占住请求）
+const MAX_BIBTEX_ENTRIES: usize = 2000;
+/// 返回给前端的逐条结果上限（超出只给统计，避免响应过大）
+const MAX_BIBTEX_ITEMS: usize = 500;
+
+/// BibTeX 批量导入请求体
+#[derive(Debug, Deserialize)]
+pub struct ImportBibtexRequest {
+    /// `.bib` 文件的原始内容
+    pub content: String,
+    /// `true` = 只预览（不写库）
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// 批量新建「库里缺失」的条目（来自 BibTeX）。
+///
+/// 只做新建，不改已有文档：命中已有文档（DOI 优先，其次归一化标题）时跳过并回传
+/// `existing_id`。新建出来的文档**没有 PDF**，`pdf_health` 直接标 `missing`、
+/// 状态保持 `uploaded`（上传 PDF 后即可走解析流水线）。
+async fn import_bibtex(
+    axum::Extension(role): axum::Extension<auth::Role>,
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    Json(data): Json<ImportBibtexRequest>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-upload"]) {
+        return resp;
+    }
+    if data.content.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "BibTeX 内容为空"}))).into_response();
+    }
+    if data.content.len() > MAX_BIBTEX_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({
+                "detail": format!(
+                    "BibTeX 文件过大（{} 字节），上限 {} 字节",
+                    data.content.len(),
+                    MAX_BIBTEX_BYTES
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    let parsed = bibtex::parse_bibtex(&data.content);
+
+    // 现有库索引：一次读出 id/标题/DOI/年份，之后全在内存里比对
+    // （DOI 统一走 `doi_key` 归一化，兼容历史数据里的 `https://doi.org/` 前缀与大小写差异）
+    let rows: Vec<(i64, Option<String>, Option<String>, Option<i64>)> =
+        sqlx::query_as("SELECT id, title, doi, year FROM documents")
+            .fetch_all(db.pool())
+            .await
+            .unwrap_or_default();
+    let mut doi_index: HashMap<String, i64> = HashMap::new();
+    let mut title_index: HashMap<String, Vec<(Option<i64>, i64)>> = HashMap::new();
+    for (id, title, doi, year) in rows {
+        if let Some(key) = doi.as_deref().and_then(doi_key) {
+            doi_index.entry(key).or_insert(id);
+        }
+        if let Some(title) = title.as_deref() {
+            let norm = normalize_title(title);
+            if !norm.is_empty() {
+                title_index.entry(norm).or_default().push((year, id));
+            }
+        }
+    }
+
+    let total = parsed.entries.len();
+    let mut processed = 0usize;
+    let mut missing_count = 0usize;
+    let mut existing_count = 0usize;
+    let mut duplicate_count = 0usize;
+    let mut invalid_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut created: Vec<Value> = Vec::new();
+    let mut items: Vec<Value> = Vec::new();
+    let mut items_truncated = false;
+    // 文件内部去重：同一个文件里重复出现的条目不再新建
+    let mut seen_doi: HashSet<String> = HashSet::new();
+    let mut seen_title: HashSet<String> = HashSet::new();
+
+    for entry in parsed.entries.iter().take(MAX_BIBTEX_ENTRIES) {
+        processed += 1;
+        let rec = match entry.to_record() {
+            Some(r) => r,
+            None => {
+                invalid_count += 1;
+                push_bibtex_item(
+                    &mut items,
+                    &mut items_truncated,
+                    bibtex_item("invalid", &entry.key, "", None, "", None, "no-title", None, "缺少标题与 DOI，已跳过"),
+                );
+                continue;
+            }
+        };
+
+        let doi_k = doi_key(&rec.doi);
+        let title_k = normalize_title(&rec.title);
+
+        // 1) 文件内部重复（同 DOI 或同归一化标题）
+        let dup_doi = doi_k.as_ref().map(|k| !seen_doi.insert(k.clone())).unwrap_or(false);
+        let dup_title = !title_k.is_empty() && !seen_title.insert(title_k.clone());
+        if dup_doi || dup_title {
+            duplicate_count += 1;
+            push_bibtex_item(
+                &mut items,
+                &mut items_truncated,
+                bibtex_item(
+                    "duplicate",
+                    &rec.key,
+                    &rec.title,
+                    rec.year,
+                    &rec.doi,
+                    None,
+                    if dup_doi { "in-file-doi" } else { "in-file-title" },
+                    None,
+                    "文件内重复条目",
+                ),
+            );
+            continue;
+        }
+
+        // 2) 库里已存在：DOI 优先，其次归一化标题（两边都有年份时才要求年份一致）
+        if let Some((existing_id, reason)) = match_existing_bibtex_doc(
+            doi_k.as_deref(),
+            &title_k,
+            rec.year,
+            &doi_index,
+            &title_index,
+        ) {
+            existing_count += 1;
+            push_bibtex_item(
+                &mut items,
+                &mut items_truncated,
+                bibtex_item(
+                    "exists",
+                    &rec.key,
+                    &rec.title,
+                    rec.year,
+                    &rec.doi,
+                    Some(existing_id),
+                    reason,
+                    None,
+                    "库中已存在",
+                ),
+            );
+            continue;
+        }
+
+        // 3) 库里缺失：预览只统计，正式导入才写库
+        missing_count += 1;
+        if data.dry_run {
+            push_bibtex_item(
+                &mut items,
+                &mut items_truncated,
+                bibtex_item("create", &rec.key, &rec.title, rec.year, &rec.doi, None, "", None, "可新建"),
+            );
+            continue;
+        }
+
+        match insert_bibtex_document(&db, &rec).await {
+            Ok(id) => {
+                // 新记录立刻进索引：同文件后续条目（同一篇的另一种写法）也能命中
+                if let Some(k) = doi_key(&rec.doi) {
+                    doi_index.entry(k).or_insert(id);
+                }
+                if !title_k.is_empty() {
+                    title_index.entry(title_k.clone()).or_default().push((rec.year, id));
+                }
+                created.push(json!({
+                    "id": id,
+                    "key": rec.key,
+                    "title": rec.title,
+                    "doi": rec.doi,
+                    "year": rec.year,
+                }));
+                push_bibtex_item(
+                    &mut items,
+                    &mut items_truncated,
+                    bibtex_item("created", &rec.key, &rec.title, rec.year, &rec.doi, None, "", Some(id), "已新建"),
+                );
+            }
+            Err(e) => {
+                failed_count += 1;
+                push_bibtex_item(
+                    &mut items,
+                    &mut items_truncated,
+                    bibtex_item("error", &rec.key, &rec.title, rec.year, &rec.doi, None, "", None, &e),
+                );
+            }
+        }
+    }
+
+    let detail = if data.dry_run {
+        format!(
+            "解析到 {} 条，其中 {} 条库中缺失（可新建），{} 条已存在，{} 条文件内重复",
+            total, missing_count, existing_count, duplicate_count
+        )
+    } else {
+        format!(
+            "解析到 {} 条，新建 {} 条，已存在 {} 条，文件内重复 {} 条，无效 {} 条，失败 {} 条",
+            total,
+            created.len(),
+            existing_count,
+            duplicate_count,
+            invalid_count,
+            failed_count
+        )
+    };
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "dry_run": data.dry_run,
+            "total": total,
+            "processed": processed,
+            "truncated": total > processed,
+            "entry_limit": MAX_BIBTEX_ENTRIES,
+            "missing": missing_count,
+            "created_count": created.len(),
+            "existing_count": existing_count,
+            "duplicate_count": duplicate_count,
+            "invalid_count": invalid_count,
+            "failed_count": failed_count,
+            "created": created,
+            "items": items,
+            "items_truncated": items_truncated,
+            "warnings": parsed.warnings,
+            "skipped_entries": parsed.skipped,
+            "detail": detail,
+        })),
+    )
+        .into_response()
+}
+
+/// 组装一条逐条结果（前端导入结果表格展示）
+#[allow(clippy::too_many_arguments)]
+fn bibtex_item(
+    action: &str,
+    key: &str,
+    title: &str,
+    year: Option<i64>,
+    doi: &str,
+    existing_id: Option<i64>,
+    reason: &str,
+    new_id: Option<i64>,
+    detail: &str,
+) -> Value {
+    let mut item = json!({
+        "action": action,
+        "key": key,
+        "title": title,
+        "year": year,
+        "doi": doi,
+    });
+    if let Some(id) = existing_id {
+        item["existing_id"] = json!(id);
+    }
+    if let Some(id) = new_id {
+        item["id"] = json!(id);
+    }
+    if !reason.is_empty() {
+        item["reason"] = json!(reason);
+    }
+    if !detail.is_empty() {
+        item["detail"] = json!(detail);
+    }
+    item
+}
+
+/// 逐条结果封顶（超出只保留统计）
+fn push_bibtex_item(items: &mut Vec<Value>, truncated: &mut bool, item: Value) {
+    if items.len() < MAX_BIBTEX_ITEMS {
+        items.push(item);
+    } else {
+        *truncated = true;
+    }
+}
+
+/// 判断条目是否已存在于库中：返回（已有文档 ID，命中依据 `doi` / `title`）
+fn match_existing_bibtex_doc(
+    doi_key: Option<&str>,
+    title_key: &str,
+    year: Option<i64>,
+    doi_index: &HashMap<String, i64>,
+    title_index: &HashMap<String, Vec<(Option<i64>, i64)>>,
+) -> Option<(i64, &'static str)> {
+    if let Some(key) = doi_key {
+        if let Some(id) = doi_index.get(key) {
+            return Some((*id, "doi"));
+        }
+    }
+    if !title_key.is_empty() {
+        if let Some(candidates) = title_index.get(title_key) {
+            let hit = candidates.iter().find(|(doc_year, _)| match (year, *doc_year) {
+                (Some(a), Some(b)) => a == b,
+                // 任一方没有年份：只按标题认定（避免漏掉历史数据里年份为空的记录）
+                _ => true,
+            });
+            if let Some((_, id)) = hit {
+                return Some((*id, "title"));
+            }
+        }
+    }
+    None
+}
+
+/// 插入「仅元数据」的文档（来自 BibTeX）：没有 PDF，`pdf_health` 直接标 `missing`。
+async fn insert_bibtex_document(db: &Database, rec: &bibtex::BibRecord) -> Result<i64, String> {
+    let now = now_datetime();
+    let authors = if rec.authors.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&rec.authors).ok()
+    };
+    let keywords = if rec.keywords.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&rec.keywords).ok()
+    };
+    // `source` 列沿用 Crossref 的语义（出版社），没有出版社时标出来源
+    let source = if rec.publisher.trim().is_empty() {
+        "bibtex".to_string()
+    } else {
+        rec.publisher.trim().to_string()
+    };
+    let doi = normalize_doi(&rec.doi);
+    let filename = bibtex_filename(rec);
+    let doc_type = if rec.doc_type.trim().is_empty() {
+        "document".to_string()
+    } else {
+        rec.doc_type.trim().to_string()
+    };
+
+    let result = sqlx::query(
+        "INSERT INTO documents (filename, title, authors, year, doi, source, journal, keywords, abstract, \
+         doc_type, language, status, status_message, progress, pdf_health, pdf_health_message, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, 0.0, 'missing', ?, ?, ?)",
+    )
+    .bind(&filename)
+    .bind(non_empty_str(&rec.title))
+    .bind(&authors)
+    .bind(rec.year)
+    .bind(&doi)
+    .bind(&source)
+    .bind(non_empty_str(&rec.journal))
+    .bind(&keywords)
+    .bind(non_empty_str(&rec.abstract_text))
+    .bind(&doc_type)
+    .bind(non_empty_str(&rec.language))
+    .bind("仅导入条目（BibTeX），尚未上传 PDF")
+    .bind("未上传 PDF（条目来自 BibTeX 导入）")
+    .bind(&now)
+    .bind(&now)
+    .execute(db.pool())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(result.last_insert_rowid())
+}
+
+/// 空串落库为 `NULL`（列表/筛选用不上空字符串）
+fn non_empty_str(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// 没有 PDF 时用引用键占位（形如 `li2020control.bib`），并去掉路径分隔符等危险字符
+fn bibtex_filename(rec: &bibtex::BibRecord) -> String {
+    let base = if !rec.key.trim().is_empty() {
+        rec.key.trim().to_string()
+    } else {
+        rec.title.trim().chars().take(60).collect::<String>()
+    };
+    let safe: String = base
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .take(120)
+        .collect();
+    let safe = safe.trim().trim_matches('.').to_string();
+    if safe.is_empty() {
+        "entry.bib".to_string()
+    } else {
+        format!("{}.bib", safe)
     }
 }
 

@@ -1,5 +1,6 @@
 //! 服务适配器模块。
 
+pub mod bibtex;
 pub mod chat_store;
 pub mod citation;
 pub mod crossref;

@@ -74,7 +74,7 @@ cargo build --release
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`drive.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/drive.rs` | 用户网盘：路径安全、角色阈值、配额统计、目录列举、Content-Type 推断 |
 | `backend-rs/src/services/pdf_engine.rs` | PDF 解析引擎运行时选择（`mutool` 命令行 / 内置 `mupdf`，含能力兜底） |
-| `backend-rs/src/services/` | 后端适配器：`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存） |
+| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
@@ -493,6 +493,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
    - **DOI 比对统一归一化**：`doi_key()`（`normalize_doi` 去 `https://doi.org/` 等前缀与尾部标点 + 转小写）用于 `GET /documents/by-doi/:doi`（先精确匹配，未命中再 `LIKE` 粗筛 + `doi_key` 校验，兼容历史数据里带前缀/大小写不一致的值）与 `POST /documents/diff-dois`；写入口也归一化 —— `PUT /documents/:id`（`update_document`）与 `pipeline` 的 `MetaRecord::apply`。新增 DOI 写/比对照旧走这几个入口，别再直接字符串相等比较。
    - **全量比对索引**（`GET /documents/doi-hash-index`）：一次返回库内全部文献的 `{count, with_doi, with_hash, generated_at, documents:[{id, doi, doi_key, file_hash, pdf_health}]}`（`doi_key` 已归一化小写，空 DOI/空哈希为 `null`），供 `client-rs` 批量比对；客户端拉一次就完成整库比对，不再按 DOI 逐条请求 `by-doi`。只返回比对必需字段（不带 title/abstract），新增字段时注意保持轻量。
    - **上传去重**（`POST /documents/upload`，`upload_document`）：先用 `find_doc_by_hash`（只查 `file_hash` 索引，**不抽 PDF 元数据**）比哈希；未命中且请求里**显式**给了 `doi` 表单字段时再用 `find_doc_by_doi` 比 DOI（PDF 里抽到的 DOI 不参与去重，保持既有行为）。命中重复的行为由 `on_duplicate` 控制：`error`（默认，409 `{error:"duplicate", kind:"hash"|"doi", existing_id, existing:{file_hash,pdf_health,…}}`）/ `skip`（200 `{status:"skipped", existing_id, id, doc}`）/ `replace`（同哈希则等价 skip，否则用本次文件覆盖已有文档的 PDF，200 `{status:"replaced", existing_id, doc}`，复用 `persist_pdf_for_doc`，与 `POST /{id}/pdf` 同一套副作用）。`force=true` 跳过全部去重检查。新文档的 `doi` 直接取显式字段（`fill_meta_fields` 只补空）。去重依赖 `database.rs::init` 建的 `idx_documents_file_hash` / `idx_documents_doi`（`CREATE INDEX IF NOT EXISTS`，幂等），新增按列等值查找的功能时同步补索引。
+   - **BibTeX 批量新建条目**（`POST /assist/api/documents/import-bibtex`，`import_bibtex`）：请求体 `{content, dry_run}`，`content` 为 `.bib` 文件原始文本（≤8 MB，单次最多处理 2000 条）。服务端用 `services/bibtex.rs` 手写解析器（`@article{key,…}` / `@article(key,…)`、花括号嵌套、`"…"` 引号值、`#` 拼接、`@string` 宏、`@comment`/`@preamble` 跳过、LaTeX 重音与转义还原），把条目映射到 `documents` 的 16 个元数据字段（`filename` 用 `<引用键>.bib` 占位，`source` 取 `publisher` 否则 `bibtex`，类型走 Zotero 名）。**只新建库里缺失的条目**：先按文件内 DOI/标题去重，再与全库比对（`doi_key` 归一化 DOI 优先，其次 `normalize_title` + 年份），命中则跳过并回传 `existing_id`；`dry_run=true` 只返回预览统计（不做写库）。新建记录 `status = 'uploaded'`、`status_message` 说明「仅导入条目」、`pdf_health = 'missing'`（没有 PDF）。响应 `{dry_run,total,processed,truncated,missing,created_count,existing_count,duplicate_count,invalid_count,failed_count,created,items,items_truncated,warnings,detail}`，`items[].action ∈ created|create|exists|duplicate|invalid|error`。
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、去重、索引重置。
 6. **问答**（`chat.rs`）：`GET /assist/api/chat/models`、`GET /assist/api/chat/tools` 列出模型池与可调用的 MCP 工具，`POST /assist/api/chat` 基于 `llm.models` 做多轮对话，并可在本请求内循环调用 MCP 工具（非流式）。见下方「问答（Chat）」。
 7. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
@@ -588,6 +589,7 @@ curl -X POST -H "X-Token: <admin-token>" -H "Content-Type: application/json" \
 | `McpConfigPanel.vue` | MCP 配置面板 |
 | `McpSkillPanel.vue` | MCP Skill 面板 |
 | `config/` | 配置子组件：`BaseUrlSection.vue`、`PdfEngineSection.vue`、`MineruConfigSection.vue`、`LlmConfigSection.vue`、`LlmExtractConfigSection.vue`、`VectorDbConfigSection.vue` |
+| `BibtexImportPanel.vue` | 上传页的「从 BibTeX 批量新建条目」面板（选 `.bib` → 预览可新建/已存在 → 只为缺失条目建记录，逐条结果可跳转已有/新建文档）；`api/documents.ts::importBibtex(content, dryRun)` |
 
 ### 路由与视图（`src/router/index.ts` + `src/views/`）
 
@@ -741,6 +743,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
     - **不要再改回读日志文件**（旧的 `ReverseLines` / 字节游标 `since` / 半行处理 / `scanned_bytes` 已随 `get_logs` 一并删除）；历史日志的去处是 `system.json` 的 `log_path` 文件，页面只回显路径。
 
 23. **PDF 引擎是运行时选择，不是编译期开关**：`pdf_meta` / `pdf_health` 的公共入口一律先 `services::pdf_engine::active()` 再分发，mutool 那套实现**必须始终编译**（不要再加 `#[cfg(not(feature = "mupdf"))]`）。新增 PDF 能力时要两套实现都补，否则切引擎后会静默失能；另外 `mupdf` 引擎拿不到 stderr 诊断，依赖诊断的功能（如「损坏但可修复」判定）要在 UI 上提示用户切回 `mutool`。
+24. **BibTeX 导入的条目没有 PDF**：`import_bibtex` 建的记录 `status = 'uploaded'` 且 `pdf_health = 'missing'`，**不要**在 `do_parse_impl` 里把这种记录打成 `error`（解析入口已加「PDF 不存在就跳过并把状态留在 `uploaded`」的守卫，批量解析只会空转一次）。后续上传 PDF 走文档管理页的「替换 PDF」（`POST /documents/:id/pdf`），上传页重新上传会另建一条记录（上传去重只在显式传 `doi` 表单字段时比 DOI），需要时用去重页合并。
 
 ## 入口与关键文件速查
 

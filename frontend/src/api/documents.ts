@@ -11,7 +11,8 @@ import type {
   PdfInfoResponse,
   CrossrefRecordResponse,
   CitationFormat,
-  CitationResponse
+  CitationResponse,
+  BibtexImportResponse
 } from '@/types/document'
 
 // ── 文档 CRUD ───────────────────────────────────────────
@@ -161,6 +162,21 @@ export function registerPath(filePath: string) {
   return apiPost<Document>('/assist/api/documents/register/', {
     file_path: filePath
   })
+}
+
+/**
+ * BibTeX 批量新建条目。
+ *
+ * `dryRun = true` 只做比对预览（哪些能新建、哪些已存在），不写库；
+ * `false` 才真正为「库里缺失」的条目建记录（没有 PDF，`pdf_health = missing`）。
+ */
+export function importBibtex(content: string, dryRun = true) {
+  return apiPost<BibtexImportResponse>(
+    '/assist/api/documents/import-bibtex/',
+    { content, dry_run: dryRun },
+    // 大文件（几千条）解析 + 比对可能比默认 30s 久
+    { timeout: 120000 }
+  )
 }
 
 // ── 搜索 ────────────────────────────────────────────────

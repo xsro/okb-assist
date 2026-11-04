@@ -115,11 +115,15 @@
         </div>
       </div>
     </div>
+
+    <!-- BibTeX 批量新建条目 -->
+    <BibtexImportPanel />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import BibtexImportPanel from '@/components/BibtexImportPanel.vue'
 import { uploadPdf } from '@/api/documents'
 import type { UploadPhase } from '@/api/documents'
 import { describeUploadError } from '@/utils/uploadError'
@@ -321,6 +325,10 @@ async function startUpload() {
 </script>
 
 <style scoped>
+.upload-view :deep(.bibtex-panel) {
+  margin-top: 24px;
+}
+
 .upload-area {
   border: 2px dashed var(--border);
   border-radius: 12px;

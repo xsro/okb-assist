@@ -165,3 +165,48 @@ export interface CitationResponse {
   key: string
   content: string
 }
+
+// ── BibTeX 批量新建条目 ──────────────────────────────────
+
+/** 单条 BibTeX 的处理结果 */
+export interface BibtexImportItem {
+  /** created 新建 / create 可新建（预览）/ exists 已存在 / duplicate 文件内重复 / invalid 无效 / error 失败 */
+  action: 'created' | 'create' | 'exists' | 'duplicate' | 'invalid' | 'error'
+  /** BibTeX 引用键 */
+  key: string
+  title: string
+  year: number | null
+  doi: string
+  /** 命中已有文档时的文档 ID */
+  existing_id?: number
+  /** 新建成功时的文档 ID */
+  id?: number
+  /** 命中依据：doi / title / in-file-doi / in-file-title / no-title */
+  reason?: string
+  /** 可读说明 */
+  detail?: string
+}
+
+/** BibTeX 批量导入响应（后端 /documents/import-bibtex） */
+export interface BibtexImportResponse {
+  dry_run: boolean
+  /** 文件里解析到的条目数 */
+  total: number
+  /** 实际处理的条目数（受 entry_limit 截断） */
+  processed: number
+  truncated: boolean
+  entry_limit: number
+  /** 库中缺失的条目数（预览时即“可新建”） */
+  missing: number
+  created_count: number
+  existing_count: number
+  duplicate_count: number
+  invalid_count: number
+  failed_count: number
+  created: { id: number; key: string; title: string; doi: string; year: number | null }[]
+  items: BibtexImportItem[]
+  items_truncated: boolean
+  warnings: string[]
+  skipped_entries: number
+  detail: string
+}
