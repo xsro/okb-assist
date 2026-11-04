@@ -84,6 +84,12 @@
 - `kind=hash`：本地这份 PDF 的**内容**已在库中（登记成了另一篇）。常见原因是 Zotero 条目挂错附件，
   或库里那条记录装错了 PDF。多个附件时会列出全部候选，提示去 Zotero / CSV 里删掉错的；
 - `kind=doi`：DOI 已存在，`--dup-doi-action hash` 可改走「比对哈希，不同则覆盖已有 PDF」。
+- 特例：已有记录的 DOI 与我们上传的**一致**（说明上一次请求其实已在超时后落库）→ 直接按成功处理，
+  不报错也不会新建重复记录。
+
+**上传失败自动重试**：发送阶段报 `error sending request`（超时/断链）会自动重试一次；
+仍失败时提示「该请求可能已在服务端完成，重跑同一命令核对」。实测慢链路或服务端卡顿时，
+一条 2 MB 的上传曾耗时 6 分钟，旧版 `120s` 基线会先把请求掰断（表现就是 `error sending request`）。
 
 ```
 okb-client zotero <csv_file> [选项]
@@ -105,6 +111,8 @@ okb-client zotero <csv_file> [选项]
 - `--debug`                  显示解析出的元数据详情
 - `--reuse-hash`             复用 `~/.okb/client/doi-hash.json` 里记录的 DOI→哈希：命中则跳过重新读文件算哈希
   （需要比对哈希的策略才有意义：`--dup-doi-action hash` / `health-hash`）。文件没换过时才可靠
+- `--upload-timeout <SECONDS>` 单次上传请求的超时（默认 `0` = 自动：`300s + 每 MB 30s`，上限 2 小时）。
+  慢链路或服务端卡顿时会看到 `error sending request`，调大这个值即可
 - `--upload-interval <SECONDS>` 每次上传之间的间隔秒数（默认 `1`；可写小数如 `0.5`，`0` 表示不等待）。
   新建上传与「更新 PDF」共用同一个计数，两次上传之间才等待，首个上传不等待
 
@@ -144,6 +152,7 @@ okb-client dir <目录路径> [选项]
 - `--dry-run`                试运行，不实际上传
 - `-r, --recursive`          递归搜索子目录
 - `--process`                上传后触发解析流水线（默认不触发）
+- `--upload-timeout <SECONDS>` 单次上传请求的超时（默认 `0` = 自动：`300s + 每 MB 30s`，上限 2 小时）
 - `--upload-interval <SECONDS>` 每次上传之间的间隔秒数（默认 `1`；可写小数如 `0.5`，`0` 表示不等待），
   适合服务端限速或不想一次压满带宽的场景
 

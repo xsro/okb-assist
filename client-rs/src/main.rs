@@ -44,12 +44,21 @@ struct UploadIntervalArgs {
     /// 每次上传之间的间隔秒数（默认 1 秒；可写小数，0 表示不等待）
     #[arg(long, value_name = "SECONDS", default_value_t = 1.0)]
     upload_interval: f64,
+
+    /// 单次上传请求的超时秒数（0 = 自动：300s + 每 MB 30s，上限 2 小时）；
+    /// 慢链路或服务端卡顿（表现为 `error sending request`）时调大
+    #[arg(long, value_name = "SECONDS", default_value_t = 0.0)]
+    upload_timeout: f64,
 }
 
 impl UploadIntervalArgs {
+    /// 传给 `upload_client` 的超时覆盖值（<= 0 表示自动）
+    fn timeout_override(&self) -> Option<f64> {
+        Some(self.upload_timeout).filter(|s| *s > 0.0)
+    }
+
     /// 第 `seq` 次上传（从 0 开始）前的等待：首个不等待，间隔 <= 0 也不等待
-    async fn throttle(&self, seq: usize) {
-        if seq > 0 && self.upload_interval > 0.0 {
+    async fn throttle(&self, seq: usize) {        if seq > 0 && self.upload_interval > 0.0 {
             tokio::time::sleep(std::time::Duration::from_secs_f64(self.upload_interval)).await;
         }
     }
@@ -651,13 +660,21 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
-/// 上传类请求的超时：基础 120s + 每 MB 2s（上限 30 分钟），
-/// 避免大文件走慢链路时被固定 120s 提前掐断。
-fn upload_client(file_size: u64) -> Result<Client> {
-    let extra_secs = (file_size / (1024 * 1024)).saturating_mul(2);
-    let secs = (120 + extra_secs).min(30 * 60);
+/// 上传类请求的超时：默认 300s + 每 MB 30s（上限 2 小时），
+/// 可用 `--upload-timeout` 覆盖。
+///
+/// 基线从旧的 120s 提到 300s：实测慢链路/服务端卡顿时「2 MB 传了 6 分钟」，
+/// 旧基线会在服务端已经收完/正在写入时先把请求掰断（表现为 `error sending request`）。
+fn upload_client(file_size: u64, timeout_override: Option<f64>) -> Result<Client> {
+    let secs = match timeout_override.filter(|s| *s > 0.0) {
+        Some(t) => t,
+        None => {
+            let extra = (file_size / (1024 * 1024)).saturating_mul(30);
+            (300 + extra).min(2 * 3600) as f64
+        }
+    };
     Client::builder()
-        .timeout(std::time::Duration::from_secs(secs))
+        .timeout(std::time::Duration::from_secs_f64(secs))
         .redirect(reqwest::redirect::Policy::default())
         .build()
         .context("无法创建 HTTP 客户端")
@@ -681,6 +698,7 @@ async fn post_pdf(
     file_path: &Path,
     token: &Option<String>,
     extra_fields: &[(&str, &str)],
+    timeout_override: Option<f64>,
 ) -> Result<reqwest::Response> {
     let size = tokio::fs::metadata(file_path)
         .await
@@ -707,7 +725,7 @@ async fn post_pdf(
         form = form.text((*k).to_string(), (*v).to_string());
     }
 
-    let client = upload_client(size)?;
+    let client = upload_client(size, timeout_override)?;
     let mut req = client.post(url).multipart(form);
     if let Some(t) = token {
         req = req.header("X-Token", t.as_str());
@@ -733,11 +751,15 @@ enum UploadOutcome {
 }
 
 /// 上传 PDF 文件到服务器（新建文献，默认不触发自动处理）
+///
+/// 链路或服务端卡顿导致请求失败时会自动重试一次；若重试后服务端返回 409 且
+/// 已有记录的 DOI 与我们上传的一致，说明「上一次请求其实已经落库」，按成功处理。
 async fn api_upload(
     base_url: &str,
     file_path: &Path,
     doi: Option<&str>,
     token: &Option<String>,
+    timeout_override: Option<f64>,
 ) -> UploadOutcome {
     let url = format!("{}/assist/api/documents/upload", base_url);
     // 显式带 DOI：服务端不必解析 PDF 就能做 DOI 去重（命中时返回 409 `kind=doi`）
@@ -745,12 +767,34 @@ async fn api_upload(
     if let Some(doi) = doi {
         fields.push(("doi", doi));
     }
-    let resp = match post_pdf(&url, file_path, token, &fields).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("    上传失败: {}", e);
-            return UploadOutcome::Failed;
+
+    let mut resp: Option<reqwest::Response> = None;
+    for attempt in 0..2 {
+        match post_pdf(&url, file_path, token, &fields, timeout_override).await {
+            Ok(r) => {
+                resp = Some(r);
+                break;
+            }
+            Err(e) => {
+                if attempt == 0 {
+                    eprintln!("    上传失败（{e:#}），3 秒后重试一次 ...");
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                } else {
+                    eprintln!("    上传失败: {e:#}");
+                    eprintln!(
+                        "    提示: 多为链路过慢/服务端卡顿导致的超时（该请求可能已在服务端完成）。"
+                    );
+                    eprintln!(
+                        "    重跑同一条命令即可核对：服务端若已有该 DOI 的同内容记录，会按成功处理；也可加 --upload-timeout <秒数> 放宽超时。"
+                    );
+                    return UploadOutcome::Failed;
+                }
+            }
         }
+    }
+    let resp = match resp {
+        Some(r) => r,
+        None => return UploadOutcome::Failed,
     };
 
     let status = resp.status();
@@ -775,6 +819,31 @@ async fn api_upload(
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
         };
+        let existing_doi = get_str("/existing/doi");
+        // 同一个 DOI 的同内容记录 = 上一次请求（可能超时后才）真的落库了 → 当作成功，避免白重跑
+        let same_doi = match (doi, existing_doi.as_deref()) {
+            (Some(a), Some(b)) => normalize_doi(a)
+                .zip(normalize_doi(b))
+                .map(|(x, y)| x.eq_ignore_ascii_case(&y))
+                .unwrap_or(false),
+            _ => false,
+        };
+        if same_doi {
+            let id = parsed
+                .as_ref()
+                .and_then(|v| v.get("existing_id"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            println!(
+                "    服务端已有同一 DOI 的同内容记录 id={}（上一次请求应该是在超时后才写入的），按成功处理",
+                id
+            );
+            return UploadOutcome::Created(UploadResult {
+                id,
+                doi: existing_doi,
+                file_hash: get_str("/existing/file_hash"),
+            });
+        }
         return UploadOutcome::Duplicate {
             kind: get_str("/kind").unwrap_or_else(|| "unknown".to_string()),
             existing_id: parsed
@@ -782,7 +851,7 @@ async fn api_upload(
                 .and_then(|v| v.get("existing_id"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0),
-            existing_doi: get_str("/existing/doi"),
+            existing_doi,
             existing_filename: get_str("/existing/filename"),
             same_file: parsed
                 .as_ref()
@@ -849,12 +918,13 @@ async fn api_replace_pdf(
     doc_id: u64,
     file_path: &Path,
     token: &Option<String>,
+    timeout_override: Option<f64>,
 ) -> bool {
     let url = format!("{}/assist/api/documents/{}/pdf", base_url, doc_id);
-    let resp = match post_pdf(&url, file_path, token, &[]).await {
+    let resp = match post_pdf(&url, file_path, token, &[], timeout_override).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("  更新 PDF 失败: {}", e);
+            eprintln!("  更新 PDF 失败: {e:#}");
             return false;
         }
     };
@@ -1189,7 +1259,7 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
         upload_seq += 1;
         print!("        上传 ... ");
         io::stdout().flush().ok();
-        match api_upload(&base_url, path, None, &token).await {
+        match api_upload(&base_url, path, None, &token, args.interval.timeout_override()).await {
             UploadOutcome::Created(result) => {
                 println!("成功 -> id={}", result.id);
                 // 记下 DOI → 哈希（服务端算的与本地一致，优先用服务端返回值），供 `zotero --reuse-hash` 复用
@@ -1887,12 +1957,21 @@ async fn upload_one_zotero(
     dry_run: bool,
     client: &Client,
     token: &Option<String>,
+    timeout_override: Option<f64>,
 ) -> bool {
     if dry_run {
         println!("  [dry-run] 跳过上传: {} ({})", d.doi, d.file_path);
         return true;
     }
-    let res = match api_upload(base_url, Path::new(&d.file_path), Some(d.doi.as_str()), token).await {
+    let res = match api_upload(
+        base_url,
+        Path::new(&d.file_path),
+        Some(d.doi.as_str()),
+        token,
+        timeout_override,
+    )
+    .await
+    {
         UploadOutcome::Created(r) => r,
         UploadOutcome::Duplicate {
             kind,
@@ -2385,7 +2464,17 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         upload_seq += 1;
         print!("  新建 [{}] {} ... ", i + 1, dw.doi);
         io::stdout().flush().ok();
-        if upload_one_zotero(dw, &base_url, update_meta, false, &client, &token).await {
+        if upload_one_zotero(
+            dw,
+            &base_url,
+            update_meta,
+            false,
+            &client,
+            &token,
+            args.interval.timeout_override(),
+        )
+        .await
+        {
             println!("✓");
             uploaded += 1;
         } else {
@@ -2410,7 +2499,15 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         upload_seq += 1;
         print!("  更新 PDF [{}] ID={} ({}) ... ", i + 1, server_id, dw.doi);
         io::stdout().flush().ok();
-        if api_replace_pdf(&base_url, *server_id, Path::new(&dw.file_path), &token).await {
+        if api_replace_pdf(
+            &base_url,
+            *server_id,
+            Path::new(&dw.file_path),
+            &token,
+            args.interval.timeout_override(),
+        )
+        .await
+        {
             if update_meta {
                 api_update_metadata(&client, &base_url, *server_id, &dw.meta, &token).await;
                 api_save_info(&client, &base_url, *server_id, &dw.info, &token).await;
