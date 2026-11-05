@@ -9,17 +9,17 @@
         :class="mode === 'title' ? 'btn-primary' : 'btn-outline'"
         @click="mode = 'title'"
       >
-        标题相似（{{ titleGroups.length }} 组）
+        标题相似（{{ detected ? titleGroups.length + ' 组' : '未检测' }}）
       </button>
       <button
         class="btn btn-sm"
         :class="mode === 'doi' ? 'btn-primary' : 'btn-outline'"
         @click="mode = 'doi'"
       >
-        DOI 重复（{{ doiGroups.length }} 组）
+        DOI 重复（{{ detected ? doiGroups.length + ' 组' : '未检测' }}）
       </button>
-      <button class="btn btn-sm btn-outline" :disabled="loading || merging" @click="load">
-        {{ loading ? '检测中…' : '重新检测' }}
+      <button class="btn btn-sm" :disabled="loading || merging" @click="load">
+        {{ loading ? '检测中…' : detected ? '重新检测' : '开始检测' }}
       </button>
     </div>
 
@@ -135,13 +135,21 @@
     </div>
 
     <div v-else class="empty">
-      {{ loading ? '检测中…' : mode === 'title' ? '暂无相似文献' : '暂无 DOI 重复的文献' }}
+      <template v-if="loading">检测中…</template>
+      <template v-else-if="!detected">
+        <p>尚未检测。</p>
+        <p class="empty-tip">点击上方「开始检测」后才查询重复文献（标题相似与 DOI 重复会同时检测）。</p>
+        <button class="btn btn-sm" :disabled="loading" @click="load">开始检测</button>
+      </template>
+      <template v-else>
+        {{ mode === 'title' ? '暂无相似文献' : '暂无 DOI 重复的文献' }}
+      </template>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed } from 'vue'
 import { getSimilarTitles, getSimilarDois, mergeDocuments } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
@@ -154,6 +162,8 @@ const mode = ref<'title' | 'doi'>('title')
 const titleGroups = ref<SimilarTitleGroup['groups']>([])
 const doiGroups = ref<SimilarDoiGroup['groups']>([])
 const loading = ref(false)
+/** 是否已主动检测过（进入页面不自动检测，由用户点「开始检测」触发） */
+const detected = ref(false)
 const merging = ref(false)
 const progressDone = ref(0)
 const progressTotal = ref(0)
@@ -277,6 +287,7 @@ async function load() {
   }
   // 重新检测后一律恢复「全部保留」，避免沿用已失效的选择
   resetSelection()
+  detected.value = true
   loading.value = false
 }
 
@@ -378,7 +389,7 @@ async function runBatchMerge() {
   }
 }
 
-onMounted(load)
+// 不自动检测：进入页面只展示提示，等用户点「开始检测」
 </script>
 
 <style scoped>
@@ -499,6 +510,11 @@ onMounted(load)
   text-align: center;
   padding: 60px;
   color: var(--text-secondary);
+}
+
+.empty-tip {
+  margin: 8px 0 16px;
+  font-size: 13px;
 }
 
 @media (max-width: 768px) {
