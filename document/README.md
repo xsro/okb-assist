@@ -92,14 +92,6 @@
 ## 设计与计划
 
 <div class="doc-grid">
-  <a class="doc-card" href="#/user-management-plan">
-    <span class="doc-card__title">用户体系升级计划</span>
-    <span class="doc-card__desc">从「静态 Token → 角色」到完整用户体系的决策与进度</span>
-  </a>
-  <a class="doc-card" href="#/search-filesize-plan">
-    <span class="doc-card__title">文件大小筛选（计划）</span>
-    <span class="doc-card__desc">高级搜索按 PDF / Markdown / ZIP 大小过滤</span>
-  </a>
   <a class="doc-card" href="#/webdav-plan">
     <span class="doc-card__title">网盘 WebDAV 同步（计划）</span>
     <span class="doc-card__desc">方案对比、认证设计（scope=dav）、代价与分阶段 TODO</span>
@@ -128,7 +120,7 @@ document/
 ## 撰写约定
 
 - **新增文档后**，在 `_sidebar.md` 与首页对应分组里各补一条链接，否则只能靠搜索找到。
-- 文件名用小写 + 短横线（如 `search-filesize-plan.md`），中文标题写在文件内的 `#` 标题里。
+- 文件名用小写 + 短横线（如 `db-status-removal-plan.md`），中文标题写在文件内的 `#` 标题里。
 - 页内相对链接写成 `./xxx.md`（`relativePath: true` 已开启）；指向应用页面用 `/assist/...`（已在 `noCompileLinks` 中，走浏览器整页跳转）。
 - 子目录（`mineru4/`、`skills/`）各自带一个 `_sidebar.md`，docsify 会就近取用；子目录侧栏里的文档链接写成相对该目录的路径（如 `parse-api-test.md`）。
 - 本目录是仓库文档的单一来源，`AGENTS.md` 里的路径引用与之保持一致，**不要随意移动文件**。

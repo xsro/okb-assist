@@ -18,8 +18,6 @@
   - [官方云 API](mineru4/mineru-cloud-api.md)
   - [解析接口测试](mineru4/parse-api-test.md)
 - **设计与计划**
-  - [用户体系升级计划](user-management-plan.md)
-  - [文件大小筛选（计划）](search-filesize-plan.md)
   - [网盘 WebDAV 同步（计划）](webdav-plan.md)
   - [文献状态去库化（计划）](db-status-removal-plan.md)
 - **相关入口**

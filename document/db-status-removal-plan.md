@@ -251,7 +251,7 @@ pub fn derive_state(
 | 现状 | 处置 |
 |---|---|
 | `{ prefix: 'status', field: 'status', type: 'status' }` + `STATUS_ALIASES`（上传/解析中/完成/错误） | **删除**；`?q=status:done` 不再被解析 |
-| `filesize_pdf` / `filesize_md` / `filesize_zip`（`field: pdf_size` 等） | **保留并让它真正生效** —— 后端 `ListQuery` 目前**根本没有这些参数**（axum 静默忽略未知 query），这是「`search-filesize-plan.md` 提到但未实现」的缺口，本次顺手补齐（4.1） |
+| `filesize_pdf` / `filesize_md` / `filesize_zip`（`field: pdf_size` 等） | **保留并让它真正生效** —— 后端 `ListQuery` 原本**根本没有这些参数**（axum 静默忽略未知 query，前端点了没反应），本次补齐（4.1） |
 | — | **新增** 三态前缀：`md:present` / `md:absent` / `md:unknown`（同样 `pdf:` / `zip:`），映射到 `md_state` / `pdf_state` / `zip_state` |
 | — | **新增** 健康前缀：`health:error` / `health:unchecked` → `pdf_health`（可逗号多选） |
 

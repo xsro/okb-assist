@@ -94,7 +94,7 @@ cargo build --release
 | `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 8 构建，输出到 `frontend/dist/`，包管理器 `pnpm`） |
 | `frontend/dist/` | 前端构建产物（`index.html`、`assets/`），由后端 serving |
 | `data/` | 运行时数据（`okb_assist.db`、`_uploads/`、`tokens/` 等），由 `system.json` 模板决定路径；实际位置为 `backend-rs/data/`，已被 `backend-rs/.gitignore` 忽略 |
-| `document/` | 参考文档（同时是 **docsify 文档站**，由 `system.json` 的 `static_dirs` 挂到 `/document`）：`index.html`（docsify 入口）、`README.md`（首页/索引）、`_sidebar.md`（左侧目录）、`_404.md`、`assets/`（自有样式与登录守卫）；内容页 `mcp.md`（MCP 连接指南）、`mcp-tools.md`（工具列表）、`user-management.md`（用户/登录/令牌）、`user-management-plan.md`（权限→用户升级计划）、`drive.md`（网盘）、`build.md`（部署构建）、`search.md`（搜索语法）、`search-filesize-plan.md`、`webdav-plan.md`（网盘 WebDAV 同步方案与 TODO）、`datalab.to.md`、`openwebui.md`、`qdrant.md`、`udisks2-automount.md`、`mineru4/`、`skills/` |
+| `document/` | 参考文档（同时是 **docsify 文档站**，由 `system.json` 的 `static_dirs` 挂到 `/document`）：`index.html`（docsify 入口）、`README.md`（首页/索引）、`_sidebar.md`（左侧目录）、`_404.md`、`assets/`（自有样式与登录守卫）；内容页 `mcp.md`（MCP 连接指南）、`mcp-tools.md`（工具列表）、`user-management.md`（用户/登录/令牌）、`drive.md`（网盘）、`build.md`（部署构建）、`search.md`（搜索语法）、`webdav-plan.md`（网盘 WebDAV 同步方案与 TODO）、`db-status-removal-plan.md`（文献状态去库化）、`datalab.to.md`、`openwebui.md`、`qdrant.md`、`udisks2-automount.md`、`mineru4/`、`skills/` |
 
 ## 配置（JSON 文件，非环境变量）
 
