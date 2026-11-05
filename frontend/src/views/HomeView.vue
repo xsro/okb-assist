@@ -206,11 +206,11 @@
       </div>
     </div>
 
-    <!-- 分页 -->
+    <!-- 分页（当前页码同步在地址栏 ?page=，可刷新 / 分享 / 后退复原） -->
     <div v-if="total > 0" class="pagination">
-      <button :disabled="page <= 1" @click="page--; doLoad()">上一页</button>
-      <span>第 {{ page }} 页，共 {{ total }} 条</span>
-      <button :disabled="page >= totalPages" @click="page++; doLoad()">下一页</button>
+      <button :disabled="page <= 1 || loading" @click="goPage(page - 1)">上一页</button>
+      <span>第 {{ page }} / {{ totalPages }} 页，共 {{ total }} 条</span>
+      <button :disabled="page >= totalPages || loading" @click="goPage(page + 1)">下一页</button>
     </div>
 
     <!-- 空状态 -->
@@ -322,11 +322,9 @@ function toggleColumn(key: string) {
   localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(visibleColumns.value))
 }
 
-const { items, loading, page, total, totalPages, load } = usePagination<Document>()
+const { items, loading, page, pageSize, total, totalPages, load } = usePagination<Document>()
 
 const searchQuery = ref('')
-// 标志位：避免路由变化触发重复搜索
-const updatingUrl = ref(false)
 const searchWrapRef = ref<HTMLElement | null>(null)
 const searchInputRef = ref<HTMLInputElement | null>(null)
 const queryBuilderRef = ref<{ show: (q?: string) => Promise<string | null> } | null>(null)
@@ -392,47 +390,95 @@ const highlightedQuery = computed(() => {
   return result
 })
 
-/** 从 URL 读取初始查询参数 */
+/** 解析地址栏里的 page 参数（缺失或非法一律当作第 1 页） */
+function parsePageQuery(raw: unknown): number {
+  const value = Array.isArray(raw) ? raw[0] : raw
+  const n = Number.parseInt(String(value ?? ''), 10)
+  return Number.isFinite(n) && n > 0 ? n : 1
+}
+
+/** 由当前视图状态生成地址栏 query：q 为空、页码为 1 时省略，保持 URL 干净 */
+function buildUrlQuery(): Record<string, string> {
+  const query = searchQuery.value.trim()
+  const next: Record<string, string> = {}
+  if (query) next.q = query
+  if (page.value > 1) next.page = String(page.value)
+  return next
+}
+
+/**
+ * 把视图状态写回地址栏（与当前 URL 一致时不产生导航）
+ * - replace：搜索条件变化 / 页码越界纠正，不新增历史记录
+ * - push：翻页，浏览器后退可回到上一页
+ */
+function syncUrl(mode: 'push' | 'replace') {
+  const next = buildUrlQuery()
+  const current: Record<string, string> = {}
+  const currentQ = (route.query.q as string | undefined) || ''
+  if (currentQ) current.q = currentQ
+  const currentPage = parsePageQuery(route.query.page)
+  if (currentPage > 1) current.page = String(currentPage)
+  if (JSON.stringify(next) === JSON.stringify(current)) return
+  const target = { query: next }
+  if (mode === 'push') router.push(target)
+  else router.replace(target)
+}
+
+/** 从 URL 读取初始查询参数（搜索词 + 页码） */
 function restoreQueryFromUrl() {
   const q = route.query.q as string | undefined
   if (q) {
     searchQuery.value = q
   }
+  page.value = parsePageQuery(route.query.page)
 }
 
-async function doLoad() {
+/**
+ * 加载当前页数据
+ * @param urlMode 是否把状态写进地址栏：replace（默认）/ push（翻页）/ none（URL 驱动，别再写回去）
+ */
+async function doLoad(urlMode: 'push' | 'replace' | 'none' = 'replace') {
   if (!requireToken()) return
-  const query = searchQuery.value.trim()
+  if (urlMode !== 'none') syncUrl(urlMode)
 
-  // 更新地址栏（不重复 push 同样的值）
-  const currentQ = (route.query.q as string) || ''
-  if (currentQ !== query) {
-    updatingUrl.value = true
-    router.replace({ query: query ? { q: query } : {} })
-  }
+  const query = searchQuery.value.trim()
 
   if (query === '') {
     // 无搜索词时正常加载全部
     await load(listDocuments, {})
-    return
+  } else {
+    // 将原始 query string 发送给后端，由后端解析和执行搜索
+    await load(
+      async (params) => {
+        const res = await searchInfo(query, {
+          page: params.page as number | undefined,
+          page_size: params.page_size as number | undefined,
+        })
+        return { items: res.items, total: res.total }
+      },
+      { page: page.value, page_size: pageSize.value }
+    )
   }
 
-  // 将原始 query string 发送给后端，由后端解析和执行搜索
-  await load(
-    async (params) => {
-      const res = await searchInfo(query, {
-        page: params.page as number | undefined,
-        page_size: params.page_size as number | undefined,
-      })
-      return { items: res.items, total: res.total }
-    },
-    { page: page.value, page_size: 20 }
-  )
+  // 结果变少（过滤 / 删除）导致当前页越界时，回退到最后一页
+  if (page.value > totalPages.value) {
+    page.value = totalPages.value
+    await doLoad('replace')
+  }
+}
+
+/** 翻页：页码写进地址栏（push）并重新加载 */
+function goPage(target: number) {
+  const next = Math.min(Math.max(1, Math.trunc(target) || 1), totalPages.value)
+  if (next === page.value) return
+  page.value = next
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+  doLoad('push')
 }
 
 function search() {
   page.value = 1
-  doLoad()
+  doLoad('replace')
 }
 
 function clearSearch() {
@@ -440,25 +486,17 @@ function clearSearch() {
   search()
 }
 
-/** 监控路由变化（浏览器前进/后退），恢复搜索状态 */
+/** 监控路由变化（浏览器前进/后退、手改地址栏），以 URL 为准恢复搜索词与页码 */
 watch(
-  () => route.query.q,
-  (newQ) => {
-    if (updatingUrl.value) {
-      // 本次 URL 更新由搜索触发，不重复加载
-      updatingUrl.value = false
-      return
-    }
-    const q = (newQ as string) || ''
-    if (q !== searchQuery.value) {
-      searchQuery.value = q
-      if (q === '' && items.value.length === 0) {
-        // 首次加载或清除搜索
-        doLoad()
-      } else if (q !== '') {
-        doLoad()
-      }
-    }
+  () => [route.query.q, route.query.page] as const,
+  () => {
+    const urlQ = (route.query.q as string | undefined) || ''
+    const urlPage = parsePageQuery(route.query.page)
+    // URL 与视图状态一致：这次变化由本页自己写入，无需重复加载
+    if (urlQ === searchQuery.value.trim() && urlPage === page.value) return
+    searchQuery.value = urlQ
+    page.value = urlPage
+    doLoad('none')
   }
 )
 
@@ -470,10 +508,10 @@ async function openQueryBuilder() {
   }
 }
 
-onMounted(async () => {
-  // 从 URL 恢复搜索状态
+onMounted(() => {
+  // 从 URL 恢复搜索状态（搜索词 + 页码）
   restoreQueryFromUrl()
-  doLoad()
+  doLoad('replace')
 })
 
 
