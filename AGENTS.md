@@ -768,6 +768,12 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 23. **PDF 引擎是运行时选择，不是编译期开关**：`pdf_meta` / `pdf_health` 的公共入口一律先 `services::pdf_engine::active()` 再分发，mutool 那套实现**必须始终编译**（不要再加 `#[cfg(not(feature = "mupdf"))]`）。新增 PDF 能力时要两套实现都补，否则切引擎后会静默失能；另外 `mupdf` 引擎拿不到 stderr 诊断，依赖诊断的功能（如「损坏但可修复」判定）要在 UI 上提示用户切回 `mutool`。
 24. **BibTeX 导入的条目没有 PDF**：`import_bibtex` 建的记录写入 `fs_synced_at`（三个 size = NULL，即「已同步且确定不存在」）+ `pdf_health = 'missing'`，派生状态自然是 `uploaded` / 「PDF 缺失」；**不要**在 `do_parse_impl` 里把这种记录打成 `error`（worker 里已加「PDF 不存在就跳过」的真实文件守卫，批量解析只能空转一次）。后续上传 PDF 走文档管理页的「替换 PDF」（`POST /documents/:id/pdf`），上传页重新上传会另建一条记录（上传去重只在显式传 `doi` 表单字段时比 DOI），需要时用去重页合并。
 
+25. **`year` 列是 SQLite 动态类型，取出时必须 `CAST(NULLIF(TRIM(year), '') AS INTEGER)`**：老库里存在写成 `''`（TEXT 类型）的年份，sqlx 把 TEXT 解码成 `Option<i64>` 会直接报
+    `mismatched types; Rust type Option<i64> (as SQL type INTEGER) is not compatible with SQL type TEXT`，**整条 `fetch_all` 一起失败**。
+    历史教训：`import_bibtex` 用 `sqlx::query_as(...).fetch_all().await.unwrap_or_default()` 吞掉这个错误，索引变成空表 → 一个重复都检不出来（131 条全部报「可新建」，直接导入会造出 131 条重复记录）。
+    现有约定：`DOC_COLUMNS`（documents.rs / pipeline.rs / mcp_server.rs 三份）+ `import_bibtex` 的索引查询都带这个 CAST；`database.rs::init()` 启动时还会把历史 TEXT 年份一次性修成 INTEGER/NULL。
+    **新增任何读取 `year` 的查询都必须带 CAST，且不要再对查询结果 `unwrap_or_default()`**（读不到就该报错，不能静默当成空库）。
+
 ## 入口与关键文件速查
 
 - 后端入口：`backend-rs/src/main.rs`

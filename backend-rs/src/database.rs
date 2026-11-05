@@ -181,6 +181,27 @@ impl Database {
             }
         }
 
+        // ── 年份列类型修复 ─────────────────────────
+        // 历史数据里有把 `year` 写成 `''`（TEXT）的（旧版本/旧库遗留）。sqlx 按 `Option<i64>`
+        // 解码 TEXT 会报 `mismatched types`，导致任何 `SELECT ... year` 整条查询失败
+        // （BibTeX 导入比对曾因此静默拿到空索引）。这里一次性把这些值修成 INTEGER/NULL，
+        // 幂等；CAST 只是兜底，不能代替这里的清洗。
+        for ddl in [
+            "UPDATE documents SET year = NULL WHERE typeof(year) = 'text' AND trim(year) = ''",
+            "UPDATE documents SET year = CAST(trim(year) AS INTEGER) \
+             WHERE typeof(year) = 'text' AND trim(year) GLOB '[0-9]*'",
+            "UPDATE documents SET year = NULL WHERE typeof(year) = 'text'",
+        ] {
+            let fixed = sqlx::query(ddl).execute(&self.pool).await?;
+            if fixed.rows_affected() > 0 {
+                tracing::info!(
+                    "数据库迁移：documents.year 修正 {} 行（{}）",
+                    fixed.rows_affected(),
+                    ddl
+                );
+            }
+        }
+
         // 常用查找列建索引：`by-hash` / `by-doi` / 上传去重都是这几列上的等值查询，
         // 文档数量上去后没索引就退化成全表扇描（幂等，可重复执行）。
         // 文件事实列（size / fs_synced_at / pdf_health）是列表筛选与排序的主力条件，同样建索引。

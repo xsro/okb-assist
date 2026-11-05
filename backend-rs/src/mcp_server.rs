@@ -20,7 +20,9 @@ use crate::routers::documents::get_or_create_alias;
 use crate::services::grep_search::{grep_search as do_grep, parse_doc_ids};
 
 /// Document 全部列的 SELECT 语句（列顺序与 `Document` 结构体字段一致）。
-const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, year, doi, source, journal, \
+// `year` 必须 CAST：老库里有写成 `''`（TEXT）的年份，按 `Option<i64>` 解码 TEXT 会报
+// `mismatched types`，整条查询取不到任何行（与 documents.rs 的 DOC_COLUMNS 保持一致）。
+const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, CAST(NULLIF(TRIM(year), '') AS INTEGER) AS year, doi, source, journal, \
      keywords, abstract, category, doc_type, language, title_en, authors_en, \
      keywords_en, abstract_en, journal_en, mineru_task_id, fs_synced_at, \
      qdrant_collection, vector_db_id, created_at, updated_at, \

@@ -1755,11 +1755,27 @@ async fn import_bibtex(
 
     // 现有库索引：一次读出 id/标题/DOI/年份，之后全在内存里比对
     // （DOI 统一走 `doi_key` 归一化，兼容历史数据里的 `https://doi.org/` 前缀与大小写差异）
-    let rows: Vec<(i64, Option<String>, Option<String>, Option<i64>)> =
-        sqlx::query_as("SELECT id, title, doi, year FROM documents")
-            .fetch_all(db.pool())
-            .await
-            .unwrap_or_default();
+    //
+    // ⚠ `year` 必须 CAST：老库里存在写成 `''`（TEXT 类型）的年份，sqlx 按 `Option<i64>`
+    // 解码 TEXT 会直接报 `mismatched types`，整条 `fetch_all` 失败。以前这里用
+    // `unwrap_or_default()` 把错误吞掉 → 索引变成空表 → 所有条目都被判成「库里缺失」
+    // （看起来就是「检测不出重复」）。读取失败必须显式报错，不能静默当成空库。
+    let rows: Vec<(i64, Option<String>, Option<String>, Option<i64>)> = match sqlx::query_as(
+        "SELECT id, title, doi, CAST(NULLIF(TRIM(year), '') AS INTEGER) AS year FROM documents",
+    )
+    .fetch_all(db.pool())
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("BibTeX 导入：读取库内文献索引失败: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": format!("读取文献库索引失败：{}", e)})),
+            )
+                .into_response();
+        }
+    };
     let mut doi_index: HashMap<String, i64> = HashMap::new();
     let mut title_index: HashMap<String, Vec<(Option<i64>, i64)>> = HashMap::new();
     for (id, title, doi, year) in rows {

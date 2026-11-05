@@ -30,7 +30,10 @@ use crate::services::vector_db::{chunk_text_by_markdown, get_vector_db};
 use crate::utils::{absolute_path, now_iso};
 
 /// 与 documents.rs 保持一致的文档列清单
-const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, year, doi, source, journal, \
+///
+/// `year` 必须 CAST：老库里有写成 `''`（TEXT）的年份，按 `Option<i64>` 解码 TEXT 会报
+/// `mismatched types`，整条查询取不到任何行。
+const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, CAST(NULLIF(TRIM(year), '') AS INTEGER) AS year, doi, source, journal, \
     keywords, abstract, category, doc_type, language, title_en, authors_en, \
     keywords_en, abstract_en, journal_en, mineru_task_id, fs_synced_at, \
     qdrant_collection, vector_db_id, created_at, updated_at, \
