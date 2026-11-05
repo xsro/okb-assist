@@ -1,14 +1,43 @@
 <template>
   <div class="duplicates-view">
     <h2>去重</h2>
-    <p class="hint">检测标题相似的文献组（归一化标题 + 编辑距离相似度），确认后合并。</p>
 
-    <div v-if="groups && groups.length" class="groups-list">
-      <div v-for="(group, idx) in groups" :key="idx" class="group-card">
-        <h4>组 {{ idx + 1 }} · {{ group.count }} 篇 · 相似标题：{{ group.normalized_title }}</h4>
+    <!-- 检测模式：标题相似 / DOI 重复 -->
+    <div class="mode-tabs">
+      <button
+        class="btn btn-sm"
+        :class="mode === 'title' ? 'btn-primary' : 'btn-outline'"
+        @click="mode = 'title'"
+      >
+        标题相似（{{ titleGroups.length }} 组）
+      </button>
+      <button
+        class="btn btn-sm"
+        :class="mode === 'doi' ? 'btn-primary' : 'btn-outline'"
+        @click="mode = 'doi'"
+      >
+        DOI 重复（{{ doiGroups.length }} 组）
+      </button>
+      <button class="btn btn-sm btn-outline" :disabled="loading" @click="load">
+        {{ loading ? '检测中…' : '重新检测' }}
+      </button>
+    </div>
+
+    <p class="hint">
+      <template v-if="mode === 'title'">
+        按「归一化标题 + 编辑距离相似度」分组，确认后合并到指定文档。
+      </template>
+      <template v-else>
+        按「归一化 DOI」分组（忽略 <code>https://doi.org/</code> 前缀、大小写与尾部标点），确认后合并到指定文档。
+      </template>
+    </p>
+
+    <div v-if="currentGroups.length" class="groups-list">
+      <div v-for="(group, idx) in currentGroups" :key="`${mode}-${idx}`" class="group-card">
+        <h4>组 {{ idx + 1 }} · {{ group.documents.length }} 篇 · {{ group.label }}</h4>
         <table class="doc-table">
           <thead>
-            <tr><th>ID</th><th>标题</th><th>作者</th><th>年份</th><th>操作</th></tr>
+            <tr><th>ID</th><th>标题</th><th>作者</th><th>年份</th><th>DOI</th><th>操作</th></tr>
           </thead>
           <tbody>
             <tr v-for="doc in group.documents" :key="doc.id">
@@ -16,8 +45,13 @@
               <td>{{ doc.title }}</td>
               <td>{{ doc.authors || '-' }}</td>
               <td>{{ doc.year || '-' }}</td>
+              <td class="doi-cell">{{ doc.doi || '-' }}</td>
               <td>
-                <button class="btn btn-sm btn-danger" :disabled="merging" @click="merge(group.documents, doc.id)">
+                <button
+                  class="btn btn-sm btn-danger"
+                  :disabled="merging"
+                  @click="merge(group.documents, doc.id)"
+                >
                   {{ merging ? '合并中…' : '合并到此文档' }}
                 </button>
               </td>
@@ -27,30 +61,57 @@
       </div>
     </div>
 
-    <div v-else class="empty">暂无相似文献</div>
+    <div v-else class="empty">
+      {{ loading ? '检测中…' : mode === 'title' ? '暂无相似文献' : '暂无 DOI 重复的文献' }}
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { getSimilarTitles, mergeDocuments } from '@/api/documents'
+import { ref, computed, onMounted } from 'vue'
+import { getSimilarTitles, getSimilarDois, mergeDocuments } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
-import type { Document, SimilarTitleGroup } from '@/types/document'
+import type { Document, SimilarTitleGroup, SimilarDoiGroup } from '@/types/document'
 
 const { showSuccess, showError } = useToast()
 const { requireToken } = useRequireToken()
-const groups = ref<SimilarTitleGroup['groups'] | null>(null)
+
+const mode = ref<'title' | 'doi'>('title')
+const titleGroups = ref<SimilarTitleGroup['groups']>([])
+const doiGroups = ref<SimilarDoiGroup['groups']>([])
+const loading = ref(false)
 const merging = ref(false)
+
+/** 两种模式统一成同一渲染结构 */
+const currentGroups = computed<{ label: string; documents: Document[] }[]>(() =>
+  mode.value === 'title'
+    ? titleGroups.value.map((g) => ({
+        label: `相似标题：${g.normalized_title}`,
+        documents: g.documents,
+      }))
+    : doiGroups.value.map((g) => ({
+        label: `DOI：${g.doi}`,
+        documents: g.documents,
+      }))
+)
 
 async function load() {
   if (!requireToken()) return
-  try {
-    const res = await getSimilarTitles()
-    groups.value = res.groups
-  } catch {
-    showError('加载失败')
+  loading.value = true
+  // 两个检测都是 admin 级只读查询，一次都拉回来，切换 tab 不再等
+  const [titles, dois] = await Promise.allSettled([getSimilarTitles(), getSimilarDois()])
+  if (titles.status === 'fulfilled') {
+    titleGroups.value = titles.value.groups
+  } else {
+    showError('标题相似检测失败')
   }
+  if (dois.status === 'fulfilled') {
+    doiGroups.value = dois.value.groups
+  } else {
+    showError('DOI 重复检测失败')
+  }
+  loading.value = false
 }
 
 async function merge(group: Document[], targetId: number) {
@@ -81,10 +142,18 @@ onMounted(load)
 </script>
 
 <style scoped>
+.mode-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
 .hint {
   color: var(--text-secondary);
   margin-bottom: 20px;
 }
+
 .group-card {
   margin-bottom: 24px;
   padding: 16px;
@@ -92,9 +161,17 @@ onMounted(load)
   border: 1px solid var(--border);
   border-radius: 8px;
 }
+
 .group-card h4 {
   margin-bottom: 12px;
 }
+
+.doi-cell {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
 .empty {
   text-align: center;
   padding: 60px;

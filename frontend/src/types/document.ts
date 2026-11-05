@@ -143,6 +143,20 @@ export interface SimilarTitleGroup {
   total_groups: number
   total_documents: number
 }
+
+/** 按归一化 DOI 分组的重复文献（`GET /documents/similar-dois`） */
+export interface SimilarDoiGroup {
+  groups: {
+    /** 归一化后的 DOI（小写、去 `https://doi.org/` 前缀与尾部标点），用于分组去重 */
+    doi_key: string
+    /** 组内第一个非空的原始 DOI，仅用于展示 */
+    doi: string
+    count: number
+    documents: Document[]
+  }[]
+  total_groups: number
+  total_documents: number
+}
 // ── PDF 元信息 / Crossref / 引用条目 ──────────────────────
 
 /** PDF 元信息报告（后端 /pdf-info） */

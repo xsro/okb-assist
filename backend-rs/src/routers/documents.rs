@@ -257,6 +257,8 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/import-bibtex", post(import_bibtex))
         .route("/assist/api/documents/similar-titles/", get(find_similar_titles))
         .route("/assist/api/documents/similar-titles", get(find_similar_titles))
+        .route("/assist/api/documents/similar-dois/", get(find_similar_dois))
+        .route("/assist/api/documents/similar-dois", get(find_similar_dois))
         .route("/assist/api/documents/merge/", post(merge_documents))
         .route("/assist/api/documents/merge", post(merge_documents))
         .route("/assist/api/documents/vector-dbs/", get(list_vector_dbs))
@@ -2131,6 +2133,70 @@ fn title_similarity(a: &str, b: &str) -> f64 {
 
 /// 相似标题判定阈值：归一化相似度 >= 该值视为重复。
 const SIMILARITY_THRESHOLD: f64 = 0.75;
+
+/// GET /assist/api/documents/similar-dois —— 按归一化 DOI 分组的重复文献。
+///
+/// DOI 比较统一走 [`doi_key`]（`normalize_doi` 去前缀/尾部标点 + 转小写），
+/// 兼容历史数据里 `https://doi.org/…`、大写、尾部标点等写法差异。
+/// 只返回组内 ≥ 2 篇的分组，供前端「手动去重」按 DOI 合并。
+async fn find_similar_dois(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+) -> Json<Value> {
+    let docs: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
+        "SELECT {} FROM documents WHERE doi IS NOT NULL AND trim(doi) != '' ORDER BY id",
+        DOC_COLUMNS
+    ))
+    .fetch_all(db.pool())
+    .await
+    .unwrap_or_default();
+
+    // 1. 按归一化 DOI 分组
+    let mut groups: HashMap<String, Vec<Document>> = HashMap::new();
+    for doc in docs {
+        if let Some(key) = doc.doi.as_deref().and_then(doi_key) {
+            groups.entry(key).or_default().push(doc);
+        }
+    }
+
+    // 2. 只留重复组，按组内最小 id 排序保证输出稳定
+    let mut repeated: Vec<(String, Vec<Document>)> = groups
+        .into_iter()
+        .filter(|(_, docs)| docs.len() > 1)
+        .collect();
+    repeated.sort_by_key(|(_, docs)| docs.iter().map(|d| d.id).min().unwrap_or(0));
+
+    // 3. 转输出结构（`doi` 给组内第一个非空原值，仅用于展示）
+    let mut out_groups: Vec<Value> = Vec::new();
+    for (key, docs) in repeated {
+        let count = docs.len();
+        let display_doi = docs
+            .iter()
+            .find_map(|d| d.doi.clone().filter(|s| !s.trim().is_empty()))
+            .unwrap_or_else(|| key.clone());
+        let mut out_docs: Vec<Value> = Vec::with_capacity(count);
+        for d in &docs {
+            out_docs.push(json!(doc_to_out(d, &settings, &db).await));
+        }
+        out_groups.push(json!({
+            "doi_key": key,
+            "doi": display_doi,
+            "count": count,
+            "documents": out_docs,
+        }));
+    }
+
+    let total_documents: usize = out_groups
+        .iter()
+        .map(|g| g["documents"].as_array().map(|a| a.len()).unwrap_or(0))
+        .sum();
+
+    Json(json!({
+        "groups": out_groups,
+        "total_groups": out_groups.len(),
+        "total_documents": total_documents,
+    }))
+}
 
 async fn find_similar_titles(
     axum::Extension(db): axum::Extension<Arc<Database>>,

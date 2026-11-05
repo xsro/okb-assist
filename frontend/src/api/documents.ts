@@ -4,6 +4,7 @@ import type {
   SearchResult,
   SearchResultList,
   SimilarTitleGroup,
+  SimilarDoiGroup,
   TocItem,
   MarkdownResponse,
   MarkdownLinesSaveResult,
@@ -424,6 +425,11 @@ export function getDocTypes() {
 /** 获取相似标题分组（去重用，后端按归一化标题 + 编辑距离聚类） */
 export function getSimilarTitles() {
   return apiGet<SimilarTitleGroup>('/assist/api/documents/similar-titles/')
+}
+
+/** 按归一化 DOI 查找重复文献组（用于手动去重） */
+export function getSimilarDois() {
+  return apiGet<SimilarDoiGroup>('/assist/api/documents/similar-dois/')
 }
 
 /** 将 sourceIds 合并进 targetId（去重合并，源文档将被删除） */
