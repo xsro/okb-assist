@@ -558,6 +558,14 @@ impl Settings {
             .to_string()
     }
 
+    /// 运行时状态 sidecar 路径模板（`{id}` 为文档 ID；空串 = 只用进程内存）
+    pub fn runtime_state_path_template(&self) -> String {
+        self.get_system_config()["runtime_state_path"]
+            .as_str()
+            .unwrap_or("data/pipeline/{id}.json")
+            .to_string()
+    }
+
     pub fn mutool_path(&self) -> String {
         self.get_system_config()["mutool_path"]
             .as_str()

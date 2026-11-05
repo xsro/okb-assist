@@ -22,6 +22,7 @@ use crate::services::pdf_meta::{
 };
 use crate::services::image_cache;
 use crate::services::bibtex;
+use crate::services::file_state;
 use crate::services::citation::{self, CitationRecord};
 use crate::auth;
 use crate::routers::pipeline::run_crossref_override;
@@ -319,7 +320,6 @@ pub struct ListQuery {
     pub page: Option<i64>,
     pub page_size: Option<i64>,
     pub q: Option<String>,
-    pub status_filter: Option<String>,
     pub doc_type_filter: Option<String>,
     pub search_fields: Option<String>,
     pub sort_by: Option<String>,
@@ -337,6 +337,28 @@ pub struct ListQuery {
     pub journal: Option<String>,
     /// 单一作者精确筛选（用于 author:xxx 语法）
     pub authors: Option<String>,
+
+    // ── 文件事实筛选（取代原 `status_filter`）──
+    /// PDF 三态：`present` / `absent` / `unknown`（逗号多选 = OR）
+    pub pdf_state: Option<String>,
+    /// Markdown 三态
+    pub md_state: Option<String>,
+    /// 图片资源包三态
+    pub zip_state: Option<String>,
+    /// 文件事实是否已同步过：`1` / `0`（与三态正交）
+    pub synced: Option<String>,
+    /// 便捷布尔：`has_pdf=1/0`（0 含未同步）
+    pub has_pdf: Option<String>,
+    pub has_md: Option<String>,
+    pub has_zip: Option<String>,
+    pub pdf_size_min: Option<i64>,
+    pub pdf_size_max: Option<i64>,
+    pub md_size_min: Option<i64>,
+    pub md_size_max: Option<i64>,
+    pub zip_size_min: Option<i64>,
+    pub zip_size_max: Option<i64>,
+    /// PDF 健康状态：`ok` / `warning` / `error` / `missing` / `unchecked`（逗号多选）
+    pub pdf_health: Option<String>,
 }
 
 /// 文档输出格式
@@ -384,11 +406,19 @@ pub struct DocumentOut {
     pub journal_en: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mineru_task_id: Option<String>,
+    /// 派生状态：`uploaded` / `parsing` / `markdown_done` / `error`
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<f64>,
+    /// 文件事实是否已同步过（false = 状态未知）
+    pub synced: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fs_synced_at: Option<String>,
+    pub has_pdf: bool,
+    pub has_md: bool,
+    pub has_zip: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexed_dbs: Option<Vec<String>>,
     pub pdf_size: Option<i64>,
@@ -408,8 +438,8 @@ pub struct DocumentOut {
 
 const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, CAST(NULLIF(year, '') AS INTEGER) AS year, doi, source, journal, \
     keywords, abstract, category, doc_type, language, title_en, authors_en, \
-    keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
-    progress, qdrant_collection, vector_db_id, created_at, updated_at, \
+    keywords_en, abstract_en, journal_en, mineru_task_id, fs_synced_at, \
+    qdrant_collection, vector_db_id, created_at, updated_at, \
     pdf_size, md_size, zip_size, pdf_health, pdf_health_message";
 
 /// 查询文档已索引的向量数据库列表（仅 indexed 状态）
@@ -435,17 +465,21 @@ fn file_size(path: &str) -> Option<i64> {
 }
 
 /// 同步文档的文件大小信息到数据库（写时同步用）。
-/// 对 pdf、md、zip 三个文件执行 stat 并更新数据库列。
+/// 对 pdf、md、zip 三个文件执行 stat 并更新数据库列（`fs_synced_at` 一并刷新）。
+///
+/// 这三列是「文件事实」的唯一来源：文献状态、列表筛选、批量选文档全靠它们，
+/// **新增任何会动 PDF/MD/ZIP 的写路径都必须调用本函数**。
 pub async fn sync_doc_file_sizes(db: &Database, settings: &Settings, doc_id: i64) {
     let pdf_size = file_size(&paths::get_pdf_path(settings, doc_id));
     let md_size = file_size(&paths::get_markdown_path(settings, doc_id));
     let zip_size = file_size(&paths::get_asset_path(settings, doc_id));
     let _ = sqlx::query(
-        "UPDATE documents SET pdf_size = ?, md_size = ?, zip_size = ?, updated_at = ? WHERE id = ?"
+        "UPDATE documents SET pdf_size = ?, md_size = ?, zip_size = ?, fs_synced_at = ?, updated_at = ? WHERE id = ?"
     )
     .bind(pdf_size)
     .bind(md_size)
     .bind(zip_size)
+    .bind(now_iso())
     .bind(now_iso())
     .bind(doc_id)
     .execute(db.pool())
@@ -453,9 +487,15 @@ pub async fn sync_doc_file_sizes(db: &Database, settings: &Settings, doc_id: i64
 }
 
 async fn doc_to_out(doc: &Document, settings: &Settings, db: &Database) -> DocumentOut {
-    let pdf_path = paths::get_pdf_path(settings, doc.id);
-    let md_path = paths::get_markdown_path(settings, doc.id);
-    let zip_path = paths::get_asset_path(settings, doc.id);
+    // 状态由「文件事实（同步列）+ 运行时状态」推导，不再 stat、也不再读状态列
+    let state = file_state::derive_state(
+        doc.fs_synced_at.as_deref(),
+        doc.pdf_size,
+        doc.md_size,
+        crate::routers::pipeline::runtime_task(doc.id).as_ref(),
+        file_state::last_error(doc.id).as_deref(),
+        doc.mineru_task_id.as_deref(),
+    );
 
     DocumentOut {
         id: doc.id,
@@ -480,13 +520,18 @@ async fn doc_to_out(doc: &Document, settings: &Settings, db: &Database) -> Docum
         abstract_en: doc.abstract_en.clone(),
         journal_en: doc.journal_en.clone(),
         mineru_task_id: doc.mineru_task_id.clone(),
-        status: doc.status.clone(),
-        status_message: doc.status_message.clone(),
-        progress: Some(doc.progress),
+        status: state.status.as_str().to_string(),
+        status_message: state.message.clone(),
+        progress: Some(state.progress),
+        synced: state.synced,
+        fs_synced_at: doc.fs_synced_at.clone(),
+        has_pdf: doc.has_pdf(),
+        has_md: doc.has_md(),
+        has_zip: doc.has_zip(),
         indexed_dbs: indexed_dbs(db, doc.id).await,
-        pdf_size: file_size(&pdf_path),
-        md_size: file_size(&md_path),
-        zip_size: file_size(&zip_path),
+        pdf_size: doc.pdf_size,
+        md_size: doc.md_size,
+        zip_size: doc.zip_size,
         pdf_health: doc.pdf_health.clone(),
         pdf_health_message: doc.pdf_health_message.clone(),
         created_at: doc.created_at.clone(),
@@ -539,19 +584,24 @@ const SEARCHABLE_COLUMNS: &[(&str, &str)] = &[
 ];
 
 /// 可排序字段名 → SQL 列名映射
+///
+/// 注意：`status` 已不再可排序（它不再是数据库列）。
 const SORTABLE_COLUMNS: &[(&str, &str)] = &[
     ("id", "id"),
     ("title", "title"),
     ("authors", "authors"),
     ("year", "year"),
     ("doc_type", "doc_type"),
-    ("status", "status"),
     ("journal", "journal"),
     ("language", "language"),
     ("doi", "doi"),
     ("category", "category"),
     ("created_at", "created_at"),
     ("updated_at", "updated_at"),
+    ("pdf_size", "pdf_size"),
+    ("md_size", "md_size"),
+    ("zip_size", "zip_size"),
+    ("fs_synced_at", "fs_synced_at"),
 ];
 
 fn column_for(field: &str, table: &[(&str, &str)]) -> Option<String> {
@@ -565,7 +615,7 @@ async fn list_documents(
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Query(params): Query<ListQuery>,
-) -> Json<Value> {
+) -> Response {
     let page = params.page.unwrap_or(1).max(1);
     let page_size = params.page_size.unwrap_or(50).clamp(1, 500);
     let offset = (page - 1) * page_size;
@@ -599,14 +649,114 @@ async fn list_documents(
             }
         }
     }
-    if let Some(status) = &params.status_filter {
-        let statuses: Vec<&str> = status.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-        if !statuses.is_empty() {
-            let placeholders = statuses.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            conditions.push(format!("status IN ({})", placeholders));
-            for s in statuses {
-                binds.push(s.to_string());
+    // ── 文件事实筛选（取代原 `status_filter`）──
+    for (kind, raw) in [
+        (file_state::FileKind::Pdf, params.pdf_state.as_deref()),
+        (file_state::FileKind::Md, params.md_state.as_deref()),
+        (file_state::FileKind::Zip, params.zip_state.as_deref()),
+    ] {
+        let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else { continue };
+        let mut ors: Vec<String> = Vec::new();
+        for st in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            match file_state::state_condition(kind, st) {
+                Some(cond) => ors.push(cond),
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "detail": format!(
+                                "{}_state 取值非法：{}（仅支持 present / absent / unknown）",
+                                kind.key(), st
+                            )
+                        })),
+                    )
+                        .into_response();
+                }
             }
+        }
+        if ors.len() == 1 {
+            conditions.push(ors.remove(0));
+        } else if !ors.is_empty() {
+            conditions.push(format!("({})", ors.join(" OR ")));
+        }
+    }
+
+    if let Some(raw) = params.synced.as_deref().filter(|s| !s.trim().is_empty()) {
+        match parse_bool_param(raw) {
+            Some(true) => conditions.push("fs_synced_at IS NOT NULL".to_string()),
+            Some(false) => conditions.push("fs_synced_at IS NULL".to_string()),
+            None => {
+                return (StatusCode::BAD_REQUEST, Json(json!({"detail": "synced 只接受 1/0"})))
+                    .into_response()
+            }
+        }
+    }
+
+    for (kind, raw) in [
+        (file_state::FileKind::Pdf, params.has_pdf.as_deref()),
+        (file_state::FileKind::Md, params.has_md.as_deref()),
+        (file_state::FileKind::Zip, params.has_zip.as_deref()),
+    ] {
+        let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else { continue };
+        match parse_bool_param(raw) {
+            Some(want) => conditions.push(file_state::has_condition(kind, want)),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"detail": format!("has_{} 只接受 1/0", kind.key())})),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    for (column, min, max) in [
+        ("pdf_size", params.pdf_size_min, params.pdf_size_max),
+        ("md_size", params.md_size_min, params.md_size_max),
+        ("zip_size", params.zip_size_min, params.zip_size_max),
+    ] {
+        if let Some(v) = min {
+            conditions.push(format!("COALESCE({}, 0) >= CAST(? AS INTEGER)", column));
+            binds.push(v.to_string());
+        }
+        if let Some(v) = max {
+            conditions.push(format!("COALESCE({}, 0) <= CAST(? AS INTEGER)", column));
+            binds.push(v.to_string());
+        }
+    }
+
+    if let Some(raw) = params.pdf_health.as_deref().filter(|s| !s.trim().is_empty()) {
+        let mut values: Vec<String> = Vec::new();
+        let mut include_unchecked = false;
+        for item in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            match item.to_ascii_lowercase().as_str() {
+                "ok" | "warning" | "error" | "missing" => values.push(item.to_ascii_lowercase()),
+                "unchecked" | "none" | "null" => include_unchecked = true,
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "detail": format!(
+                                "pdf_health 取值非法：{}（仅支持 ok / warning / error / missing / unchecked）",
+                                item
+                            )
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        if !values.is_empty() {
+            let placeholders = values.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let cond = format!("pdf_health IN ({})", placeholders);
+            conditions.push(if include_unchecked {
+                format!("({} OR pdf_health IS NULL)", cond)
+            } else {
+                format!("({})", cond)
+            });
+            binds.extend(values);
+        } else if include_unchecked {
+            conditions.push("pdf_health IS NULL".to_string());
         }
     }
     if let Some(dt) = &params.doc_type_filter {
@@ -707,6 +857,16 @@ async fn list_documents(
         "page_size": page_size,
         "total_pages": total_pages,
     }))
+    .into_response()
+}
+
+/// 解析 `1/0`、`true/false`、`yes/no` 形式的布尔参数
+fn parse_bool_param(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => Some(true),
+        "0" | "false" | "no" | "n" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 async fn get_document(
@@ -714,6 +874,10 @@ async fn get_document(
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(id): Path<i64>,
 ) -> Response {
+    // 单篇详情：实时 stat 一次并回写（列表用同步列，详情页保持与磁盘一致）
+    if matches!(fetch_doc(&db, id).await, Ok(Some(_))) {
+        sync_doc_file_sizes(&db, &settings, id).await;
+    }
     match fetch_doc(&db, id).await {
         Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"detail": "Document not found"}))).into_response(),
@@ -1037,8 +1201,8 @@ async fn insert_document(db: &Database, doc: Document) -> Result<i64, String> {
     let result = sqlx::query(
         "INSERT INTO documents (filename, file_hash, title, authors, year, doi, source, journal, \
          keywords, abstract, category, doc_type, language, title_en, authors_en, keywords_en, \
-         abstract_en, journal_en, status, progress, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', 0.0, ?, ?)",
+         abstract_en, journal_en, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&doc.filename)
     .bind(&doc.file_hash)
@@ -1230,8 +1394,6 @@ async fn upload_document(
                     temp_upload,
                     &file_hash,
                     doi_field.clone(),
-                    // 去重覆盖沿用历史行为：文件换了，状态退回「已上传」等待重新解析
-                    true,
                 )
                 .await
                 {
@@ -1325,9 +1487,7 @@ async fn upload_document(
         abstract_en: None,
         journal_en: None,
         mineru_task_id: None,
-        status: "uploaded".to_string(),
-        status_message: None,
-        progress: 0.0,
+        fs_synced_at: None,
         qdrant_collection: None,
         vector_db_id: None,
         created_at: None,
@@ -1349,8 +1509,8 @@ async fn upload_document(
             let result = sqlx::query(
                 "INSERT INTO documents (id, filename, file_hash, title, authors, year, doi, source, journal, \
                  keywords, abstract, category, doc_type, language, title_en, authors_en, keywords_en, \
-                 abstract_en, journal_en, status, progress, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', 0.0, ?, ?)",
+                 abstract_en, journal_en, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(id)
             .bind(&doc.filename)
@@ -1482,9 +1642,7 @@ async fn register_document_by_path(
         abstract_en: None,
         journal_en: None,
         mineru_task_id: None,
-        status: "uploaded".to_string(),
-        status_message: None,
-        progress: 0.0,
+        fs_synced_at: None,
         qdrant_collection: None,
         vector_db_id: None,
         created_at: None,
@@ -1862,8 +2020,8 @@ async fn insert_bibtex_document(db: &Database, rec: &bibtex::BibRecord) -> Resul
 
     let result = sqlx::query(
         "INSERT INTO documents (filename, title, authors, year, doi, source, journal, keywords, abstract, \
-         doc_type, language, status, status_message, progress, pdf_health, pdf_health_message, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, 0.0, 'missing', ?, ?, ?)",
+         doc_type, language, pdf_health, pdf_health_message, fs_synced_at, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'missing', ?, ?, ?, ?)",
     )
     .bind(&filename)
     .bind(non_empty_str(&rec.title))
@@ -1876,8 +2034,9 @@ async fn insert_bibtex_document(db: &Database, rec: &bibtex::BibRecord) -> Resul
     .bind(non_empty_str(&rec.abstract_text))
     .bind(&doc_type)
     .bind(non_empty_str(&rec.language))
-    .bind("仅导入条目（BibTeX），尚未上传 PDF")
     .bind("未上传 PDF（条目来自 BibTeX 导入）")
+    // 导入时就知道没有 PDF：直接记下同步时间，三个 size 保持 NULL = 全部 absent
+    .bind(&now)
     .bind(&now)
     .bind(&now)
     .execute(db.pool())
@@ -2128,8 +2287,10 @@ async fn search_info(
         Some("year") => "year",
         Some("id") => "id",
         Some("journal") => "journal",
-        Some("status") => "status",
         Some("doc_type") => "doc_type",
+        Some("pdf_size") => "pdf_size",
+        Some("md_size") => "md_size",
+        Some("zip_size") => "zip_size",
         Some("updated_at") => "updated_at",
         Some("created_at") => "created_at",
         _ => "updated_at",
@@ -2220,9 +2381,17 @@ async fn semantic_search(
         let mut doc_info = json!({});
         if let Some(did) = doc_id {
             if let Ok(Some(doc)) = fetch_doc(&db, did).await {
+                let state = crate::services::file_state::derive_state(
+                    doc.fs_synced_at.as_deref(),
+                    doc.pdf_size,
+                    doc.md_size,
+                    crate::routers::pipeline::runtime_task(doc.id).as_ref(),
+                    crate::services::file_state::last_error(doc.id).as_deref(),
+                    doc.mineru_task_id.as_deref(),
+                );
                 doc_info = json!({
                     "filename": doc.filename,
-                    "status": doc.status,
+                    "status": state.status.as_str(),
                     "authors": doc.authors,
                     "year": doc.year,
                     "journal": doc.journal,
@@ -2313,10 +2482,18 @@ async fn grep_search(
         let sql = format!("SELECT {} FROM documents WHERE id IN ({})", DOC_COLUMNS, ids_str.join(","));
         if let Ok(rows) = sqlx::query_as::<_, Document>(&sql).fetch_all(db.pool()).await {
             for doc in rows {
+                let state = crate::services::file_state::derive_state(
+                    doc.fs_synced_at.as_deref(),
+                    doc.pdf_size,
+                    doc.md_size,
+                    crate::routers::pipeline::runtime_task(doc.id).as_ref(),
+                    crate::services::file_state::last_error(doc.id).as_deref(),
+                    doc.mineru_task_id.as_deref(),
+                );
                 doc_map.insert(doc.id, json!({
                     "title": doc.title,
                     "filename": doc.filename,
-                    "status": doc.status,
+                    "status": state.status.as_str(),
                     "authors": doc.authors,
                     "year": doc.year,
                     "journal": doc.journal,
@@ -2430,11 +2607,11 @@ async fn find_doc_by_hash(db: &Database, hash: &str) -> Option<Document> {
 /// 把已落盘的临时 PDF 应用到**已有**文档：搬文件 → 同步体积 → 更新哈希与健康状态。
 ///
 /// 上传命中重复且 `on_duplicate=replace`、以及 `POST /{id}/pdf` 替换 PDF 都走这里。
-/// `pdf_health` 一律置空（旧结果对新文件无效）；
-/// `status` 只在 `reset_status = true` 时才重置为 `uploaded`：
-/// - 管理界面「替换 PDF」（`POST /{id}/pdf`）默认 **保留** 原状态（已解析的文档替换扫描件后
-///   不应退回「已上传」），显式传 `reset_status=1` 才重置；
-/// - 上传去重时的 `on_duplicate=replace` 保持历史行为（重置为 `uploaded`）。
+/// `pdf_health` 一律置空（旧结果对新文件无效）。
+///
+/// **替换 PDF 不影响解析阶段**：状态由文件事实推导（有 Markdown 就是 `markdown_done`），
+/// 不再有 `reset_status` 开关；需要重新解析请调 `POST /assist/api/pipeline/{id}/reset`
+/// （「清空解析产物」）。
 /// `doi` 为 `Some` 时只在该文档原本没有 DOI 时补写（已有 DOI 不覆盖）。
 async fn persist_pdf_for_doc(
     db: &Database,
@@ -2443,7 +2620,6 @@ async fn persist_pdf_for_doc(
     temp_upload: TempUpload,
     file_hash: &str,
     doi: Option<String>,
-    reset_status: bool,
 ) -> Result<(), String> {
     let pdf_path = paths::get_pdf_path(settings, doc_id);
     persist_temp_file(temp_upload, &pdf_path)
@@ -2453,16 +2629,9 @@ async fn persist_pdf_for_doc(
     // 写时同步：更新文件大小到数据库
     sync_doc_file_sizes(db, settings, doc_id).await;
 
-    // `status` 按调用方意图决定是否重置（见函数文档）
-    let sql = if reset_status {
-        "UPDATE documents SET file_hash = ?, status = 'uploaded', \
+    let sql = "UPDATE documents SET file_hash = ?, \
          pdf_health = NULL, pdf_health_message = NULL, \
-         doi = COALESCE(NULLIF(doi, ''), ?), updated_at = ? WHERE id = ?"
-    } else {
-        "UPDATE documents SET file_hash = ?, \
-         pdf_health = NULL, pdf_health_message = NULL, \
-         doi = COALESCE(NULLIF(doi, ''), ?), updated_at = ? WHERE id = ?"
-    };
+         doi = COALESCE(NULLIF(doi, ''), ?), updated_at = ? WHERE id = ?";
     if let Err(e) = sqlx::query(sql)
     .bind(file_hash)
     .bind(doi)
@@ -2968,9 +3137,10 @@ async fn update_markdown_lines(
     .into_response()
 }
 
-/// 上传 MinerU 解析结果（Markdown 内容）到文档，并更新状态为 markdown_done。
+/// 上传 MinerU 解析结果（Markdown 内容）到文档。
 ///
 /// 与 pipeline 的 parse 阶段完成等价，但由外部脚本直接上传解析结果。
+/// 状态不需要手写：写完 Markdown 并同步文件事实后，派生状态自然变为 `markdown_done`。
 #[derive(Debug, Deserialize)]
 pub struct ParseResultBody {
     pub content: String,
@@ -2987,8 +3157,8 @@ async fn upload_parse_result(
         return resp;
     }
     // 校验文档存在
-    let doc = match fetch_doc(&db, id).await {
-        Ok(Some(d)) => d,
+    match fetch_doc(&db, id).await {
+        Ok(Some(_)) => {}
         Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
     };
@@ -3002,23 +3172,16 @@ async fn upload_parse_result(
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": format!("写入 Markdown 失败: {}", e)}))).into_response();
     }
 
-    // 仅当处于解析前状态时升级为 markdown_done，不降级后续状态
-    let new_status = match doc.status.as_str() {
-        "uploaded" | "parsing" | "error" => "markdown_done",
-        other => other,
-    };
-    let _ = sqlx::query(
-        "UPDATE documents SET status = ?, status_message = ?, progress = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(new_status)
-    .bind("PDF 解析完成")
-    .bind(100.0)
-    .bind(now_datetime())
-    .bind(id)
-    .execute(db.pool())
-    .await;
+    // 写时同步文件事实（md_size 更新后，派生状态即为 markdown_done）
+    sync_doc_file_sizes(&db, &settings, id).await;
+    crate::services::file_state::clear_error(&settings, id);
 
-    Json(json!({"id": id, "status": new_status, "markdown_path": md_path})).into_response()
+    Json(json!({
+        "id": id,
+        "status": "markdown_done",
+        "markdown_path": md_path,
+    }))
+    .into_response()
 }
 
 /// 带 HTTP Range / ETag / If-None-Match 支持的 PDF 文件响应。
@@ -3669,8 +3832,6 @@ async fn replace_pdf(
 
     let mut file_name: Option<String> = None;
     let mut uploaded: Option<(TempUpload, u64, String)> = None;
-    // 默认保留原状态（替换扫描件不等于重新走一遍解析流水线）；显式 reset_status=1 才重置为 uploaded
-    let mut reset_status = false;
     let temp_dir = upload_temp_dir(&settings);
     while let Ok(Some(mut field)) = multipart.next_field().await {
         let Some(name) = field.name().map(|s| s.to_string()) else {
@@ -3686,12 +3847,14 @@ async fn replace_pdf(
                     return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response()
                 }
             }
-        } else if name == "reset_status" {
-            if let Ok(bytes) = field.bytes().await {
-                let v = String::from_utf8_lossy(&bytes).trim().to_ascii_lowercase();
-                reset_status = matches!(v.as_str(), "1" | "true" | "t" | "yes" | "y" | "on");
-            }
         } else {
+            // `reset_status` 等旧字段已删除：忽略并提示（替换 PDF 不再影响解析阶段）
+            if name == "reset_status" {
+                tracing::warn!(
+                    "文档 {} 收到已删除的 reset_status 字段，已忽略；需要重解析请调 /assist/api/pipeline/{}/reset",
+                    id, id
+                );
+            }
             let _ = field.bytes().await;
         }
     }
@@ -3714,7 +3877,7 @@ async fn replace_pdf(
     }
 
     if let Err(e) =
-        persist_pdf_for_doc(&db, &settings, id, temp_upload, &file_hash, None, reset_status).await
+        persist_pdf_for_doc(&db, &settings, id, temp_upload, &file_hash, None).await
     {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response();
     }

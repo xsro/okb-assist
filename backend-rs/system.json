@@ -10,6 +10,7 @@
   "markdown_asset_path": "data/pdfs/{id}/{id}.zip",
   "pdf_path": "data/pdfs/{id}/{id}.pdf",
   "chat_session_path": "data/chat_sessions/{id}.json",
+  "runtime_state_path": "data/pipeline/{id}.json",
   "uploads_folder": "data/_uploads",
   "drive_root": "data/drive",
   "static_dirs": [

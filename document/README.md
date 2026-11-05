@@ -104,6 +104,10 @@
     <span class="doc-card__title">网盘 WebDAV 同步（计划）</span>
     <span class="doc-card__desc">方案对比、认证设计（scope=dav）、代价与分阶段 TODO</span>
   </a>
+  <a class="doc-card" href="#/db-status-removal-plan">
+    <span class="doc-card__title">文献状态去库化（计划）</span>
+    <span class="doc-card__desc">删除 documents.status，状态改由文件事实 + 运行时注册表推导</span>
+  </a>
 </div>
 
 ## 目录结构

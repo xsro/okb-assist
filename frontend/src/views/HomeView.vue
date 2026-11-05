@@ -107,7 +107,7 @@
           <td v-if="visibleColumns.year">{{ doc.year || '-' }}</td>
           <td v-if="visibleColumns.doc_type">{{ doc.doc_type || '-' }}</td>
           <td v-if="visibleColumns.status">
-            <StatusBadge :status="doc.status" :status_message="doc.status_message" />
+            <StatusBadge :status="doc.status" :status_message="doc.status_message" :synced="doc.synced" />
             <span v-if="doc.indexed_dbs && doc.indexed_dbs.length" class="index-dbs">
               <span
                 v-for="dbId in doc.indexed_dbs"
@@ -155,7 +155,7 @@
       <div v-for="doc in items" :key="doc.id" class="doc-card">
         <div class="doc-card-header">
           <span class="doc-card-id">#{{ doc.id }}</span>
-          <StatusBadge :status="doc.status" :status_message="doc.status_message" />
+          <StatusBadge :status="doc.status" :status_message="doc.status_message" :synced="doc.synced" />
         </div>
         <router-link :to="{ name: 'detail', params: { id: doc.id } }" class="doc-card-title">
           {{ doc.title || doc.filename || '(无标题)' }}
@@ -337,7 +337,9 @@ const SORT_LABELS: Record<string, string> = {
   authors: '作者',
   year: '年份',
   doc_type: '类型',
-  status: '状态',
+  pdf_size: 'PDF 大小',
+  md_size: 'Markdown 大小',
+  zip_size: '资源包大小',
   journal: '期刊',
   doi: 'DOI',
   id: 'ID',
@@ -349,7 +351,15 @@ const activeFilterChips = computed(() => {
   if (!searchQuery.value) return chips
   const pq = parseSearchQuery(searchQuery.value)
   const p = parsedQueryToParams(pq)
-  if (p.status_filter) chips.push(`状态: ${p.status_filter}`)
+  const stateLabel = (k: 'md_state' | 'pdf_state' | 'zip_state', name: string) => {
+    const v = p[k]
+    if (!v) return
+    chips.push(`${name}: ${v}`)
+  }
+  stateLabel('md_state', 'Markdown')
+  stateLabel('pdf_state', 'PDF')
+  stateLabel('zip_state', '资源包')
+  if (p.pdf_health) chips.push(`PDF 健康: ${p.pdf_health}`)
   if (p.doc_type_filter) chips.push(`类型: ${p.doc_type_filter}`)
   if (p.year) chips.push(`年份: ${p.year}`)
   if (p.year_min !== undefined && p.year_max !== undefined && p.year_min === p.year_max) {

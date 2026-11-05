@@ -23,6 +23,7 @@ use crate::database::Database;
 use crate::models::{Document, DocStatus, DocumentVectorIndex};
 use crate::paths;
 use crate::services::crossref::CrossrefClient;
+use crate::services::image_cache;
 use crate::services::mineru::MinerUClient;
 use crate::services::pdf_meta::{extract_pdf_metadata_from_path_async, looks_like_placeholder, normalize_doi};
 use crate::services::vector_db::{chunk_text_by_markdown, get_vector_db};
@@ -31,8 +32,8 @@ use crate::utils::{absolute_path, now_iso};
 /// 与 documents.rs 保持一致的文档列清单
 const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, year, doi, source, journal, \
     keywords, abstract, category, doc_type, language, title_en, authors_en, \
-    keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
-    progress, qdrant_collection, vector_db_id, created_at, updated_at, \
+    keywords_en, abstract_en, journal_en, mineru_task_id, fs_synced_at, \
+    qdrant_collection, vector_db_id, created_at, updated_at, \
     pdf_size, md_size, zip_size, pdf_health, pdf_health_message";
 
 /// 默认 Qdrant user id（无鉴权）
@@ -79,10 +80,8 @@ struct ActiveTask {
     task_type: String,
     started_at: String,
     status_message: String,
-    /// `true`：展示时优先用数据库里的 `documents.status_message`（流水线阶段会同步写入进度文案）；
-    /// `false`：一律用本进程内记录的文案（维护类任务如重算哈希不写 DB 状态，
-    /// 否则会显示与该任务无关的旧状态，例如「解析完成」）。
-    prefer_db_message: bool,
+    /// 百分比进度（0-100）；页数进度用 `extracted_pages`/`total_pages` 表达
+    progress: Option<f64>,
     mineru_config_name: Option<String>,
     extracted_pages: Option<i32>,
     total_pages: Option<i32>,
@@ -147,7 +146,7 @@ fn track_task_start(doc_id: i64, task_type: &str, mineru_config_name: Option<Str
             task_type: task_type.to_string(),
             started_at: now_iso(),
             status_message: "正在处理...".to_string(),
-            prefer_db_message: true,
+            progress: None,
             mineru_config_name,
             extracted_pages: None,
             total_pages: None,
@@ -172,7 +171,7 @@ pub(crate) fn track_maintenance_task(
             task_type: task_type.to_string(),
             started_at: now_iso(),
             status_message: message.to_string(),
-            prefer_db_message: false,
+            progress: None,
             mineru_config_name: None,
             extracted_pages: Some(processed),
             total_pages: Some(total),
@@ -199,6 +198,34 @@ fn track_task_set_mineru_config(doc_id: i64, config_name: &str) {
     }
 }
 
+/// 设置百分比进度（不改变页数进度）
+fn track_task_set_progress(doc_id: i64, progress: f64) {
+    if let Some(t) = active_tasks_map().write().unwrap().get_mut(&doc_id) {
+        t.progress = Some(progress.clamp(0.0, 100.0));
+    }
+}
+
+/// 取某篇文档的运行时任务快照（供 `services::file_state::derive_state` 使用）
+pub(crate) fn runtime_task(doc_id: i64) -> Option<crate::services::file_state::RuntimeTask> {
+    let map = active_tasks_map().read().unwrap();
+    let t = map.get(&doc_id)?;
+    let progress = t.progress.unwrap_or_else(|| match (t.extracted_pages, t.total_pages) {
+        (Some(done), Some(total)) if total > 0 => {
+            (done as f64 / total as f64 * 100.0).clamp(0.0, 99.0)
+        }
+        _ => 0.0,
+    });
+    Some(crate::services::file_state::RuntimeTask {
+        message: t.status_message.clone(),
+        progress,
+    })
+}
+
+/// 当前进程内正在跑的任务数（用于「解析中」计数）
+pub(crate) fn runtime_task_count() -> i64 {
+    active_tasks_map().read().unwrap().len() as i64
+}
+
 pub(crate) fn track_task_end(doc_id: i64) {
     active_tasks_map().write().unwrap().remove(&doc_id);
 }
@@ -213,39 +240,106 @@ async fn fetch_doc(db: &Database, doc_id: i64) -> Option<Document> {
         .unwrap_or(None)
 }
 
-async fn update_doc_status(
-    db: &Database,
+/// 由「文件事实 + 运行时状态」推导 doc 的可见状态（零 IO）
+fn doc_state(doc: &Document) -> crate::services::file_state::DocState {
+    crate::services::file_state::derive_state(
+        doc.fs_synced_at.as_deref(),
+        doc.pdf_size,
+        doc.md_size,
+        runtime_task(doc.id).as_ref(),
+        crate::services::file_state::last_error(doc.id).as_deref(),
+        doc.mineru_task_id.as_deref(),
+    )
+}
+
+/// 记录一次**运行时**状态变化（内存 + 可选 sidecar），不碰数据库。
+///
+/// 文献状态由文件事实推导（`services::file_state::derive_state`），这里只维护推导需要的
+/// 两个瞬时输入：
+/// - `Error` → 写入运行时错误表（+ sidecar）
+/// - `Parsing` → 更新活动任务的文案 / 百分比
+/// - `MarkdownDone` / `Uploaded` → 清除之前的错误记录
+async fn set_runtime_state(
+    _db: &Database,
     doc_id: i64,
     status: DocStatus,
     message: Option<&str>,
     progress: Option<f64>,
 ) {
-    let mut sql = "UPDATE documents SET status = ?".to_string();
-    if message.is_some() {
-        sql.push_str(", status_message = ?");
+    let settings = crate::settings::get_settings();
+    match status {
+        DocStatus::Error => {
+            let msg = message.unwrap_or("解析失败");
+            crate::services::file_state::set_error(&settings, doc_id, msg);
+            track_task_update(doc_id, msg);
+        }
+        DocStatus::Parsing => {
+            if let Some(m) = message {
+                track_task_update(doc_id, m);
+            }
+            if let Some(p) = progress {
+                track_task_set_progress(doc_id, p);
+            }
+        }
+        DocStatus::MarkdownDone | DocStatus::Uploaded => {
+            crate::services::file_state::clear_error(&settings, doc_id);
+            if let Some(m) = message {
+                track_task_update(doc_id, m);
+            }
+        }
     }
-    if progress.is_some() {
-        sql.push_str(", progress = ?");
-    }
-    sql.push_str(", updated_at = ? WHERE id = ?");
-
-    let mut q = sqlx::query(&sql).bind(status.as_str());
-    if let Some(m) = message {
-        q = q.bind(m);
-    }
-    if let Some(p) = progress {
-        q = q.bind(p);
-    }
-    q = q.bind(now_iso()).bind(doc_id);
-    let _ = q.execute(db.pool()).await;
 }
 
-async fn count_status(db: &Database, status: &str) -> i64 {
-    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM documents WHERE status = ?")
-        .bind(status)
+/// 阶段计数（全部基于文件事实列 + 运行时错误表，零 stat）
+#[derive(Debug, Default)]
+struct StageCounts {
+    uploaded: i64,
+    markdown_done: i64,
+    unsynced: i64,
+    parsing: i64,
+    error: i64,
+    timeout_error: i64,
+    ready_to_promote: i64,
+}
+
+async fn stage_counts(db: &Database) -> StageCounts {
+    let (uploaded, markdown_done, unsynced, ready_to_promote): (i64, i64, i64, i64) =
+        sqlx::query_as(
+            "SELECT \
+               SUM(CASE WHEN COALESCE(md_size,0) = 0 THEN 1 ELSE 0 END), \
+               SUM(CASE WHEN COALESCE(md_size,0) > 0 THEN 1 ELSE 0 END), \
+               SUM(CASE WHEN fs_synced_at IS NULL THEN 1 ELSE 0 END), \
+               SUM(CASE WHEN COALESCE(md_size,0) > 0 \
+                         AND COALESCE(title,'') != '' AND COALESCE(authors,'') != '' \
+                        THEN 1 ELSE 0 END) \
+             FROM documents",
+        )
         .fetch_one(db.pool())
         .await
-        .unwrap_or(0)
+        .unwrap_or((0, 0, 0, 0));
+
+    let errors = crate::services::file_state::error_snapshot();
+    let error = errors.len() as i64;
+    let timeout_error = errors
+        .values()
+        .filter(|m| m.to_lowercase().contains("timed out"))
+        .count() as i64;
+    let parsing = active_tasks_map()
+        .read()
+        .unwrap()
+        .values()
+        .filter(|t| t.task_type == "parse")
+        .count() as i64;
+
+    StageCounts {
+        uploaded,
+        markdown_done,
+        unsynced,
+        parsing,
+        error,
+        timeout_error,
+        ready_to_promote,
+    }
 }
 
 async fn save_mineru_task_id(db: &Database, doc_id: i64, task_id: &str) {
@@ -328,7 +422,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
         Some(c) => c,
         None => {
             error!("没有可用的 MinerU 配置 (doc_id={})", doc_id);
-            update_doc_status(&db, doc_id, DocStatus::Error, Some("没有可用的 MinerU 配置"), None).await;
+            set_runtime_state(&db, doc_id, DocStatus::Error, Some("没有可用的 MinerU 配置"), None).await;
             return;
         }
     };
@@ -344,14 +438,14 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
     // 否则 MinerU 会报错，把记录打成 `error`，元数据反而被埋掉。
     if !std::path::Path::new(&pdf_path).exists() {
         warn!("文档 {} 解析跳过：PDF 不存在（{}）", doc_id, pdf_path);
-        update_doc_status(&db, doc_id, DocStatus::Uploaded, Some("PDF 缺失，请先上传 PDF"), None).await;
+        set_runtime_state(&db, doc_id, DocStatus::Uploaded, Some("PDF 缺失，请先上传 PDF"), None).await;
         return;
     }
     let abs_file_path = absolute_path(&pdf_path);
     let output_dir = std::path::Path::new(&uploads_folder).join(doc_id.to_string());
     let _ = std::fs::create_dir_all(&output_dir);
 
-    update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在解析 PDF..."), Some(10.0)).await;
+    set_runtime_state(&db, doc_id, DocStatus::Parsing, Some("正在解析 PDF..."), Some(10.0)).await;
 
     // 检查是否存在之前的 MinerU 任务
     let mut existing_task_id: Option<String> = fetch_doc(&db, doc_id)
@@ -360,7 +454,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
         .filter(|t| !t.is_empty());
 
     if let Some(ref task_id) = existing_task_id {
-        update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在检查之前的解析任务..."), Some(15.0)).await;
+        set_runtime_state(&db, doc_id, DocStatus::Parsing, Some("正在检查之前的解析任务..."), Some(15.0)).await;
         let status_result = primary_client.check_task_status(task_id).await;
         let status = status_result["status"].as_str().unwrap_or("unknown").to_string();
         info!("文档 {} 存在之前的 MinerU 任务: id={}, status={}", doc_id, task_id, status);
@@ -368,24 +462,24 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
         match status.as_str() {
             "completed" => {
                 info!("文档 {} 之前的任务已完成, 正在获取结果", doc_id);
-                update_doc_status(&db, doc_id, DocStatus::Parsing, Some("之前的任务已完成，正在获取结果..."), Some(50.0)).await;
+                set_runtime_state(&db, doc_id, DocStatus::Parsing, Some("之前的任务已完成，正在获取结果..."), Some(50.0)).await;
                 if let Ok(md_path) = primary_client.get_task_result(task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
                     finish_parse_result(&db, &settings, doc_id, &md_path).await;
                 } else {
                     error!("文档 {} 获取之前任务结果失败", doc_id);
-                    update_doc_status(&db, doc_id, DocStatus::Error, Some("解析失败: 获取之前任务结果失败"), None).await;
+                    set_runtime_state(&db, doc_id, DocStatus::Error, Some("解析失败: 获取之前任务结果失败"), None).await;
                 }
                 return;
             }
             "failed" => {
                 warn!("文档 {} 之前的任务失败, 重新提交", doc_id);
-                update_doc_status(&db, doc_id, DocStatus::Parsing, Some("之前的任务失败，重新提交..."), Some(10.0)).await;
+                set_runtime_state(&db, doc_id, DocStatus::Parsing, Some("之前的任务失败，重新提交..."), Some(10.0)).await;
                 clear_mineru_task_id(&db, doc_id).await;
                 existing_task_id = None;
             }
             "processing" | "pending" => {
                 info!("文档 {} 之前的任务仍在处理中, 等待完成", doc_id);
-                update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在等待之前的解析任务完成..."), Some(20.0)).await;
+                set_runtime_state(&db, doc_id, DocStatus::Parsing, Some("正在等待之前的解析任务完成..."), Some(20.0)).await;
                 let poll_interval = match active_config.mineru_type.as_str() {
                     "official" => 5u64,
                     "official-lightweight" => 3u64,
@@ -398,7 +492,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
                             finish_parse_result(&db, &settings, doc_id, &md_path).await;
                         } else {
                             error!("文档 {} 获取轮询结果失败", doc_id);
-                            update_doc_status(&db, doc_id, DocStatus::Error, Some("解析失败: 获取结果失败"), None).await;
+                            set_runtime_state(&db, doc_id, DocStatus::Error, Some("解析失败: 获取结果失败"), None).await;
                         }
                         return;
                     }
@@ -407,7 +501,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
                         warn!("文档 {} 之前的任务轮询失败: {}", doc_id, msg);
                         if msg.to_lowercase().contains("timed out") {
                             error!("文档 {} 之前的任务超时", doc_id);
-                            update_doc_status(&db, doc_id, DocStatus::Error, Some(&format!("解析失败: {}", msg)), None).await;
+                            set_runtime_state(&db, doc_id, DocStatus::Error, Some(&format!("解析失败: {}", msg)), None).await;
                             return;
                         }
                         clear_mineru_task_id(&db, doc_id).await;
@@ -424,7 +518,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
     }
 
     // 使用选中的 MinerU 配置提交解析任务
-    update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在提交解析任务..."), Some(15.0)).await;
+    set_runtime_state(&db, doc_id, DocStatus::Parsing, Some("正在提交解析任务..."), Some(15.0)).await;
     info!("文档 {} 提交解析任务: MinerU='{}', pdf={}", doc_id, active_config.name, abs_file_path);
 
     let client = MinerUClient::new(&active_config);
@@ -432,7 +526,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
         Ok(task_id) => {
             info!("文档 {} 提交解析成功, task_id={}", doc_id, task_id);
             save_mineru_task_id(&db, doc_id, &task_id).await;
-            update_doc_status(&db, doc_id, DocStatus::Parsing, Some("已提交任务，正在解析..."), Some(20.0)).await;
+            set_runtime_state(&db, doc_id, DocStatus::Parsing, Some("已提交任务，正在解析..."), Some(20.0)).await;
 
             info!("文档 {} 开始轮询解析任务 (timeout={}s)", doc_id, active_config.task_timeout);
             let poll_interval = match active_config.mineru_type.as_str() {
@@ -443,7 +537,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
             match poll_task_with_progress(&client, &task_id, doc_id, active_config.task_timeout, poll_interval).await {
                 Ok(_) => {
                     info!("文档 {} 解析任务完成, 获取结果中", doc_id);
-                    update_doc_status(&db, doc_id, DocStatus::Parsing, Some("正在获取解析结果..."), Some(80.0)).await;
+                    set_runtime_state(&db, doc_id, DocStatus::Parsing, Some("正在获取解析结果..."), Some(80.0)).await;
                     match client.get_task_result(&task_id, output_dir.to_str().unwrap_or(""), Some(doc_id)).await {
                         Ok(md_path) => {
                             info!("文档 {} 解析结果获取成功, markdown_path={}", doc_id, md_path);
@@ -453,7 +547,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
                         Err(e) => {
                             error!("文档 {} 获取解析结果失败: {}", doc_id, e);
                             let err_msg = format!("获取结果失败: {}", e);
-                            update_doc_status(&db, doc_id, DocStatus::Error, Some(&err_msg), None).await;
+                            set_runtime_state(&db, doc_id, DocStatus::Error, Some(&err_msg), None).await;
                             return;
                         }
                     }
@@ -461,7 +555,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
                 Err(e) => {
                     error!("文档 {} 解析失败: {}", doc_id, e);
                     let err_msg = format!("解析失败: {}", e);
-                    update_doc_status(&db, doc_id, DocStatus::Error, Some(&err_msg), None).await;
+                    set_runtime_state(&db, doc_id, DocStatus::Error, Some(&err_msg), None).await;
                     return;
                 }
             }
@@ -469,7 +563,7 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
         Err(e) => {
             error!("文档 {} 提交解析任务失败: {}", doc_id, e);
             let err_msg = format!("提交解析任务失败: {}", e);
-            update_doc_status(&db, doc_id, DocStatus::Error, Some(&err_msg), None).await;
+            set_runtime_state(&db, doc_id, DocStatus::Error, Some(&err_msg), None).await;
             return;
         }
     }
@@ -506,14 +600,15 @@ async fn finish_parse_result(db: &Database, settings: &Settings, doc_id: i64, md
         }
     }
 
-    let _ = sqlx::query(
-        "UPDATE documents SET status = 'markdown_done', status_message = 'PDF 解析完成', \
-         progress = 100, mineru_task_id = NULL, updated_at = ? WHERE id = ?",
-    )
-    .bind(now_iso())
-    .bind(doc_id)
-    .execute(db.pool())
-    .await;
+    // 状态不写库：只需要清掉外部任务指针（否则规则 4 会让它看起来一直在解析）。
+    // `sync_doc_file_sizes` 更新 md_size/zip_size/fs_synced_at 后，
+    // 派生状态自然变为 `markdown_done`（见 `services::file_state::derive_state`）。
+    let _ = sqlx::query("UPDATE documents SET mineru_task_id = NULL, updated_at = ? WHERE id = ?")
+        .bind(now_iso())
+        .bind(doc_id)
+        .execute(db.pool())
+        .await;
+    crate::services::file_state::clear_error(settings, doc_id);
 
     // 写时同步：更新 .md 和 .zip 文件大小到数据库
     crate::routers::documents::sync_doc_file_sizes(db, settings, doc_id).await;
@@ -1108,12 +1203,10 @@ async fn do_index_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64, 
     .await;
 
     let _ = sqlx::query(
-        "UPDATE documents SET qdrant_collection = ?, vector_db_id = ?, \
-         status_message = ?, progress = 100, updated_at = ? WHERE id = ?",
+        "UPDATE documents SET qdrant_collection = ?, vector_db_id = ?, updated_at = ? WHERE id = ?",
     )
     .bind(&collection_name)
     .bind(&vector_db_id)
-    .bind(format!("已索引到 {}", vector_db_id))
     .bind(now_iso())
     .bind(doc_id)
     .execute(db.pool())
@@ -1425,7 +1518,7 @@ where
 
 async fn process_stage_batch_parse(db: Arc<Database>, settings: Arc<Settings>) {
     let docs: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
-        "SELECT {} FROM documents WHERE status IN ('uploaded', 'error')", DOC_COLUMNS
+        "SELECT {} FROM documents WHERE COALESCE(md_size,0) = 0 AND COALESCE(pdf_size,0) > 0", DOC_COLUMNS
     ))
     .fetch_all(db.pool())
     .await
@@ -1453,7 +1546,7 @@ async fn process_stage_batch_parse(db: Arc<Database>, settings: Arc<Settings>) {
 
 async fn process_stage_batch_extract(db: Arc<Database>, settings: Arc<Settings>) {
     let docs: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
-        "SELECT {} FROM documents WHERE status = 'markdown_done'", DOC_COLUMNS
+        "SELECT {} FROM documents WHERE COALESCE(md_size,0) > 0", DOC_COLUMNS
     ))
     .fetch_all(db.pool())
     .await
@@ -1490,7 +1583,7 @@ async fn process_index_batch(
     // 查询待索引文档（排除已索引到该库的）
     let rows: Vec<(i64,)> = sqlx::query_as(
         "SELECT d.id FROM documents d \
-         WHERE d.status = 'markdown_done' \
+         WHERE COALESCE(d.md_size,0) > 0 \
          AND d.id NOT IN (SELECT document_id FROM document_vector_index WHERE vector_db_id = ? AND status = 'indexed') \
          ORDER BY d.id",
     )
@@ -1615,14 +1708,10 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/pipeline/batch/start-extract", post(batch_start_extract))
         .route("/assist/api/pipeline/batch/start-index/", post(batch_start_index))
         .route("/assist/api/pipeline/batch/start-index", post(batch_start_index))
-        .route("/assist/api/pipeline/batch/start-full/", post(batch_start_full))
-        .route("/assist/api/pipeline/batch/start-full", post(batch_start_full))
         .route("/assist/api/pipeline/batch/pause/", post(batch_pause))
         .route("/assist/api/pipeline/batch/pause", post(batch_pause))
         .route("/assist/api/pipeline/batch/resume/", post(batch_resume))
         .route("/assist/api/pipeline/batch/resume", post(batch_resume))
-        .route("/assist/api/pipeline/batch/reset/", post(batch_reset))
-        .route("/assist/api/pipeline/batch/reset", post(batch_reset))
         .route("/assist/api/pipeline/batch/reset-errors/", post(batch_reset_errors))
         .route("/assist/api/pipeline/batch/reset-errors", post(batch_reset_errors))
         .route("/assist/api/pipeline/batch/reset-timeout-errors/", post(batch_reset_timeout_errors))
@@ -1708,12 +1797,8 @@ async fn active_tasks(
                 "doc_title": doc.title.clone().unwrap_or_else(|| doc.filename.clone()),
                 "task_type": info.task_type,
                 "started_at": info.started_at,
-                "status_message": if info.prefer_db_message {
-                    doc.status_message.clone().unwrap_or(info.status_message)
-                } else {
-                    info.status_message
-                },
-                "status": doc.status.clone(),
+                "status_message": info.status_message.clone(),
+                "status": doc_state(&doc).status.as_str(),
                 "mineru_config_name": info.mineru_config_name,
                 "extracted_pages": info.extracted_pages,
                 "total_pages": info.total_pages,
@@ -1730,29 +1815,19 @@ async fn batch_status(
     if let Err(_resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
         return Json(json!({"detail": "权限不足"}));
     }
-    let pending = count_status(&db, "uploaded").await + count_status(&db, "error").await;
-    let processing = count_status(&db, "parsing").await;
+    // 全部基于文件事实列 + 运行时错误表（零 stat）
+    let counts = stage_counts(&db).await;
+    let pending = counts.uploaded + counts.error;
+    let processing = counts.parsing;
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents")
         .fetch_one(db.pool())
         .await
         .unwrap_or(0);
-    let timeout_error: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM documents WHERE status = 'error' AND status_message LIKE '%timed out%'",
-    )
-    .fetch_one(db.pool())
-    .await
-    .unwrap_or(0);
-    let ready_to_promote: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM documents WHERE status = 'markdown_done' \
-         AND title IS NOT NULL AND title != '' AND authors IS NOT NULL AND authors != ''",
-    )
-    .fetch_one(db.pool())
-    .await
-    .unwrap_or(0);
-
-    let uploaded = count_status(&db, "uploaded").await;
-    let error = count_status(&db, "error").await;
-    let markdown_done = count_status(&db, "markdown_done").await;
+    let timeout_error = counts.timeout_error;
+    let ready_to_promote = counts.ready_to_promote;
+    let uploaded = counts.uploaded;
+    let error = counts.error;
+    let markdown_done = counts.markdown_done;
 
     let batch_progress = batch_progress_map().read().unwrap().clone();
 
@@ -1770,6 +1845,7 @@ async fn batch_status(
             "timeout_error": timeout_error,
             "markdown_done": markdown_done,
             "ready_to_promote": ready_to_promote,
+            "unsynced": counts.unsynced,
         },
         "batch_progress": batch_progress,
     }))
@@ -1794,7 +1870,8 @@ async fn batch_start(
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
-    let pending = count_status(&db, "uploaded").await + count_status(&db, "error").await;
+    let counts = stage_counts(&db).await;
+    let pending = counts.uploaded + counts.error;
     if pending == 0 {
         return Json(json!({"detail": "没有待解析的文档", "pending": 0})).into_response();
     }
@@ -1826,15 +1903,6 @@ async fn batch_resume(
     Json(json!({"detail": "批量解析已恢复"}))
 }
 
-async fn batch_reset(
-    Extension(role): Extension<auth::Role>,
-) -> Json<Value> {
-    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
-        return Json(json!({"detail": "权限不足"}));
-    }
-    Json(json!({"status": "ok"}))
-}
-
 async fn batch_start_parse(
     Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
@@ -1843,7 +1911,8 @@ async fn batch_start_parse(
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
-    let count = count_status(&db, "uploaded").await + count_status(&db, "error").await;
+    let counts = stage_counts(&db).await;
+    let count = counts.uploaded + counts.error;
     if count == 0 {
         return Json(json!({"detail": "没有待解析的文档", "pending": 0})).into_response();
     }
@@ -1860,7 +1929,8 @@ async fn batch_start_extract(
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
-    let count = count_status(&db, "markdown_done").await;
+    let counts = stage_counts(&db).await;
+    let count = counts.markdown_done;
     if count == 0 {
         return Json(json!({"detail": "没有待提取元数据的文档", "pending": 0})).into_response();
     }
@@ -1887,7 +1957,7 @@ async fn batch_start_index(
 
     let total_available: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM documents d \
-         WHERE d.status = 'markdown_done' \
+         WHERE COALESCE(d.md_size,0) > 0 \
          AND d.id NOT IN (SELECT document_id FROM document_vector_index WHERE vector_db_id = ? AND status = 'indexed')",
     )
     .bind(&vector_db_id)
@@ -1922,15 +1992,6 @@ async fn batch_start_index(
     })).into_response()
 }
 
-async fn batch_start_full(
-    Extension(role): Extension<auth::Role>,
-) -> Json<Value> {
-    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
-        return Json(json!({"detail": "权限不足"}));
-    }
-    Json(json!({"status": "ok", "message": "请使用 batch/start-index 或单文档 full 端点"}))
-}
-
 // ── 批量错误重置端点 ──
 
 async fn batch_reset_errors(
@@ -1942,41 +2003,14 @@ async fn batch_reset_errors(
     if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
         return Json(json!({"detail": "权限不足"}));
     }
-    let docs: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
-        "SELECT {} FROM documents WHERE status = 'error'", DOC_COLUMNS
-    ))
-    .fetch_all(db.pool())
-    .await
-    .unwrap_or_default();
-
-    if docs.is_empty() {
+    // 错误状态只在运行时：清掉错误记录后，文档自然回到「待解析 / 解析完成」
+    let reset_count = crate::services::file_state::clear_all_errors(&settings);
+    let _ = (db, query);
+    if reset_count == 0 {
         return Json(json!({"detail": "没有错误状态的文档", "reset_count": 0}));
     }
 
-    let mut reset_count = 0i64;
-    for doc in &docs {
-        let new_status = match query.target_status.as_deref() {
-            Some("uploaded") => "uploaded",
-            Some("markdown_done") => "markdown_done",
-            _ => {
-                if std::path::Path::new(&paths::get_markdown_path(&settings, doc.id)).exists() {
-                    "markdown_done"
-                } else {
-                    "uploaded"
-                }
-            }
-        };
-        let _ = sqlx::query(
-            "UPDATE documents SET status = ?, status_message = NULL, progress = 0, mineru_task_id = NULL WHERE id = ?",
-        )
-        .bind(new_status)
-        .bind(doc.id)
-        .execute(db.pool())
-        .await;
-        reset_count += 1;
-    }
-
-    Json(json!({"detail": format!("已重置 {} 个错误状态的文档", reset_count), "reset_count": reset_count}))
+    Json(json!({"detail": format!("已清除 {} 个文档的错误记录", reset_count), "reset_count": reset_count as i64}))
 }
 
 async fn batch_reset_timeout_errors(
@@ -1988,41 +2022,20 @@ async fn batch_reset_timeout_errors(
     if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
         return Json(json!({"detail": "权限不足"}));
     }
-    let docs: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
-        "SELECT {} FROM documents WHERE status = 'error' AND status_message LIKE '%timed out%'", DOC_COLUMNS
-    ))
-    .fetch_all(db.pool())
-    .await
-    .unwrap_or_default();
-
-    if docs.is_empty() {
+    let errors = crate::services::file_state::error_snapshot();
+    let ids: Vec<i64> = errors
+        .iter()
+        .filter(|(_, msg)| msg.to_lowercase().contains("timed out"))
+        .map(|(id, _)| *id)
+        .collect();
+    let _ = (db, query);
+    if ids.is_empty() {
         return Json(json!({"detail": "没有超时失败的文档", "reset_count": 0}));
     }
-
-    let mut reset_count = 0i64;
-    for doc in &docs {
-        let new_status = match query.target_status.as_deref() {
-            Some("uploaded") => "uploaded",
-            Some("markdown_done") => "markdown_done",
-            _ => {
-                if std::path::Path::new(&paths::get_markdown_path(&settings, doc.id)).exists() {
-                    "markdown_done"
-                } else {
-                    "uploaded"
-                }
-            }
-        };
-        let _ = sqlx::query(
-            "UPDATE documents SET status = ?, status_message = NULL, progress = 0, mineru_task_id = NULL WHERE id = ?",
-        )
-        .bind(new_status)
-        .bind(doc.id)
-        .execute(db.pool())
-        .await;
-        reset_count += 1;
+    for id in &ids {
+        crate::services::file_state::clear_error(&settings, *id);
     }
-
-    Json(json!({"detail": format!("已重置 {} 个超时失败的文档", reset_count), "reset_count": reset_count}))
+    Json(json!({"detail": format!("已清除 {} 个超时失败文档的错误记录", ids.len()), "reset_count": ids.len() as i64}))
 }
 
 async fn batch_promote_ready(
@@ -2033,7 +2046,7 @@ async fn batch_promote_ready(
         return Json(json!({"detail": "权限不足"}));
     }
     let docs: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
-        "SELECT {} FROM documents WHERE status = 'markdown_done' \
+        "SELECT {} FROM documents WHERE COALESCE(md_size,0) > 0 \
          AND title IS NOT NULL AND title != '' AND authors IS NOT NULL AND authors != ''", DOC_COLUMNS
     ))
     .fetch_all(db.pool())
@@ -2065,18 +2078,18 @@ async fn parse(
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
     };
 
-    let status = doc.doc_status();
-    if status != DocStatus::Uploaded && status != DocStatus::Error {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("当前状态 {} 不允许解析", status)}))).into_response();
+    // 门禁用**文件事实**（而不是派生状态）：已有 Markdown 就没什么可解析的；
+    // 正在跑任务时也拒绝，避免同一篇重复提交。
+    if doc.has_md() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "已有 Markdown，无需解析（如需重解析请先清空解析产物）"}))).into_response();
+    }
+    if runtime_task(id).is_some() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "该文档已有任务在运行"}))).into_response();
     }
 
-    let _ = sqlx::query(
-        "UPDATE documents SET status = 'parsing', status_message = '任务已提交，等待处理...', progress = 0, updated_at = ? WHERE id = ?",
-    )
-    .bind(now_iso())
-    .bind(id)
-    .execute(db.pool())
-    .await;
+    // 不再写数据库状态：只登记运行时文案（后台任务开始时也会覆盖）
+    track_task_start(id, "parse", None);
+    track_task_update(id, "任务已提交，等待处理...");
 
     tokio::spawn(run_mineru_tracked(id, "parse", do_parse_impl(db, settings, id)));
 
@@ -2097,8 +2110,9 @@ async fn extract(
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
     };
 
-    if doc.doc_status() != DocStatus::MarkdownDone {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("当前状态 {} 不允许提取元数据", doc.status)}))).into_response();
+    // 只看文件事实：有 Markdown 就能提取元数据（不受运行时错误记录影响）
+    if !doc.has_md() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "当前没有 Markdown，不允许提取元数据"}))).into_response();
     }
 
     tokio::spawn(run_tracked(id, "extract", do_extract_impl(db, settings, id)));
@@ -2155,13 +2169,9 @@ async fn index(
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
     };
 
-    let allowed = [DocStatus::Error, DocStatus::MarkdownDone];
-    if !allowed.contains(&doc.doc_status()) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("当前状态 {} 不允许索引", doc.status)}))).into_response();
-    }
-
-    if !std::path::Path::new(&paths::get_markdown_path(&settings, id)).exists() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "Markdown 文件不存在，无法索引"}))).into_response();
+    // 只看文件事实：有 Markdown 就能索引（不受运行时错误记录影响）
+    if !doc.has_md() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "当前没有 Markdown，不允许索引"}))).into_response();
     }
 
     let manager = crate::config_manager::ConfigManager::new("system.json");
@@ -2211,7 +2221,6 @@ async fn indexes(
 async fn doc_status(
     Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
-    Extension(settings): Extension<Arc<Settings>>,
     Path(id): Path<i64>,
 ) -> Response {
     if let Err(resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
@@ -2222,7 +2231,7 @@ async fn doc_status(
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
     };
 
-    let has_markdown = std::path::Path::new(&paths::get_markdown_path(&settings, id)).exists();
+    let state = doc_state(&doc);
 
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT vector_db_id, status FROM document_vector_index WHERE document_id = ? AND status = 'indexed'",
@@ -2237,10 +2246,12 @@ async fn doc_status(
     }).collect();
 
     Json(json!({
-        "status": doc.status,
-        "status_message": doc.status_message,
-        "progress": doc.progress,
-        "has_markdown": has_markdown,
+        "status": state.status.as_str(),
+        "status_message": state.message,
+        "progress": state.progress,
+        "synced": state.synced,
+        "has_markdown": doc.has_md(),
+        "has_pdf": doc.has_pdf(),
         "has_meta": doc.title.is_some(),
         "is_indexed": !indexed_dbs.is_empty(),
         "indexed_dbs": indexed_dbs,
@@ -2257,48 +2268,41 @@ async fn reset(
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
-    let doc = match fetch_doc(&db, id).await {
-        Some(d) => d,
-        None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
-    };
-
-    let current = doc.doc_status();
-    let valid_targets: Vec<&str> = match current {
-        DocStatus::Parsing => vec!["uploaded"],
-        DocStatus::MarkdownDone => vec!["uploaded"],
-        DocStatus::Error => vec!["uploaded", "markdown_done"],
-        DocStatus::Uploaded => vec!["uploaded"],
-    };
-
-    let target = match query.target_status.as_deref() {
-        Some(t) if valid_targets.contains(&t) => t.to_string(),
-        _ => valid_targets.first().map(|s| s.to_string()).unwrap_or_else(|| "uploaded".to_string()),
-    };
-
-    // 清理下游数据
-    if target == "uploaded" || target == "markdown_done" {
-        let _ = sqlx::query("UPDATE documents SET qdrant_collection = NULL WHERE id = ?")
-            .bind(id)
-            .execute(db.pool())
-            .await;
+    if fetch_doc(&db, id).await.is_none() {
+        return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response();
+    }
+    if query.target_status.is_some() {
+        tracing::warn!("文档 {} 的 reset 收到已删除的 target_status 参数，已忽略", id);
     }
 
+    // 「清空解析产物」：只做文件操作 + 清运行时状态。
+    // 删掉 Markdown/资源包后再同步文件事实，派生状态自然回落为「待解析 / PDF 缺失」。
+    let md_path = paths::get_markdown_path(&settings, id);
+    let zip_path = paths::get_asset_path(&settings, id);
+    let md_removed = std::fs::remove_file(&md_path).is_ok();
+    let zip_removed = std::fs::remove_file(&zip_path).is_ok();
+    image_cache::invalidate(id);
+
     let _ = sqlx::query(
-        "UPDATE documents SET status = ?, status_message = NULL, progress = 0, mineru_task_id = NULL, updated_at = ? WHERE id = ?",
+        "UPDATE documents SET qdrant_collection = NULL, mineru_task_id = NULL, updated_at = ? WHERE id = ?",
     )
-    .bind(&target)
     .bind(now_iso())
     .bind(id)
     .execute(db.pool())
     .await;
 
-    let _ = (settings,);
+    crate::services::file_state::clear_error(&settings, id);
+    // 必须重新同步：否则 md_size 会残留，状态会一直显示「解析完成」
+    crate::routers::documents::sync_doc_file_sizes(&db, &settings, id).await;
 
+    let state = fetch_doc(&db, id).await.map(|d| doc_state(&d));
     Json(json!({
-        "detail": format!("状态已重置为 {}", target),
-        "status": target,
-        "valid_targets": valid_targets,
-    })).into_response()
+        "detail": "已清空解析产物（Markdown / 资源包）",
+        "removed_markdown": md_removed,
+        "removed_asset": zip_removed,
+        "status": state.map(|s| s.status.as_str()).unwrap_or("uploaded"),
+    }))
+    .into_response()
 }
 
 async fn full(
@@ -2315,8 +2319,11 @@ async fn full(
         Some(d) => d,
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
     };
-    if doc.doc_status() != DocStatus::Uploaded && doc.doc_status() != DocStatus::Error {
-        return (StatusCode::BAD_REQUEST, Json(json!({"detail": format!("当前状态 {} 不允许执行完整流水线", doc.status)}))).into_response();
+    if doc.has_md() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "已有 Markdown，无需执行完整流水线（如需重跑请先清空解析产物）"}))).into_response();
+    }
+    if runtime_task(id).is_some() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "该文档已有任务在运行"}))).into_response();
     }
 
     let db2 = db.clone();
@@ -2325,7 +2332,7 @@ async fn full(
         do_parse_impl(db2.clone(), settings2.clone(), id).await;
         let d = fetch_doc(&db2, id).await;
         if let Some(d) = d {
-            if d.doc_status() == DocStatus::MarkdownDone {
+            if doc_state(&d).status == DocStatus::MarkdownDone {
                 do_extract_impl(db2.clone(), settings2.clone(), id).await;
                 let d2 = fetch_doc(&db2, id).await;
                 if let Some(d2) = d2 {
@@ -2351,23 +2358,18 @@ async fn stop(
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
-    // 将运行中的文档标记为 error（暂停其后台进度）。
+    // 将运行中的任务标记为失败（暂停其后台进度）：只写运行时状态
     let doc = match fetch_doc(&db, id).await {
         Some(d) => d,
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
     };
-    let status = doc.doc_status();
-    if matches!(status, DocStatus::Parsing) {
-        let _ = sqlx::query(
-            "UPDATE documents SET status = 'error', status_message = '任务已停止', updated_at = ? WHERE id = ?",
-        )
-        .bind(now_iso())
-        .bind(id)
-        .execute(db.pool())
-        .await;
+    let state = doc_state(&doc);
+    if matches!(state.status, DocStatus::Parsing) {
+        let settings = crate::settings::get_settings();
+        crate::services::file_state::set_error(&settings, id, "任务已停止");
         track_task_end(id);
     }
-    Json(json!({"detail": "任务停止请求已处理", "status": doc.status})).into_response()
+    Json(json!({"detail": "任务停止请求已处理", "status": state.status.as_str()})).into_response()
 }
 
 #[cfg(test)]

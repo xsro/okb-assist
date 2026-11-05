@@ -54,13 +54,19 @@ export function getDocumentIndexes(id: number) {
   )
 }
 
-/** 重置文档状态（可指定目标状态） */
-export function resetDocument(id: number, targetStatus?: string) {
-  return apiPost<{ detail: string; status: string }>(
-    `/assist/api/pipeline/reset/${id}/`,
-    undefined,
-    { params: targetStatus ? { target_status: targetStatus } : undefined }
-  )
+/**
+ * 清空解析产物（删除 Markdown + 资源包），文档随之回到「待解析」。
+ *
+ * 状态不再可由客户端设置：文献状态由文件事实推导，想重新解析只能清空产物。
+ * 这是破坏性操作，调用方需二次确认。
+ */
+export function clearParseOutput(id: number) {
+  return apiPost<{
+    detail: string
+    status: string
+    removed_markdown: boolean
+    removed_asset: boolean
+  }>(`/assist/api/pipeline/reset/${id}/`)
 }
 
 /** 获取文档状态 */

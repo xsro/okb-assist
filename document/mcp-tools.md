@@ -12,7 +12,7 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | `search_info` | 搜索文献元数据（中英文），支持分页、字段过滤、年份/类型过滤、排序 | `query`, `fields`, `year_from`, `year_to`, `doc_type`, `sort_by`, `sort_order` |
 | `read_markdown` | 读取文献 Markdown 内容（行切片分页），或按标题提取指定章节 | `id`, `line_start`, `line_count`, `section`, `sections` |
 | `get_document_info` | 获取文献详细信息（含元数据、状态、PDF/Markdown 链接） | `id` |
-| `list_documents` | 搜索/列出文献，支持标题/作者搜索、状态与类型过滤、字段过滤、排序 | `query`, `status`, `doc_type`, `fields`, `sort_by`, `sort_order` |
+| `list_documents` | 搜索/列出文献，支持标题/作者搜索、**文件事实过滤**（`md_state`/`pdf_state`/`zip_state`/`synced`/`has_*`/`pdf_health`）与类型过滤、字段过滤、排序 | `query`, `doc_type`, `md_state`, `pdf_state`, `zip_state`, `synced`, `has_md`, `has_pdf`, `has_zip`, `pdf_health`, `page`, `page_size`, `fields`, `sort_by`, `sort_order` |
 | `get_document_abstract` | 获取文献摘要（中英文） | `id` |
 | `get_stats` | 获取知识库统计信息（总数、状态分布、类型分布） | 无 |
 | `list_doc_types` | 列出所有已使用的文献类型 | 无 |
@@ -187,7 +187,7 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | `sort_by` | string | `"updated_at"` | 排序字段 |
 | `sort_order` | string | `"desc"` | 排序方向：`"asc"` 或 `"desc"` |
 
-**可排序字段：** `title`, `authors`, `year`, `id`, `journal`, `status`, `doc_type`, `created_at`, `updated_at`
+**可排序字段：** `title`, `authors`, `year`, `id`, `journal`, `doc_type`, `created_at`, `updated_at`, `pdf_size`, `md_size`, `zip_size`
 
 **返回格式：**
 
@@ -288,8 +288,11 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | `category` | 分类 |
 | `doc_type` | 文献类型 |
 | `language` | 语言 |
-| `status` | 处理状态 |
-| `has_markdown` | 是否已生成 Markdown |
+| `status` | 派生状态（`uploaded` / `parsing` / `markdown_done` / `error`） |
+| `status_message` | 派生状态的说明文案 |
+| `synced` | 文件事实是否已从磁盘同步过（`false` = 状态未知） |
+| `has_markdown` / `has_pdf` / `has_asset` | 三个文件是否「已同步且存在」 |
+| `pdf_health` / `pdf_size` / `md_size` | PDF 健康与文件大小（来自同步列） |
 | `pdf_need_auth_url` | 需要认证的 PDF 下载链接 |
 | `temp_downloadable_pdf_url` | 无需认证的临时 PDF 下载链接（有效至 `temp_downloadable_pdf_expiration`） |
 | `temp_downloadable_pdf_expiration` | 临时链接过期时间 |
@@ -300,15 +303,18 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 
 ### `list_documents` — 列出文献
 
-搜索或列出文献，支持标题/作者模糊搜索、状态与类型过滤、字段白名单、排序。
+搜索或列出文献，支持标题/作者模糊搜索、**文件事实过滤**（取代原 `status` 参数）与类型过滤、字段白名单、排序。
 
 **参数：**
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `query` | string | `""` | 搜索关键词（匹配标题、作者、文件名） |
-| `status` | string | `""` | 状态过滤（逗号分隔多值） |
 | `doc_type` | string | `""` | 文献类型过滤（逗号分隔多值） |
+| `md_state` / `pdf_state` / `zip_state` | string | `""` | 文件三态：`present` / `absent` / `unknown`（逗号分隔多值） |
+| `synced` | string | `""` | `1` = 文件事实已同步，`0` = 未同步（状态未知） |
+| `has_md` / `has_pdf` / `has_zip` | string | `""` | `1` 有 / `0` 无（不含未同步语义，需精确用三态） |
+| `pdf_health` | string | `""` | `ok` / `warning` / `error` / `missing` / `unchecked`（逗号分隔多值） |
 | `page` | int | `1` | 页码 |
 | `page_size` | int | `20` | 每页条数（1-100，别名：`limit`） |
 | `limit` | int | `20` | `page_size` 的别名 |
@@ -316,7 +322,7 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | `sort_by` | string | `"created_at"` | 排序字段 |
 | `sort_order` | string | `"desc"` | 排序方向 |
 
-**可排序字段：** `title`, `authors`, `year`, `id`, `journal`, `status`, `doc_type`, `created_at`, `updated_at`
+**可排序字段：** `title`, `authors`, `year`, `id`, `journal`, `doc_type`, `created_at`, `updated_at`, `pdf_size`, `md_size`, `zip_size`
 
 **返回格式：**
 

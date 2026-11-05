@@ -74,7 +74,7 @@ cargo build --release
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`drive.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/drive.rs` | 用户网盘：路径安全、角色阈值、配额统计、目录列举、Content-Type 推断 |
 | `backend-rs/src/services/pdf_engine.rs` | PDF 解析引擎运行时选择（`mutool` 命令行 / 内置 `mupdf`，含能力兜底） |
-| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存） |
+| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`file_state.rs`（文件事实 → 文献状态推导 + 运行时状态注册表）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
@@ -412,6 +412,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 | `markdown_path` | Markdown 文件路径模板 | `data/markdowns/{id}.md` |
 | `info_path` | 元信息 JSON 路径模板 | `data/markdowns/{id}.json` |
 | `chat_session_path` | 问答会话文件路径模板（`{id}` 为会话 ID，字符串） | `data/chat_sessions/{id}.json` |
+| `runtime_state_path` | 运行时状态 sidecar 路径模板（`{id}` = 文档 ID；空串 = 只用进程内存） | `data/pipeline/{id}.json` |
 | `drive_root` | 用户网盘根目录（私有 `users/{user_id}/`、公有 `_public/{folder_id}/`）；相对路径按 `cwd`，也可写绝对路径（独立磁盘/挂载点），支持 `{system_dir}` / `{env:VAR}` | `data/drive` |
 | `crossref_path` | Crossref 数据路径模板 | `data/markdowns/{id}_crossref.json` |
 | `markdown_asset_path` | Markdown 资产包路径模板 | `data/pdfs/{id}/{id}.zip` |
@@ -473,9 +474,9 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 ## 架构与请求流
 
 1. **Web/API 层**：`backend-rs/src/main.rs` + `backend-rs/src/routers/*`。`TokenMiddleware` 仅对 `/assist/api/*` 校验凭证（`X-Token` 头 → `Authorization: Bearer` → query `token`），放行 `/assist/mcp`、`/assist/assets`（前端静态资源）、`/assist/uploads`、`/assist/file`、`/redirect`，以及 `/assist/api/documents/` 下含 `/image/` 的图片 URL。凭证由 `auth::resolve_principal` 解析成 `Principal`（会话 `sess_…` → 用户 API token `okb_…`）；**系统未初始化（没有任何 active admin）时只允许 `/auth/status|bootstrap`**；受信任子网仅在 `trusted_subnet_enabled = true` 时生效。CORS 限定前端来源（开发 `localhost:5173`，生产同源 `localhost:5001`）。
-2. **数据模型**：`Document`（主记录 + 状态）、`DocumentVectorIndex`（每个向量库的索引状态，唯一键 `(document_id, vector_db_id)`）。状态机用 `DocStatus` / `IndexStatus` 枚举（`backend-rs/src/models.rs`）。
+2. **数据模型**：`Document`（主记录 + **文件事实**）、`DocumentVectorIndex`（每个向量库的索引状态，唯一键 `(document_id, vector_db_id)`）。**`documents` 不再有 `status` / `status_message` / `progress` 列**：文献状态在读取时由 `services/file_state.rs::derive_state()` 从「文件事实列（`pdf_size`/`md_size`/`zip_size` + `fs_synced_at`）+ 进程内运行时状态」推导，枚举仍沿用 `DocStatus`（`backend-rs/src/models.rs`），索引状态仍用 `IndexStatus`。
 3. **摄取流水线**（`backend-rs/src/routers/pipeline.rs`，核心状态机）：
-   - parse（MinerU）→ `parsing` → `markdown_done`
+   - parse（MinerU）→ `parsing`（**仅运行时**）→ `markdown_done`（= `md_size` 落库）
    - extract（信息补全模型，`llm_extract`）→ `extracting` → `meta_done`
    - index（向量库）→ `indexing` → `indexed`
    - 含批量控制器、暂停/恢复/重置、两级信号量并发限制：MinerU 解析使用独立 `Semaphore(max_tasks)`（按配置），extract/index 使用全局 `Semaphore(max_concurrent_tasks)`（`system.json`）。
@@ -493,7 +494,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
    - **DOI 比对统一归一化**：`doi_key()`（`normalize_doi` 去 `https://doi.org/` 等前缀与尾部标点 + 转小写）用于 `GET /documents/by-doi/:doi`（先精确匹配，未命中再 `LIKE` 粗筛 + `doi_key` 校验，兼容历史数据里带前缀/大小写不一致的值）与 `POST /documents/diff-dois`；写入口也归一化 —— `PUT /documents/:id`（`update_document`）与 `pipeline` 的 `MetaRecord::apply`。新增 DOI 写/比对照旧走这几个入口，别再直接字符串相等比较。
    - **全量比对索引**（`GET /documents/doi-hash-index`）：一次返回库内全部文献的 `{count, with_doi, with_hash, generated_at, documents:[{id, doi, doi_key, file_hash, pdf_health}]}`（`doi_key` 已归一化小写，空 DOI/空哈希为 `null`），供 `client-rs` 批量比对；客户端拉一次就完成整库比对，不再按 DOI 逐条请求 `by-doi`。只返回比对必需字段（不带 title/abstract），新增字段时注意保持轻量。
    - **上传去重**（`POST /documents/upload`，`upload_document`）：先用 `find_doc_by_hash`（只查 `file_hash` 索引，**不抽 PDF 元数据**）比哈希；未命中且请求里**显式**给了 `doi` 表单字段时再用 `find_doc_by_doi` 比 DOI（PDF 里抽到的 DOI 不参与去重，保持既有行为）。命中重复的行为由 `on_duplicate` 控制：`error`（默认，409 `{error:"duplicate", kind:"hash"|"doi", existing_id, existing:{file_hash,pdf_health,…}}`）/ `skip`（200 `{status:"skipped", existing_id, id, doc}`）/ `replace`（同哈希则等价 skip，否则用本次文件覆盖已有文档的 PDF，200 `{status:"replaced", existing_id, doc}`，复用 `persist_pdf_for_doc`，与 `POST /{id}/pdf` 同一套副作用）。`force=true` 跳过全部去重检查。新文档的 `doi` 直接取显式字段（`fill_meta_fields` 只补空）。去重依赖 `database.rs::init` 建的 `idx_documents_file_hash` / `idx_documents_doi`（`CREATE INDEX IF NOT EXISTS`，幂等），新增按列等值查找的功能时同步补索引。
-   - **BibTeX 批量新建条目**（`POST /assist/api/documents/import-bibtex`，`import_bibtex`）：请求体 `{content, dry_run}`，`content` 为 `.bib` 文件原始文本（≤8 MB，单次最多处理 2000 条）。服务端用 `services/bibtex.rs` 手写解析器（`@article{key,…}` / `@article(key,…)`、花括号嵌套、`"…"` 引号值、`#` 拼接、`@string` 宏、`@comment`/`@preamble` 跳过、LaTeX 重音与转义还原），把条目映射到 `documents` 的 16 个元数据字段（`filename` 用 `<引用键>.bib` 占位，`source` 取 `publisher` 否则 `bibtex`，类型走 Zotero 名）。**只新建库里缺失的条目**：先按文件内 DOI/标题去重，再与全库比对（`doi_key` 归一化 DOI 优先，其次 `normalize_title` + 年份），命中则跳过并回传 `existing_id`；`dry_run=true` 只返回预览统计（不做写库）。新建记录 `status = 'uploaded'`、`status_message` 说明「仅导入条目」、`pdf_health = 'missing'`（没有 PDF）。响应 `{dry_run,total,processed,truncated,missing,created_count,existing_count,duplicate_count,invalid_count,failed_count,created,items,items_truncated,warnings,detail}`，`items[].action ∈ created|create|exists|duplicate|invalid|error`。
+   - **BibTeX 批量新建条目**（`POST /assist/api/documents/import-bibtex`，`import_bibtex`）：请求体 `{content, dry_run}`，`content` 为 `.bib` 文件原始文本（≤8 MB，单次最多处理 2000 条）。服务端用 `services/bibtex.rs` 手写解析器（`@article{key,…}` / `@article(key,…)`、花括号嵌套、`"…"` 引号值、`#` 拼接、`@string` 宏、`@comment`/`@preamble` 跳过、LaTeX 重音与转义还原），把条目映射到 `documents` 的 16 个元数据字段（`filename` 用 `<引用键>.bib` 占位，`source` 取 `publisher` 否则 `bibtex`，类型走 Zotero 名）。**只新建库里缺失的条目**：先按文件内 DOI/标题去重，再与全库比对（`doi_key` 归一化 DOI 优先，其次 `normalize_title` + 年份），命中则跳过并回传 `existing_id`；`dry_run=true` 只返回预览统计（不做写库）。新建记录**直接写入 `fs_synced_at`**（三个 size 保持 `NULL` = 三个文件全部「已同步且不存在」），`pdf_health = 'missing'`，因此派生状态为 `uploaded` + 「PDF 缺失」。响应 `{dry_run,total,processed,truncated,missing,created_count,existing_count,duplicate_count,invalid_count,failed_count,created,items,items_truncated,warnings,detail}`，`items[].action ∈ created|create|exists|duplicate|invalid|error`。
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、去重、索引重置。
 6. **问答**（`chat.rs`）：`GET /assist/api/chat/models`、`GET /assist/api/chat/tools` 列出模型池与可调用的 MCP 工具，`POST /assist/api/chat` 基于 `llm.models` 做多轮对话，并可在本请求内循环调用 MCP 工具（非流式）。见下方「问答（Chat）」。
 7. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
@@ -506,7 +507,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 - **机制**：摄取阶段（parse / extract / crossref / extract-pdf-meta / index / process）及批量端点通过 `tokio::spawn` 提交 Tokio 协程。协程在 HTTP 响应发出后由同一个 Tokio 运行时调度，状态机流转记录在数据库中。
 - **并发限制**：两级信号量独立控制。**全局** `Semaphore(max_concurrent_tasks)`（`system.json` 默认 `3`）限制 extract（Ollama 元数据抽取）和 index（向量索引）的并发。**MinerU 专用** `Semaphore(max_tasks)`（每个配置独立，默认 `3`）限制 PDF 解析并发。两者互不抢占，避免 MinerU 慢解析阻塞其他文档的抽取/索引。
 - **批量进度 / 暂停状态存于进程内存**：模块级全局变量，**进程重启即丢失**。重启后需手动重新触发。
-- **维护类任务也走后台**：`POST /assist/api/admin/recalculate-hashes`（重算 `file_hash`）、`POST /assist/api/admin/check-pdf-health`（批量 PDF 健康检查）、`POST /assist/api/admin/sync-file-sizes`（同步文件大小）都立即返回、后台执行。三者都支持 `?only_missing=1`（也接受 `true` / `yes` / `on`）：只处理对应字段为空（`file_hash` / `pdf_health` / `pdf_size·md_size·zip_size` 任一为 `NULL`）的文档，即「补缺」而非全量重做，返回体里的 `only_missing` 回显实际模式；管理页「维护操作」里「补充缺失 …」与「… 全部」按钮成对使用同一端点。重算哈希与健康检查都是**逐个串行**（不并发、不占流水线信号量），每条用 `pipeline::track_maintenance_task()` 登记到「活跃任务」表（`task_type = "hash"` / `"pdf-health"`，进度为「第 i/N 条」，文案只存进程内、不写 `documents.status_message`）；进程内各有 `HASH_RECALC_RUNNING` / `PDF_HEALTH_RUNNING` 标记防止重复提交，进程重启即中断。
+- **维护类任务也走后台**：`POST /assist/api/admin/recalculate-hashes`（重算 `file_hash`）、`POST /assist/api/admin/check-pdf-health`（批量 PDF 健康检查）、`POST /assist/api/admin/sync-file-sizes`（同步文件大小）都立即返回、后台执行。三者都支持 `?only_missing=1`（也接受 `true` / `yes` / `on`）：只处理「缺失」的文档 —— `file_hash` 为空 / `pdf_health` 为空 / **`fs_synced_at` 为空（从未同步过文件事实）**，即「补缺」而非全量重做（注意：`size` 列为 `NULL` 现在表示「文件确实不存在」，**不再**是「缺失」），返回体里的 `only_missing` 回显实际模式；管理页「维护操作」里「补充缺失 …」与「… 全部」按钮成对使用同一端点。重算哈希与健康检查都是**逐个串行**（不并发、不占流水线信号量），每条用 `pipeline::track_maintenance_task()` 登记到「活跃任务」表（`task_type = "hash"` / `"pdf-health"`，进度为「第 i/N 条」，文案只存进程内、不写 `documents.status_message`）；进程内各有 `HASH_RECALC_RUNNING` / `PDF_HEALTH_RUNNING` 标记防止重复提交，进程重启即中断。
 
 ### PDF 健康检查（`services/pdf_health.rs`）
 
@@ -519,25 +520,43 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 - 诊断处理：`push_diagnostics()` 去重收集 stderr 行（探活/`trailer/Encrypt`/`Pages/Count`/`pages` 四次调用都收），`summarize_diagnostics()` 归为「交叉引用表(xref)损坏 / 数据被截断 / 对象语法错误 / 对象引用无效」并附原始首行；只要诊断非空就判 `warning`，消息写明损坏类型与「严格阅读器可能打不开」。**正常文件 mutool 的 stderr 为空**，因此误报率低（实测本库 13 个文件只有上述 2 个触发）。
 - 限制：内置 `mupdf` 引擎（`pdf.engine = "mupdf"`）没有回传修复警告的接口，只能拿到页数，检不出「xref 损坏但能自动修复」；查看这类问题请把引擎切回 `mutool`。
 - **刻意不复用** `pdf_meta::extract_pdf_report_from_path`：那会整份抽取正文，批量检查太贵；这里只读文件头尾各几 KB + 读一次页数 + 收一次 stderr（单文件几十毫秒）。
-- 替换 PDF（`POST /assist/api/documents/:id/pdf`）会把这两列重置为 `NULL`（旧结果对新文件无效），但**不再改 `status`**：已解析的文档替换扫描件后仍是 `markdown_done`；只有显式带 multipart 字段 `reset_status=1` 才退回 `uploaded`（上传去重 `on_duplicate=replace` 仍沿用旧行为会重置为 `uploaded`）。
+- 替换 PDF（`POST /assist/api/documents/:id/pdf`）会把这两列重置为 `NULL`（旧结果对新文件无效），**且不影响解析阶段**：状态由文件事实推导，已解析的文档换扫描件后仍是 `markdown_done`。`reset_status` 字段已**删除**（收到则忽略并 `warn`）；要重新解析必须调 `POST /assist/api/pipeline/reset/:id`（清空 Markdown + 资源包，破坏性）。上传去重 `on_duplicate=replace` 同样不再重置状态。
 - **真·fire-and-forget**：删除文档时，SQLite 记录与本地文件先同步删除，而 Qdrant 中对应向量点的删除通过 `tokio::spawn` 异步执行，**请求不等待、失败也不可见**。
 - **前台（非后台）操作**：连接测试、服务状态、语义/全文搜索、上传、问答（`/assist/api/chat`）均在前端 `await` 内同步完成。MCP 端点也是「收完整请求体 → 返回一个 JSON」，**不是流式长连接**，工具函数内部检索同样是同步 await。
 - **无定时任务**：没有 `APScheduler`/`schedule`/守护线程；后台仅为 Tokio 协程。
 
-### 文档状态批量修正（运维端点）
+### 文献状态：由文件事实推导（无状态列）
 
-`POST /assist/api/admin/documents/status`（admin，**同步**、只改 `documents.status`，不碰文件/流水线/向量库）：
+`documents` **没有** `status` / `status_message` / `progress` 列（已删除，旧值备份在 `documents_status_legacy`）。
+状态在读取时由 `services/file_state.rs::derive_state()` 推导，输入只有两样：
 
-```bash
-curl -X POST -H "X-Token: <admin-token>" -H "Content-Type: application/json" \
-  -d '{"from":"uploaded","to":"markdown_done","dry_run":true}' \
-  http://127.0.0.1:5001/assist/api/admin/documents/status
-```
+1. **文件事实**（数据库列，写时同步）：`pdf_size` / `md_size` / `zip_size` + `fs_synced_at`；
+2. **运行时状态**（进程内）：`pipeline::active_tasks_map()` + `file_state::LAST_ERROR`（可镜像到 sidecar 文件）。
 
-- 请求体：`{ from?, ids?, to, dry_run? }` —— `to` 必填且不能是 `parsing`（该状态由后台流水线持有）；`from` 与 `ids` 至少给一个（防无条件改写全库），两者同时给即「这些 id 中处于 from 状态的」。
-- `dry_run: true` 只返回会被影响的 `ids` / `matched` 不写库；返回 `{detail, from, to, matched, updated, ids}`。
-- 写库时 `to = markdown_done` 顺带把 `status_message = 'PDF 解析完成'`、`progress = 100`，其他状态清空这两列，并更新 `updated_at`。
-- 用途：修正历史上「PDF 被替换后状态退回 `uploaded`，但 Markdown 早已解析完成」这类不一致记录。**部署前的老版本没有这个端点**，此时可临时用 `POST /assist/api/documents/:id/parse-result`（body `{content}`，`uploaded/parsing/error` → `markdown_done`，且原样回写 Markdown）逐条升级，再用 `?raw=1&full=1` 读回内容保证无损。
+三态语义（每个文件独立）：`fs_synced_at IS NULL` = **未同步/未知**；`fs_synced_at` 非空且 `size` 为 `NULL`/`0` = **确定不存在**；`size > 0` = **存在**。
+
+推导顺序（`derive_state`）：
+
+| # | 条件 | status | message |
+|---|---|---|---|
+| 1 | 有活动任务 | `parsing` | 任务实时文案（进度取页数比或百分比） |
+| 2 | 有运行时错误 | `error` | 错误原文 |
+| 3 | `md_size > 0` | `markdown_done` | `PDF 解析完成` |
+| 4 | `mineru_task_id` 非空 | `parsing` | `正在恢复上次解析任务…` |
+| 5 | `fs_synced_at` 为空 | `uploaded` | `文件状态未同步`（`synced=false`） |
+| 6 | `pdf_size > 0` | `uploaded` | `待解析` |
+| 7 | 其他 | `uploaded` | `PDF 缺失，请先上传 PDF` |
+
+- **错误不落库**：重启后 `error` 消失，文档回到规则 5/6/7（即「可以重新解析」）。若 `system.json` 配了 `runtime_state_path`（默认 `data/pipeline/{id}.json`），启动时 `file_state::load_all()` 会把上次失败原因读回内存。
+- **启动时后台全量同步一次文件事实**（`main.rs`，`tokio::spawn`），修复带外文件改动 / 崩溃遗留 / 迁移后偏差。
+- 单篇 `GET /assist/api/documents/:id` 会**实时 stat 并回写**这三列（详情页永远准；列表用同步列，零 stat）。
+- 原「人工改状态」端点 `POST /assist/api/admin/documents/status` 与 `StatusFixBody` **已删除**；替代品是 `GET /assist/api/admin/file-state/reconcile?fix=0`（只读报告「同步列 vs 磁盘」差异，`fix=1` 重新同步）。
+- **阶段门禁与 worker 的分工（别搞混）**：
+  - 门禁（`parse` / `extract` / `index` / `full` 的 handler，以及批量选择 SQL）只读**文件事实**（`has_md()` / `has_pdf()` / `COALESCE(md_size,0)`）+ `runtime_task(id)` 判断是否已有任务在跑，**不读派生状态、也不 stat 文件**，所以可能滞后（带外改动需要 sync 才反映），但贵在零 IO。
+  - worker（`do_parse_impl` / `do_extract_impl` / `do_index_impl` / `run_extract_pdf_meta`）在真正干活前会 **stat 真实文件**并优雅退出（缺 PDF/MD 直接 return 或写 `document_vector_index.error_message`），所以门禁滞后最多「白跑一次」，不会损坏数据。
+  - 由此得出一条约定：**门禁判断用文件事实，不要用 `doc_state(...).status`** —— 否则一条残留的运行时错误会把 `extract`/`index` 误挡在门外（有 Markdown 也报「没有 Markdown」）。
+- 「替换 PDF」不再影响解析阶段；重新解析唯一通道是 `POST /assist/api/pipeline/reset/:id`（删除 Markdown + 资源包 + `image_cache::invalidate` + 重新同步，破坏性、UI 需二次确认）。
+- 迁移：`database.rs::init()` 若发现 `status` 列存在，先建 `documents_status_legacy` 备份再 `DROP COLUMN`；`fs_synced_at` 不回填（NULL = 未同步），由启动同步补齐。
 
 ## 路由前缀
 
@@ -657,7 +676,7 @@ curl -X POST -H "X-Token: <admin-token>" -H "Content-Type: application/json" \
 - `admin.ts`、`config.ts`：管理/配置
 
 ### 类型定义
-- `src/types/document.ts` — `Document`、`DocStatus`、`SearchResult`、`SearchResultList`、`TocItem`、`MarkdownResponse`、`ChunkResponse`
+- `src/types/document.ts` — `Document`（含 `synced` / `fs_synced_at` / `has_pdf` / `has_md` / `has_zip`，`status` 是派生值）、`DocStatus`、`SearchResult`、`SearchResultList`、`TocItem`、`MarkdownResponse`、`ChunkResponse`
 - `src/types/chat.ts` — `ChatMessage`、`ChatModelInfo`、`ChatModelsResponse`、`ChatRequest`、`ChatResponse`
 - `src/types/config.ts` — `ServiceConfig`、`SystemConfig`
 - `src/types/pipeline.ts` — `PipelineState`、`BatchProgress`
@@ -717,7 +736,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 11. **Rust 异步**：后台任务用 `tokio::spawn`，不要在 `async` 块中使用 `std::thread::sleep` 或阻塞 I/O。
 12. **SQLx 编译时检查**：`sqlx` 默认在 `debug` 模式下会校验 SQL 查询，如果迁移了数据库结构需运行 `cargo sqlx prepare`（需安装 `sqlx-cli`）。
     **给 `documents` 加列的完整清单**（漏一处就会在运行时 `FromRow` 缺列报错/静默取空）：
-   - `database.rs::init()` 的 `CREATE TABLE` + 同一个函数里的**轻量迁移数组**（`CREATE TABLE IF NOT EXISTS` 不会改已有库，新列必须在迁移数组里逐个 `ALTER TABLE`）；
+   - `database.rs::init()` 的 `CREATE TABLE` + 同一个函数里的**轻量迁移数组**（`CREATE TABLE IF NOT EXISTS` 不会改已有库，新列必须在迁移数组里逐个 `ALTER TABLE`）；`documents` 现有列：16 个元数据字段 + `mineru_task_id` / `fs_synced_at` / `qdrant_collection` / `vector_db_id` / `created_at` / `updated_at` / `pdf_size` / `md_size` / `zip_size` / `pdf_health` / `pdf_health_message`（**没有** `status` / `status_message` / `progress`）；
    - `models.rs::Document` 字段；
    - 三份 `DOC_COLUMNS`：`routers/documents.rs`、`routers/pipeline.rs`、`mcp_server.rs`（列顺序需与 `Document` 字段顺序一致）；
    - `documents.rs::DocumentOut` + `doc_to_out()`；
@@ -743,7 +762,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
     - **不要再改回读日志文件**（旧的 `ReverseLines` / 字节游标 `since` / 半行处理 / `scanned_bytes` 已随 `get_logs` 一并删除）；历史日志的去处是 `system.json` 的 `log_path` 文件，页面只回显路径。
 
 23. **PDF 引擎是运行时选择，不是编译期开关**：`pdf_meta` / `pdf_health` 的公共入口一律先 `services::pdf_engine::active()` 再分发，mutool 那套实现**必须始终编译**（不要再加 `#[cfg(not(feature = "mupdf"))]`）。新增 PDF 能力时要两套实现都补，否则切引擎后会静默失能；另外 `mupdf` 引擎拿不到 stderr 诊断，依赖诊断的功能（如「损坏但可修复」判定）要在 UI 上提示用户切回 `mutool`。
-24. **BibTeX 导入的条目没有 PDF**：`import_bibtex` 建的记录 `status = 'uploaded'` 且 `pdf_health = 'missing'`，**不要**在 `do_parse_impl` 里把这种记录打成 `error`（解析入口已加「PDF 不存在就跳过并把状态留在 `uploaded`」的守卫，批量解析只会空转一次）。后续上传 PDF 走文档管理页的「替换 PDF」（`POST /documents/:id/pdf`），上传页重新上传会另建一条记录（上传去重只在显式传 `doi` 表单字段时比 DOI），需要时用去重页合并。
+24. **BibTeX 导入的条目没有 PDF**：`import_bibtex` 建的记录写入 `fs_synced_at`（三个 size = NULL，即「已同步且确定不存在」）+ `pdf_health = 'missing'`，派生状态自然是 `uploaded` / 「PDF 缺失」；**不要**在 `do_parse_impl` 里把这种记录打成 `error`（worker 里已加「PDF 不存在就跳过」的真实文件守卫，批量解析只能空转一次）。后续上传 PDF 走文档管理页的「替换 PDF」（`POST /documents/:id/pdf`），上传页重新上传会另建一条记录（上传去重只在显式传 `doi` 表单字段时比 DOI），需要时用去重页合并。
 
 ## 入口与关键文件速查
 

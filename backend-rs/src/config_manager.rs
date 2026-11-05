@@ -213,6 +213,8 @@ pub fn default_system() -> serde_json::Value {
         "crossref_path": "data/markdowns/{id}_crossref.json",
         "markdown_asset_path": "data/pdfs/{id}/{id}.zip",
         "pdf_path": "data/pdfs/{id}/{id}.pdf",
+        // 运行时状态 sidecar（失败原因等）一个文档一个文件；空串 = 只用进程内存
+        "runtime_state_path": "data/pipeline/{id}.json",
         "config_path": "config.json",
         "log_path": "okb-log.jsonl",
         "drive_root": "data/drive",

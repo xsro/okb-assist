@@ -160,16 +160,39 @@
         </div>
       </div>
 
-      <!-- 状态设置 -->
+      <!-- 文件事实（状态由这三列推导，不再提供「设置状态」） -->
       <div class="action-group">
-        <span class="action-label">设置状态</span>
-        <div class="action-buttons">
-          <select v-model="selectedTargetStatus" class="select status-select">
-            <option value="uploaded">uploaded</option>
-            <option value="markdown_done">markdown_done</option>
-          </select>
-          <button class="btn btn-warning" @click="setStatus">设置状态</button>
+        <span class="action-label">文件事实</span>
+        <div class="action-buttons file-facts">
+          <span class="file-fact">
+            <span class="file-label">Markdown</span>
+            <span class="file-fact-value" :class="doc.has_md ? 'ok' : 'muted'">
+              {{ doc.has_md ? '存在' : '不存在' }}
+            </span>
+          </span>
+          <span class="file-fact">
+            <span class="file-label">PDF</span>
+            <span class="file-fact-value" :class="doc.has_pdf ? 'ok' : 'muted'">
+              {{ doc.has_pdf ? '存在' : '不存在' }}
+            </span>
+          </span>
+          <span class="file-fact">
+            <span class="file-label">同步</span>
+            <span class="file-fact-value" :class="doc.synced ? 'ok' : 'warn'">
+              {{ doc.synced ? (doc.fs_synced_at || '已同步') : '未同步' }}
+            </span>
+          </span>
+          <button class="btn btn-sm btn-outline" @click="load()">重新同步</button>
         </div>
+      </div>
+
+      <!-- 清空解析产物（唯一的「重新解析」通道） -->
+      <div class="action-group">
+        <span class="action-label">清空解析产物</span>
+        <div class="action-buttons">
+          <button class="btn btn-warning" @click="clearParseOutputClick">删除 Markdown + 资源包</button>
+        </div>
+        <p class="action-hint">状态由文件事实推导，删除后即回到「待解析」；此操作不可撤销。</p>
       </div>
 
       <!-- 危险操作 -->
@@ -236,7 +259,7 @@ import {
   extractDocument,
   indexDocument,
   getDocumentIndexes,
-  resetDocument,
+  clearParseOutput,
   crossrefDocument,
   extractPdfMeta
 } from '@/api/pipeline'
@@ -261,7 +284,6 @@ const replaceMarkdownInput = ref<HTMLInputElement>()
 const replaceAssetInput = ref<HTMLInputElement>()
 const vectorDbs = ref<VectorDbConfig[]>([])
 const selectedIndexDb = ref('')
-const selectedTargetStatus = ref('uploaded')
 const docIndexes = ref<DocumentIndexInfo[]>([])
 const hashResult = ref<{ file_hash: string; old_file_hash: string | null } | null>(null)
 
@@ -410,18 +432,19 @@ async function runIndex() {
   }
 }
 
-async function setStatus() {
+async function clearParseOutputClick() {
   const id = parseInt(route.params.id as string)
-  const target = selectedTargetStatus.value
-  if (!confirm(`确定将文档状态设置为「${target}」？`)) return
+  if (!confirm('确定删除该文档的 Markdown 与资源包？（删除后状态回到「待解析」，不可撤销）')) return
+  if (!confirm('再次确认：此操作不可撤销。')) return
   try {
-    const res = await resetDocument(id, target)
-    showSuccess(`状态已设置为 ${res.status}`)
+    const res = await clearParseOutput(id)
+    showSuccess(`已清空解析产物（Markdown: ${res.removed_markdown ? '删除' : '无'}，资源包: ${res.removed_asset ? '删除' : '无'}）`)
     load()
   } catch (err) {
     showError(getErrorMessage(err))
   }
 }
+
 
 async function removeDocument() {
   const id = parseInt(route.params.id as string)
@@ -630,6 +653,38 @@ function formatFile(size: number | null): string {
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
+}
+
+.file-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: center;
+}
+
+.file-fact {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.file-fact-value.ok {
+  color: var(--success-text);
+}
+
+.file-fact-value.muted {
+  color: var(--text-secondary);
+}
+
+.file-fact-value.warn {
+  color: var(--warning-text);
+}
+
+.action-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .status-select {

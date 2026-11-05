@@ -206,6 +206,31 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("数据库初始化完成: {}", settings.database_url());
     let db_arc = Arc::new(db);
 
+    // 启动引导：恢复运行时 sidecar（上次失败原因）+ 后台全量同步文件事实。
+    // 文献状态不再存数据库，全靠这三列 size + fs_synced_at，因此启动时兜一次：
+    // 修复带外文件改动、崩溃遗留、迁移后偏差。不阻塞启动。
+    crate::services::file_state::load_all(&settings);
+    {
+        let db = db_arc.clone();
+        let settings = settings.clone();
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let ids: Vec<(i64,)> = sqlx::query_as("SELECT id FROM documents")
+                .fetch_all(db.pool())
+                .await
+                .unwrap_or_default();
+            let total = ids.len();
+            for (id,) in &ids {
+                crate::routers::documents::sync_doc_file_sizes(&db, &settings, *id).await;
+            }
+            tracing::info!(
+                "启动同步：{} 条文档的文件事实已同步，耗时 {:?}",
+                total,
+                started.elapsed()
+            );
+        });
+    }
+
     // 构建应用
     let app = create_app(
         db_arc.clone(),

@@ -131,13 +131,32 @@
             </select>
           </div>
           <div class="qb-section">
-            <label class="qb-label">处理状态</label>
-            <select v-model="form.status" class="qb-select">
+            <label class="qb-label">Markdown 文件</label>
+            <select v-model="form.mdState" class="qb-select">
               <option value="">全部</option>
-              <option value="uploaded">uploaded（已上传）</option>
-              <option value="parsing">parsing（解析中）</option>
-              <option value="markdown_done">done（解析完成）</option>
-              <option value="error">error（出错）</option>
+              <option value="present">present（有）</option>
+              <option value="absent">absent（确定没有）</option>
+              <option value="unknown">unknown（未同步）</option>
+            </select>
+          </div>
+          <div class="qb-section">
+            <label class="qb-label">PDF 文件</label>
+            <select v-model="form.pdfState" class="qb-select">
+              <option value="">全部</option>
+              <option value="present">present（有）</option>
+              <option value="absent">absent（确定没有，如 BibTeX 条目）</option>
+              <option value="unknown">unknown（未同步）</option>
+            </select>
+          </div>
+          <div class="qb-section">
+            <label class="qb-label">PDF 健康</label>
+            <select v-model="form.pdfHealth" class="qb-select">
+              <option value="">全部</option>
+              <option value="ok">ok（正常）</option>
+              <option value="warning">warning（警告）</option>
+              <option value="error">error（损坏）</option>
+              <option value="missing">missing（缺失）</option>
+              <option value="unchecked">unchecked（未检查）</option>
             </select>
           </div>
         </div>
@@ -302,7 +321,9 @@ interface QueryForm {
   yearFrom: string | number
   yearTo: string | number
   docType: string
-  status: string
+  mdState: string
+  pdfState: string
+  pdfHealth: string
   sortBy: string
   sortOrder: string
   pdfSizeOp: string
@@ -327,7 +348,9 @@ const form = reactive<QueryForm>({
   yearFrom: '',
   yearTo: '',
   docType: '',
-  status: '',
+  mdState: '',
+  pdfState: '',
+  pdfHealth: '',
   sortBy: '',
   sortOrder: 'desc',
   pdfSizeOp: '',
@@ -411,9 +434,15 @@ const generatedQuery = computed(() => {
     parts.push(`type:${form.docType}`)
   }
 
-  // 状态（使用 status: 语法）
-  if (form.status) {
-    parts.push(`status:${form.status}`)
+  // 文件事实（状态不再可筛选，改按「文件是否存在」）
+  if (form.mdState) {
+    parts.push(`md:${form.mdState}`)
+  }
+  if (form.pdfState) {
+    parts.push(`pdf:${form.pdfState}`)
+  }
+  if (form.pdfHealth) {
+    parts.push(`health:${form.pdfHealth}`)
   }
 
   // 排序
@@ -475,7 +504,9 @@ function resetForm() {
   form.yearFrom = ''
   form.yearTo = ''
   form.docType = ''
-  form.status = ''
+  form.mdState = ''
+  form.pdfState = ''
+  form.pdfHealth = ''
   form.sortBy = ''
   form.sortOrder = 'desc'
   form.pdfSizeOp = ''
@@ -527,8 +558,14 @@ function parseInitialQuery(q: string) {
         case 'doc_type':
           form.docType = value
           break
-        case 'status':
-          form.status = value
+        case 'md':
+          form.mdState = value
+          break
+        case 'pdf':
+          form.pdfState = value
+          break
+        case 'health':
+          form.pdfHealth = value
           break
         case 'sort':
           form.sortBy = value

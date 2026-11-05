@@ -47,7 +47,7 @@
             <span v-if="doc.pdf_health_message" class="health-msg">{{ doc.pdf_health_message }}</span>
           </td>
         </tr>
-        <tr><th>状态</th><td><StatusBadge :status="doc.status" :status_message="doc.status_message" /></td></tr>
+        <tr><th>状态</th><td><StatusBadge :status="doc.status" :status_message="doc.status_message" :synced="doc.synced" /></td></tr>
         <tr v-if="doc.status === 'error' && doc.status_message">
           <th>错误详情</th>
           <td class="error-message">{{ doc.status_message }}</td>
@@ -133,7 +133,7 @@
         </div>
         <div class="info-row">
           <span class="info-label">状态</span>
-          <span class="info-value"><StatusBadge :status="doc.status" :status_message="doc.status_message" /></span>
+          <span class="info-value"><StatusBadge :status="doc.status" :status_message="doc.status_message" :synced="doc.synced" /></span>
         </div>
         <div v-if="doc.status === 'error' && doc.status_message" class="info-row error-row">
           <span class="info-label">错误详情</span>

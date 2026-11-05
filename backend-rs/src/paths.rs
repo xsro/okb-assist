@@ -37,6 +37,11 @@ pub fn get_crossref_path(settings: &Settings, doc_id: i64) -> String {
     resolve_template(&settings.crossref_path_template(), doc_id, settings)
 }
 
+/// 运行时状态 sidecar 路径（`{id}` = 文档 ID，字符串）
+pub fn get_runtime_state_path(settings: &Settings, doc_id: i64) -> String {
+    resolve_template(&settings.runtime_state_path_template(), doc_id, settings)
+}
+
 pub fn get_markdown_path_buf(settings: &Settings, doc_id: i64) -> PathBuf {
     PathBuf::from(get_markdown_path(settings, doc_id))
 }

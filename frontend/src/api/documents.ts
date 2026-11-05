@@ -20,10 +20,9 @@ import type {
 /** 文档列表（分页 + 筛选 + 排序） */
 export function listDocuments(params: {
   q?: string
-  status_filter?: string
   doc_type_filter?: string
   search_fields?: string
-  sort_by?: 'created_at' | 'title' | 'year' | 'id' | 'authors' | 'status' | 'updated_at'
+  sort_by?: 'created_at' | 'title' | 'year' | 'id' | 'authors' | 'updated_at' | 'pdf_size' | 'md_size' | 'zip_size'
   sort_order?: 'asc' | 'desc'
   page?: number
   page_size?: number
@@ -35,6 +34,24 @@ export function listDocuments(params: {
   id_max?: number
   journal?: string
   authors?: string
+  // ── 文件事实筛选（取代原 status_filter）──
+  /** present / absent / unknown（逗号多选） */
+  md_state?: string
+  pdf_state?: string
+  zip_state?: string
+  /** 1 = 已同步过文件事实，0 = 未同步 */
+  synced?: 0 | 1
+  has_md?: 0 | 1
+  has_pdf?: 0 | 1
+  has_zip?: 0 | 1
+  pdf_size_min?: number
+  pdf_size_max?: number
+  md_size_min?: number
+  md_size_max?: number
+  zip_size_min?: number
+  zip_size_max?: number
+  /** ok / warning / error / missing / unchecked（逗号多选） */
+  pdf_health?: string
 }) {
   return apiGet<SearchResultList>('/assist/api/documents/', params)
 }

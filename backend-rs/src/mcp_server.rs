@@ -22,8 +22,8 @@ use crate::services::grep_search::{grep_search as do_grep, parse_doc_ids};
 /// Document 全部列的 SELECT 语句（列顺序与 `Document` 结构体字段一致）。
 const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, year, doi, source, journal, \
      keywords, abstract, category, doc_type, language, title_en, authors_en, \
-     keywords_en, abstract_en, journal_en, mineru_task_id, status, status_message, \
-     progress, qdrant_collection, vector_db_id, created_at, updated_at, \
+     keywords_en, abstract_en, journal_en, mineru_task_id, fs_synced_at, \
+     qdrant_collection, vector_db_id, created_at, updated_at, \
      pdf_size, md_size, zip_size, pdf_health, pdf_health_message";
 
 /// 分页 offset 上限（防止恶意大 offset 导致全表扫描）。
@@ -78,7 +78,7 @@ impl McpServer {
                         "year_to": {"type": "integer", "default": 0, "description": "Filter: maximum publication year"},
                         "doc_type": {"type": "string", "default": "", "description": "Filter: document type (comma-separated for multiple)"},
                         "fields": {"type": "array", "items": {"type": "string"}, "description": "Optional list of fields to return (e.g. ['id','title','year'])"},
-                        "sort_by": {"type": "string", "default": "updated_at", "description": "Sort field: title, authors, year, id, journal, status, doc_type, created_at, updated_at"},
+                        "sort_by": {"type": "string", "default": "updated_at", "description": "Sort field: title, authors, year, id, journal, doc_type, created_at, updated_at, pdf_size, md_size, zip_size"},
                         "sort_order": {"type": "string", "default": "desc", "description": "Sort direction: asc or desc"}
                     },
                     "required": ["query"]
@@ -110,18 +110,25 @@ impl McpServer {
             }),
             json!({
                 "name": "list_documents",
-                "description": "Search or list documents. Supports search by title/author, filter by status and document type, and field filtering.",
+                "description": "Search or list documents. Supports search by title/author, filtering by file facts and document type, plus field filtering. NOTE: the old `status` parameter was removed — use md_state / pdf_state / zip_state (present|absent|unknown), synced (0|1) or pdf_health instead.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "default": ""},
-                        "status": {"type": "string", "default": ""},
                         "doc_type": {"type": "string", "default": ""},
+                        "md_state": {"type": "string", "default": "", "description": "Markdown file facts: present / absent / unknown (comma-separated for multiple)"},
+                        "pdf_state": {"type": "string", "default": "", "description": "PDF file facts: present / absent / unknown"},
+                        "zip_state": {"type": "string", "default": "", "description": "Image asset zip file facts: present / absent / unknown"},
+                        "synced": {"type": "string", "default": "", "description": "1 = file facts already synced from disk, 0 = not synced yet (status unknown)"},
+                        "has_md": {"type": "string", "default": "", "description": "1 = has Markdown, 0 = no Markdown (includes unsynced)"},
+                        "has_pdf": {"type": "string", "default": "", "description": "1 = has PDF, 0 = no PDF"},
+                        "has_zip": {"type": "string", "default": "", "description": "1 = has image asset zip, 0 = none"},
+                        "pdf_health": {"type": "string", "default": "", "description": "ok / warning / error / missing / unchecked (comma-separated)"},
                         "page": {"type": "integer", "default": 1},
                         "page_size": {"type": "integer", "default": 20, "description": "Results per page (1-100, alias: limit)"},
                         "limit": {"type": "integer", "default": 20, "description": "Results per page (alias for page_size)"},
                         "fields": {"type": "array", "items": {"type": "string"}, "description": "Optional list of fields to return (e.g. ['id','title','year'])"},
-                        "sort_by": {"type": "string", "default": "created_at", "description": "Sort field: title, authors, year, id, journal, status, doc_type, created_at, updated_at"},
+                        "sort_by": {"type": "string", "default": "created_at", "description": "Sort field: title, authors, year, id, journal, doc_type, created_at, updated_at, pdf_size, md_size, zip_size"},
                         "sort_order": {"type": "string", "default": "desc", "description": "Sort direction: asc or desc"}
                     }
                 }
@@ -186,7 +193,65 @@ impl McpServer {
             })
     }
 
+    /// 严格参数校验：拒绝 `inputSchema` 未声明的参数。
+    ///
+    /// 用于避免旧客户端（如传旧 `status`）**静默丢失筛选**：直接 `isError` 并给出
+    /// 可用参数清单 + 替代建议（错误文本会回给工具调用方，包括问答里的模型）。
+    ///
+    /// 宽容处：`args` 不是对象、或某键值为 `null` 时跳过（部分客户端会把所有字段都填 `null`）。
+    fn reject_unknown_args(tools: &[Value], name: &str, args: &Value) -> Result<(), Value> {
+        let Some(obj) = args.as_object() else { return Ok(()) };
+        let Some(tool) = tools.iter().find(|t| t["name"].as_str() == Some(name)) else {
+            return Ok(());
+        };
+        let Some(props) = tool["inputSchema"]["properties"].as_object() else {
+            return Ok(());
+        };
+
+        let unknown: Vec<String> = obj
+            .iter()
+            .filter(|(k, v)| !v.is_null() && !props.contains_key(k.as_str()))
+            .map(|(k, _)| k.clone())
+            .collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+
+        let mut allowed: Vec<&str> = props.keys().map(|s| s.as_str()).collect();
+        allowed.sort_unstable();
+        let hints: Vec<String> = unknown.iter().map(|k| Self::removed_arg_hint(k)).collect();
+        let msg = format!(
+            "未知参数 {}。可用参数：{}。{}",
+            unknown
+                .iter()
+                .map(|k| format!("`{}`", k))
+                .collect::<Vec<_>>()
+                .join(", "),
+            allowed.join(", "),
+            hints.join(" ")
+        );
+        Err(json!({
+            "isError": true,
+            "content": [{"type": "text", "text": Self::err("invalid_argument", &msg)}]
+        }))
+    }
+
+    /// 已删除参数的替代提示（只用于报错文案，**不是**兼容层，不会让旧参数生效）
+    fn removed_arg_hint(name: &str) -> String {
+        match name {
+            "status" => "`status` 已移除：请改用 md_state / pdf_state / zip_state（present|absent|unknown）、synced（0|1）或 pdf_health（ok|warning|error|missing|unchecked）。".to_string(),
+            "reset_status" => "`reset_status` 已移除：重新解析请调 POST /assist/api/pipeline/{id}/reset（清空解析产物）。".to_string(),
+            _ => String::new(),
+        }
+    }
+
     pub async fn call_tool(&self, name: &str, args: &Value) -> Value {
+        // 严格参数校验：schema 未声明的参数直接报错（不发默忽略）
+        let tools = self.list_tools().await;
+        if let Err(e) = Self::reject_unknown_args(&tools, name, args) {
+            return e;
+        }
+
         // 前置校验：必填参数在进入工具前检查
         macro_rules! check_required_str {
             ($key:expr) => {
@@ -256,7 +321,15 @@ impl McpServer {
 
     fn format_doc(&self, doc: &Document) -> Value {
         let year = doc.year;
-        let has_markdown = std::path::Path::new(&paths::get_markdown_path(&self.settings, doc.id)).exists();
+        // 状态由文件事实（同步列）+ 运行时推导，不再读状态列/不 stat
+        let state = crate::services::file_state::derive_state(
+            doc.fs_synced_at.as_deref(),
+            doc.pdf_size,
+            doc.md_size,
+            crate::routers::pipeline::runtime_task(doc.id).as_ref(),
+            crate::services::file_state::last_error(doc.id).as_deref(),
+            doc.mineru_task_id.as_deref(),
+        );
         let base = self.settings.base_url();
         let prefix = if base.is_empty() { String::new() } else { base };
         let (alias, alias_expires) = get_or_create_alias(
@@ -278,8 +351,15 @@ impl McpServer {
             "category": doc.category,
             "doc_type": doc.doc_type,
             "language": doc.language,
-            "status": doc.status,
-            "has_markdown": has_markdown,
+            "status": state.status.as_str(),
+            "status_message": state.message,
+            "synced": state.synced,
+            "has_markdown": doc.has_md(),
+            "has_pdf": doc.has_pdf(),
+            "has_asset": doc.has_zip(),
+            "pdf_health": doc.pdf_health,
+            "pdf_size": doc.pdf_size,
+            "md_size": doc.md_size,
             "pdf_need_auth_url": format!("{}/assist/api/documents/{}/pdf", prefix, doc.id),
             "temp_downloadable_pdf_url": format!("{}/assist/file/{}", prefix, alias),
             "temp_downloadable_pdf_expiration": alias_expires,
@@ -358,10 +438,12 @@ impl McpServer {
         ("year", "year"),
         ("id", "id"),
         ("journal", "journal"),
-        ("status", "status"),
         ("doc_type", "doc_type"),
         ("created_at", "created_at"),
         ("updated_at", "updated_at"),
+        ("pdf_size", "pdf_size"),
+        ("md_size", "md_size"),
+        ("zip_size", "zip_size"),
     ];
 
     /// 拼接 ORDER BY 子句（防 SQL 注入：仅允许白名单字段）。
@@ -536,7 +618,14 @@ impl McpServer {
                     "doc_type": doc.doc_type.clone().unwrap_or_default(),
                     "language": doc.language.clone().unwrap_or_default(),
                     "category": doc.category.clone().unwrap_or_default(),
-                    "status": doc.status,
+                    "status": crate::services::file_state::derive_state(
+                        doc.fs_synced_at.as_deref(),
+                        doc.pdf_size,
+                        doc.md_size,
+                        crate::routers::pipeline::runtime_task(doc.id).as_ref(),
+                        crate::services::file_state::last_error(doc.id).as_deref(),
+                        doc.mineru_task_id.as_deref(),
+                    ).status.as_str(),
                 });
                 Self::filter_fields(&mut v, &fields);
                 v
@@ -652,7 +741,6 @@ impl McpServer {
 
     async fn tool_list_documents(&self, args: &Value) -> String {
         let query = args["query"].as_str().unwrap_or("").to_string();
-        let status = args["status"].as_str().unwrap_or("").to_string();
         let doc_type = args["doc_type"].as_str().unwrap_or("").to_string();
         let page = args["page"].as_i64().unwrap_or(1).max(1) as i64;
         // page_size 为主，limit 为兼容别名，范围 1-100
@@ -667,7 +755,9 @@ impl McpServer {
 
         // 计数
         let mut cqb = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM documents WHERE 1=1");
-        append_list_filters(&mut cqb, &query, &status, &doc_type);
+        if let Err(e) = append_list_filters(&mut cqb, &query, &doc_type, args) {
+            return Self::err("invalid_argument", &e);
+        }
         let total: i64 = cqb
             .build()
             .fetch_one(self.db.pool())
@@ -677,7 +767,9 @@ impl McpServer {
 
         // 分页查询
         let mut qb = sqlx::QueryBuilder::new(format!("SELECT {} FROM documents WHERE 1=1", DOC_COLUMNS));
-        append_list_filters(&mut qb, &query, &status, &doc_type);
+        if let Err(e) = append_list_filters(&mut qb, &query, &doc_type, args) {
+            return Self::err("invalid_argument", &e);
+        }
         Self::append_order_clause(&mut qb, &sort_by, &sort_order);
         qb.push(" LIMIT ").push_bind(page_size)
             .push(" OFFSET ").push_bind((page - 1).saturating_mul(page_size));
@@ -734,21 +826,27 @@ impl McpServer {
             .unwrap_or(0);
 
         let mut status_counts = serde_json::Map::new();
-        for s in [
-            DocStatus::Uploaded,
-            DocStatus::Parsing,
-            DocStatus::MarkdownDone,
-            DocStatus::Error,
-        ] {
-            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents WHERE status = ?")
-                .bind(s.as_str())
-                .fetch_one(self.db.pool())
-                .await
-                .unwrap_or(0);
-            if count > 0 {
-                status_counts.insert(s.as_str().to_string(), json!(count));
-            }
+        let (uploaded, markdown_done, unsynced): (i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+               SUM(CASE WHEN COALESCE(md_size,0) = 0 THEN 1 ELSE 0 END), \
+               SUM(CASE WHEN COALESCE(md_size,0) > 0 THEN 1 ELSE 0 END), \
+               SUM(CASE WHEN fs_synced_at IS NULL THEN 1 ELSE 0 END) \
+             FROM documents",
+        )
+        .fetch_one(self.db.pool())
+        .await
+        .unwrap_or((0, 0, 0));
+        status_counts.insert(DocStatus::Uploaded.as_str().to_string(), json!(uploaded));
+        status_counts.insert(DocStatus::MarkdownDone.as_str().to_string(), json!(markdown_done));
+        let runtime_errors = crate::services::file_state::error_snapshot().len() as i64;
+        if runtime_errors > 0 {
+            status_counts.insert(DocStatus::Error.as_str().to_string(), json!(runtime_errors));
         }
+        let runtime_parsing = crate::routers::pipeline::runtime_task_count();
+        if runtime_parsing > 0 {
+            status_counts.insert(DocStatus::Parsing.as_str().to_string(), json!(runtime_parsing));
+        }
+        status_counts.insert("unsynced".to_string(), json!(unsynced));
 
         let rows: Vec<(Option<String>,)> =
             sqlx::query_as("SELECT doc_type FROM documents WHERE doc_type IS NOT NULL AND doc_type != ''")
@@ -766,7 +864,7 @@ impl McpServer {
         sorted.sort_by(|a, b| b.1.as_i64().unwrap_or(0).cmp(&a.1.as_i64().unwrap_or(0)));
         let type_counts_sorted: serde_json::Map<String, Value> = sorted.into_iter().collect();
 
-        // 索引状态记在 document_vector_index 上（documents.status 只表示解析阶段）
+        // 索引状态记在 document_vector_index 上（documents 不再有解析状态列）
         let indexed_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(DISTINCT document_id) FROM document_vector_index WHERE status = 'indexed'",
         )
@@ -839,28 +937,23 @@ impl McpServer {
 // ── 辅助函数 ──
 
 /// 向 QueryBuilder 追加 list_documents 的筛选条件。
+///
+/// 状态参数（`status`）已删除 —— 改用文件事实参数（见 `services::file_state`）：
+/// `md_state` / `pdf_state` / `zip_state`（present/absent/unknown）、`synced`、
+/// `has_md` / `has_pdf` / `has_zip`、`pdf_health`。非法取值返回 `Err`（→ `isError`）。
 fn append_list_filters<'a>(
     qb: &mut sqlx::QueryBuilder<'a, sqlx::Sqlite>,
     query: &str,
-    status: &str,
     doc_type: &str,
-) {
+    args: &Value,
+) -> Result<(), String> {
+    use crate::services::file_state::{self, FileKind};
+
     if !query.trim().is_empty() {
         let like = format!("%{}%", query.trim());
         qb.push(" AND (title LIKE ").push_bind(like.clone())
             .push(" OR authors LIKE ").push_bind(like.clone())
             .push(" OR filename LIKE ").push_bind(like).push(")");
-    }
-    if !status.trim().is_empty() {
-        let statuses: Vec<String> = status.split(',').map(|s| s.trim().to_string()).collect();
-        qb.push(" AND status IN (");
-        for (i, s) in statuses.iter().enumerate() {
-            if i > 0 {
-                qb.push(", ");
-            }
-            qb.push_bind(s.clone());
-        }
-        qb.push(")");
     }
     if !doc_type.trim().is_empty() {
         let types: Vec<String> = doc_type.split(',').map(|s| s.trim().to_string()).collect();
@@ -873,6 +966,73 @@ fn append_list_filters<'a>(
         }
         qb.push(")");
     }
+
+    // 三态筛选（逗号多选 = OR）
+    for (kind, key) in [
+        (FileKind::Pdf, "pdf_state"),
+        (FileKind::Md, "md_state"),
+        (FileKind::Zip, "zip_state"),
+    ] {
+        let Some(raw) = args[key].as_str().filter(|s| !s.trim().is_empty()) else { continue };
+        let mut conds: Vec<String> = Vec::new();
+        for st in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let cond = file_state::state_condition(kind, st)
+                .ok_or_else(|| format!("{} 取值非法：{}（仅 present / absent / unknown）", key, st))?;
+            conds.push(cond);
+        }
+        if conds.len() == 1 {
+            qb.push(" AND ").push(conds.remove(0));
+        } else if !conds.is_empty() {
+            qb.push(" AND (").push(conds.join(" OR ")).push(")");
+        }
+    }
+
+    // 布尔：是否已同步 / 是否有某文件
+    for (key, expr_yes, expr_no) in [
+        ("synced", "fs_synced_at IS NOT NULL", "fs_synced_at IS NULL"),
+        ("has_pdf", "COALESCE(pdf_size,0) > 0", "NOT (COALESCE(pdf_size,0) > 0)"),
+        ("has_md", "COALESCE(md_size,0) > 0", "NOT (COALESCE(md_size,0) > 0)"),
+        ("has_zip", "COALESCE(zip_size,0) > 0", "NOT (COALESCE(zip_size,0) > 0)"),
+    ] {
+        let Some(raw) = args[key].as_str().filter(|s| !s.trim().is_empty()) else { continue };
+        let expr = match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "y" | "on" => expr_yes,
+            "0" | "false" | "no" | "n" | "off" => expr_no,
+            _ => return Err(format!("{} 只接受 1/0（或 true/false）", key)),
+        };
+        qb.push(" AND ").push(expr);
+    }
+
+    // PDF 健康（逗号多选；unchecked = IS NULL）
+    if let Some(raw) = args["pdf_health"].as_str().filter(|s| !s.trim().is_empty()) {
+        let mut values: Vec<String> = Vec::new();
+        let mut unchecked = false;
+        for item in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            match item.to_ascii_lowercase().as_str() {
+                "ok" | "warning" | "error" | "missing" => values.push(item.to_ascii_lowercase()),
+                "unchecked" | "none" | "null" => unchecked = true,
+                _ => return Err(format!("pdf_health 取值非法：{}（ok/warning/error/missing/unchecked）", item)),
+            }
+        }
+        if !values.is_empty() {
+            qb.push(" AND pdf_health IN (");
+            for (i, v) in values.iter().enumerate() {
+                if i > 0 {
+                    qb.push(", ");
+                }
+                qb.push_bind(v.clone());
+            }
+            if unchecked {
+                qb.push(") OR pdf_health IS NULL");
+            } else {
+                qb.push(")");
+            }
+        } else if unchecked {
+            qb.push(" AND pdf_health IS NULL");
+        }
+    }
+
+    Ok(())
 }
 
 /// 向 QueryBuilder 追加 search_info 的筛选条件（不含 WHERE 关键字）。

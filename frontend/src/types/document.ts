@@ -18,13 +18,21 @@ export interface Document {
   doi: string | null
   abstract: string | null
   keywords: string | null
+  /** 派生状态：由文件事实（size 列）+ 运行时推导，非数据库字段 */
   status: DocStatus
   status_message: string | null
+  /** 文件事实是否已从磁盘同步过（false = 状态未知） */
+  synced: boolean
+  fs_synced_at?: string | null
+  has_pdf: boolean
+  has_md: boolean
+  has_zip: boolean
   index_status: IndexStatus
   indexed_dbs?: string[]
   filename: string
   file_hash: string | null
   file_size: number | null
+  /** 文件大小：来自「从磁盘同步」的列，可能滞后（详情页会实时校正） */
   pdf_size: number | null
   md_size: number | null
   zip_size: number | null
@@ -56,12 +64,28 @@ export interface SearchResultList {
 
 export interface SearchParams {
   q?: string
-  status_filter?: string
   doc_type_filter?: string
-  sort_by?: 'created_at' | 'title' | 'year' | 'id' | 'authors' | 'status' | 'updated_at'
+  sort_by?: 'created_at' | 'title' | 'year' | 'id' | 'authors' | 'updated_at' | 'pdf_size' | 'md_size' | 'zip_size'
   sort_order?: 'asc' | 'desc'
   page?: number
   page_size?: number
+  /** 文件事实三态：present / absent / unknown（逗号多选） */
+  md_state?: string
+  pdf_state?: string
+  zip_state?: string
+  /** 1 = 已同步文件事实，0 = 未同步 */
+  synced?: 0 | 1
+  has_md?: 0 | 1
+  has_pdf?: 0 | 1
+  has_zip?: 0 | 1
+  pdf_size_min?: number
+  pdf_size_max?: number
+  md_size_min?: number
+  md_size_max?: number
+  zip_size_min?: number
+  zip_size_max?: number
+  /** ok / warning / error / missing / unchecked（逗号多选） */
+  pdf_health?: string
 }
 
 export interface TocItem {

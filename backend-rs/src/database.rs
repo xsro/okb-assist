@@ -100,9 +100,7 @@ impl Database {
                 abstract_en TEXT,
                 journal_en TEXT,
                 mineru_task_id TEXT,
-                status TEXT DEFAULT 'uploaded',
-                status_message TEXT,
-                progress REAL DEFAULT 0.0,
+                fs_synced_at TEXT,
                 qdrant_collection TEXT,
                 vector_db_id TEXT,
                 pdf_size INTEGER,
@@ -149,6 +147,10 @@ impl Database {
                 "pdf_health_message",
                 "ALTER TABLE documents ADD COLUMN pdf_health_message TEXT",
             ),
+            (
+                "fs_synced_at",
+                "ALTER TABLE documents ADD COLUMN fs_synced_at TEXT",
+            ),
         ] {
             if !Self::has_column(&self.pool, "documents", column).await? {
                 sqlx::query(ddl).execute(&self.pool).await?;
@@ -156,11 +158,39 @@ impl Database {
             }
         }
 
+        // ── 状态列移除 ─────────────────────────────
+        // 文献状态改为「由文件事实推导」（见 `services::file_state`），
+        // 因此 `status` / `status_message` / `progress` 三列整体删除。
+        // 老库先备份一份旧值（`DROP COLUMN` 不可逆），便于回滚排查。
+        if Self::has_column(&self.pool, "documents", "status").await? {
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS documents_status_legacy AS \
+                 SELECT id, status, status_message, progress, datetime('now') AS archived_at \
+                 FROM documents",
+            )
+            .execute(&self.pool)
+            .await?;
+            tracing::info!("数据库迁移：documents 旧状态已备份到 documents_status_legacy");
+        }
+        for column in ["status", "status_message", "progress"] {
+            if Self::has_column(&self.pool, "documents", column).await? {
+                sqlx::query(&format!("ALTER TABLE documents DROP COLUMN {}", column))
+                    .execute(&self.pool)
+                    .await?;
+                tracing::info!("数据库迁移：documents 表删除列 {}", column);
+            }
+        }
+
         // 常用查找列建索引：`by-hash` / `by-doi` / 上传去重都是这几列上的等值查询，
         // 文档数量上去后没索引就退化成全表扇描（幂等，可重复执行）。
+        // 文件事实列（size / fs_synced_at / pdf_health）是列表筛选与排序的主力条件，同样建索引。
         for ddl in [
             "CREATE INDEX IF NOT EXISTS idx_documents_file_hash ON documents(file_hash)",
             "CREATE INDEX IF NOT EXISTS idx_documents_doi ON documents(doi)",
+            "CREATE INDEX IF NOT EXISTS idx_documents_md_size ON documents(md_size)",
+            "CREATE INDEX IF NOT EXISTS idx_documents_pdf_size ON documents(pdf_size)",
+            "CREATE INDEX IF NOT EXISTS idx_documents_fs_synced_at ON documents(fs_synced_at)",
+            "CREATE INDEX IF NOT EXISTS idx_documents_pdf_health ON documents(pdf_health)",
         ] {
             sqlx::query(ddl).execute(&self.pool).await?;
         }

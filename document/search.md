@@ -35,21 +35,29 @@ transformer attention
 | `doc_type:类型` | 同 type | `doc_type:book` |
 | `lang:语言` | 按语言筛选 | `lang:en` |
 | `language:语言` | 同 lang | `language:zh` |
-| `status:状态` | 按文档状态筛选（见下方状态值） | `status:done` |
+| `md:三态` | 按 Markdown 文件筛选（`present` 有 / `absent` 确定没有 / `unknown` 未同步） | `md:present` |
+| `pdf:三态` | 按 PDF 文件筛选（同上） | `pdf:absent` |
+| `zip:三态` | 按资源包筛选（同上） | `zip:present` |
+| `health:健康` | 按 PDF 健康筛选（`ok`/`warning`/`error`/`missing`/`unchecked`） | `health:error` |
+| `filesize_pdf:大小` | 按 PDF 大小筛选（支持 `>`/`>=`/`<`/`<=`/范围，单位字节） | `filesize_pdf:>1048576` |
+| `filesize_md:大小` | 按 Markdown 大小筛选 | `filesize_md:>0` |
+| `filesize_zip:大小` | 按资源包大小筛选 | `filesize_zip:>1024` |
 | `id:ID` | 按文献 ID 筛选（支持范围，见下方） | `id:1`、`id:1-30` |
 | `sort:字段` | 排序字段 | `sort:year` |
 | `order:方向` | 排序方向（asc 升序 / desc 降序） | `order:desc` |
 
-**排序字段可选值**：`title`、`authors`、`year`、`id`、`doc_type`、`status`、`journal`、`doi`、`category`、`created_at`（登记时间）、`updated_at`（更新时间）
+**排序字段可选值**：`title`、`authors`、`year`、`id`、`doc_type`、`journal`、`doi`、`category`、`created_at`（登记时间）、`updated_at`（更新时间）、`pdf_size`、`md_size`、`zip_size`（后三者按文件大小）
 
-**状态值说明**：
+**文件事实三态说明**（文献状态不再可筛选，改为按「文件是否存在」筛）：
 
-| 查询值 | 含义 | 后端映射 |
+| 查询值 | 含义 | 后端条件 |
 |--------|------|---------|
-| `uploaded` | 已上传未解析 | `uploaded` |
-| `parsing` | 解析中 | `parsing` |
-| `done` | 解析完成 | `markdown_done` |
-| `error` | 解析出错 | `error` |
+| `present` | 文件存在 | `size > 0` |
+| `absent` | 已同步且确定没有该文件 | `fs_synced_at` 非空且 `size` 为空/0 |
+| `unknown` | 还没从磁盘同步过（状态未知） | `fs_synced_at IS NULL` |
+
+> 文献状态（已上传/解析中/解析完成/出错）现在由文件事实 + 运行时推导，**不再有 `status:` 筛选语法**；
+> 想看「已解析」就用 `md:present`，想看「待解析」用 `md:absent pdf:present`。
 
 ### 年份范围查询
 
@@ -80,7 +88,7 @@ transformer attention
 常用于快速定位或对比一组已知 ID 的文献，例如：
 
 ```
-id:1-30 status:done sort:id order:asc
+id:1-30 md:present sort:id order:asc
 ```
 
 含义：查看 ID 1~30 中已解析完成的文献，并按 ID 升序排列。
@@ -117,7 +125,7 @@ title:transformer OR title:attention
 空格分隔多个条件 = AND 逻辑：
 
 ```
-transformer title:attention year:>2018 status:done
+transformer title:attention year:>2018 md:present
 ```
 
 含义：搜索 `transformer` 关键词，标题含 `attention`，2018 年后，已解析完成的文档。
@@ -184,7 +192,7 @@ build_where_clause() / build_search_sql()（SQL WHERE 构建）→ 结果列表
   author:lecun year:2019-2024 sort:year order:asc
 
 # 查找所有解析完成的书籍
-  type:book status:done
+  type:book md:present
 
 # 查找摘要中包含 pre-training 的 2023 年文章（按标题排序）
   abstract:pre-training year:2023 type:article sort:title

@@ -14,7 +14,7 @@
  *   expr1 OR expr2          逻辑或
  *
  * 示例：
- *   transformer title:attention year:>2018 status:done type:article
+ *   transformer title:attention year:>2018 md:present type:article
  *   id:1-30 year:2023
  *   author:smith journal:Nature
  *   "deep learning" year:2020-2023 OR year:2018
@@ -25,7 +25,7 @@
 export interface FieldDef {
   prefix: string       // 查询前缀，如 "author"
   field: string        // 映射到后端的 search_fields / filter 参数名
-  type: 'text' | 'number' | 'status' | 'doc_type'
+  type: 'text' | 'number' | 'file_state' | 'health' | 'doc_type'
   label: string        // 显示用中文名
 }
 
@@ -50,20 +50,14 @@ export const SEARCH_FIELD_DEFS: FieldDef[] = [
   { prefix: 'filesize_pdf', field: 'pdf_size', type: 'number', label: 'PDF 大小' },
   { prefix: 'filesize_md', field: 'md_size', type: 'number', label: 'MD 大小' },
   { prefix: 'filesize_zip', field: 'zip_size', type: 'number', label: 'ZIP 大小' },
-  { prefix: 'status', field: 'status', type: 'status', label: '状态' },
+  { prefix: 'md', field: 'md_state', type: 'file_state', label: 'Markdown 文件' },
+  { prefix: 'pdf', field: 'pdf_state', type: 'file_state', label: 'PDF 文件' },
+  { prefix: 'zip', field: 'zip_state', type: 'file_state', label: '资源包' },
+  { prefix: 'health', field: 'pdf_health', type: 'health', label: 'PDF 健康' },
   // 排序控制（不参与字段过滤，由 parsedQueryToParams 特殊处理）
   { prefix: 'sort', field: '__sort__', type: 'sort', label: '排序字段' },
   { prefix: 'order', field: '__order__', type: 'sort', label: '排序方向' },
 ]
-
-// 状态值别名 → 后端 status_filter 值
-const STATUS_ALIASES: Record<string, string> = {
-  uploaded: 'uploaded',
-  parsing: 'parsing',
-  done: 'markdown_done',
-  markdown_done: 'markdown_done',
-  error: 'error',
-}
 
 // ── 解析结果类型 ────────────────────────────────────────
 
@@ -75,7 +69,7 @@ export interface ParsedQuery {
   /** 数值范围条件（year 等） */
   rangeFilters: Record<string, { min?: number; max?: number }>
   /** 否定条件（-field:value） */
-  negations: { field: string; value: string; type: 'text' | 'number' | 'status' | 'doc_type' }[]
+  negations: { field: string; value: string; type: FieldDef['type'] }[]
   /** OR 分组：每组是一个 ParsedQuery */
   orGroups: ParsedQuery[]
   /** 原始查询字符串 */
@@ -241,10 +235,9 @@ function applyFieldFilter(q: ParsedQuery, def: FieldDef, rawValue: string) {
       // 无法解析为数值，当文本处理
       addFieldFilter(q, def.field, value)
     }
-  } else if (def.type === 'status') {
-    // 状态值别名转换
-    const mapped = STATUS_ALIASES[value.toLowerCase()] || value
-    addFieldFilter(q, def.field, mapped)
+  } else if (def.type === 'file_state' || def.type === 'health') {
+    // 文件事实三态 / PDF 健康：值原样透传（present|absent|unknown、ok|warning|error|missing|unchecked）
+    addFieldFilter(q, def.field, value.toLowerCase())
   } else if (def.type === 'sort') {
     // sort: 和 order: 直接设置到 ParsedQuery 上
     if (def.field === '__sort__') {
@@ -269,8 +262,19 @@ function addFieldFilter(q: ParsedQuery, field: string, value: string) {
 export interface SearchApiParams {
   q?: string
   search_fields?: string
-  status_filter?: string
   doc_type_filter?: string
+  /** 文件事实三态：present / absent / unknown（逗号多选） */
+  md_state?: string
+  pdf_state?: string
+  zip_state?: string
+  /** PDF 健康：ok / warning / error / missing / unchecked */
+  pdf_health?: string
+  pdf_size_min?: number
+  pdf_size_max?: number
+  md_size_min?: number
+  md_size_max?: number
+  zip_size_min?: number
+  zip_size_max?: number
   year?: number
   year_min?: number
   year_max?: number
@@ -296,8 +300,10 @@ export function parsedQueryToParams(pq: ParsedQuery): SearchApiParams {
 
   // 字段过滤
   for (const [field, values] of Object.entries(pq.fieldFilters)) {
-    if (field === 'status') {
-      params.status_filter = values.join(',')
+    if (field === 'md_state' || field === 'pdf_state' || field === 'zip_state') {
+      ;(params as Record<string, unknown>)[field] = values.join(',')
+    } else if (field === 'pdf_health') {
+      params.pdf_health = values.join(',')
     } else if (field === 'doc_type') {
       params.doc_type_filter = values.join(',')
     } else if (field === 'journal') {
@@ -316,7 +322,7 @@ export function parsedQueryToParams(pq: ParsedQuery): SearchApiParams {
   // 如果只有 fieldFilters 没有 textTokens，将第一个字段值作为 q
   if (!params.q && Object.keys(pq.fieldFilters).length > 0) {
     for (const [field, values] of Object.entries(pq.fieldFilters)) {
-      if (field !== 'status' && field !== 'doc_type') {
+      if (field !== 'doc_type' && field !== 'pdf_health' && !field.endsWith('_state')) {
         params.q = values[0]
         params.search_fields = field
         break
@@ -324,8 +330,15 @@ export function parsedQueryToParams(pq: ParsedQuery): SearchApiParams {
     }
   }
 
-  // 范围过滤（year / id）
+  // 范围过滤（year / id / 文件大小）
   for (const [field, range] of Object.entries(pq.rangeFilters)) {
+    if (field === 'pdf_size' || field === 'md_size' || field === 'zip_size') {
+      const minKey = `${field}_min` as keyof SearchApiParams
+      const maxKey = `${field}_max` as keyof SearchApiParams
+      if (range.min !== undefined) (params[minKey] as number) = range.min
+      if (range.max !== undefined) (params[maxKey] as number) = range.max
+      continue
+    }
     if (field === 'year') {
       if (range.min !== undefined && range.max !== undefined && range.min === range.max) {
         params.year = range.min
@@ -383,7 +396,10 @@ export const SYNTAX_HELP_ITEMS = [
   { syntax: 'year:>2020', description: '年份大于 2020' },
   { syntax: 'year:2020-2023', description: '年份范围' },
   { syntax: 'type:article', description: '按文献类型筛选' },
-  { syntax: 'status:done', description: '按状态筛选（uploaded/parsing/done/error）' },
+  { syntax: 'md:present', description: '按 Markdown 文件筛选（present 有 / absent 确定没有 / unknown 未同步）' },
+  { syntax: 'pdf:absent', description: '按 PDF 文件筛选（同上三态）' },
+  { syntax: 'health:error', description: '按 PDF 健康筛选（ok/warning/error/missing/unchecked）' },
+  { syntax: 'filesize_md:>1024', description: '按文件大小筛选（filesize_pdf / filesize_md / filesize_zip）' },
   { syntax: 'sort:year', description: '排序字段（title/year/authors/id/created_at 等）' },
   { syntax: 'order:asc', description: '排序方向（asc 升序 / desc 降序）' },
   { syntax: '-year:2020', description: '排除条件' },

@@ -107,9 +107,8 @@ pub struct Document {
     pub abstract_en: Option<String>,
     pub journal_en: Option<String>,
     pub mineru_task_id: Option<String>,
-    pub status: String,
-    pub status_message: Option<String>,
-    pub progress: f64,
+    /// 文件事实（size）上次从文件系统同步的时间；`None` = 从未同步过（状态未知）
+    pub fs_synced_at: Option<String>,
     pub qdrant_collection: Option<String>,
     pub vector_db_id: Option<String>,
     pub created_at: Option<String>,
@@ -124,8 +123,16 @@ pub struct Document {
 }
 
 impl Document {
-    pub fn doc_status(&self) -> DocStatus {
-        self.status.parse().unwrap_or(DocStatus::Uploaded)
+    pub fn has_pdf(&self) -> bool {
+        self.pdf_size.unwrap_or(0) > 0
+    }
+
+    pub fn has_md(&self) -> bool {
+        self.md_size.unwrap_or(0) > 0
+    }
+
+    pub fn has_zip(&self) -> bool {
+        self.zip_size.unwrap_or(0) > 0
     }
 }
 

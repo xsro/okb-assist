@@ -59,8 +59,8 @@ pub fn router() -> axum::Router<()> {
         )
         .route("/assist/api/admin/sync-file-sizes/", post(sync_file_sizes))
         .route("/assist/api/admin/sync-file-sizes", post(sync_file_sizes))
-        .route("/assist/api/admin/documents/status/", post(fix_document_status))
-        .route("/assist/api/admin/documents/status", post(fix_document_status))
+        .route("/assist/api/admin/file-state/reconcile/", get(file_state_reconcile))
+        .route("/assist/api/admin/file-state/reconcile", get(file_state_reconcile))
         .route("/assist/api/admin/dedup/", post(dedup))
         .route("/assist/api/admin/dedup", post(dedup))
         .route("/assist/api/admin/logs/", get(get_logs))
@@ -407,22 +407,31 @@ async fn stats(
         .await
         .unwrap_or(0);
 
-    let mut status_counts = serde_json::Map::new();
-    for status in [
-        DocStatus::Uploaded,
-        DocStatus::Parsing,
-        DocStatus::MarkdownDone,
-        DocStatus::Error,
-    ] {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents WHERE status = ?")
-            .bind(status.as_str())
-            .fetch_one(db.pool())
-            .await
-            .unwrap_or(0);
-        status_counts.insert(status.as_str().to_string(), json!(count));
-    }
+    // 状态由文件事实推导（见 `services::file_state`）：
+    // uploaded / markdown_done 用 size 列聚合，parsing / error 来自运行时。
+    let (uploaded, markdown_done, unsynced): (i64, i64, i64) = sqlx::query_as(
+        "SELECT \
+           SUM(CASE WHEN COALESCE(md_size,0) = 0 THEN 1 ELSE 0 END), \
+           SUM(CASE WHEN COALESCE(md_size,0) > 0 THEN 1 ELSE 0 END), \
+           SUM(CASE WHEN fs_synced_at IS NULL THEN 1 ELSE 0 END) \
+         FROM documents",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap_or((0, 0, 0));
 
-    // 索引状态记在 document_vector_index 上（documents.status 只表示解析阶段）
+    let runtime_errors = crate::services::file_state::error_snapshot().len() as i64;
+    let mut status_counts = serde_json::Map::new();
+    status_counts.insert(DocStatus::Uploaded.as_str().to_string(), json!(uploaded));
+    status_counts.insert(DocStatus::MarkdownDone.as_str().to_string(), json!(markdown_done));
+    status_counts.insert(DocStatus::Error.as_str().to_string(), json!(runtime_errors));
+    status_counts.insert(
+        DocStatus::Parsing.as_str().to_string(),
+        json!(crate::routers::pipeline::runtime_task_count()),
+    );
+    status_counts.insert("unsynced".to_string(), json!(unsynced));
+
+    // 索引状态记在 document_vector_index 上（documents 不再有解析状态列）
     let indexed_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT document_id) FROM document_vector_index WHERE status = 'indexed'",
     )
@@ -1100,190 +1109,87 @@ async fn sync_file_sizes(
     }))
 }
 
-// ── 文档状态批量修正（运维） ─────────────────────────────
+// ── 文件事实一致性报告（运维） ───────────────────────────
 
-/// 批量修正文档状态的请求体。
-///
-/// 只改 `documents.status`（不碰流水线、文件、向量库），用于修正历史数据里状态与实际
-/// 文件不符的记录（例如 PDF 被替换后状态退回 `uploaded`，而 Markdown 早已解析完成）。
+/// `GET /assist/api/admin/file-state/reconcile` 的查询参数。
 #[derive(Debug, Deserialize)]
-pub struct StatusFixBody {
-    /// 只改这些 id（缺省 = 该 `from` 状态的全部文档）
-    #[serde(default)]
-    pub ids: Option<Vec<i64>>,
-    /// 匹配的旧状态（`uploaded` / `parsing` / `markdown_done` / `error`）；缺省则必须给 `ids`
-    #[serde(default)]
-    pub from: Option<String>,
-    /// 目标状态（必填）
-    #[serde(default)]
-    pub to: Option<String>,
-    /// 只统计不写入（默认 false）
-    #[serde(default)]
-    pub dry_run: bool,
+pub struct ReconcileQuery {
+    /// `1` / `true` 时把差异文档的文件事实重新同步（默认只报告）
+    pub fix: Option<String>,
 }
 
-/// POST /assist/api/admin/documents/status —— 批量修正文档状态
+/// 文件事实一致性报告：对比「数据库同步列」与「磁盘实时 stat」。
 ///
-/// - `to` 必填，且不能是 `parsing`（该状态由后台流水线持有，手改会被覆盖）
-/// - `from` 与 `ids` 至少给一个，两者都给时是「这些 id 中处于 from 状态的」
-/// - `dry_run = true` 只返回会被影响的文档，不写库
-async fn fix_document_status(
+/// 取代原「批量修正文档状态」端点 —— 状态不再可手改，只能靠重新同步文件事实修正。
+/// 三个桶：
+/// - `unsynced`：`fs_synced_at` 为空（从未同步过，状态未知）
+/// - `mismatch`：同步值与实时值不一致
+/// - `ok`：一致
+async fn file_state_reconcile(
     Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
-    Json(body): Json<StatusFixBody>,
+    Extension(settings): Extension<Arc<Settings>>,
+    Query(q): Query<ReconcileQuery>,
 ) -> Response {
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
+    let fix = matches!(
+        q.fix.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    );
 
-    let to = match body.to.as_deref().map(|s| s.trim().parse::<DocStatus>()) {
-        Some(Ok(DocStatus::Parsing)) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "detail": "不能把状态改成 parsing（该状态由后台流水线维护）"
-            })))
-                .into_response();
-        }
-        Some(Ok(s)) => s.as_str().to_string(),
-        Some(Err(_)) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "detail": "to 必须是 uploaded / parsing / markdown_done / error 之一"
-            })))
-                .into_response();
-        }
-        None => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"detail": "缺少 to"}))).into_response()
-        }
-    };
+    let rows: Vec<(i64, Option<i64>, Option<i64>, Option<i64>, Option<String>)> = sqlx::query_as(
+        "SELECT id, pdf_size, md_size, zip_size, fs_synced_at FROM documents ORDER BY id",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap_or_default();
 
-    let from = match body.from.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        Some(s) => match s.parse::<DocStatus>() {
-            Ok(st) => Some(st.as_str().to_string()),
-            Err(_) => {
-                return (StatusCode::BAD_REQUEST, Json(json!({
-                    "detail": "from 必须是 uploaded / parsing / markdown_done / error 之一"
-                })))
-                    .into_response();
+    let mut unsynced: Vec<i64> = Vec::new();
+    let mut mismatch: Vec<Value> = Vec::new();
+    let mut fixed = 0i64;
+
+    for (id, pdf, md, zip, synced_at) in rows {
+        if synced_at.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+            unsynced.push(id);
+            if fix {
+                crate::routers::documents::sync_doc_file_sizes(&db, &settings, id).await;
+                fixed += 1;
             }
-        },
-        None => None,
-    };
-
-    let ids: Vec<i64> = body
-        .ids
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|i| *i > 0)
-        .collect();
-
-    if from.is_none() && ids.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({
-            "detail": "from 与 ids 至少要提供一个，避免无条件改写全库"
-        })))
-            .into_response();
-    }
-
-    // 拼 WHERE：ids 用占位符逐个绑定（不接受任何客户端拼进来的 SQL 片段）
-    let mut where_parts: Vec<String> = Vec::new();
-    if !ids.is_empty() {
-        let ph = vec!["?"; ids.len()].join(", ");
-        where_parts.push(format!("id IN ({})", ph));
-    }
-    if from.is_some() {
-        where_parts.push("status = ?".to_string());
-    }
-    let where_sql = where_parts.join(" AND ");
-
-    // 先查受影响集合，便于 dry_run 与回显
-    let select_sql = format!("SELECT id FROM documents WHERE {} ORDER BY id", where_sql);
-    let mut q = sqlx::query_as::<_, (i64,)>(&select_sql);
-    if !ids.is_empty() {
-        for id in &ids {
-            q = q.bind(id);
+            continue;
+        }
+        let live = (
+            std::fs::metadata(paths::get_pdf_path(&settings, id)).ok().map(|m| m.len() as i64),
+            std::fs::metadata(paths::get_markdown_path(&settings, id)).ok().map(|m| m.len() as i64),
+            std::fs::metadata(paths::get_asset_path(&settings, id)).ok().map(|m| m.len() as i64),
+        );
+        if (pdf, md, zip) != live {
+            mismatch.push(json!({
+                "id": id,
+                "db": {"pdf_size": pdf, "md_size": md, "zip_size": zip},
+                "disk": {"pdf_size": live.0, "md_size": live.1, "zip_size": live.2},
+            }));
+            if fix {
+                crate::routers::documents::sync_doc_file_sizes(&db, &settings, id).await;
+                fixed += 1;
+            }
         }
     }
-    if let Some(f) = &from {
-        q = q.bind(f);
-    }
-    let matched: Vec<i64> = match q.fetch_all(db.pool()).await {
-        Ok(rows) => rows.into_iter().map(|(id,)| id).collect(),
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
-                .into_response()
-        }
-    };
 
-    if body.dry_run {
-        return Json(json!({
-            "detail": "dry_run：未写库",
-            "dry_run": true,
-            "from": from,
-            "to": to,
-            "matched": matched.len(),
-            "updated": 0,
-            "ids": matched,
-        }))
-        .into_response();
-    }
-
-    if matched.is_empty() {
-        return Json(json!({
-            "detail": "没有匹配的文档",
-            "from": from,
-            "to": to,
-            "matched": 0,
-            "updated": 0,
-            "ids": [],
-        }))
-        .into_response();
-    }
-
-    // markdown_done 是「解析完成」，进度按 100 收尾；其他状态清空流水线残留
-    let (message, progress): (Option<&str>, i64) = match to.as_str() {
-        "markdown_done" => (Some("PDF 解析完成"), 100),
-        _ => (None, 0),
-    };
-
-    let update_sql = format!(
-        "UPDATE documents SET status = ?, status_message = ?, progress = ?, updated_at = ? \
-         WHERE {}",
-        where_sql
-    );
-    let mut u = sqlx::query(&update_sql)
-        .bind(&to)
-        .bind(message)
-        .bind(progress)
-        .bind(crate::utils::now_iso());
-    if !ids.is_empty() {
-        for id in &ids {
-            u = u.bind(id);
-        }
-    }
-    if let Some(f) = &from {
-        u = u.bind(f);
-    }
-    let result = match u.execute(db.pool()).await {
-        Ok(r) => r,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
-                .into_response()
-        }
-    };
-    let updated = result.rows_affected() as i64;
-    tracing::info!(
-        "批量修正文档状态: {} -> {}，匹配 {} 条，写入 {} 条",
-        from.as_deref().unwrap_or("(ids)"),
-        to,
-        matched.len(),
-        updated
-    );
-
+    let total = unsynced.len() + mismatch.len();
     Json(json!({
-        "detail": format!("已把 {} 条文档状态改为 {}", updated, to),
-        "from": from,
-        "to": to,
-        "matched": matched.len(),
-        "updated": updated,
-        "ids": matched,
+        "detail": if fix {
+            format!("已重新同步 {} 条文档的文件事实", fixed)
+        } else {
+            format!("发现 {} 条文档的文件事实需要同步（unsynced {} / mismatch {}）",
+                    total, unsynced.len(), mismatch.len())
+        },
+        "fix": fix,
+        "total_documents": unsynced.len() + mismatch.len(),
+        "unsynced": unsynced,
+        "mismatch": mismatch,
+        "fixed": fixed,
     }))
     .into_response()
 }

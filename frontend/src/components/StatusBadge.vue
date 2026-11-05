@@ -5,6 +5,7 @@
     :title="props.status === 'error' && props.status_message ? props.status_message : undefined"
   >
     {{ statusLabel }}
+    <span v-if="props.synced === false" class="unsynced-icon" title="文件事实尚未从磁盘同步，状态未知">未同步</span>
     <span v-if="props.status === 'error' && props.status_message" class="error-icon" title="">⚠</span>
   </span>
 </template>
@@ -15,6 +16,8 @@ import { computed } from 'vue'
 const props = defineProps<{
   status: string
   status_message?: string | null
+  /** 文件事实是否已同步过；`false` 时额外标注「未同步」（区分「不知道」与「确定没有」） */
+  synced?: boolean | null
 }>()
 
 const statusMap: Record<string, { label: string; class: string }> = {
@@ -44,6 +47,13 @@ const statusClass = computed(
 </script>
 
 <style scoped>
+.unsynced-icon {
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--text-secondary, #666);
+}
 .badge {
   display: inline-flex;
   align-items: center;
