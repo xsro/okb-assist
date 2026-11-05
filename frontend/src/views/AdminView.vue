@@ -97,6 +97,7 @@
           title="只为没有 file_hash 的文档计算哈希"
           @click="recalcMissingHashes"
         >补充缺失的哈希信息</button>
+        <br>
         <button class="btn btn-outline" @click="doSyncFileSizes">同步全部文件大小</button>
         <button class="btn btn-outline" @click="checkPdfHealthBatch">检查全部 PDF 健康</button>
         <button class="btn btn-outline" @click="recalcHashes">重算全部哈希</button>
