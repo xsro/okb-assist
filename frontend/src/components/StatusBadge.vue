@@ -1,27 +1,41 @@
 <template>
   <span
     class="badge"
-    :class="[statusClass, { 'has-error': props.status === 'error' && props.status_message }]"
-    :title="props.status === 'error' && props.status_message ? props.status_message : undefined"
+    :class="[statusClass, { 'has-error': view.status === 'error' && view.detail }]"
+    :title="view.detail || undefined"
   >
-    {{ statusLabel }}
-    <span v-if="props.synced === false" class="unsynced-icon" title="文件事实尚未从磁盘同步，状态未知">未同步</span>
-    <span v-if="props.status === 'error' && props.status_message" class="error-icon" title="">⚠</span>
+    <span class="files-text">{{ view.files }}</span>
+    <span v-if="view.activity" class="activity-text">
+      {{ view.activity }}<template v-if="view.progress !== null"> {{ Math.round(view.progress) }}%</template>
+    </span>
+    <span
+      v-if="view.synced === false"
+      class="unsynced-icon"
+      title="文件事实尚未从磁盘同步，状态未知"
+    >未同步</span>
+    <span v-if="view.status === 'error'" class="error-icon" title="">⚠</span>
   </span>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import type { Document } from '@/types/document'
+import { deriveDocStatus } from '@/utils/docStatus'
 
+/**
+ * 两种用法：
+ * 1. 传 `doc`：状态与文案由 `deriveDocStatus()` 前端推导（文献列表 / 详情页用这个）；
+ * 2. 传 `status`：直接给枚举值（监控面板的流水线任务等场景用这个）。
+ */
 const props = defineProps<{
-  status: string
+  doc?: Document | null
+  status?: string
   status_message?: string | null
-  /** 文件事实是否已同步过；`false` 时额外标注「未同步」（区分「不知道」与「确定没有」） */
   synced?: boolean | null
 }>()
 
 const statusMap: Record<string, { label: string; class: string }> = {
-  // 文档状态
+  // 文献状态（粗粒度，决定配色）
   uploaded: { label: '已上传', class: 'badge-gray' },
   parsing: { label: '解析中', class: 'badge-warning pulse' },
   markdown_done: { label: '解析完成', class: 'badge-info' },
@@ -38,22 +52,39 @@ const statusMap: Record<string, { label: string; class: string }> = {
   completed: { label: '已完成', class: 'badge-success' }
 }
 
-const statusLabel = computed(
-  () => statusMap[props.status]?.label || props.status
-)
-const statusClass = computed(
-  () => statusMap[props.status]?.class || 'badge-gray'
-)
+const view = computed(() => {
+  // 文献：主文字直接显示「实际存在的文件类型」（pdf|md|zip / 无文件 / 未知）
+  if (props.doc) {
+    const d = deriveDocStatus(props.doc)
+    return {
+      status: d.status,
+      files: d.files,
+      activity: d.activity,
+      detail: d.detail,
+      progress: d.progress,
+      synced: d.synced,
+      health: d.health,
+      healthDetail: d.healthDetail
+    }
+  }
+  // 其他场景（流水线任务状态等）：主文字就是状态文案
+  const key = props.status || ''
+  return {
+    status: key,
+    files: statusMap[key]?.label || key,
+    activity: null as string | null,
+    detail: props.status_message ?? null,
+    progress: null as number | null,
+    synced: props.synced ?? null,
+    health: null as string | null,
+    healthDetail: null as string | null
+  }
+})
+
+const statusClass = computed(() => statusMap[view.value.status]?.class || 'badge-gray')
 </script>
 
 <style scoped>
-.unsynced-icon {
-  font-size: 10px;
-  padding: 0 4px;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.08);
-  color: var(--text-secondary, #666);
-}
 .badge {
   display: inline-flex;
   align-items: center;
@@ -90,22 +121,43 @@ const statusClass = computed(
   color: var(--success-text);
 }
 
-.error-icon {
-  font-size: 13px;
-  cursor: help;
-}
-
-.has-error {
-  cursor: help;
-  position: relative;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
-
 .pulse {
-  animation: pulse 1.5s ease-in-out infinite;
+  animation: badge-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes badge-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+.files-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: -0.2px;
+}
+
+.activity-text {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.unsynced-icon {
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--text-secondary, #666);
+}
+
+.error-icon {
+  font-size: 11px;
 }
 </style>

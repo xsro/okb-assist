@@ -595,7 +595,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 | `AppHeader.vue` | 顶部导航栏（含汉堡菜单） |
 | `AppNav.vue` | 桌面端水平导航 |
 | `MobileMenu.vue` | 移动端侧滑菜单 |
-| `StatusBadge.vue` | 状态徽章（状态/索引状态） |
+| `StatusBadge.vue` | 文件事实徽章：**主文字直接显示实际存在的文件类型**（`pdf\|md\|zip` / `pdf\|md` / `无文件` / `未知`），PDF 健康有问题时内嵌标注（`pdf(bad)` 损坏 / `pdf(warn)` 警告，如 `pdf(bad)\|md`），另附「解析中 42%」「未同步」「⚠」等小标；也支持直接传 `status` 给流水线任务状态用 |
 | `Toast.vue` | 消息提示 |
 | `ConfirmDialog.vue` | 确认对话框 |
 | `TokenModal.vue` | 账号面板（当前用户/角色、凭证来源、「退出登录」、跳转账户页）。**不提供页内切换账号** —— 切换走「退出登录 → 登录页选择账号」 |
@@ -743,7 +743,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
    - `database.rs::init()` 的 `CREATE TABLE` + 同一个函数里的**轻量迁移数组**（`CREATE TABLE IF NOT EXISTS` 不会改已有库，新列必须在迁移数组里逐个 `ALTER TABLE`）；`documents` 现有列：16 个元数据字段 + `mineru_task_id` / `fs_synced_at` / `qdrant_collection` / `vector_db_id` / `created_at` / `updated_at` / `pdf_size` / `md_size` / `zip_size` / `pdf_health` / `pdf_health_message`（**没有** `status` / `status_message` / `progress`）；
    - `models.rs::Document` 字段；
    - 三份 `DOC_COLUMNS`：`routers/documents.rs`、`routers/pipeline.rs`、`mcp_server.rs`（列顺序需与 `Document` 字段顺序一致）；
-   - `documents.rs::DocumentOut` + `doc_to_out()`；
+   - `documents.rs::DocumentOut` + `doc_to_out()`（**不返回 `status` / `status_message`**：只给数据库记录 + `has_*` / `synced` / `fs_synced_at` / `pdf_health*` / `qdrant_collection` / `vector_db_id`，以及非数据库的 `runtime_task`、`last_error`；展示状态由前端 `utils/docStatus.ts::deriveDocStatus()` 推导）；
    - `documents.rs` 里两处 `Document { .. }` 字面量（上传 / 按路径登记）。
 13. **MinerU Markdown 图片处理**（`backend-rs/src/services/mineru.rs`）：`get_task_result()` 必须优先从 ZIP 输出提取 Markdown（含本地图片引用），而非从独立 Markdown 输出（含 data URI）。`finish_parse_result()` 在 `pipeline.rs` 中还需**复制独立图片文件**到目标目录，否则 Markdown 中的相对路径引用会失效。
 14. **MinerU API 的 output_formats 顺序无关**：`submit_job()` 必须同时请求 `"markdown"` 和 `"zip"` 两个格式。`zip` 格式包含解析结果的完整输出（Markdown + 图片），而 `markdown` 格式是自包含的 data URI 版本。两套输出分别下载后合并处理。

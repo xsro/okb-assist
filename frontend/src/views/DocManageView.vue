@@ -8,9 +8,9 @@
     </div>
 
     <!-- 文档错误横幅 -->
-    <div v-if="doc.status === 'error' && doc.status_message" class="doc-error-banner">
+    <div v-if="derivedStatus?.status === 'error' && derivedStatus.detail" class="doc-error-banner">
       <span class="error-icon">⚠</span>
-      <span>{{ doc.status_message }}</span>
+      <span>{{ derivedStatus.detail }}</span>
     </div>
 
     <!-- 文献操作 -->
@@ -268,6 +268,7 @@ import { useRequireToken } from '@/composables/useRequireToken'
 import { useTokenStore } from '@/stores/token'
 import { checkDocumentPdfHealth } from '@/api/admin'
 import type { Document } from '@/types/document'
+import { deriveDocStatus } from '@/utils/docStatus'
 import type { VectorDbConfig } from '@/types/config'
 import type { DocumentIndexInfo } from '@/types/pipeline'
 
@@ -278,6 +279,9 @@ const { requireToken } = useRequireToken()
 const tokenStore = useTokenStore()
 
 const doc = ref<Document | null>(null)
+
+/** 状态由前端推导（后端只给文件事实与运行时字段） */
+const derivedStatus = computed(() => (doc.value ? deriveDocStatus(doc.value) : null))
 const form = ref<Partial<Document>>({})
 const replacePdfInput = ref<HTMLInputElement>()
 const replaceMarkdownInput = ref<HTMLInputElement>()

@@ -107,7 +107,7 @@
           <td v-if="visibleColumns.year">{{ doc.year || '-' }}</td>
           <td v-if="visibleColumns.doc_type">{{ doc.doc_type || '-' }}</td>
           <td v-if="visibleColumns.status">
-            <StatusBadge :status="doc.status" :status_message="doc.status_message" :synced="doc.synced" />
+            <StatusBadge :doc="doc" />
             <span v-if="doc.indexed_dbs && doc.indexed_dbs.length" class="index-dbs">
               <span
                 v-for="dbId in doc.indexed_dbs"
@@ -155,7 +155,7 @@
       <div v-for="doc in items" :key="doc.id" class="doc-card">
         <div class="doc-card-header">
           <span class="doc-card-id">#{{ doc.id }}</span>
-          <StatusBadge :status="doc.status" :status_message="doc.status_message" :synced="doc.synced" />
+          <StatusBadge :doc="doc" />
         </div>
         <router-link :to="{ name: 'detail', params: { id: doc.id } }" class="doc-card-title">
           {{ doc.title || doc.filename || '(无标题)' }}
@@ -289,7 +289,7 @@ const allColumns: ColumnDef[] = [
   { key: 'journal', label: '期刊/会议名' },
   { key: 'year', label: '年份' },
   { key: 'doc_type', label: '类型' },
-  { key: 'status', label: '状态' },
+  { key: 'status', label: '文件' },
   { key: 'files', label: '文件大小' },
   { key: 'filename', label: '文件名' },
   { key: 'file_hash', label: '文件哈希' },
@@ -325,6 +325,25 @@ function toggleColumn(key: string) {
 const { items, loading, page, pageSize, total, totalPages, load } = usePagination<Document>()
 
 const searchQuery = ref('')
+/**
+ * PDF 健康筛选（`?pdf_health=warning,error,missing`），来自监控面板的「查看异常 PDF 文献」链接。
+ * 与搜索词叠加（AND），值直接透传给后端的 `pdf_health` 逗号多选参数。
+ */
+const healthFilter = ref('')
+const healthFilterLabels: Record<string, string> = {
+  ok: '正常',
+  warning: '警告',
+  error: '无法解析',
+  missing: '缺失',
+  unchecked: '未检查',
+}
+const healthFilterText = computed(() =>
+  healthFilter.value
+    .split(',')
+    .map((v) => healthFilterLabels[v.trim()] || v.trim())
+    .filter(Boolean)
+    .join(' / ')
+)
 const searchWrapRef = ref<HTMLElement | null>(null)
 const searchInputRef = ref<HTMLInputElement | null>(null)
 const queryBuilderRef = ref<{ show: (q?: string) => Promise<string | null> } | null>(null)
@@ -348,6 +367,7 @@ const SORT_LABELS: Record<string, string> = {
 // 活跃筛选条件 chips
 const activeFilterChips = computed(() => {
   const chips: string[] = []
+  if (healthFilter.value) chips.push(`PDF 健康: ${healthFilterText.value}`)
   if (!searchQuery.value) return chips
   const pq = parseSearchQuery(searchQuery.value)
   const p = parsedQueryToParams(pq)
@@ -407,11 +427,18 @@ function parsePageQuery(raw: unknown): number {
   return Number.isFinite(n) && n > 0 ? n : 1
 }
 
-/** 由当前视图状态生成地址栏 query：q 为空、页码为 1 时省略，保持 URL 干净 */
+/** 解析地址栏里的 pdf_health 参数（逗号多选，非法值交给后端 400 提示） */
+function parseHealthQuery(raw: unknown): string {
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return String(value ?? '').trim()
+}
+
+/** 由当前视图状态生成地址栏 query：q / pdf_health 为空、页码为 1 时省略，保持 URL 干净 */
 function buildUrlQuery(): Record<string, string> {
   const query = searchQuery.value.trim()
   const next: Record<string, string> = {}
   if (query) next.q = query
+  if (healthFilter.value) next.pdf_health = healthFilter.value
   if (page.value > 1) next.page = String(page.value)
   return next
 }
@@ -426,6 +453,8 @@ function syncUrl(mode: 'push' | 'replace') {
   const current: Record<string, string> = {}
   const currentQ = (route.query.q as string | undefined) || ''
   if (currentQ) current.q = currentQ
+  const currentHealth = parseHealthQuery(route.query.pdf_health)
+  if (currentHealth) current.pdf_health = currentHealth
   const currentPage = parsePageQuery(route.query.page)
   if (currentPage > 1) current.page = String(currentPage)
   if (JSON.stringify(next) === JSON.stringify(current)) return
@@ -434,12 +463,13 @@ function syncUrl(mode: 'push' | 'replace') {
   else router.replace(target)
 }
 
-/** 从 URL 读取初始查询参数（搜索词 + 页码） */
+/** 从 URL 读取初始查询参数（搜索词 + PDF 健康筛选 + 页码） */
 function restoreQueryFromUrl() {
   const q = route.query.q as string | undefined
   if (q) {
     searchQuery.value = q
   }
+  healthFilter.value = parseHealthQuery(route.query.pdf_health)
   page.value = parsePageQuery(route.query.page)
 }
 
@@ -452,10 +482,11 @@ async function doLoad(urlMode: 'push' | 'replace' | 'none' = 'replace') {
   if (urlMode !== 'none') syncUrl(urlMode)
 
   const query = searchQuery.value.trim()
+  const health = healthFilter.value || undefined
 
   if (query === '') {
-    // 无搜索词时正常加载全部
-    await load(listDocuments, {})
+    // 无搜索词时按 PDF 健康筛选（有则带上）加载列表
+    await load(listDocuments, health ? { pdf_health: health } : {})
   } else {
     // 将原始 query string 发送给后端，由后端解析和执行搜索
     await load(
@@ -463,6 +494,7 @@ async function doLoad(urlMode: 'push' | 'replace' | 'none' = 'replace') {
         const res = await searchInfo(query, {
           page: params.page as number | undefined,
           page_size: params.page_size as number | undefined,
+          pdf_health: health,
         })
         return { items: res.items, total: res.total }
       },
@@ -493,18 +525,25 @@ function search() {
 
 function clearSearch() {
   searchQuery.value = ''
+  healthFilter.value = ''
   search()
 }
 
-/** 监控路由变化（浏览器前进/后退、手改地址栏），以 URL 为准恢复搜索词与页码 */
+/** 监控路由变化（浏览器前进/后退、手改地址栏），以 URL 为准恢复搜索词/健康筛选/页码 */
 watch(
-  () => [route.query.q, route.query.page] as const,
+  () => [route.query.q, route.query.pdf_health, route.query.page] as const,
   () => {
     const urlQ = (route.query.q as string | undefined) || ''
+    const urlHealth = parseHealthQuery(route.query.pdf_health)
     const urlPage = parsePageQuery(route.query.page)
     // URL 与视图状态一致：这次变化由本页自己写入，无需重复加载
-    if (urlQ === searchQuery.value.trim() && urlPage === page.value) return
+    if (
+      urlQ === searchQuery.value.trim() &&
+      urlHealth === healthFilter.value &&
+      urlPage === page.value
+    ) return
     searchQuery.value = urlQ
+    healthFilter.value = urlHealth
     page.value = urlPage
     doLoad('none')
   }
@@ -519,7 +558,7 @@ async function openQueryBuilder() {
 }
 
 onMounted(() => {
-  // 从 URL 恢复搜索状态（搜索词 + 页码）
+  // 从 URL 恢复搜索状态（搜索词 + PDF 健康筛选 + 页码）
   restoreQueryFromUrl()
   doLoad('replace')
 })

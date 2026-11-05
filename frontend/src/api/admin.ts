@@ -25,28 +25,16 @@ export function getStats() {
 
 // ── PDF 健康概览 ───────────────────────────────────────
 
-export interface PdfHealthItem {
-  id: number
-  title?: string | null
-  filename?: string | null
-  /** ok / warning / error / missing */
-  pdf_health?: string | null
-  pdf_health_message?: string | null
-}
-
 export interface PdfHealthOverview {
   total: number
   counts: Record<string, number>
   /** 未检查数量 */
   unchecked: number
-  /** 非 ok 的文档总数（可能大于 items.length） */
+  /** 非 ok 的文档总数（列表清单不在此返回，到文献列表筛选查看） */
   problem_count: number
-  /** 清单上限 */
-  limit: number
-  items: PdfHealthItem[]
 }
 
-/** PDF 健康概览（分布计数 + 异常文档清单） */
+/** PDF 健康概览（分布计数 + 异常文档总数） */
 export function getPdfHealthOverview() {
   return apiGet<PdfHealthOverview>('/assist/api/admin/pdf-health')
 }

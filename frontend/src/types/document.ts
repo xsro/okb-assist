@@ -18,15 +18,30 @@ export interface Document {
   doi: string | null
   abstract: string | null
   keywords: string | null
-  /** 派生状态：由文件事实（size 列）+ 运行时推导，非数据库字段 */
-  status: DocStatus
-  status_message: string | null
+  /**
+   * 注意：接口**不返回** `status` / `status_message`。
+   * 展示用状态由 `utils/docStatus.ts::deriveDocStatus(doc)` 从前面的原始字段推导。
+   */
   /** 文件事实是否已从磁盘同步过（false = 状态未知） */
   synced: boolean
   fs_synced_at?: string | null
   has_pdf: boolean
   has_md: boolean
   has_zip: boolean
+  /** 进程内的活动任务（非数据库字段）；存在即「有任务在跑」 */
+  runtime_task?: {
+    /** `parse` / `extract` / `index` / `hash` / `pdf-health` … */
+    task_type: string
+    message: string
+    /** 0-100 */
+    progress: number
+  } | null
+  /** 进程内记录的最近一次失败原因（非数据库字段）；存在即「出错」 */
+  last_error?: string | null
+  /** 数据库列：索引成功后回填的 Qdrant collection */
+  qdrant_collection?: string | null
+  /** 数据库列：上次索引使用的向量库 ID */
+  vector_db_id?: string | null
   index_status: IndexStatus
   indexed_dbs?: string[]
   filename: string

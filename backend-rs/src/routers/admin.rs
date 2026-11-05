@@ -505,11 +505,10 @@ async fn stats(
     }))
 }
 
-/// PDF 健康概览（admin）：分布计数 + 异常文档清单。
+/// PDF 健康概览（admin）：分布计数 + 非 `ok` 文档总数。
 ///
 /// `pdf_health` 取值 `ok` / `warning` / `error` / `missing`，`NULL` / 空串表示从未检查。
-/// 清单只返回非 `ok` 的文档（最严重 error → missing → warning 排序），最多 200 条，
-/// 供「监控面板」直接展示并可跳到文档管理页。
+/// 具体文档清单不在本端点返回：前端从「监控面板」跳到文献列表（`?pdf_health=warning,error,missing`）查看。
 async fn pdf_health_overview(
     Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
@@ -545,33 +544,6 @@ async fn pdf_health_overview(
     .await
     .unwrap_or(0);
 
-    const PROBLEM_LIMIT: i64 = 200;
-    // 异常清单：error → missing → warning，同级别按 id
-    let rows: Vec<(i64, Option<String>, String, Option<String>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT id, title, filename, pdf_health, pdf_health_message FROM documents \
-             WHERE pdf_health IN ('error', 'missing', 'warning') \
-             ORDER BY CASE pdf_health WHEN 'error' THEN 0 WHEN 'missing' THEN 1 ELSE 2 END, id \
-             LIMIT ?",
-        )
-        .bind(PROBLEM_LIMIT)
-        .fetch_all(db.pool())
-        .await
-        .unwrap_or_default();
-
-    let items: Vec<Value> = rows
-        .into_iter()
-        .map(|(id, title, filename, health, message)| {
-            json!({
-                "id": id,
-                "title": title,
-                "filename": filename,
-                "pdf_health": health,
-                "pdf_health_message": message,
-            })
-        })
-        .collect();
-
     let problem_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM documents WHERE pdf_health IN ('error', 'missing', 'warning')",
     )
@@ -584,8 +556,6 @@ async fn pdf_health_overview(
         "counts": counts,
         "unchecked": unchecked,
         "problem_count": problem_count,
-        "limit": PROBLEM_LIMIT,
-        "items": items,
     }))
 }
 

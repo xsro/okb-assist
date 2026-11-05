@@ -408,12 +408,6 @@ pub struct DocumentOut {
     pub journal_en: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mineru_task_id: Option<String>,
-    /// 派生状态：`uploaded` / `parsing` / `markdown_done` / `error`
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status_message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub progress: Option<f64>,
     /// 文件事实是否已同步过（false = 状态未知）
     pub synced: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -426,16 +420,38 @@ pub struct DocumentOut {
     pub pdf_size: Option<i64>,
     pub md_size: Option<i64>,
     pub zip_size: Option<i64>,
-    /// PDF 健康检查结果：`ok` / `warning` / `error` / `missing`（`None` = 未检查）
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// PDF 健康检查结果：`ok` / `warning` / `error` / `missing`（`null` = 未检查）。
+    /// 恒定下发（不跳过 `null`），便于调用方区分「未检查」与「字段缺失」。
     pub pdf_health: Option<String>,
     /// 健康检查原因
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pdf_health_message: Option<String>,
+    /// 已写入的 Qdrant collection（数据库列，索引成功后回填）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qdrant_collection: Option<String>,
+    /// 上次索引使用的向量库 ID（数据库列）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_db_id: Option<String>,
+    /// 进程内的活动任务（**不是**数据库记录；前端用它自行推导「解析中/进度」）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_task: Option<RuntimeTaskOut>,
+    /// 进程内记录的最近一次失败原因（**不是**数据库记录；前端用它自行推导 `error`）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+}
+
+/// 活动任务的输出结构（供前端自行推导「解析中」与进度）
+#[derive(Debug, Serialize)]
+pub struct RuntimeTaskOut {
+    /// `parse` / `extract` / `index` / `hash` / `pdf-health` …
+    pub task_type: String,
+    pub message: String,
+    /// 0-100
+    pub progress: f64,
 }
 
 const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, CAST(NULLIF(year, '') AS INTEGER) AS year, doi, source, journal, \
@@ -489,15 +505,15 @@ pub async fn sync_doc_file_sizes(db: &Database, settings: &Settings, doc_id: i64
 }
 
 async fn doc_to_out(doc: &Document, settings: &Settings, db: &Database) -> DocumentOut {
-    // 状态由「文件事实（同步列）+ 运行时状态」推导，不再 stat、也不再读状态列
-    let state = file_state::derive_state(
-        doc.fs_synced_at.as_deref(),
-        doc.pdf_size,
-        doc.md_size,
-        crate::routers::pipeline::runtime_task(doc.id).as_ref(),
-        file_state::last_error(doc.id).as_deref(),
-        doc.mineru_task_id.as_deref(),
-    );
+    // 只输出「数据库记录 + 运行时事实」，**不再**在这里推导 status / status_message：
+    // 展示用的状态由前端（`utils/docStatus.ts`）根据这些原始字段自行组合，便于给出更细的文案。
+    // 列表零 stat：所有文件大小都来自写时同步的列。
+    let runtime_task = crate::routers::pipeline::runtime_task(doc.id).map(|t| RuntimeTaskOut {
+        task_type: t.task_type,
+        message: t.message,
+        progress: t.progress,
+    });
+    let last_error = file_state::last_error(doc.id);
 
     DocumentOut {
         id: doc.id,
@@ -522,10 +538,11 @@ async fn doc_to_out(doc: &Document, settings: &Settings, db: &Database) -> Docum
         abstract_en: doc.abstract_en.clone(),
         journal_en: doc.journal_en.clone(),
         mineru_task_id: doc.mineru_task_id.clone(),
-        status: state.status.as_str().to_string(),
-        status_message: state.message.clone(),
-        progress: Some(state.progress),
-        synced: state.synced,
+        synced: doc
+            .fs_synced_at
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false),
         fs_synced_at: doc.fs_synced_at.clone(),
         has_pdf: doc.has_pdf(),
         has_md: doc.has_md(),
@@ -536,6 +553,10 @@ async fn doc_to_out(doc: &Document, settings: &Settings, db: &Database) -> Docum
         zip_size: doc.zip_size,
         pdf_health: doc.pdf_health.clone(),
         pdf_health_message: doc.pdf_health_message.clone(),
+        qdrant_collection: doc.qdrant_collection.clone(),
+        vector_db_id: doc.vector_db_id.clone(),
+        runtime_task,
+        last_error,
         created_at: doc.created_at.clone(),
         updated_at: doc.updated_at.clone(),
     }
@@ -2313,6 +2334,45 @@ pub struct SearchInfoQuery {
     pub q: Option<String>,
     pub page: Option<i64>,
     pub page_size: Option<i64>,
+    /// PDF 健康筛选：`ok` / `warning` / `error` / `missing` / `unchecked`（逗号多选）
+    ///
+    /// 与 `q` 的高级语法叠加（AND），供文献列表页从监控面板带入 `?pdf_health=warning,error,missing`。
+    pub pdf_health: Option<String>,
+}
+
+/// 解析 `pdf_health` 逗号多选参数，生成 SQL 条件与绑定值。
+///
+/// 返回 `Err(非法取值)` 时端点应回 400（与列表端点 `list_documents` 的校验保持一致）。
+fn pdf_health_condition(raw: &str) -> Result<Option<(String, Vec<String>)>, String> {
+    let mut values: Vec<String> = Vec::new();
+    let mut include_unchecked = false;
+    for item in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match item.to_ascii_lowercase().as_str() {
+            "ok" | "warning" | "error" | "missing" => values.push(item.to_ascii_lowercase()),
+            "unchecked" | "none" | "null" => include_unchecked = true,
+            _ => {
+                return Err(format!(
+                    "pdf_health 取值非法：{}（仅支持 ok / warning / error / missing / unchecked）",
+                    item
+                ))
+            }
+        }
+    }
+
+    if !values.is_empty() {
+        let placeholders = values.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let cond = format!("pdf_health IN ({})", placeholders);
+        let cond = if include_unchecked {
+            format!("({} OR pdf_health IS NULL)", cond)
+        } else {
+            format!("({})", cond)
+        };
+        return Ok(Some((cond, values)));
+    }
+    if include_unchecked {
+        return Ok(Some(("pdf_health IS NULL".to_string(), Vec::new())));
+    }
+    Ok(None)
 }
 
 /// 高级搜索端点。
@@ -2323,20 +2383,36 @@ async fn search_info(
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Query(params): Query<SearchInfoQuery>,
-) -> Json<Value> {
+) -> Response {
     let q = params.q.unwrap_or_default();
     let page = params.page.unwrap_or(1).max(1);
     let page_size = params.page_size.unwrap_or(20).clamp(1, 100);
 
-    if q.trim().is_empty() {
-        return Json(json!({"items": [], "query": q, "total": 0, "page": page, "page_size": page_size, "total_pages": 0}));
+    // 额外的 PDF 健康筛选（来自文献列表页的 `?pdf_health=` 参数）
+    let health_cond = match params.pdf_health.as_deref().filter(|s| !s.trim().is_empty()) {
+        Some(raw) => match pdf_health_condition(raw) {
+            Ok(c) => c,
+            Err(detail) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({ "detail": detail })))
+                    .into_response()
+            }
+        },
+        None => None,
+    };
+
+    if q.trim().is_empty() && health_cond.is_none() {
+        return Json(json!({"items": [], "query": q, "total": 0, "page": page, "page_size": page_size, "total_pages": 0})).into_response();
     }
 
     // 解析查询字符串
     let pq = crate::services::query_parser::parse_query(&q);
 
     // 生成 WHERE 子句和绑定值
-    let (where_clause, binds) = crate::services::query_parser::build_where_clause(&pq, true);
+    let (mut where_clause, mut binds) = crate::services::query_parser::build_where_clause(&pq, true);
+    if let Some((cond, extra)) = health_cond {
+        where_clause = format!("({}) AND {}", where_clause, cond);
+        binds.extend(extra);
+    }
 
     // 计数
     let count_sql = format!("SELECT COUNT(*) FROM documents WHERE {}", where_clause);
@@ -2396,6 +2472,7 @@ async fn search_info(
         "page_size": page_size,
         "total_pages": total_pages
     }))
+    .into_response()
 }
 
 /// 语义搜索
@@ -2447,20 +2524,16 @@ async fn semantic_search(
         let mut doc_info = json!({});
         if let Some(did) = doc_id {
             if let Ok(Some(doc)) = fetch_doc(&db, did).await {
-                let state = crate::services::file_state::derive_state(
-                    doc.fs_synced_at.as_deref(),
-                    doc.pdf_size,
-                    doc.md_size,
-                    crate::routers::pipeline::runtime_task(doc.id).as_ref(),
-                    crate::services::file_state::last_error(doc.id).as_deref(),
-                    doc.mineru_task_id.as_deref(),
-                );
+                // 同样不再给 `status`：只给文件事实，状态由调用方（前端）自行推导
                 doc_info = json!({
                     "filename": doc.filename,
-                    "status": state.status.as_str(),
                     "authors": doc.authors,
                     "year": doc.year,
                     "journal": doc.journal,
+                    "has_md": doc.has_md(),
+                    "has_pdf": doc.has_pdf(),
+                    "synced": doc.fs_synced_at.is_some(),
+                    "pdf_health": doc.pdf_health,
                 });
             }
         }
@@ -2548,21 +2621,17 @@ async fn grep_search(
         let sql = format!("SELECT {} FROM documents WHERE id IN ({})", DOC_COLUMNS, ids_str.join(","));
         if let Ok(rows) = sqlx::query_as::<_, Document>(&sql).fetch_all(db.pool()).await {
             for doc in rows {
-                let state = crate::services::file_state::derive_state(
-                    doc.fs_synced_at.as_deref(),
-                    doc.pdf_size,
-                    doc.md_size,
-                    crate::routers::pipeline::runtime_task(doc.id).as_ref(),
-                    crate::services::file_state::last_error(doc.id).as_deref(),
-                    doc.mineru_task_id.as_deref(),
-                );
+                // 同样不再给 `status`：只给文件事实
                 doc_map.insert(doc.id, json!({
                     "title": doc.title,
                     "filename": doc.filename,
-                    "status": state.status.as_str(),
                     "authors": doc.authors,
                     "year": doc.year,
                     "journal": doc.journal,
+                    "has_md": doc.has_md(),
+                    "has_pdf": doc.has_pdf(),
+                    "synced": doc.fs_synced_at.is_some(),
+                    "pdf_health": doc.pdf_health,
                 }));
             }
         }

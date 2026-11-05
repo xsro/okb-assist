@@ -92,14 +92,14 @@ export function extractPdfMeta(id: number) {
 
 // ── 批量操作 ────────────────────────────────────────────
 
-/** 批量启动所有待处理文档 */
+/** 批量启动解析（只处理「有 PDF 但缺少 Markdown」的文档） */
 export function startBatch() {
   return apiPost<{ detail: string; pending: number }>(
     '/assist/api/pipeline/batch/start/'
   )
 }
 
-/** 批量解析所有待解析文档 */
+/** 批量解析「有 PDF 但缺少 Markdown」的文档（没有 PDF 的记录会被跳过） */
 export function startBatchParse() {
   return apiPost<{ detail: string; pending: number }>(
     '/assist/api/pipeline/batch/start-parse/'

@@ -63,44 +63,13 @@
         </div>
       </div>
 
-      <div class="subsection">
-        <h4>异常 PDF（{{ health?.problem_count ?? 0 }}）</h4>
-        <div v-if="healthItems.length > 0" class="table-wrap">
-          <table class="doc-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>标题</th>
-                <th>健康</th>
-                <th>说明</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="item in healthItems" :key="item.id">
-                <td>{{ item.id }}</td>
-                <td>{{ item.title || item.filename || '(无标题)' }}</td>
-                <td>
-                  <span
-                    class="health-badge"
-                    :class="`health-${item.pdf_health || 'unchecked'}`"
-                    :title="item.pdf_health_message || undefined"
-                  >{{ healthLabel(item.pdf_health) }}</span>
-                </td>
-                <td class="health-message">{{ item.pdf_health_message || '-' }}</td>
-                <td>
-                  <button class="btn btn-sm btn-outline" @click="openDoc(item.id)">管理</button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-          <div v-if="(health?.problem_count ?? 0) > healthItems.length" class="empty-hint">
-            仅显示前 {{ healthItems.length }} 条（共 {{ health?.problem_count }} 条），可到「文档管理」逐条查看。
-          </div>
-        </div>
-        <div v-else class="empty-hint">
-          {{ health ? '没有异常 PDF' : '暂无数据' }}
-        </div>
+      <div class="health-link-row">
+        <router-link class="btn btn-sm btn-outline" to="/assist?pdf_health=warning,error,missing">
+          查看异常 PDF 文献（{{ health?.problem_count ?? 0 }}）→
+        </router-link>
+        <span class="health-link-hint">
+          在文献列表中按「PDF 健康 = warning / error / missing」筛选
+        </span>
       </div>
     </div>
 
@@ -108,7 +77,11 @@
     <div class="section">
       <h3>维护操作</h3>
       <div class="action-buttons">
-        <button class="btn btn-outline" @click="batchParse">批量解析已上传</button>
+        <button
+          class="btn btn-outline"
+          title="只解析「有 PDF 但还没有 Markdown」的文档；没有 PDF 的记录会被跳过"
+          @click="batchParse"
+        >批量解析有 PDF 无 Markdown</button>
         <button
           class="btn btn-outline"
           title="只为 PDF/Markdown/资源包 大小为空（NULL）的文档补写大小，不动已有数据"
@@ -271,10 +244,9 @@ const queue = computed(() => pipelineStore.queue)
 const activeTasks = computed(() => pipelineStore.activeTasks)
 const batchProgress = computed(() => pipelineStore.batchProgress)
 
-// PDF 健康概览（分布计数 + 异常文档清单）
+// PDF 健康概览（分布计数 + 异常文档总数）
 const health = ref<PdfHealthOverview | null>(null)
 const healthLoading = ref(false)
-const healthItems = computed(() => health.value?.items ?? [])
 
 const healthCards = computed(() => {
   const counts = health.value?.counts ?? {}
@@ -310,7 +282,7 @@ async function load() {
   }
 }
 
-/** 加载 PDF 健康概览（计数 + 异常清单） */
+/** 加载 PDF 健康概览（分布计数 + 异常文档总数） */
 async function loadPdfHealth() {
   healthLoading.value = true
   try {
@@ -322,24 +294,8 @@ async function loadPdfHealth() {
   }
 }
 
-/** PDF 健康状态 → 中文标签 */
-function healthLabel(status?: string | null): string {
-  const labels: Record<string, string> = {
-    ok: '✓ 正常',
-    warning: '⚠ 警告',
-    error: '✕ 无法解析',
-    missing: '✕ 缺失',
-    unchecked: '未检查'
-  }
-  return labels[status || 'unchecked'] || (status || '未检查')
-}
-
-function openDoc(id: number) {
-  router.push(`/assist/doc/${id}`)
-}
-
 async function batchParse() {
-  if (!confirm('确定批量解析所有已上传/待解析的文档？')) return
+  if (!confirm('确定批量解析「有 PDF 但缺少 Markdown」的文档？没有 PDF 的记录会被跳过。')) return
   try {
     const res = await startBatchParse()
     showInfo(res.detail)
@@ -512,46 +468,17 @@ onUnmounted(() => {
   color: var(--text-secondary);
 }
 
-.health-badge {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-  border: 1px solid transparent;
+.health-link-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 20px;
 }
 
-.health-badge.health-ok {
-  color: #1b7f4b;
-  background: #e8f7ee;
-  border-color: #b7e2c9;
-}
-
-.health-badge.health-warning {
-  color: #9a6400;
-  background: #fff6e0;
-  border-color: #f0d69b;
-}
-
-.health-badge.health-error,
-.health-badge.health-missing {
-  color: var(--danger-text);
-  background: #fdecec;
-  border-color: #f3c1c1;
-}
-
-.health-badge.health-unchecked {
-  color: var(--text-secondary);
-  background: var(--bg-secondary);
-  border-color: var(--border);
-}
-
-.health-message {
+.health-link-hint {
   font-size: 12px;
   color: var(--text-secondary);
-  max-width: 320px;
-  word-break: break-all;
 }
 
 .tool-tag {

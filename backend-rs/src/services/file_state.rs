@@ -43,6 +43,8 @@ pub struct DocState {
 /// 进程内活动任务的快照（由 pipeline 组装后传入，避免本模块依赖 router）
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeTask {
+    /// `parse` / `extract` / `index` / `hash` / `pdf-health` …
+    pub task_type: String,
     pub message: String,
     pub progress: f64,
 }

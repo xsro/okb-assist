@@ -216,6 +216,7 @@ pub(crate) fn runtime_task(doc_id: i64) -> Option<crate::services::file_state::R
         _ => 0.0,
     });
     Some(crate::services::file_state::RuntimeTask {
+        task_type: t.task_type.clone(),
         message: t.status_message.clone(),
         progress,
     })
@@ -340,6 +341,20 @@ async fn stage_counts(db: &Database) -> StageCounts {
         timeout_error,
         ready_to_promote,
     }
+}
+
+/// 批量解析的目标集合：「有 PDF 但还没有 Markdown」的文档数。
+///
+/// 必须与 `process_stage_batch_parse()` 里的选取条件保持一致，
+/// 否则提示里的条数会与实际处理的文档数不符。
+async fn pending_parse_count(db: &Database) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM documents \
+         WHERE COALESCE(md_size,0) = 0 AND COALESCE(pdf_size,0) > 0",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap_or(0)
 }
 
 async fn save_mineru_task_id(db: &Database, doc_id: i64, task_id: &str) {
@@ -1516,6 +1531,10 @@ where
 
 // ── 批量处理 ──
 
+/// 批量解析：只处理「有 PDF 但还没有 Markdown」的文档。
+///
+/// 没有 PDF 的记录（如 BibTeX 导入的条目）不参与批量解析，
+/// 需要先上传 PDF（文档管理页「替换 PDF」）。
 async fn process_stage_batch_parse(db: Arc<Database>, settings: Arc<Settings>) {
     let docs: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
         "SELECT {} FROM documents WHERE COALESCE(md_size,0) = 0 AND COALESCE(pdf_size,0) > 0", DOC_COLUMNS
@@ -1870,14 +1889,21 @@ async fn batch_start(
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
-    let counts = stage_counts(&db).await;
-    let pending = counts.uploaded + counts.error;
+    let pending = pending_parse_count(&db).await;
     if pending == 0 {
-        return Json(json!({"detail": "没有待解析的文档", "pending": 0})).into_response();
+        return Json(json!({
+            "detail": "没有「有 PDF 但缺少 Markdown」的文档",
+            "pending": 0
+        }))
+        .into_response();
     }
     BATCH_PAUSED.store(false, Ordering::SeqCst);
     tokio::spawn(process_stage_batch_parse(db, settings));
-    Json(json!({"detail": format!("批量解析已开始，共 {} 个文档待处理", pending), "pending": pending})).into_response()
+    Json(json!({
+        "detail": format!("批量解析已开始，共 {} 个「有 PDF、缺 Markdown」的文档待处理", pending),
+        "pending": pending
+    }))
+    .into_response()
 }
 
 async fn batch_pause(
@@ -1911,14 +1937,21 @@ async fn batch_start_parse(
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
-    let counts = stage_counts(&db).await;
-    let count = counts.uploaded + counts.error;
+    let count = pending_parse_count(&db).await;
     if count == 0 {
-        return Json(json!({"detail": "没有待解析的文档", "pending": 0})).into_response();
+        return Json(json!({
+            "detail": "没有「有 PDF 但缺少 Markdown」的文档",
+            "pending": 0
+        }))
+        .into_response();
     }
     BATCH_PAUSED.store(false, Ordering::SeqCst);
     tokio::spawn(process_stage_batch_parse(db, settings));
-    Json(json!({"detail": format!("批量解析已开始，共 {} 个文档", count), "pending": count})).into_response()
+    Json(json!({
+        "detail": format!("批量解析已开始，共 {} 个「有 PDF、缺 Markdown」的文档", count),
+        "pending": count
+    }))
+    .into_response()
 }
 
 async fn batch_start_extract(

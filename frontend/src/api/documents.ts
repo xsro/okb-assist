@@ -273,12 +273,12 @@ export async function grepSearch(
  */
 export function searchInfo(
   query: string,
-  options: { page?: number; page_size?: number } = {}
+  options: { page?: number; page_size?: number; pdf_health?: string } = {}
 ) {
-  const { page = 1, page_size = 20 } = options
+  const { page = 1, page_size = 20, pdf_health } = options
   return apiGet<SearchResultList>(
     '/assist/api/documents/search-info/',
-    { q: query, page, page_size }
+    { q: query, page, page_size, ...(pdf_health ? { pdf_health } : {}) }
   )
 }
 

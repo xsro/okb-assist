@@ -47,10 +47,10 @@
             <span v-if="doc.pdf_health_message" class="health-msg">{{ doc.pdf_health_message }}</span>
           </td>
         </tr>
-        <tr><th>状态</th><td><StatusBadge :status="doc.status" :status_message="doc.status_message" :synced="doc.synced" /></td></tr>
-        <tr v-if="doc.status === 'error' && doc.status_message">
+        <tr><th>文件</th><td><StatusBadge :doc="doc" /></td></tr>
+        <tr v-if="derivedStatus?.status === 'error' && derivedStatus.detail">
           <th>错误详情</th>
-          <td class="error-message">{{ doc.status_message }}</td>
+          <td class="error-message">{{ derivedStatus.detail }}</td>
         </tr>
         <tr>
           <th>已索引库</th>
@@ -132,12 +132,12 @@
           </span>
         </div>
         <div class="info-row">
-          <span class="info-label">状态</span>
-          <span class="info-value"><StatusBadge :status="doc.status" :status_message="doc.status_message" :synced="doc.synced" /></span>
+          <span class="info-label">文件</span>
+          <span class="info-value"><StatusBadge :doc="doc" /></span>
         </div>
-        <div v-if="doc.status === 'error' && doc.status_message" class="info-row error-row">
+        <div v-if="derivedStatus?.status === 'error' && derivedStatus.detail" class="info-row error-row">
           <span class="info-label">错误详情</span>
-          <span class="info-value error-message">{{ doc.status_message }}</span>
+          <span class="info-value error-message">{{ derivedStatus.detail }}</span>
         </div>
         <div class="info-row">
           <span class="info-label">已索引库</span>
@@ -191,6 +191,7 @@ import { useRequireToken } from '@/composables/useRequireToken'
 import { useResponsive } from '@/composables/useResponsive'
 import { useTokenStore } from '@/stores/token'
 import StatusBadge from '@/components/StatusBadge.vue'
+import { deriveDocStatus } from '@/utils/docStatus'
 import DocumentPdfInfoPanel from '@/components/detail/DocumentPdfInfoPanel.vue'
 import DocumentCrossrefPanel from '@/components/detail/DocumentCrossrefPanel.vue'
 import DocumentCitationPanel from '@/components/detail/DocumentCitationPanel.vue'
@@ -204,6 +205,9 @@ const { isMobile } = useResponsive()
 const tokenStore = useTokenStore()
 
 const doc = ref<Document | null>(null)
+
+/** 状态由前端推导（后端只给文件事实与运行时字段） */
+const derivedStatus = computed(() => (doc.value ? deriveDocStatus(doc.value) : null))
 
 const openingPdf = ref(false)
 

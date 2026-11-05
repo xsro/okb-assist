@@ -543,7 +543,7 @@ for ddl in [
 | 4.5 MCP 删参 | `list_documents` schema 删 `status`，加三态/健康参数；`append_list_filters()` 重写 |
 | 4.6 MCP 严格校验 | `McpServer::reject_unknown_args()`：白名单取自 `list_tools()` 的 `inputSchema.properties`，`null` 值放行，错误文案含可用参数 + `status` 替代提示 |
 | 5.1 端点 | `GET /assist/api/admin/file-state/reconcile?fix=`（替代被删的 `documents/status`）；`pipeline reset` 改为「清空解析产物」 |
-| 5.2 逐点 | `models.rs` 删三字段；`database.rs` 建表 + 备份表 + 删列 + 4 个索引；`doc_to_out` 零 stat；`admin`/`mcp` 统计改聚合 |
+| 5.2 逐点 | `models.rs` 删三字段；`database.rs` 建表 + 备份表 + 删列 + 4 个索引；`doc_to_out` 零 stat、**不再返回 `status`/`status_message`**（只给数据库记录 + `has_*`/`synced`/`pdf_health*`/`runtime_task`/`last_error`，展示文案由前端 `utils/docStatus.ts` 推导，列表徽章直接显示 `pdf\|md\|zip` 这类文件类型，PDF 健康异常时内嵌 `pdf(bad)` / `pdf(warn)`）；`admin`/`mcp` 统计改聚合 |
 | D6 | `fix_document_status` / `StatusFixBody` / 两条路由 **直接删除**（实测返回 404） |
 | D7 | `persist_pdf_for_doc` 的 `reset_status` 参数与 SQL 分支删除；收到该 multipart 字段时忽略并 `warn` |
 | 七、前端 | `types/document.ts`、`api/documents.ts`、`api/pipeline.ts`（`clearParseOutput`）、`searchParser.ts`、`QueryBuilder.vue`（文件事实 + PDF 健康两组）、`DocManageView.vue`（「设置状态」→「文件事实」+「清空解析产物」）、`StatusBadge.vue`（`synced === false` 显示「未同步」） |
