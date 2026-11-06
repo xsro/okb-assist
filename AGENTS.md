@@ -364,13 +364,13 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
   - `POST /assist/api/chat` —— 请求 `{model?, messages, system?, temperature?, max_tokens?, tools?, tool_mode?, max_tool_rounds?}`，返回 `{content, steps, delta, notes, name, protocol, model, tool_mode, tool_rounds}`。
 - 模型选择：`Settings::llm_model_config(name)`（`backend-rs/src/config.rs`）按 `name` 取池中一项，未命中/留空回退第一项。
 - 对话生成：`LlmClient::chat_with_tools()`（`backend-rs/src/services/llm.rs`），Ollama 走 `/api/chat`，OpenAI 兼容走 `/chat/completions`；消息 role 允许 `system`/`user`/`assistant`/`tool`，无 `system` 时自动补默认系统提示词（开工具时再追加工具规则）；`max_tokens` 上限 8192、`temperature` 限幅 0-2。
-- **MCP 工具接入**：直接复用 `McpServer`（`backend-rs/src/mcp_server.rs`）的 9 个只读工具（`list_tools()` / `call_tool()`，与 `/assist/mcp` 同一套实现），服务端在**本请求内**完成「模型 → 工具 → 模型」循环（默认最多 5 轮、可用 `max_tool_rounds` 调整至 8），单条工具结果截断 12k 字符，重复的相同调用复用结果。
+- **MCP 工具接入**：直接复用 `McpServer`（`backend-rs/src/mcp_server.rs`）的工具集（`list_tools()` / `call_tool()`，与 `/assist/mcp` 同一套实现；9 个只读工具 + 3 个 Markdown 写工具），服务端在**本请求内**完成「模型 → 工具 → 模型」循环（默认最长 5 轮、可用 `max_tool_rounds` 调整至 8），单条工具结果截断 12k 字符，重复的相同调用复用结果。**写工具按调用方角色过滤**：`McpServer::new()` 需传 `Role`，非 admin 的 `list_tools()` 不返回 `edit_markdown` / `replace_markdown` / `find_replace_markdown`，`call_tool()` 也直接拒绝（`forbidden`）。
 - **两种工具协议（`tool_mode`）**：
   - `native`：原生 function calling（请求带 `tools`，响应取 `tool_calls`）；
   - `prompt`：提示词协议（system 里给出工具 JSON Schema，模型输出 `{"tool_calls":[{"name","arguments"}]}`，解析后以 `user` 消息回传结果）——适用于不支持 function calling 的网关/思考型模型；
   - `auto`（默认）：先试 native，服务商报错含 tool/function 或模型首轮不动手反而声称自己“无法访问文献库”时，自动降级为 prompt（响应里的 `notes` 会说明）。
   - 取值来源：请求参数 `tool_mode` > 模型条目的 `llm.models[].tool_mode` > `auto`。**注意：没有充分系统提示词时，部分模型（如 dots3-note-prev）不会主动发起工具调用。**
-- **认证与权限**：`GET/POST /assist/api/*` 仍是全局 Token/子网鉴权；chat 本身允许全部已认证角色（含 `view-only`），工具集均为只读查询，不超出只读用户的已有权限。
+- **认证与权限**：`GET/POST /assist/api/*` 仍是全局 Token/子网鉴权；chat 本身允许全部已认证角色（含 `view-only`），工具集对非 admin 只有只读查询，admin 额外可见 3 个 Markdown 写工具（`edit_markdown` / `replace_markdown` / `find_replace_markdown`），与 MCP 端点同一套角色过滤。
 - **非流式**：一次请求返回完整回答（前端 axios 超时单独放大到 300s，支持「停止」中止）。前端把 `delta`（含 `assistant.tool_calls` 与 `tool` 结果）追加到本地 transcript 并回传，以保留跨轮工具上下文（裁剪时不能把 `tool` 消息与其前置 `assistant.tool_calls` 拆开）。
 - 前端：`ChatView.vue` + `api/chat.ts` + `types/chat.ts`；已并入「工具」页的问答 tab（`ChatView` 支持 `embedded` 属性：隐藏自带的页面标题、压低高度），导航栏不再单独放「问答」入口；展示工具调用卡片（工具名/参数/结果预览/失败标记）、本轮协议与降级提示；本地状态存 `localStorage`（`okb_chat_messages` 展示条目、`okb_chat_history` transcript、`okb_chat_model`、`okb_chat_tools`、`okb_chat_tool_mode`、`okb_chat_session` 当前会话绑定）。
 
@@ -502,7 +502,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、按文件哈希去重、索引重置。
 6. **问答**（`chat.rs`）：`GET /assist/api/chat/models`、`GET /assist/api/chat/tools` 列出模型池与可调用的 MCP 工具，`POST /assist/api/chat` 基于 `llm.models` 做多轮对话，并可在本请求内循环调用 MCP 工具（非流式）。见下方「问答（Chat）」。
 7. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
-8. **MCP 服务**（`mcp_server.rs`）：**只有一个** `POST /assist/mcp/stream` 端点（Streamable HTTP 的最小可用子集：读完请求体 → 返回单个 JSON 响应；**没有 SSE 传输**、没有 `Mcp-Session-Id` 会话、没有事件流）；Bearer 认证接受用户会话/个人令牌（`Principal.mcp`）、受信任子网（需 `trusted_subnet_enabled`）。完整工具列表见 `document/mcp.md`。
+8. **MCP 服务**（`mcp_server.rs`）：**只有一个** `POST /assist/mcp/stream` 端点（Streamable HTTP 的最小可用子集：读完请求体 → 返回单个 JSON 响应；**没有 SSE 传输**、没有 `Mcp-Session-Id` 会话、没有事件流）；Bearer 认证接受用户会话/个人令牌（`Principal.mcp`）、受信任子网（需 `trusted_subnet_enabled`，角色取 `trusted_subnet_role`，与 API 中间件一致，**不再硬编码 admin**）。工具集 = 9 个只读工具 + 3 个 Markdown 写工具（`edit_markdown` / `replace_markdown` / `find_replace_markdown`，**仅 admin 可见/可用**，`McpServer::new()` 必须传调用方 `Role`；写路径复用 `documents.rs` 的 `write_atomic` + `sync_doc_file_sizes`，不重写图片路径）。完整工具列表见 `document/mcp-tools.md`。
 
 ## 后台任务（异步执行）
 

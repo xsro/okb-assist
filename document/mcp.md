@@ -3,6 +3,8 @@
 OKB-Assist 提供了 [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) 服务器，允许 AI 助手（如 CodeBuddy、Claude Desktop、Codex、Pi Agent、OpenCode、Cursor 等）直接调用文献管理工具。
 
 > 完整的工具列表与参数说明见 [MCP 工具文档](./mcp-tools.md)。
+>
+> 其中 `edit_markdown` / `replace_markdown` / `find_replace_markdown` 是**写操作**，仅 `admin` 角色的凭证可用（非 admin 的 `tools/list` 里不会出现，直接调用返回 `forbidden`）。编辑只改 Markdown 文件并同步文件大小，不会触发重新解析或重建向量索引。
 
 ## 认证配置
 

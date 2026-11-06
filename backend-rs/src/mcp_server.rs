@@ -12,11 +12,12 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use tracing::{debug, info, warn};
 
+use crate::auth::Role;
 use crate::config::Settings;
 use crate::database::Database;
 use crate::models::{DocStatus, Document};
 use crate::paths;
-use crate::routers::documents::get_or_create_alias;
+use crate::routers::documents::{get_or_create_alias, sync_doc_file_sizes, write_atomic};
 use crate::services::grep_search::{grep_search as do_grep, parse_doc_ids};
 
 /// Document 全部列的 SELECT 语句（列顺序与 `Document` 结构体字段一致）。
@@ -31,18 +32,29 @@ const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, CAST(NULLIF(
 /// 分页 offset 上限（防止恶意大 offset 导致全表扫描）。
 const MAX_OFFSET: i64 = 10000;
 
+/// `find_replace_markdown` 单次 `all=true` 允许替换的最大命中数。
+const MAX_FIND_REPLACE: usize = 200;
+
 pub struct McpServer {
     db: Arc<Database>,
     settings: Arc<Settings>,
+    /// 调用方角色。写类工具（Markdown 编辑）仅 `admin` 可见且可用，
+    /// 非 admin 连 `tools/list` 里都看不到它们。
+    role: Role,
 }
 
 impl McpServer {
-    pub fn new(db: Arc<Database>, settings: Arc<Settings>) -> Self {
-        Self { db, settings }
+    pub fn new(db: Arc<Database>, settings: Arc<Settings>, role: Role) -> Self {
+        Self { db, settings, role }
+    }
+
+    /// 是否允许使用写类工具（当前仅 `admin`）。
+    pub fn can_write(&self) -> bool {
+        matches!(self.role, Role::Admin)
     }
 
     pub async fn list_tools(&self) -> Vec<Value> {
-        vec![
+        let mut tools = vec![
             json!({
                 "name": "grep_search",
                 "description": "Full-text search of document content (grep-based, lightweight and fast). No vector database required, supports regex. Results are sorted by document ID ascending; use start_after_id for cursor-based pagination.",
@@ -88,7 +100,7 @@ impl McpServer {
             }),
             json!({
                 "name": "read_markdown",
-                "description": "Read document Markdown content (line-based pagination, won't break document structure), or extract a specific section by heading.",
+                "description": "Read document Markdown content (line-based pagination, won't break document structure), or extract a specific section by heading. The response includes `hash` (file sha256), which is the `base_hash` expected by the write tools.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -165,7 +177,85 @@ impl McpServer {
                     "required": ["id"]
                 }
             }),
+        ];
+
+        // 写类工具：仅 admin 可见（非 admin 的 tools/list 里不会出现）
+        if self.can_write() {
+            tools.extend(Self::write_tools());
+        }
+        tools
+    }
+
+    /// 写类工具定义（Markdown 编辑），仅 `admin` 可见/可用。
+    ///
+    /// 三者语义与 Web 端编辑接口一致：直接读写 Markdown 源文件（不做图片路径
+    /// 重写/还原），写后立即同步文件事实（`md_size`），因此派生状态仍由文件推导。
+    fn write_tools() -> Vec<Value> {
+        vec![
+            json!({
+                "name": "edit_markdown",
+                "description": "Edit a document's Markdown source by replacing / inserting / deleting a line range (0-indexed, same semantics as the Web source editor). line_count=0 inserts; delete=true removes the range; the number of new lines is the line count of `content` (an empty string is ONE blank line). Reads/writes the raw file (image paths untouched). Safety: pass `expected_text` (the exact current text of the target range) and/or `base_hash` (sha256 returned by read_markdown / a previous edit); `dry_run=true` previews without writing. Requires admin.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "line_start": {"type": "integer", "description": "Starting line (0-indexed, inclusive). Clamped to total_lines."},
+                        "line_count": {"type": "integer", "default": 0, "description": "Number of existing lines to replace (0 = pure insertion)."},
+                        "content": {"type": "string", "default": "", "description": "Replacement text; its line count is `content.split('\\n').count()`. Empty string means one blank line."},
+                        "delete": {"type": "boolean", "default": false, "description": "true = delete the [line_start, line_start+line_count) range and ignore content."},
+                        "expected_text": {"type": "string", "description": "Exact current text of the target range. On mismatch nothing is written and the actual content plus a suggested line_start are returned."},
+                        "base_hash": {"type": "string", "description": "Optimistic concurrency: sha256 of the file read earlier. Mismatch returns error code `conflict`."},
+                        "dry_run": {"type": "boolean", "default": false, "description": "Preview only, do not write."}
+                    },
+                    "required": ["id", "line_start"]
+                }
+            }),
+            json!({
+                "name": "replace_markdown",
+                "description": "Replace the WHOLE Markdown source of a document (must be non-empty). Use only when the change rewrites most of the file; prefer edit_markdown / find_replace_markdown otherwise. Supports `base_hash` and `dry_run`. Requires admin.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "content": {"type": "string", "description": "New full Markdown content (required, non-empty)."},
+                        "base_hash": {"type": "string", "description": "Optimistic concurrency: sha256 of the current file. Mismatch returns error code `conflict`."},
+                        "dry_run": {"type": "boolean", "default": false, "description": "Preview only, do not write."}
+                    },
+                    "required": ["id", "content"]
+                }
+            }),
+            json!({
+                "name": "find_replace_markdown",
+                "description": "Exact (case-sensitive, literal) find & replace on a document's Markdown source. By default the `find` text must occur exactly once; if it occurs more often nothing is written and the hit count plus line previews are returned — pass all=true to replace every occurrence (max 200). Supports `base_hash` and `dry_run`. Requires admin.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "find": {"type": "string", "description": "Literal text to find (not a regex), must be non-empty."},
+                        "replace": {"type": "string", "default": "", "description": "Replacement text; empty string deletes the matched text."},
+                        "all": {"type": "boolean", "default": false, "description": "Replace every occurrence (max 200). Default requires a unique match."},
+                        "base_hash": {"type": "string", "description": "Optimistic concurrency: sha256 of the current file. Mismatch returns error code `conflict`."},
+                        "dry_run": {"type": "boolean", "default": false, "description": "Preview only, do not write."}
+                    },
+                    "required": ["id", "find"]
+                }
+            }),
         ]
+    }
+
+    /// 写类工具的权限拒绝错误（供 `call_tool` 使用）。
+    fn permission_denied(&self, tool: &str) -> Value {
+        json!({
+            "isError": true,
+            "content": [{"type": "text", "text": Self::err(
+                "forbidden",
+                &format!(
+                    "工具 {} 需要 admin 权限（当前角色 {}）。Markdown 编辑属于写操作，仅管理员可用。",
+                    tool,
+                    self.role.as_str()
+                )
+            )}]
+        })
     }
 
     /// 前置校验：验证必需的字符串参数不为空，返回 `Ok(value)` 或 `Err(error_response)`。
@@ -299,6 +389,29 @@ impl McpServer {
             "get_toc" => {
                 let _id = check_required_id!();
                 self.tool_get_toc(args).await
+            }
+            // ── 写类工具（仅 admin）──
+            "edit_markdown" => {
+                if !self.can_write() {
+                    return self.permission_denied("edit_markdown");
+                }
+                let _id = check_required_id!();
+                self.tool_edit_markdown(args).await
+            }
+            "replace_markdown" => {
+                if !self.can_write() {
+                    return self.permission_denied("replace_markdown");
+                }
+                let _id = check_required_id!();
+                self.tool_replace_markdown(args).await
+            }
+            "find_replace_markdown" => {
+                if !self.can_write() {
+                    return self.permission_denied("find_replace_markdown");
+                }
+                let _id = check_required_id!();
+                let _find = check_required_str!("find");
+                self.tool_find_replace_markdown(args).await
             }
             _ => {
                 warn!(tool = %name, "Unknown tool called");
@@ -684,6 +797,9 @@ impl McpServer {
         };
 
         let title = doc.title.clone().unwrap_or_else(|| doc.filename.clone());
+        // 文件 sha256：可直接作为写工具（edit_markdown / replace_markdown / find_replace_markdown）
+        // 的 `base_hash`，用于乐观并发校验。
+        let hash = crate::utils::sha256_hex_async(content.clone().into_bytes()).await;
 
         // 章节提取模式：优先于分页
         if !targets.is_empty() {
@@ -706,6 +822,7 @@ impl McpServer {
                 "title": title,
                 "section": targets.join(", "),
                 "matched_sections": matched_sections,
+                "hash": hash,
                 "content": extracted,
             }));
         }
@@ -729,6 +846,7 @@ impl McpServer {
             "line_count": line_count,
             "lines_returned": lines_returned,
             "total_lines": total_lines,
+            "hash": hash,
             "content": page_content,
         }))
     }
@@ -934,9 +1052,432 @@ impl McpServer {
             "toc": toc,
         }))
     }
+
+    // ── 写类工具实现：Markdown 编辑（仅 admin）──
+
+    /// 读取待编辑的 Markdown：返回 `(文档, 文件路径, 原文)`。
+    /// 错误时直接返回已格式化好的错误文本（供工具原样回传）。
+    async fn load_markdown(&self, doc_id: i64) -> Result<(Document, String, String), String> {
+        let doc = match self.fetch_doc(doc_id).await {
+            Some(d) => d,
+            None => return Err(Self::err("not_found", &format!("文档 {} 不存在", doc_id))),
+        };
+        let md_path = paths::get_markdown_path(&self.settings, doc_id);
+        let raw = match std::fs::read_to_string(&md_path) {
+            Ok(c) => c,
+            Err(_) => {
+                return Err(Self::err(
+                    "not_found",
+                    "Markdown 文件尚未生成，请先解析 PDF（或调用 upload_parse_result 接口）",
+                ))
+            }
+        };
+        Ok((doc, md_path, raw))
+    }
+
+    /// 乐观并发校验：`base_hash` 非空且与当前文件 hash 不一致时返回错误文本。
+    fn check_base_hash_arg(args: &Value, current_hash: &str) -> Result<(), String> {
+        match args["base_hash"].as_str() {
+            Some(expected) if !expected.is_empty() && expected != current_hash => Err(Self::pretty(&json!({
+                "error": {
+                    "code": "conflict",
+                    "message": "文件已被其它操作修改（base_hash 不匹配），未写入。请重新 read_markdown 后再编辑",
+                },
+                "hash": current_hash,
+            }))),
+            _ => Ok(()),
+        }
+    }
+
+    /// 写入 Markdown 并同步文件事实（`md_size` 等），返回 `(新 hash, md_size)`。
+    async fn persist_markdown(
+        &self,
+        md_path: &str,
+        content: &str,
+        doc_id: i64,
+    ) -> Result<(String, Option<i64>), String> {
+        if let Err(e) = write_atomic(md_path, content) {
+            return Err(Self::err("write_failed", &format!("写入 Markdown 失败: {}", e)));
+        }
+        // 同步文件事实：列表页 md_size 与派生状态都不能过期
+        sync_doc_file_sizes(&self.db, &self.settings, doc_id).await;
+        let hash = crate::utils::sha256_hex_async(content.as_bytes().to_vec()).await;
+        let md_size = std::fs::metadata(md_path).ok().map(|m| m.len() as i64);
+        Ok((hash, md_size))
+    }
+
+    /// `edit_markdown` —— 按行范围替换 / 插入 / 删行。
+    async fn tool_edit_markdown(&self, args: &Value) -> String {
+        let doc_id = args["id"].as_i64().unwrap_or(0);
+        let line_start = match args["line_start"].as_i64() {
+            Some(v) if v >= 0 => v as usize,
+            _ => return Self::err("invalid_argument", "line_start 必须是非负整数（0-based）"),
+        };
+        let line_count = match args["line_count"].as_i64().unwrap_or(0) {
+            v if v >= 0 => v as usize,
+            _ => return Self::err("invalid_argument", "line_count 不能为负数"),
+        };
+        let delete = args["delete"].as_bool().unwrap_or(false);
+        let dry_run = args["dry_run"].as_bool().unwrap_or(false);
+        let content = args["content"].as_str().unwrap_or("");
+
+        let (doc, md_path, raw) = match self.load_markdown(doc_id).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let current_hash = crate::utils::sha256_hex_async(raw.clone().into_bytes()).await;
+        if let Err(e) = Self::check_base_hash_arg(args, &current_hash) {
+            return e;
+        }
+
+        let ends_with_newline = raw.ends_with('\n');
+        let lines: Vec<&str> = raw.lines().collect();
+        let total_lines = lines.len();
+        let start = line_start.min(total_lines);
+        let end = (start + line_count).min(total_lines);
+        let old_content = lines[start..end].join("\n");
+
+        // 安全阀：expected_text 必须与目标行范围的实际内容完全一致，否则不写
+        if let Some(expected) = args["expected_text"].as_str().filter(|s| !s.is_empty()) {
+            if expected != old_content {
+                return Self::pretty(&json!({
+                    "error": {
+                        "code": "mismatch",
+                        "message": "expected_text 与目标行范围的实际内容不一致，未写入。请重新 read_markdown 确认行号后再编辑",
+                    },
+                    "id": doc_id,
+                    "line_start": start,
+                    "line_count": line_count,
+                    "actual_content": clip(&old_content, 2000),
+                    "suggested_line_start": locate_text(&lines, expected),
+                }));
+            }
+        }
+
+        let new_lines: Vec<&str> = if delete {
+            Vec::new()
+        } else {
+            content.split('\n').collect()
+        };
+        let mut merged: Vec<&str> = Vec::with_capacity(total_lines + new_lines.len());
+        merged.extend_from_slice(&lines[..start]);
+        merged.extend_from_slice(&new_lines);
+        merged.extend_from_slice(&lines[end..]);
+        let mut result = merged.join("\n");
+        if ends_with_newline && !result.is_empty() {
+            result.push('\n');
+        }
+
+        let action = if delete {
+            "delete"
+        } else if line_count == 0 {
+            "insert"
+        } else {
+            "replace"
+        };
+        let title = doc.title.clone().unwrap_or_else(|| doc.filename.clone());
+        let changed = result != raw;
+
+        if dry_run {
+            return Self::pretty(&json!({
+                "dry_run": true,
+                "id": doc_id,
+                "title": title,
+                "action": action,
+                "changed": changed,
+                "line_start": start,
+                "line_count": line_count,
+                "lines_written": new_lines.len(),
+                "total_lines": merged.len(),
+                "hash": current_hash,
+                "old_content": clip(&old_content, 2000),
+                "new_content": clip(if delete { "" } else { content }, 2000),
+            }));
+        }
+
+        if !changed {
+            return Self::pretty(&json!({
+                "id": doc_id,
+                "title": title,
+                "detail": "内容与原文件一致，未写入",
+                "action": action,
+                "changed": false,
+                "line_start": start,
+                "line_count": line_count,
+                "lines_written": new_lines.len(),
+                "total_lines": total_lines,
+                "hash": current_hash,
+            }));
+        }
+
+        let (hash, md_size) = match self.persist_markdown(&md_path, &result, doc_id).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        info!(
+            doc_id,
+            action,
+            line_start = start,
+            line_count,
+            lines_written = new_lines.len(),
+            "MCP edit_markdown 已写入"
+        );
+
+        Self::pretty(&json!({
+            "id": doc_id,
+            "title": title,
+            "detail": "Markdown 已更新",
+            "action": action,
+            "changed": true,
+            "line_start": start,
+            "line_count": line_count,
+            "lines_written": new_lines.len(),
+            "total_lines": merged.len(),
+            "md_size": md_size,
+            "hash": hash,
+            "previous_hash": current_hash,
+        }))
+    }
+
+    /// `replace_markdown` —— 整篇覆盖。
+    async fn tool_replace_markdown(&self, args: &Value) -> String {
+        let doc_id = args["id"].as_i64().unwrap_or(0);
+        let content = match args["content"].as_str() {
+            Some(c) if !c.trim().is_empty() => c,
+            _ => {
+                return Self::err(
+                    "invalid_argument",
+                    "content 不能为空：整篇覆盖必须显式提供非空内容（清空请用 edit_markdown + delete）",
+                )
+            }
+        };
+        let dry_run = args["dry_run"].as_bool().unwrap_or(false);
+
+        let (doc, md_path, raw) = match self.load_markdown(doc_id).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let current_hash = crate::utils::sha256_hex_async(raw.clone().into_bytes()).await;
+        if let Err(e) = Self::check_base_hash_arg(args, &current_hash) {
+            return e;
+        }
+
+        let title = doc.title.clone().unwrap_or_else(|| doc.filename.clone());
+        let changed = raw != content;
+        let total_lines = content.lines().count();
+
+        if dry_run {
+            return Self::pretty(&json!({
+                "dry_run": true,
+                "id": doc_id,
+                "title": title,
+                "action": "replace_all",
+                "changed": changed,
+                "old_total_lines": raw.lines().count(),
+                "total_lines": total_lines,
+                "hash": current_hash,
+                "preview": clip(content, 2000),
+            }));
+        }
+
+        if !changed {
+            return Self::pretty(&json!({
+                "id": doc_id,
+                "title": title,
+                "detail": "内容与原文件一致，未写入",
+                "action": "replace_all",
+                "changed": false,
+                "total_lines": total_lines,
+                "hash": current_hash,
+            }));
+        }
+
+        let (hash, md_size) = match self.persist_markdown(&md_path, content, doc_id).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        info!(doc_id, total_lines, "MCP replace_markdown 已整篇覆盖");
+
+        Self::pretty(&json!({
+            "id": doc_id,
+            "title": title,
+            "detail": "Markdown 已整篇覆盖",
+            "action": "replace_all",
+            "changed": true,
+            "total_lines": total_lines,
+            "md_size": md_size,
+            "hash": hash,
+            "previous_hash": current_hash,
+        }))
+    }
+
+    /// `find_replace_markdown` —— 精确字面量查找替换（默认要求唯一命中）。
+    async fn tool_find_replace_markdown(&self, args: &Value) -> String {
+        let doc_id = args["id"].as_i64().unwrap_or(0);
+        let find = match args["find"].as_str() {
+            Some(s) if !s.is_empty() => s,
+            _ => return Self::err("invalid_argument", "find 不能为空"),
+        };
+        let replace = args["replace"].as_str().unwrap_or("");
+        let all = args["all"].as_bool().unwrap_or(false);
+        let dry_run = args["dry_run"].as_bool().unwrap_or(false);
+
+        let (doc, md_path, raw) = match self.load_markdown(doc_id).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let current_hash = crate::utils::sha256_hex_async(raw.clone().into_bytes()).await;
+        if let Err(e) = Self::check_base_hash_arg(args, &current_hash) {
+            return e;
+        }
+
+        let occurrences = raw.matches(find).count();
+        let matches = match_previews(&raw, find, 5);
+        if occurrences == 0 {
+            return Self::pretty(&json!({
+                "error": {
+                    "code": "not_found",
+                    "message": "未找到目标文本（find 为区分大小写的字面量匹配），未写入",
+                },
+                "id": doc_id,
+                "find": clip(find, 200),
+                "total_lines": raw.lines().count(),
+                "hash": current_hash,
+            }));
+        }
+        if occurrences > 1 && !all {
+            return Self::pretty(&json!({
+                "error": {
+                    "code": "ambiguous",
+                    "message": format!(
+                        "find 命中 {} 处，未写入。请给出更长的唯一文本，或传 all=true 替换全部（上限 {} 处）",
+                        occurrences, MAX_FIND_REPLACE
+                    ),
+                },
+                "id": doc_id,
+                "occurrences": occurrences,
+                "matches": matches,
+                "hash": current_hash,
+            }));
+        }
+        if all && occurrences > MAX_FIND_REPLACE {
+            return Self::pretty(&json!({
+                "error": {
+                    "code": "too_many",
+                    "message": format!("find 命中 {} 处，超过单次上限 {}；请缩小 find 的文本范围", occurrences, MAX_FIND_REPLACE),
+                },
+                "id": doc_id,
+                "occurrences": occurrences,
+            }));
+        }
+
+        let result = if all {
+            raw.replace(find, replace)
+        } else {
+            raw.replacen(find, replace, 1)
+        };
+        let replaced = if all { occurrences } else { 1 };
+        let title = doc.title.clone().unwrap_or_else(|| doc.filename.clone());
+
+        if dry_run {
+            return Self::pretty(&json!({
+                "dry_run": true,
+                "id": doc_id,
+                "title": title,
+                "action": "find_replace",
+                "occurrences": occurrences,
+                "replaced": replaced,
+                "changed": result != raw,
+                "matches": matches,
+                "hash": current_hash,
+                "new_content": clip(&result, 2000),
+            }));
+        }
+
+        if result == raw {
+            return Self::pretty(&json!({
+                "id": doc_id,
+                "title": title,
+                "detail": "替换内容与原文一致，未写入",
+                "action": "find_replace",
+                "occurrences": occurrences,
+                "replaced": 0,
+                "changed": false,
+                "hash": current_hash,
+            }));
+        }
+
+        let (hash, md_size) = match self.persist_markdown(&md_path, &result, doc_id).await {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        info!(
+            doc_id,
+            occurrences,
+            replaced,
+            "MCP find_replace_markdown 已写入"
+        );
+
+        Self::pretty(&json!({
+            "id": doc_id,
+            "title": title,
+            "detail": "Markdown 已更新",
+            "action": "find_replace",
+            "changed": true,
+            "occurrences": occurrences,
+            "replaced": replaced,
+            "matches": matches,
+            "total_lines": result.lines().count(),
+            "md_size": md_size,
+            "hash": hash,
+            "previous_hash": current_hash,
+        }))
+    }
 }
 
 // ── 辅助函数 ──
+
+/// 截断到 `max` 个字符（按字符而非字节，避免 UTF-8 边界 panic）。
+fn clip(s: &str, max: usize) -> String {
+    let total = s.chars().count();
+    if total <= max {
+        return s.to_string();
+    }
+    format!("{}…（已截断，共 {} 字符）", s.chars().take(max).collect::<String>(), total)
+}
+
+/// 在 `lines` 里查找 `text` 首次出现的起始行（0-based）。
+///
+/// 用于 `edit_markdown` 的 `expected_text` 不匹配时给出建议行号。
+fn locate_text(lines: &[&str], text: &str) -> Option<usize> {
+    let target: Vec<&str> = text.lines().collect();
+    if target.is_empty() || target.len() > lines.len() {
+        return None;
+    }
+    (0..=lines.len() - target.len()).find(|&i| lines[i..i + target.len()] == target[..])
+}
+
+/// 列出 `find` 在全文中的前 `max` 个命中（`line` 为 0-based 行号，`text` 为整行文本）。
+fn match_previews(raw: &str, find: &str, max: usize) -> Vec<Value> {
+    let mut out = Vec::new();
+    if find.is_empty() {
+        return out;
+    }
+    let mut from = 0usize;
+    while out.len() < max {
+        let Some(pos) = raw[from..].find(find) else { break };
+        let abs = from + pos;
+        let line = raw[..abs].matches('\n').count();
+        let line_start = raw[..abs].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_end = raw[abs..].find('\n').map(|i| abs + i).unwrap_or(raw.len());
+        out.push(json!({
+            "line": line,
+            "text": clip(&raw[line_start..line_end], 300),
+        }));
+        from = abs + find.len();
+    }
+    out
+}
 
 /// 向 QueryBuilder 追加 list_documents 的筛选条件。
 ///
@@ -1273,7 +1814,10 @@ pub async fn mcp_stream_handler(
     //    - 密码登录签发的会话 token（`sess_...`）；
     //    - 用户个人 API token（`okb_...`，要求该 token 与用户都开启 mcp）；
     // 2. 受信任子网（**仅当** `system.json.trusted_subnet_enabled = true`）。
+    //
+    // 未启用用户体系（库里没有任何用户）时视为单机模式，等同 admin。
     let auth_enabled = user_store.user_count() > 0;
+    let mut caller_role = crate::auth::Role::Admin;
     if auth_enabled {
         let token = crate::auth::extract_token_from_headers(&headers);
 
@@ -1297,7 +1841,11 @@ pub async fn mcp_stream_handler(
                     && !subnets.is_empty()
                     && crate::utils::ip_matches_subnets(&client_ip, &subnets);
                 if lan {
-                    crate::auth::Principal::local(crate::auth::Role::Admin, true)
+                    // 角色与 API 中间件保持一致：取 `trusted_subnet_role`（默认 admin）。
+                    // 不要再硬编码 Admin —— MCP 已有写类工具（Markdown 编辑），
+                    // 子网角色配成 view-only 时必须同样只读。
+                    let role = settings.trusted_subnet_role();
+                    crate::auth::Principal::local(role, true)
                 } else {
                     warn!(client_ip, "MCP authentication failed: missing credential");
                     return (
@@ -1329,9 +1877,12 @@ pub async fn mcp_stream_handler(
             via = %principal.via.as_str(),
             "MCP request authorized"
         );
+
+        // 写类工具（Markdown 编辑）按调用方角色放行，仅 admin 可用
+        caller_role = principal.role.clone();
     }
 
-    let server = McpServer::new(db, settings);
+    let server = McpServer::new(db, settings, caller_role);
 
     // JSON-RPC 解析
     let req: Value = match serde_json::from_str(&body) {

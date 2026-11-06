@@ -174,7 +174,7 @@ async fn list_tools(
         return resp;
     }
 
-    let mcp = McpServer::new(db, settings);
+    let mcp = McpServer::new(db, settings, role.clone());
     let tools = mcp.list_tools().await;
     let names: Vec<Value> = tools
         .iter()
@@ -227,8 +227,8 @@ async fn chat(
     let endpoint = settings.llm_model_config(body.model.as_deref());
     let client = endpoint.client();
 
-    // 工具集（本系统 MCP 工具，全部只读）
-    let mcp = McpServer::new(db, settings.clone());
+    // 工具集（本系统 MCP 工具；写类工具仅 admin 可见）
+    let mcp = McpServer::new(db, settings.clone(), role.clone());
     let tools: Vec<Value> = if body.tools && max_tool_rounds > 0 {
         mcp.list_tools().await
     } else {

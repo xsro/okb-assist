@@ -3177,7 +3177,7 @@ pub struct MarkdownLinesUpdate {
 }
 
 /// 原子写文件：先写同目录临时文件再 rename，避免崩溃/磁盘满导致截断。
-fn write_atomic(path: &str, content: &str) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &str, content: &str) -> std::io::Result<()> {
     let target = std::path::Path::new(path);
     let tmp = target.with_extension(format!(
         "{}.tmp",

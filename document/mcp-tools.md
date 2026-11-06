@@ -17,6 +17,11 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | `get_stats` | 获取知识库统计信息（总数、状态分布、类型分布） | 无 |
 | `list_doc_types` | 列出所有已使用的文献类型 | 无 |
 | `get_toc` | 获取文献目录（标题+行号），不受分页影响 | `id` |
+| `edit_markdown` 🔒 | **编辑**文献 Markdown 源码（按行范围替换/插入/删行，支持 `expected_text` 校验与 `dry_run` 预览） | `id`, `line_start`, `line_count`, `content`, `delete`, `expected_text`, `base_hash`, `dry_run` |
+| `replace_markdown` 🔒 | **整篇覆盖**文献 Markdown（要求显式提供非空内容） | `id`, `content`, `base_hash`, `dry_run` |
+| `find_replace_markdown` 🔒 | Markdown 字面量查找替换（默认要求唯一命中，`all=true` 替换全部） | `id`, `find`, `replace`, `all`, `base_hash`, `dry_run` |
+
+> 🔒 标记的工具是**写操作**，仅 `admin` 角色的调用方可见且可用：非 admin 的 `tools/list` 里不会出现，直接调用会返回 `forbidden` 错误。
 
 ---
 
@@ -230,6 +235,8 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | `section` | string | — | 按标题提取单个章节（不区分大小写，支持子串匹配） |
 | `sections` | string[] | — | 按标题提取多个章节 |
 
+返回体中的 `hash` 为文件 sha256，供写类工具的 `base_hash` 使用。
+
 **章节匹配规则：**
 
 - 不区分大小写
@@ -248,6 +255,7 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
   "line_count": 5000,
   "lines_returned": 320,
   "total_lines": 850,
+  "hash": "31ab…",
   "content": "# Title\n\nFirst paragraph..."
 }
 ```
@@ -260,9 +268,12 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
   "title": "Attention Is All You Need",
   "section": "Introduction",
   "matched_sections": ["Introduction"],
+  "hash": "31ab…",
   "content": "# Introduction\n\nIn this paper..."
 }
 ```
+
+> `hash` 是文件真实字节的 sha256，可直接作为写工具的 `base_hash` 传入（两种模式都会返回）。
 
 ---
 
@@ -430,6 +441,148 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 
 ---
 
+### `edit_markdown` — 编辑 Markdown（按行范围）
+
+> 🔒 **仅 admin**。语义与 Web 端「源码编辑」的按行替换接口（`PUT /assist/api/documents/:id/markdown/lines`）完全一致。
+
+直接读写 Markdown **源文件**：写入的是文件真实内容，**不做图片路径重写/还原**（与 `read_markdown` 返回的内容严格互逆，读出来原样写回去字节不变）。
+
+**参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `id` | int | **必填** | 文档 ID |
+| `line_start` | int | **必填** | 起始行（0-based，含端点），超出总行数时截断到文件末尾 |
+| `line_count` | int | `0` | 被替换的现有行数；`0` = 纯插入 |
+| `content` | string | `""` | 替换文本；新行数 = `content.split('\n').count()`（空串等于 **1 个空行**，不是删行） |
+| `delete` | bool | `false` | `true` = 直接删除 `[line_start, line_start + line_count)` 这些行（忽略 `content`） |
+| `expected_text` | string | — | 目标行范围当前应当等于的**精确文本**；不一致时不写入，返回实际内容与 `suggested_line_start` |
+| `base_hash` | string | — | 乐观并发：之前 `read_markdown` / 编辑响应返回的 `hash`；不一致返回 `conflict` |
+| `dry_run` | bool | `false` | 只预览不写盘，返回 `old_content` / `new_content` |
+
+**推荐流程：**
+
+1. `read_markdown` 读取目标行，记下 `content` 与 `hash`（或先 `dry_run` 预览）；
+2. 编辑时同时传 `expected_text`（要替换的那几行原文，防止行号错位）与 `base_hash`（防止并发覆盖）；
+3. 用响应里的 `hash` 作为下一次编辑的 `base_hash`。
+
+**返回格式：**
+
+```json
+{
+  "id": 42,
+  "title": "Attention Is All You Need",
+  "detail": "Markdown 已更新",
+  "action": "replace",
+  "changed": true,
+  "line_start": 12,
+  "line_count": 2,
+  "lines_written": 3,
+  "total_lines": 851,
+  "md_size": 48211,
+  "hash": "9f2c…",
+  "previous_hash": "31ab…"
+}
+```
+
+`action` 取值 `replace` / `insert` / `delete`。内容与原文件一致时返回 `changed: false` 且不写盘。
+
+**`expected_text` 不匹配时的返回（未写入）：**
+
+```json
+{
+  "error": {"code": "mismatch", "message": "expected_text 与目标行范围的实际内容不一致，未写入。…"},
+  "line_start": 12,
+  "line_count": 2,
+  "actual_content": "12 行起的真实内容…",
+  "suggested_line_start": 87
+}
+```
+
+---
+
+### `replace_markdown` — 整篇覆盖 Markdown
+
+> 🔒 **仅 admin**。会**替换整个文件**，只在「改写大部分内容」时使用；局部修改请用 `edit_markdown` / `find_replace_markdown`。
+
+**参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `id` | int | **必填** | 文档 ID |
+| `content` | string | **必填** | 新的完整 Markdown 内容；**不允许为空**（清空请用 `edit_markdown` + `delete`） |
+| `base_hash` | string | — | 乐观并发校验，不一致返回 `conflict` |
+| `dry_run` | bool | `false` | 只预览不写盘 |
+
+**返回格式：**
+
+```json
+{
+  "id": 42,
+  "title": "Attention Is All You Need",
+  "detail": "Markdown 已整篇覆盖",
+  "action": "replace_all",
+  "changed": true,
+  "total_lines": 1200,
+  "md_size": 51200,
+  "hash": "b7e1…",
+  "previous_hash": "31ab…"
+}
+```
+
+---
+
+### `find_replace_markdown` — 字面量查找替换
+
+> 🔒 **仅 admin**。区分大小写的**字面量**替换（不是正则）。
+
+比行号更稳的改法：把 `read_markdown` 里看到的一小段原文当作 `find` 直接替换。
+
+**参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `id` | int | **必填** | 文档 ID |
+| `find` | string | **必填** | 要查找的字面量文本（非空） |
+| `replace` | string | `""` | 替换文本；空串 = 删除命中的文本 |
+| `all` | bool | `false` | `false` 时要求全文**恰好命中 1 处**；`true` 时替换全部（上限 200 处，超出返回 `too_many`） |
+| `base_hash` | string | — | 乐观并发校验，不一致返回 `conflict` |
+| `dry_run` | bool | `false` | 只预览不写盘 |
+
+**返回格式：**
+
+```json
+{
+  "id": 42,
+  "title": "Attention Is All You Need",
+  "detail": "Markdown 已更新",
+  "action": "find_replace",
+  "changed": true,
+  "occurrences": 1,
+  "replaced": 1,
+  "matches": [{"line": 87, "text": "该方法在 3 个数据集上取得最好效果。"}],
+  "total_lines": 850,
+  "md_size": 48190,
+  "hash": "c1d4…",
+  "previous_hash": "31ab…"
+}
+```
+
+**多命中时的返回（未写入）：**
+
+```json
+{
+  "error": {"code": "ambiguous", "message": "find 命中 3 处，未写入。请给出更长的唯一文本，或传 all=true 替换全部（上限 200 处）"},
+  "occurrences": 3,
+  "matches": [{"line": 12, "text": "…"}, {"line": 87, "text": "…"}, {"line": 201, "text": "…"}],
+  "hash": "31ab…"
+}
+```
+
+> 编辑只改 Markdown 文件本身（并同步 `md_size`）：不会自动重新解析 PDF，也不会重建向量索引。
+
+---
+
 ## 通用参数说明
 
 ### 分页
@@ -459,4 +612,4 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 {"error": {"code": "...", "message": "..."}}
 ```
 
-常见错误码：`invalid_argument`、`not_found`。
+常见错误码：`invalid_argument`、`not_found`、`conflict`（`base_hash` 不匹配）、`mismatch`（`expected_text` 不一致）、`ambiguous`（`find` 多命中）、`too_many`、`forbidden`（写类工具需要 admin）、`write_failed`。
