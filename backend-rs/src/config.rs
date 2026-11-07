@@ -432,6 +432,17 @@ impl Settings {
             .unwrap_or(false)
     }
 
+    /// 是否允许**访客（未登录）**读取单篇文献的公开信息（**默认关闭**）。
+    ///
+    /// 打开后 `token_middleware` 会放行 `GET /assist/api/documents/public/:id`，
+    /// 该端点只返回书目元数据与摘要（不含文件名/哈希/文件大小/PDF 健康/索引库等）。
+    /// 改 `system.json` 后需重启进程（进程内缓存）。
+    pub fn public_detail_enabled(&self) -> bool {
+        self.get_system_config()["public_detail_enabled"]
+            .as_bool()
+            .unwrap_or(false)
+    }
+
     /// 命中受信任子网时授予的角色（默认 `admin`）
     pub fn trusted_subnet_role(&self) -> Role {
         self.get_system_config()["trusted_subnet_role"]

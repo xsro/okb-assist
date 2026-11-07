@@ -220,7 +220,9 @@ pub fn default_system() -> serde_json::Value {
         "drive_root": "data/drive",
         "trusted_subnets": [],
         "trusted_subnet_enabled": false,
-        "trusted_subnet_role": "admin"
+        "trusted_subnet_role": "admin",
+        // 访客可读：`true` 时未登录用户可读取单篇文献的公开信息（仅书目 + 摘要）
+        "public_detail_enabled": false
     })
 }
 

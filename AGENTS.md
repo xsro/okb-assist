@@ -407,6 +407,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 | `trusted_subnets` | 受信任子网白名单（CIDR 数组） | `[]` |
 | `trusted_subnet_enabled` | 是否启用受信任子网免鉴权（**默认关闭**，需显式打开） | `false` |
 | `trusted_subnet_role` | 命中受信任子网时授予的角色 | `admin` |
+| `public_detail_enabled` | 是否允许**访客（未登录）**读取单篇文献的公开信息（仅放行 `GET /assist/api/documents/public/:id`，数据面只含书目 + 摘要） | `false` |
 | `max_concurrent_tasks` | 全局 extract/index 最大并发数 | `3` |
 | `database_url` | SQLite 连接串 | `sqlite:///data/okb_assist.db` |
 | `markdown_path` | Markdown 文件路径模板 | `data/markdowns/{id}.md` |
@@ -491,6 +492,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
    - `GET /assist/api/documents/:id/pdf-info` —— PDF 元信息报告：`{pdf: {file_size, pdf_version, page_count, encrypted, info, heuristics}}`。`info` 为 PDF Info 字典原始键值（mupdf feature 下只有标准字段；否则由 `mutool show trailer.Info` 解析，含自定义键如 `/doi`），`heuristics` 复用 `pdf_meta` 的启发式抽取结果。页数取 `trailer/Root/Pages/Count`，回退 `mutool pages` 计数；加密判断取 trailer 的 `/Encrypt`。
    - `GET /assist/api/documents/:id/crossref` —— 读取 `crossref_path` 模板对应的已保存 Crossref 记录，返回 `{exists, path, raw, parsed, modified_at}`（`raw` 为 Crossref API 完整应答，`parsed` 与元数据补全同源）。
    - `GET /assist/api/documents/:id/citation?format=bibtex|gbt7714&source=auto|crossref|document` —— 生成引用条目，返回 `{format, source, key, content}`。默认 `source=auto`：有 Crossref 记录就用它，否则退化为数据库元数据（`source=document`，卷期页会缺失）；`source=crossref` 且无记录时返回 404。引用键为「第一作者姓 + 年份 + 标题首个实词」。
+   - **访客公开详情**（`GET /assist/api/documents/public/:id`）：仅当 `system.json` 的 `public_detail_enabled = true` 时由 `token_middleware` 放行（匿名主体注入 `ViewOnly`）；返回 `PublicDocumentOut`（`documents.rs`）—— 只有书目元数据 + 摘要（含双语），**不含**文件名/哈希/文件大小/PDF 健康/索引库/运行时任务/时间戳，也不做实时 stat。前端 `DetailView.vue` 用 `isGuest = !tokenStore.isAuthenticated` 区分：访客不渲染操作按钮与三个折叠区（改为「登录后可查看」占位卡），顶部给登录横幅；访问其它路由仍会被守卫跳登录页。
    - **DOI 比对统一归一化**：`doi_key()`（`normalize_doi` 去 `https://doi.org/` 等前缀与尾部标点 + 转小写）用于 `GET /documents/by-doi/:doi`（先精确匹配，未命中再 `LIKE` 粗筛 + `doi_key` 校验，兼容历史数据里带前缀/大小写不一致的值）与 `POST /documents/diff-dois`；写入口也归一化 —— `PUT /documents/:id`（`update_document`）与 `pipeline` 的 `MetaRecord::apply`。新增 DOI 写/比对照旧走这几个入口，别再直接字符串相等比较。
    - **全量比对索引**（`GET /documents/doi-hash-index`）：一次返回库内全部文献的 `{count, with_doi, with_hash, generated_at, documents:[{id, doi, doi_key, file_hash, pdf_health}]}`（`doi_key` 已归一化小写，空 DOI/空哈希为 `null`），供 `client-rs` 批量比对；客户端拉一次就完成整库比对，不再按 DOI 逐条请求 `by-doi`。只返回比对必需字段（不带 title/abstract），新增字段时注意保持轻量。
    - **上传去重**（`POST /documents/upload`，`upload_document`）：先用 `find_doc_by_hash`（只查 `file_hash` 索引，**不抽 PDF 元数据**）比哈希；未命中且请求里**显式**给了 `doi` 表单字段时再用 `find_doc_by_doi` 比 DOI（PDF 里抽到的 DOI 不参与去重，保持既有行为）。命中重复的行为由 `on_duplicate` 控制：`error`（默认，409 `{error:"duplicate", kind:"hash"|"doi", existing_id, existing:{file_hash,pdf_health,…}}`）/ `skip`（200 `{status:"skipped", existing_id, id, doc}`）/ `replace`（同哈希则等价 skip，否则用本次文件覆盖已有文档的 PDF，200 `{status:"replaced", existing_id, doc}`，复用 `persist_pdf_for_doc`，与 `POST /{id}/pdf` 同一套副作用）。`force=true` 跳过全部去重检查。新文档的 `doi` 直接取显式字段（`fill_meta_fields` 只补空）。去重依赖 `database.rs::init` 建的 `idx_documents_file_hash` / `idx_documents_doi`（`CREATE INDEX IF NOT EXISTS`，幂等），新增按列等值查找的功能时同步补索引。
@@ -626,7 +628,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 | `/assist/drive` | `DriveView.vue` | 网盘：我的网盘 + 公有文件夹（列目录/上传/下载/预览/重命名/移动/删除） | 全部 |
 | `/assist/drive/admin` | `DriveAdminView.vue` | 网盘管理：开关/单文件上限/默认配额、公有文件夹与角色阈值、逐用户配额 | admin |
 | `/assist` | `HomeView.vue` | 文献列表（桌面表格/移动卡片 + 列管理 + 高级搜索） | 全部 |
-| `/assist/detail/:id` | `DetailView.vue` | 文档详情（元信息 + PDF 元信息 / Crossref 记录 / 引用条目三个懒加载折叠区） | 全部 |
+| `/assist/detail/:id` | `DetailView.vue` | 文档详情（元信息 + PDF 元信息 / Crossref 记录 / 引用条目三个懒加载折叠区）。**访客可读**（路由 `meta.allowGuest`）：只显示书目信息 + 摘要，隐藏操作按钮/PDF 元信息等并给登录提示 | 全部（含访客） |
 | `/assist/markdown/:id` | `MarkdownView.vue` | Markdown 阅读（浮动设置按钮收纳全部工具；行号默认开、移动端默认关；设置面板的「源码编辑」跳到编辑器并从当前阅读行开始载入） | 全部 |
 | `/assist/markdown/:id/edit` | `MarkdownEditView.vue` | Markdown 编辑（AceEditor）；支持 `?line=a-b` 只载入指定行范围，阅读页「源码编辑」即跳到这里 | admin |
 | `/assist/upload` | `UploadView.vue` | 上传 PDF | admin / view-upload |
@@ -727,7 +729,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 
 ## ⚠️ 易错点（编辑前必读）
 
-1. **鉴权现状**：只认 `users` 段（会话 token / 用户个人令牌）。`system.json` 里**没有任何全局凭据字段**；`trusted_subnets` 默认不生效，需 `trusted_subnet_enabled = true`；系统未初始化时只有 `/auth/status|bootstrap` 可用。`TokenMiddleware` 仅对 `/assist/api/*` 生效。个人令牌的 `scope` **严格互斥**（api 只能调 API、mcp 只能调 MCP），新增受凭证保护的端点时记得同步判断 `Principal.api` / `Principal.mcp`，不要只看「令牌有效」。
+1. **鉴权现状**：只认 `users` 段（会话 token / 用户个人令牌）。`system.json` 里**没有任何全局凭据字段**；`trusted_subnets` 默认不生效，需 `trusted_subnet_enabled = true`；系统未初始化时只有 `/auth/status|bootstrap` 可用。`TokenMiddleware` 仅对 `/assist/api/*` 生效。个人令牌的 `scope` **严格互斥**（api 只能调 API、mcp 只能调 MCP），新增受凭证保护的端点时记得同步判断 `Principal.api` / `Principal.mcp`，不要只看「令牌有效」。**唯一的匿名文档读路径**是 `public_detail_enabled = true` 时的 `GET /assist/api/documents/public/:id`（只读、字段已收窄），新增匿名端点时必须同样收窄返回字段，不要直接复用 `doc_to_out()`。
 2. **配置改动不会自动生效**：`config.json` 改后需 reload；`system.json` 改后需重启进程（进程内缓存）。
 3. **MCP 只有一条路由，没有 SSE**（`backend-rs/src/main.rs`）：`.route("/assist/mcp/stream", post(..).options(..))`，处理器在 `mcp_server.rs::mcp_stream_handler`。全仓库没有任何 `axum::response::Sse` / `text/event-stream` / `Mcp-Session-Id` 代码；`/assist/mcp/sse`、`GET /assist/mcp/stream` 等未注册路径会走 `spa_fallback` 的 `mcp/` 前缀判定返回 404 JSON（不会回退到 index.html）。若要新增 SSE 传输，需自行实现 `GET` 流 + `POST` 消息通道，并在文档里同步说明。
 4. **没有测试、没有 lint**：编辑后需手动 `cargo build` 确认编译通过，并用 curl 校验端点。

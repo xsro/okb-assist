@@ -1,8 +1,14 @@
 <template>
-  <div class="detail-view" v-if="doc">
+  <div class="detail-view" v-if="doc || publicDoc">
+    <!-- 访客提示（未登录：只展示书目信息与摘要，其余功能一律隐藏） -->
+    <div v-if="isGuest" class="guest-banner">
+      <span class="guest-banner-text">当前为访客浏览：仅显示文献的书目信息与摘要。</span>
+      <button class="btn btn-sm" @click="goLogin">登录查看完整信息</button>
+    </div>
+
     <div class="detail-header">
-      <h2>{{ doc.title || doc.filename || '(无标题)' }}</h2>
-      <div class="detail-actions-row">
+      <h2>{{ meta.title || '(无标题)' }}</h2>
+      <div v-if="!isGuest" class="detail-actions-row">
         <router-link v-if="tokenStore.canEdit" :to="{ name: 'docManage', params: { id: doc.id } }" class="btn btn-sm btn-outline">
           管理
         </router-link>
@@ -20,22 +26,28 @@
     <div class="section">
       <!-- 桌面端表格 -->
       <table v-if="!isMobile" class="info-table">
-        <tr><th>ID</th><td>{{ doc.id }}</td></tr>
-        <tr><th>作者</th><td>{{ doc.authors || '-' }}</td></tr>
-        <tr><th>期刊</th><td>{{ doc.journal || '-' }}</td></tr>
-        <tr><th>年份</th><td>{{ doc.year || '-' }}</td></tr>
-        <tr><th>文档类型</th><td>{{ doc.doc_type || '-' }}</td></tr>
+        <tr v-if="!isGuest"><th>ID</th><td>{{ doc?.id }}</td></tr>
+        <tr><th>作者</th><td>{{ meta.authors || '-' }}</td></tr>
+        <tr><th>期刊</th><td>{{ meta.journal || '-' }}</td></tr>
+        <tr><th>年份</th><td>{{ meta.year || '-' }}</td></tr>
+        <tr><th>文档类型</th><td>{{ meta.doc_type || '-' }}</td></tr>
         <tr>
           <th>DOI</th>
           <td>
-            {{ doc.doi || '-' }}
+            {{ meta.doi || '-' }}
             <a v-if="doiUrl" :href="doiUrl" target="_blank" rel="noopener noreferrer" class="doi-link" title="在 doi.org 打开">
               打开 ↗
             </a>
           </td>
         </tr>
-        <tr><th>关键词</th><td>{{ doc.keywords || '-' }}</td></tr>
-        <tr><th>文件名</th><td>{{ doc.filename }}</td></tr>
+        <tr><th>关键词</th><td>{{ meta.keywords || '-' }}</td></tr>
+        <tr v-if="meta.title_en"><th>英文标题</th><td>{{ meta.title_en }}</td></tr>
+        <tr v-if="meta.authors_en"><th>英文作者</th><td>{{ meta.authors_en }}</td></tr>
+        <tr v-if="meta.journal_en"><th>英文期刊</th><td>{{ meta.journal_en }}</td></tr>
+        <tr v-if="meta.keywords_en"><th>英文关键词</th><td>{{ meta.keywords_en }}</td></tr>
+        <!-- 以下为文件/库内部信息：仅登录用户可见 -->
+        <template v-if="!isGuest">
+        <tr><th>文件名</th><td>{{ doc?.filename }}</td></tr>
         <tr><th>文件哈希</th><td>{{ doc.file_hash || '-' }}</td></tr>
         <tr><th>PDF 文件</th><td>{{ formatFile(doc.pdf_size) }}</td></tr>
         <tr><th>Markdown 文件</th><td>{{ formatFile(doc.md_size) }}</td></tr>
@@ -65,40 +77,37 @@
             </span>
           </td>
         </tr>
-        <tr><th>创建时间</th><td>{{ doc.created_at }}</td></tr>
-        <tr><th>更新时间</th><td>{{ doc.updated_at }}</td></tr>
+        <tr><th>创建时间</th><td>{{ doc?.created_at }}</td></tr>
+        <tr><th>更新时间</th><td>{{ doc?.updated_at }}</td></tr>
+        </template>
       </table>
 
       <!-- 移动端堆叠 -->
       <div v-else class="info-table-stack">
-        <div class="info-row">
+        <div v-if="!isGuest" class="info-row">
           <span class="info-label">ID</span>
-          <span class="info-value">{{ doc.id }}</span>
-        </div>
-        <div class="info-row">
-          <span class="info-label">标题</span>
-          <span class="info-value">{{ doc.title || doc.filename || '(无标题)' }}</span>
+          <span class="info-value">{{ doc?.id }}</span>
         </div>
         <div class="info-row">
           <span class="info-label">作者</span>
-          <span class="info-value">{{ doc.authors || '-' }}</span>
+          <span class="info-value">{{ meta.authors || '-' }}</span>
         </div>
         <div class="info-row">
           <span class="info-label">期刊</span>
-          <span class="info-value">{{ doc.journal || '-' }}</span>
+          <span class="info-value">{{ meta.journal || '-' }}</span>
         </div>
         <div class="info-row">
           <span class="info-label">年份</span>
-          <span class="info-value">{{ doc.year || '-' }}</span>
+          <span class="info-value">{{ meta.year || '-' }}</span>
         </div>
         <div class="info-row">
           <span class="info-label">文档类型</span>
-          <span class="info-value">{{ doc.doc_type || '-' }}</span>
+          <span class="info-value">{{ meta.doc_type || '-' }}</span>
         </div>
         <div class="info-row">
           <span class="info-label">DOI</span>
           <span class="info-value">
-            {{ doc.doi || '-' }}
+            {{ meta.doi || '-' }}
             <a v-if="doiUrl" :href="doiUrl" target="_blank" rel="noopener noreferrer" class="doi-link" title="在 doi.org 打开">
               打开 ↗
             </a>
@@ -106,8 +115,26 @@
         </div>
         <div class="info-row">
           <span class="info-label">关键词</span>
-          <span class="info-value">{{ doc.keywords || '-' }}</span>
+          <span class="info-value">{{ meta.keywords || '-' }}</span>
         </div>
+        <div v-if="meta.title_en" class="info-row">
+          <span class="info-label">英文标题</span>
+          <span class="info-value">{{ meta.title_en }}</span>
+        </div>
+        <div v-if="meta.authors_en" class="info-row">
+          <span class="info-label">英文作者</span>
+          <span class="info-value">{{ meta.authors_en }}</span>
+        </div>
+        <div v-if="meta.journal_en" class="info-row">
+          <span class="info-label">英文期刊</span>
+          <span class="info-value">{{ meta.journal_en }}</span>
+        </div>
+        <div v-if="meta.keywords_en" class="info-row">
+          <span class="info-label">英文关键词</span>
+          <span class="info-value">{{ meta.keywords_en }}</span>
+        </div>
+        <!-- 以下为文件/库内部信息：仅登录用户可见 -->
+        <template v-if="!isGuest">
         <div class="info-row">
           <span class="info-label">文件哈希</span>
           <span class="info-value">{{ doc.file_hash || '-' }}</span>
@@ -154,38 +181,53 @@
         </div>
         <div class="info-row">
           <span class="info-label">创建时间</span>
-          <span class="info-value">{{ doc.created_at }}</span>
+          <span class="info-value">{{ doc?.created_at }}</span>
         </div>
         <div class="info-row">
           <span class="info-label">更新时间</span>
-          <span class="info-value">{{ doc.updated_at }}</span>
+          <span class="info-value">{{ doc?.updated_at }}</span>
         </div>
+        </template>
       </div>
     </div>
 
-    <!-- PDF 元信息 / Crossref / 引用条目（懒加载折叠区） -->
-    <div class="section extras-section" v-if="doc">
+    <!-- PDF 元信息 / Crossref / 引用条目（懒加载折叠区，仅登录可见） -->
+    <div class="section extras-section" v-if="!isGuest && doc">
       <DocumentPdfInfoPanel :doc-id="doc.id" />
       <DocumentCrossrefPanel :doc-id="doc.id" />
       <DocumentCitationPanel :doc-id="doc.id" />
     </div>
 
-    <!-- 摘要 -->
-    <div v-if="doc.abstract" class="section">
-      <h3>摘要</h3>
-      <p class="abstract-text">{{ doc.abstract }}</p>
+    <!-- 访客：折叠区占位卡（登录后可见） -->
+    <div v-else-if="isGuest" class="section guest-lock">
+      <h3>登录后可查看</h3>
+      <p class="guest-lock-text">PDF 元信息、Crossref 记录、引用条目与 PDF 下载仅对登录用户开放。</p>
+      <button class="btn btn-sm" @click="goLogin">登录 / 注册</button>
     </div>
 
+    <!-- 摘要 -->
+    <div v-if="meta.abstract" class="section">
+      <h3>摘要</h3>
+      <p class="abstract-text">{{ meta.abstract }}</p>
+      <template v-if="meta.abstract_en">
+        <h3>英文摘要</h3>
+        <p class="abstract-text">{{ meta.abstract_en }}</p>
+      </template>
+    </div>
 
   </div>
 
+  <div v-else-if="notFound" class="loading">
+    <p>文档不存在，或尚未开放公开浏览。</p>
+    <button class="btn btn-sm" @click="goLogin">前往登录</button>
+  </div>
   <div v-else class="loading">加载中...</div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
-import { getDocument, getFileAlias } from '@/api/documents'
+import { useRoute, useRouter } from 'vue-router'
+import { getDocument, getFileAlias, getPublicDocument } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import { useResponsive } from '@/composables/useResponsive'
@@ -195,7 +237,7 @@ import { deriveDocStatus } from '@/utils/docStatus'
 import DocumentPdfInfoPanel from '@/components/detail/DocumentPdfInfoPanel.vue'
 import DocumentCrossrefPanel from '@/components/detail/DocumentCrossrefPanel.vue'
 import DocumentCitationPanel from '@/components/detail/DocumentCitationPanel.vue'
-import type { Document } from '@/types/document'
+import type { Document, PublicDocument } from '@/types/document'
 
 const route = useRoute()
 const { showError } = useToast()
@@ -203,8 +245,44 @@ const { requireToken } = useRequireToken()
 // isMobile 注入（仅响应式需要）
 const { isMobile } = useResponsive()
 const tokenStore = useTokenStore()
+const router = useRouter()
 
 const doc = ref<Document | null>(null)
+/** 访客（未登录）拿到的公开信息：只有书目元数据 + 摘要 */
+const publicDoc = ref<PublicDocument | null>(null)
+const notFound = ref(false)
+
+/** 未登录即访客：隐藏操作按钮、PDF 元信息等，只展示书目信息与摘要 */
+const isGuest = computed(() => !tokenStore.isAuthenticated)
+
+/**
+ * 页面展示用的书目字段（登录 / 访客两种数据源统一）：
+ * 访客没有 `doc`，只能读 `publicDoc`，所以模板里这些行一律走 `meta`。
+ */
+const meta = computed(() => {
+  const d = doc.value
+  const p = publicDoc.value
+  return {
+    title: d?.title || p?.title || '',
+    title_en: d?.title_en || p?.title_en || '',
+    authors: d?.authors || p?.authors || '',
+    authors_en: d?.authors_en || p?.authors_en || '',
+    journal: d?.journal || p?.journal || '',
+    journal_en: d?.journal_en || p?.journal_en || '',
+    year: d?.year ?? p?.year ?? null,
+    doc_type: d?.doc_type || p?.doc_type || '',
+    doi: d?.doi || p?.doi || '',
+    keywords: d?.keywords || p?.keywords || '',
+    keywords_en: d?.keywords_en || p?.keywords_en || '',
+    abstract: d?.abstract || p?.abstract || '',
+    abstract_en: d?.abstract_en || p?.abstract_en || ''
+  }
+})
+
+/** 登录 / 注册后回到当前详情页 */
+function goLogin() {
+  router.push({ path: '/assist/login', query: { redirect: route.fullPath } })
+}
 
 /** 状态由前端推导（后端只给文件事实与运行时字段） */
 const derivedStatus = computed(() => (doc.value ? deriveDocStatus(doc.value) : null))
@@ -213,7 +291,7 @@ const openingPdf = ref(false)
 
 /** 由 DOI 生成 doi.org 跳转地址；无法识别时返回空字符串 */
 const doiUrl = computed(() => {
-  const raw = (doc.value?.doi || '').trim()
+  const raw = (meta.value.doi || '').trim()
   if (!raw) return ''
   // 去掉常见前缀：https://doi.org/、http://dx.doi.org/、doi: 等
   const cleaned = raw
@@ -264,13 +342,35 @@ async function openPdf() {
   }
 }
 
-/** 加载文档详情 */
+/** 加载文档详情（访客走公开端点，只拿书目信息 + 摘要） */
 async function load() {
   const id = parseInt(route.params.id as string)
+  if (!Number.isFinite(id)) {
+    notFound.value = true
+    return
+  }
+  notFound.value = false
+
+  // 访客：不要求登录，走后端公开端点。
+  // 若未开启 `public_detail_enabled`，该端点返回 401，axios 拦截器会统一跳登录页。
+  if (isGuest.value) {
+    doc.value = null
+    try {
+      publicDoc.value = await getPublicDocument(id)
+    } catch (e) {
+      publicDoc.value = null
+      const status = (e as { response?: { status?: number } }).response?.status
+      if (status === 404) notFound.value = true
+      // 401 已由全局拦截器处理（跳登录页）
+    }
+    return
+  }
+
   if (!requireToken()) return
 
   try {
     doc.value = await getDocument(id)
+    publicDoc.value = null
   } catch {
     showError('加载失败')
   }
@@ -293,6 +393,42 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* 访客提示横幅（未登录） */
+.guest-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.guest-banner-text {
+  line-height: 1.6;
+}
+
+/* 访客占位卡（代替登录后才可用的折叠区） */
+.guest-lock {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: transparent;
+  text-align: center;
+  padding: 24px 16px;
+}
+.guest-lock h3 {
+  margin-bottom: 8px;
+}
+.guest-lock-text {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-bottom: 14px;
 }
 .info-table {
   width: 100%;

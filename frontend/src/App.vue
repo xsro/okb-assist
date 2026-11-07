@@ -60,12 +60,14 @@ onMounted(async () => {
   // `route.fullPath` 会是 `/`，把 ?redirect= 覆盖成 `/`（深链登录后回跳失效）。
   await router.isReady()
   // 启动时用本地 token 恢复会话（刷新页面后重新取角色/权限）
+  // 访客可读的路由（如文献详情）不强制跳登录页，由页面自己给登录提示。
+  const guestAllowed = route.meta?.allowGuest === true
   if (tokenStore.token) {
     await tokenStore.restore()
-    if (!tokenStore.role) {
+    if (!tokenStore.role && !guestAllowed) {
       onAuthRequired()
     }
-  } else if (route.name !== 'login') {
+  } else if (route.name !== 'login' && !guestAllowed) {
     router.replace({ path: '/assist/login', query: { redirect: route.fullPath } })
   }
 })

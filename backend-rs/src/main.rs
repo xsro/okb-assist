@@ -584,6 +584,16 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
         return next.run(req).await;
     }
 
+    // 访客公开详情：仅在 `system.json` 的 `public_detail_enabled = true` 时放行，
+    // 且只放行单篇公开详情端点（数据面已收窄为书目元数据 + 摘要）。
+    // 匿名主体注入 `ViewOnly` 角色，其余文档接口仍需凭证。
+    if settings.public_detail_enabled()
+        && path.starts_with(routers::documents::PUBLIC_DETAIL_PREFIX)
+    {
+        req.extensions_mut().insert(auth::Role::ViewOnly);
+        return next.run(req).await;
+    }
+
     // 受信任子网（默认关闭；即使配置了网段也需显式开启）
     if settings.trusted_subnet_enabled() {
         let subnets = settings.trusted_subnets();

@@ -1,6 +1,7 @@
 import { apiGet, apiPost, apiPut, apiDelete, apiUpload } from './client'
 import type {
   Document,
+  PublicDocument,
   SearchResult,
   SearchResultList,
   SimilarTitleGroup,
@@ -60,6 +61,16 @@ export function listDocuments(params: {
 /** 文档详情 */
 export function getDocument(id: number) {
   return apiGet<Document>(`/assist/api/documents/${id}/`)
+}
+
+/**
+ * 访客（未登录）读取单篇文献的公开信息。
+ *
+ * 仅当后端 `system.json` 的 `public_detail_enabled = true` 时可用，否则返回 401
+ * （由 axios 拦截器转成跳登录页）。
+ */
+export function getPublicDocument(id: number) {
+  return apiGet<PublicDocument>(`/assist/api/documents/public/${id}`)
 }
 
 /** 更新文档元数据 */

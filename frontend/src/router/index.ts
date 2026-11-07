@@ -38,7 +38,9 @@ const routes = [
     path: '/assist/detail/:id',
     name: 'detail',
     component: () => import('@/views/DetailView.vue'),
-    meta: { title: '文档详情' }
+    // 访客可读：未登录时也放行，页面自带登录提示；
+    // 后端仅在 `system.json` 的 `public_detail_enabled = true` 时提供公开信息。
+    meta: { title: '文档详情', allowGuest: true }
   },
   {
     path: '/assist/upload',
@@ -142,8 +144,12 @@ router.beforeEach(async (to, _from, next) => {
     await store.restore()
   }
 
-  // 未认证 → 去登录页，并记住原目标
+  // 未认证 → 访客可读的页面（如文献详情）放行，其余去登录页
   if (!store.role) {
+    if (to.meta?.allowGuest === true) {
+      next()
+      return
+    }
     next({ path: '/assist/login', query: { redirect: to.fullPath } })
     return
   }

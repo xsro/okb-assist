@@ -18,6 +18,15 @@ export interface Document {
   doi: string | null
   abstract: string | null
   keywords: string | null
+  /** 双语 / 来源字段：后端会返回，页面按需展示（非必有） */
+  title_en?: string | null
+  authors_en?: string | null
+  journal_en?: string | null
+  keywords_en?: string | null
+  abstract_en?: string | null
+  language?: string | null
+  source?: string | null
+  category?: string | null
   /**
    * 注意：接口**不返回** `status` / `status_message`。
    * 展示用状态由 `utils/docStatus.ts::deriveDocStatus(doc)` 从前面的原始字段推导。
@@ -58,6 +67,33 @@ export interface Document {
   created_at: string
   updated_at: string
   has_markdown: boolean
+}
+
+/**
+ * 访客（未登录）可见的文献公开信息（`GET /assist/api/documents/public/:id`）。
+ *
+ * 字段刻意收窄：只有书目元数据与摘要（含双语），**不含**文件名、哈希、
+ * 文件大小、PDF 健康、索引库、运行时任务/错误与时间戳。
+ * 仅在 `system.json` 的 `public_detail_enabled = true` 时可用。
+ */
+export interface PublicDocument {
+  id: number
+  title?: string | null
+  title_en?: string | null
+  authors?: string | null
+  authors_en?: string | null
+  journal?: string | null
+  journal_en?: string | null
+  year?: number | null
+  doc_type?: string | null
+  doi?: string | null
+  source?: string | null
+  category?: string | null
+  language?: string | null
+  keywords?: string | null
+  keywords_en?: string | null
+  abstract?: string | null
+  abstract_en?: string | null
 }
 
 export interface SearchResult {

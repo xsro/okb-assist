@@ -245,8 +245,14 @@ async fn persist_temp_file(mut temp: TempUpload, target: &str) -> std::io::Resul
     }
 }
 
+/// 访客（未登录）可读的公开详情端点前缀（`system.json` 的 `public_detail_enabled` 控制是否放行）
+pub const PUBLIC_DETAIL_PREFIX: &str = "/assist/api/documents/public/";
+
 pub fn router() -> axum::Router<()> {
     axum::Router::new()
+        // 访客公开详情：**必须**注册在 `/assist/api/documents/:id` 之前（静态段优先）
+        .route("/assist/api/documents/public/:id/", get(get_public_document))
+        .route("/assist/api/documents/public/:id", get(get_public_document))
         .route("/assist/api/documents/", get(list_documents).post(upload_document))
         .route("/assist/api/documents", get(list_documents).post(upload_document))
         .route("/assist/api/documents/upload/", post(upload_document))
@@ -903,6 +909,87 @@ async fn get_document(
     }
     match fetch_doc(&db, id).await {
         Ok(Some(doc)) => (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"detail": "Document not found"}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    }
+}
+
+/// 访客可见的文献公开信息（`GET /assist/api/documents/public/:id`）。
+///
+/// 字段刻意收窄：只含书目元数据与摘要（含双语字段），**不含**文件名、文件哈希、
+/// 文件大小、PDF 健康、已索引库、运行时任务/错误与时间戳。
+#[derive(Debug, Serialize)]
+pub struct PublicDocumentOut {
+    pub id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_en: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authors: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authors_en: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal_en: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub year: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doi: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keywords: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keywords_en: Option<String>,
+    #[serde(rename = "abstract", skip_serializing_if = "Option::is_none")]
+    pub abstract_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abstract_en: Option<String>,
+}
+
+impl PublicDocumentOut {
+    /// 从数据库记录里只取出可公开的字段（其余一律不下发）
+    pub fn from_doc(doc: &Document) -> Self {
+        Self {
+            id: doc.id,
+            title: doc.title.clone(),
+            title_en: doc.title_en.clone(),
+            authors: doc.authors.clone(),
+            authors_en: doc.authors_en.clone(),
+            journal: doc.journal.clone(),
+            journal_en: doc.journal_en.clone(),
+            year: doc.year,
+            doc_type: doc.doc_type.clone(),
+            doi: doc.doi.clone(),
+            source: doc.source.clone(),
+            category: doc.category.clone(),
+            language: doc.language.clone(),
+            keywords: doc.keywords.clone(),
+            keywords_en: doc.keywords_en.clone(),
+            abstract_text: doc.abstract_text.clone(),
+            abstract_en: doc.abstract_en.clone(),
+        }
+    }
+}
+
+/// 访客公开详情（匿名可读，仅在 `system.json` 的 `public_detail_enabled = true` 时由
+/// `token_middleware` 放行）。不做实时 stat、不查向量索引，避免任何副作用与信息泄露。
+async fn get_public_document(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    Path(id): Path<i64>,
+) -> Response {
+    match fetch_doc(&db, id).await {
+        Ok(Some(doc)) => {
+            (StatusCode::OK, Json(json!(PublicDocumentOut::from_doc(&doc)))).into_response()
+        }
         Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"detail": "Document not found"}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
     }

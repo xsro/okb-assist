@@ -37,6 +37,7 @@
     "192.168.1.0/24",
     "127.0.0.1/32"
   ],
+  "public_detail_enabled": false,
   "mutool_path": "mutool",
   "ui_path": "../frontend/dist"
 }
