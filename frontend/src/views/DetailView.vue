@@ -198,13 +198,6 @@
       <DocumentCitationPanel :doc-id="doc.id" />
     </div>
 
-    <!-- 访客：折叠区占位卡（登录后可见） -->
-    <div v-else-if="isGuest" class="section guest-lock">
-      <h3>登录后可查看</h3>
-      <p class="guest-lock-text">PDF 元信息、Crossref 记录、引用条目与 PDF 下载仅对登录用户开放。</p>
-      <button class="btn btn-sm" @click="goLogin">登录 / 注册</button>
-    </div>
-
     <!-- 摘要 -->
     <div v-if="meta.abstract" class="section">
       <h3>摘要</h3>
