@@ -68,7 +68,10 @@ okb-client sync      # 无参数，配置全部来自上面这个文件
 
 - `direction`：`two-way`（默认，双向）/ `upload`（只写网盘）/ `download`（只写本地）；
 - `remote`：个人网盘内的子目录（缺省 = 根目录）；`disk`：本地目录；
-- 只同步**个人网盘**（不支持公有文件夹）；同步状态存 `~/.okb/client/sync-state.json`；
+- `conflict`：两侧都改过时怎么办 —— `newer`（默认，取较新一方并覆盖）/ `strict`（严格模式：只报告、
+  不动文件，并以非 0 退出码结束，适合先人工确认）；
+- 只同步**个人网盘**（`sync.personal`）与**公有文件夹**（`sync.public[]`，只读文件夹只能单向下载）；
+  同步状态存 `~/.okb/client/sync-state.json`（按目标分组）；
 - **删除不传播**：一侧删掉的文件会从另一侧补回。详见 `client-rs/README.md` 的 `sync` 一节。
 
 ### 预览说明

@@ -82,7 +82,7 @@ cargo build --release
 | `backend-rs/src/settings.rs`、`backend-rs/src/utils.rs` | 全局 Settings 单例、工具函数（含 `resolve_token`：解析 `!cat <path>` 形式的敏感值） |
 | `backend-rs/config.json` | 服务配置（MinerU/LLM/向量库），可由 UI 编辑 |
 | `backend-rs/system.json` | 系统配置（token、MCP token、白名单、DB URL、上传路径、路径模板），需手动改 |
-| `client-rs/` | Zotero CSV 导入客户端（Rust）。配置默认读 `~/.okb/client.json`（`url`/`base_url`、`token`、`storage_root`、`sync`），成功拉到的 doi-hash 全量索引会自动写到 `~/.okb/client/docs.json`。三个子命令：`zotero`（CSV 导入）、`dir`（目录批量上传）、`sync`（按配置文件在本地目录 ⇄ 个人网盘之间双向/单向同步，无参数，状态存 `~/.okb/client/sync-state.json`，上传带 `overwrite=true`）。上传走流式 `post_pdf()`，传输时在终端实时显示进度（已发送 / 总大小、百分比、速度、剩余时间，非 TTY 自动降为每 10% 一行），`--no-progress` 关闭（`sync` 无参数，总是显示） |
+| `client-rs/` | Zotero CSV 导入客户端（Rust）。配置默认读 `~/.okb/client.json`（`url`/`base_url`、`token`、`storage_root`、`sync`），成功拉到的 doi-hash 全量索引会自动写到 `~/.okb/client/docs.json`。三个子命令：`zotero`（CSV 导入）、`dir`（目录批量上传）、`sync`（按配置文件同步网盘，无参数：`sync.personal` = 本地目录 ⇄ 个人网盘，`sync.public[]` = 每个公有文件夹一个目标（按名称或 `pf_` id 解析，方向缺省 `download`，只读文件夹自动降级为下载）；状态存 `~/.okb/client/sync-state.json`（v2 按目标分组，v1 自动迁移），上传带 `overwrite=true`，冲突策略 `conflict` = `newer`（默认，取较新一方）/ `strict`（只报告不改动、退出码非 0））。上传走流式 `post_pdf()`，传输时在终端实时显示进度（已发送 / 总大小、百分比、速度、剩余时间，非 TTY 自动降为每 10% 一行），`--no-progress` 关闭（`sync` 无参数，总是显示） |
 | `frontend/src/components/` | Vue 组件 — 见下方「前端架构 → 组件一览」 |
 | `frontend/src/views/` | 页面视图 — 见下方「前端架构 → 路由」 |
 | `frontend/src/router/index.ts` | Vue Router 配置（14 路由，`base: '/assist/'`） |
