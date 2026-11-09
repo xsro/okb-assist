@@ -18,7 +18,8 @@ concurrency:
   cancel-in-progress: true
 
 # 约定：
-# - 平常（推送 main 分支 / workflow_dispatch 手动触发）只构建 ubuntu-22.04-arm 的后端（okb_assist）并上传 artifact；
+# - 平常（推送 main 分支 / workflow_dispatch 手动触发）只构建 ubuntu-22.04-arm 的后端（okb_assist，静态链接 musl）并上传 artifact；
+# - 容器参考：https://github.com/actions/runner-images
 # - 推送 v* tag 时才额外构建 macOS / Windows / Linux-x64 后端、前端 dist、以及客户端（okb-client）；
 # - Release 只在推送 v* tag 时创建。
 
@@ -190,52 +191,70 @@ jobs:
           name: frontend-dist
           path: frontend-dist.zip
 
+  # 树莓派 / ARM64 Linux：静态链接 musl，产物不依赖目标机 glibc/musl 版本
+  #
+  # 注意：musl 目标**不启用**内嵌 mupdf（`--features mupdf`）。mupdf-sys 在 Linux 上走
+  #       font-kit → 系统 fontconfig/freetype，且 mupdf 本体含 C++ 源码（harfbuzz/zxing 等），
+  #       需要 musl 版 C/C++ 交叉工具链才能静态链接，CI 上不可靠；
+  #       因此这里用默认特性（PDF 引擎 = 外部 mutool，与 system.json 的 mutool_path 配合），
+  #       这也正是 config.json 的 `pdf.engine` 默认值。
   build-raspberry-pi-arm64:
     runs-on: ubuntu-22.04-arm
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
     steps:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libsqlite3-dev \
-            libfontconfig1-dev \
-            pkg-config
+          sudo apt-get install -y musl-tools pkg-config
 
-      - name: "Install Rust (target: aarch64-unknown-linux-gnu)"
+      - name: "Install Rust (target: aarch64-unknown-linux-musl)"
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-gnu
+          targets: aarch64-unknown-linux-musl
 
-      - name: Build backend
-        run: cargo build --release --features mupdf --target aarch64-unknown-linux-gnu
+      - name: Build backend (static musl)
+        run: cargo build --release --target aarch64-unknown-linux-musl
         working-directory: backend-rs
 
+      - name: Verify static binary
+        run: |
+          BIN=backend-rs/target/aarch64-unknown-linux-musl/release/okb_assist
+          file "$BIN"
+          if file "$BIN" | grep -q "statically linked"; then
+            echo "okb_assist 已静态链接 ✔"
+          else
+            echo "::error::okb_assist 不是静态链接"
+            exit 1
+          fi
+
       - name: Prepare backend artifact
-        run: cp backend-rs/target/aarch64-unknown-linux-gnu/release/okb_assist okb-assist-linux-arm64
+        run: cp backend-rs/target/aarch64-unknown-linux-musl/release/okb_assist okb-assist-linux-arm64-musl
 
       - name: Upload backend artifact
         uses: actions/upload-artifact@v4
         with:
-          name: okb-assist-linux-arm64
-          path: okb-assist-linux-arm64
+          name: okb-assist-linux-arm64-musl
+          path: okb-assist-linux-arm64-musl
 
-      - name: Build client
+      - name: Build client (static musl)
         if: startsWith(github.ref, 'refs/tags/v')
-        run: cargo build --release --target aarch64-unknown-linux-gnu
+        run: cargo build --release --target aarch64-unknown-linux-musl
         working-directory: client-rs
 
       - name: Prepare client artifact
         if: startsWith(github.ref, 'refs/tags/v')
-        run: cp client-rs/target/aarch64-unknown-linux-gnu/release/okb-client okb-client-linux-arm64
+        run: cp client-rs/target/aarch64-unknown-linux-musl/release/okb-client okb-client-linux-arm64-musl
 
       - name: Upload client artifact
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
-          name: okb-client-linux-arm64
-          path: okb-client-linux-arm64
+          name: okb-client-linux-arm64-musl
+          path: okb-client-linux-arm64-musl
 
   create-release:
     name: Create GitHub Release

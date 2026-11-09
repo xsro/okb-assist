@@ -9,7 +9,8 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 csv = "1"
 dirs = "5"
-reqwest = { version = "0.12", features = ["multipart", "json", "stream"] }
+# 用 rustls 而非 native-tls（openssl），静态 musl 构建（树莓派/ARM64）不依赖目标机 openssl
+reqwest = { version = "0.12", default-features = false, features = ["multipart", "json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
