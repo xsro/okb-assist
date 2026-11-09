@@ -5,14 +5,17 @@
 //!   dir    <dir>        — 扫描目录中的 PDF，与服务器比对后交互上传
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio_stream::StreamExt;
 use walkdir::WalkDir;
 
 // ==================== CLI 参数 ====================
@@ -49,6 +52,19 @@ struct UploadIntervalArgs {
     /// 慢链路或服务端卡顿（表现为 `error sending request`）时调大
     #[arg(long, value_name = "SECONDS", default_value_t = 0.0)]
     upload_timeout: f64,
+
+    /// 不显示上传进度（默认在传输时实时刷新「已发送 / 总大小、百分比、速度、剩余时间」）
+    #[arg(long)]
+    no_progress: bool,
+
+    /// 上传时让服务端做 PDF 元数据启发式抽取（题名/作者/年份/DOI/摘要等）
+    ///
+    /// 默认**不开**：抽取会起几个 mutool 子进程把整份文档正文过一遍，
+    /// 批量上传大文件时这是「等待服务端处理」的主要耗时。
+    /// 不抽也能先把记录建好（列表里显示文件名），之后在文档管理页 / 
+    /// `POST /assist/api/pipeline/extract-pdf-meta/:id` 补即可。
+    #[arg(long)]
+    extract_meta: bool,
 }
 
 impl UploadIntervalArgs {
@@ -660,6 +676,234 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
+/// 人性化文件大小（与上传进度里的单位一致）
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut idx = 0usize;
+    while value >= 1024.0 && idx + 1 < UNITS.len() {
+        value /= 1024.0;
+        idx += 1;
+    }
+    if idx == 0 {
+        format!("{} B", bytes)
+    } else {
+        format!("{:.1} {}", value, UNITS[idx])
+    }
+}
+
+/// 终端显示宽度（中文/全角字符算 2 列，用于擦除上一行残留）
+fn display_width(s: &str) -> usize {
+    s.chars()
+        .map(|c| if (c as u32) >= 0x1100 { 2 } else { 1 })
+        .sum()
+}
+
+/// 进度条宽度（字符数）
+const PROGRESS_BAR_WIDTH: usize = 16;
+/// 进度采样间隔
+const PROGRESS_TICK: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// 是否显示上传进度（`--no-progress` 置为 false，在 `run_dir` / `run_zotero` 开头设置）
+static PROGRESS_ENABLED: AtomicBool = AtomicBool::new(true);
+
+fn percent_of(sent: u64, total: u64) -> u64 {
+    if total == 0 {
+        100
+    } else {
+        (sent.min(total) * 100 / total).min(100)
+    }
+}
+
+fn speed_bps(sent: u64, elapsed: std::time::Duration) -> u64 {
+    let secs = elapsed.as_secs_f64().max(0.001);
+    (sent as f64 / secs) as u64
+}
+
+/// 交互模式下的进度行（单行、原地刷新）
+fn progress_line(sent: u64, total: u64, elapsed: std::time::Duration) -> String {
+    let pct = percent_of(sent, total);
+    let filled = (pct as usize * PROGRESS_BAR_WIDTH / 100).min(PROGRESS_BAR_WIDTH);
+    let bar = format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(PROGRESS_BAR_WIDTH - filled)
+    );
+    let speed = speed_bps(sent, elapsed);
+    let tail = if sent >= total {
+        "传输完成，等待服务端处理…".to_string()
+    } else if speed > 0 {
+        let eta = (total - sent) as f64 / speed as f64;
+        format!(
+            "{}/s · 剩余约 {}",
+            format_bytes(speed),
+            format_duration(std::time::Duration::from_secs_f64(eta))
+        )
+    } else {
+        String::new()
+    };
+    if tail.is_empty() {
+        format!(
+            "⬆ {:>3}% [{}] {} / {}",
+            pct,
+            bar,
+            format_bytes(sent),
+            format_bytes(total)
+        )
+    } else {
+        format!(
+            "⬆ {:>3}% [{}] {} / {} · {}",
+            pct,
+            bar,
+            format_bytes(sent),
+            format_bytes(total),
+            tail
+        )
+    }
+}
+
+/// 非交互模式（重定向到文件/管道）下的进度行，按 10% 粒度打印
+fn progress_line_plain(sent: u64, total: u64) -> String {
+    format!(
+        "⬆ 上传 {}% {} / {}",
+        percent_of(sent, total),
+        format_bytes(sent),
+        format_bytes(total)
+    )
+}
+
+/// 上传进度：传输时只做一次 `fetch_add`，后台任务每 200ms 采样并画一行进度。
+///
+/// - 终端（stderr 是 TTY）：`\r` 原地刷新，进度独占一行（调用方的半行提示会先补一个换行）；
+/// - 非终端：每 10% 打一行，避免 carriage return 把日志文件刷成一团。
+///
+/// 结束时（`finish`）打印一行汇总：已发送 / 总大小 / 用时 / 平均速度，失败时标注已发送量。
+struct UploadProgress {
+    /// 已从本地文件读出发送的字节数（multipart 头尾开销不计，按文件大小算百分比）
+    sent: Arc<AtomicU64>,
+    total: u64,
+    started: std::time::Instant,
+    handle: Option<tokio::task::JoinHandle<()>>,
+    enabled: bool,
+    interactive: bool,
+    /// 上一行已画出的显示宽度（用于擦除残留字符）
+    last_width: Arc<AtomicUsize>,
+    /// 进度是否已经独占了一行（首次输出前需要补换行）
+    line_started: Arc<AtomicBool>,
+}
+
+impl UploadProgress {
+    fn start(total: u64) -> Self {
+        let enabled = PROGRESS_ENABLED.load(Ordering::Relaxed) && total > 0;
+        let interactive = io::stderr().is_terminal();
+        let sent = Arc::new(AtomicU64::new(0));
+        let last_width = Arc::new(AtomicUsize::new(0));
+        let line_started = Arc::new(AtomicBool::new(false));
+        let mut this = UploadProgress {
+            sent: sent.clone(),
+            total,
+            started: std::time::Instant::now(),
+            handle: None,
+            enabled,
+            interactive,
+            last_width: last_width.clone(),
+            line_started: line_started.clone(),
+        };
+        if !enabled {
+            return this;
+        }
+
+        let started = this.started;
+        this.handle = Some(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(PROGRESS_TICK);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut last_milestone = 0u64;
+            loop {
+                ticker.tick().await;
+                let current = sent.load(Ordering::Relaxed).min(total);
+                if interactive {
+                    let line = progress_line(current, total, started.elapsed());
+                    let mut w = io::stderr();
+                    if !line_started.swap(true, Ordering::Relaxed) {
+                        // 调用方（`上传 ... ` 之类）往往没有换行，先收尾再独占一行
+                        let _ = writeln!(w);
+                    }
+                    let width = display_width(&line);
+                    let pad = last_width.load(Ordering::Relaxed).saturating_sub(width);
+                    let _ = write!(w, "\r{}{}", line, " ".repeat(pad));
+                    let _ = w.flush();
+                    last_width.store(width, Ordering::Relaxed);
+                } else {
+                    let pct = percent_of(current, total);
+                    if pct / 10 > last_milestone / 10 {
+                        last_milestone = pct;
+                        eprintln!("{}", progress_line_plain(current, total));
+                    }
+                }
+            }
+        }));
+        this
+    }
+
+    /// 传输流用的计数器（`ReaderStream` 的 `map` 里 `fetch_add`）
+    fn counter(&self) -> Arc<AtomicU64> {
+        self.sent.clone()
+    }
+
+    /// 收尾：停掉采样任务，画一行最终结果（成功显示总量/用时/平均速度，失败显示已发送量）
+    fn finish(mut self, ok: bool) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+        if !self.enabled {
+            return;
+        }
+        let sent = self.sent.load(Ordering::Relaxed).min(self.total);
+        let elapsed = self.started.elapsed();
+        let speed = speed_bps(sent, elapsed);
+        let line = if ok {
+            format!(
+                "⬆ 已发送 {} / {}（用时 {}，平均 {}/s）",
+                format_bytes(sent),
+                format_bytes(self.total),
+                format_duration(elapsed),
+                format_bytes(speed)
+            )
+        } else {
+            format!(
+                "⬆ 上传中断：已发送 {} / {}（{}%），用时 {}",
+                format_bytes(sent),
+                format_bytes(self.total),
+                percent_of(sent, self.total),
+                format_duration(elapsed)
+            )
+        };
+        if self.interactive {
+            let mut w = io::stderr();
+            if !self.line_started.swap(true, Ordering::Relaxed) {
+                let _ = writeln!(w);
+            }
+            let pad = self
+                .last_width
+                .load(Ordering::Relaxed)
+                .saturating_sub(display_width(&line));
+            let _ = writeln!(w, "\r{}{}", line, " ".repeat(pad));
+            let _ = w.flush();
+        } else {
+            eprintln!("{}", line);
+        }
+    }
+}
+
+impl Drop for UploadProgress {
+    fn drop(&mut self) {
+        // 未走到 `finish`（提前 return / panic）时别把采样任务留在后台
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// 上传类请求的超时：默认 300s + 每 MB 30s（上限 2 小时），
 /// 可用 `--upload-timeout` 覆盖。
 ///
@@ -712,9 +956,19 @@ async fn post_pdf(
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown.pdf".to_string());
 
-    // 流式 multipart：必须带长度，否则 reqwest 会改成 chunked
+    // 流式 multipart：必须带长度，否则 reqwest 会改成 chunked。
+    // 下游 map 只做一次 `fetch_add`（零拷贝），进度由 `UploadProgress` 的后台任务采样绘制。
+    let progress = UploadProgress::start(size);
+    let counter = progress.counter();
     let part = reqwest::multipart::Part::stream_with_length(
-        reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file)),
+        reqwest::Body::wrap_stream(
+            tokio_util::io::ReaderStream::new(file).map(move |chunk| {
+                if let Ok(bytes) = &chunk {
+                    counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                }
+                chunk
+            }),
+        ),
         size,
     )
     .file_name(filename)
@@ -730,7 +984,10 @@ async fn post_pdf(
     if let Some(t) = token {
         req = req.header("X-Token", t.as_str());
     }
-    Ok(req.send().await?)
+    // `send()` 要等响应头，期间字节已发完但服务端还在查重/抽元数据，进度行会显示「等待服务端处理」
+    let result = req.send().await;
+    progress.finish(result.is_ok());
+    Ok(result?)
 }
 
 /// 上传结果（区分「新建成功」与「409 去重命中」，后者需要把服务端已有文档的信息报给用户）
@@ -752,6 +1009,9 @@ enum UploadOutcome {
 
 /// 上传 PDF 文件到服务器（新建文献，默认不触发自动处理）
 ///
+/// `extract_meta` 为 false 时请求里带 `extract_meta=false`，服务端跳过 PDF 元数据启发式抽取
+/// （客户端批量上传默认跳过：那是上传后最慢的一步，且可事后补）。
+///
 /// 链路或服务端卡顿导致请求失败时会自动重试一次；若重试后服务端返回 409 且
 /// 已有记录的 DOI 与我们上传的一致，说明「上一次请求其实已经落库」，按成功处理。
 async fn api_upload(
@@ -760,10 +1020,14 @@ async fn api_upload(
     doi: Option<&str>,
     token: &Option<String>,
     timeout_override: Option<f64>,
+    extract_meta: bool,
 ) -> UploadOutcome {
     let url = format!("{}/assist/api/documents/upload", base_url);
     // 显式带 DOI：服务端不必解析 PDF 就能做 DOI 去重（命中时返回 409 `kind=doi`）
-    let mut fields: Vec<(&str, &str)> = vec![("auto_process", "false")];
+    let mut fields: Vec<(&str, &str)> = vec![
+        ("auto_process", "false"),
+        ("extract_meta", if extract_meta { "true" } else { "false" }),
+    ];
     if let Some(doi) = doi {
         fields.push(("doi", doi));
     }
@@ -1113,12 +1377,22 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
     let token = read_token(args.token.as_deref(), cfg.token.as_deref());
     let base_url = args.base_url.clone().unwrap_or_else(|| cfg.base_url());
     let process = args.process;
+    // 上传进度开关（`--no-progress`）
+    PROGRESS_ENABLED.store(!args.interval.no_progress, Ordering::Relaxed);
     // `dir` 不知道 DOI（要等上传后服务端返回），所以只做记录：上传成功后写回 `~/.okb/client/doi-hash.json`
     let mut hash_store = HashDoiStore::load();
 
     println!("扫描目录: {}", args.dir);
     println!("递归搜索: {}", if args.recursive { "是" } else { "否" });
     println!("上传间隔: {}", args.interval.describe());
+    println!(
+        "PDF 元数据抽取: {}",
+        if args.interval.extract_meta {
+            "开启"
+        } else {
+            "跳过（默认，--extract-meta 开启）"
+        }
+    );
     println!("服务地址: {}", base_url);
     println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
     println!();
@@ -1257,11 +1531,20 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
         // 两次上传之间按 `--upload-interval` 等待（首个不等待）
         args.interval.throttle(upload_seq).await;
         upload_seq += 1;
-        print!("        上传 ... ");
-        io::stdout().flush().ok();
-        match api_upload(&base_url, path, None, &token, args.interval.timeout_override()).await {
+        // 行尾先换行，进度行独占一行（见 `UploadProgress`）
+        println!("        上传 ...");
+        match api_upload(
+            &base_url,
+            path,
+            None,
+            &token,
+            args.interval.timeout_override(),
+            args.interval.extract_meta,
+        )
+        .await
+        {
             UploadOutcome::Created(result) => {
-                println!("成功 -> id={}", result.id);
+                println!("        成功 -> id={}", result.id);
                 // 记下 DOI → 哈希（服务端算的与本地一致，优先用服务端返回值），供 `zotero --reuse-hash` 复用
                 if let Some(doi) = result.doi.as_deref().filter(|s| !s.trim().is_empty()) {
                     let h = result.file_hash.as_deref().unwrap_or(hash.as_str());
@@ -1282,7 +1565,7 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
                 same_file,
                 message,
             } => {
-                println!("被服务端去重拦下");
+                println!("        被服务端去重拦下");
                 println!(
                     "        已有文档: id={} | DOI={} | 文件名={}",
                     existing_id,
@@ -1305,7 +1588,7 @@ async fn run_dir(args: &DirArgs) -> Result<()> {
                 failed += 1;
             }
             UploadOutcome::Failed => {
-                println!("失败");
+                println!("        失败");
                 failed += 1;
             }
         }
@@ -1958,6 +2241,7 @@ async fn upload_one_zotero(
     client: &Client,
     token: &Option<String>,
     timeout_override: Option<f64>,
+    extract_meta: bool,
 ) -> bool {
     if dry_run {
         println!("  [dry-run] 跳过上传: {} ({})", d.doi, d.file_path);
@@ -1969,6 +2253,7 @@ async fn upload_one_zotero(
         Some(d.doi.as_str()),
         token,
         timeout_override,
+        extract_meta,
     )
     .await
     {
@@ -2018,6 +2303,8 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         .filter(|s| !s.trim().is_empty())
         .or_else(|| cfg.storage_root.clone());
     let update_meta = args.update_meta;
+    // 上传进度开关（`--no-progress`）
+    PROGRESS_ENABLED.store(!args.interval.no_progress, Ordering::Relaxed);
 
     println!("服务地址: {}", base_url);
     println!("CSV 文件: {}", args.csv_file);
@@ -2025,6 +2312,14 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
     println!("更新元数据: {}", if update_meta { "是" } else { "否 (默认)" });
     println!("上传间隔: {}", args.interval.describe());
+    println!(
+        "PDF 元数据抽取: {}",
+        if args.interval.extract_meta {
+            "开启"
+        } else {
+            "跳过（默认，--extract-meta 开启）"
+        }
+    );
     if !args.keys.is_empty() {
         println!("只处理 key: {}", args.keys.join(", "));
     }
@@ -2462,8 +2757,8 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         }
         args.interval.throttle(upload_seq).await;
         upload_seq += 1;
-        print!("  新建 [{}] {} ... ", i + 1, dw.doi);
-        io::stdout().flush().ok();
+        // 行尾先换行，进度行独占一行（见 `UploadProgress`）
+        println!("  新建 [{}] {} ...", i + 1, dw.doi);
         if upload_one_zotero(
             dw,
             &base_url,
@@ -2472,13 +2767,14 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
             &client,
             &token,
             args.interval.timeout_override(),
+            args.interval.extract_meta,
         )
         .await
         {
-            println!("✓");
+            println!("  ✓ 已上传");
             uploaded += 1;
         } else {
-            println!("失败");
+            println!("  ✗ 失败");
             failed += 1;
         }
     }
@@ -2497,8 +2793,7 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         }
         args.interval.throttle(upload_seq).await;
         upload_seq += 1;
-        print!("  更新 PDF [{}] ID={} ({}) ... ", i + 1, server_id, dw.doi);
-        io::stdout().flush().ok();
+        println!("  更新 PDF [{}] ID={} ({}) ...", i + 1, server_id, dw.doi);
         if api_replace_pdf(
             &base_url,
             *server_id,
@@ -2512,10 +2807,10 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
                 api_update_metadata(&client, &base_url, *server_id, &dw.meta, &token).await;
                 api_save_info(&client, &base_url, *server_id, &dw.info, &token).await;
             }
-            println!("✓");
+            println!("  ✓ 已更新");
             updated_pdf += 1;
         } else {
-            println!("失败");
+            println!("  ✗ 失败");
             failed += 1;
         }
     }

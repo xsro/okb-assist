@@ -1404,6 +1404,10 @@ async fn upload_document(
     let mut doi_field: Option<String> = None;
     // 命中重复时的行为：error（默认，409）| skip（200 + 已存在文档）| replace（用本次上传覆盖已有 PDF）
     let mut on_duplicate = "error".to_string();
+    // 是否做 PDF 元数据启发式抽取（默认 true，保持 Web 上传行为不变）。
+    // 批量上传（client-rs）会传 false：那一步要起几个 mutool 子进程、把整份文档的正文抽一遍，
+    // 是大文件上传后「等服务端处理」的主要耗时；不抽也能先把记录建好，之后再补。
+    let mut extract_meta = true;
     let temp_dir = upload_temp_dir(&settings);
 
     while let Ok(Some(mut field)) = multipart.next_field().await {
@@ -1437,6 +1441,10 @@ async fn upload_document(
             "auto_process" => {
                 let val = field.bytes().await.unwrap_or_default();
                 auto_process = std::str::from_utf8(&val).unwrap_or("true") != "false";
+            }
+            "extract_meta" => {
+                let val = field.bytes().await.unwrap_or_default();
+                extract_meta = std::str::from_utf8(&val).unwrap_or("true") != "false";
             }
             "doi" => {
                 let val = field.bytes().await.unwrap_or_default();
@@ -1612,13 +1620,17 @@ async fn upload_document(
         }
     }
 
-    // PDF 元数据（后台线程读临时文件，不占用请求内存）
-    let meta = extract_pdf_metadata_from_path_async(
-        temp_upload.path().to_string_lossy().to_string(),
-        Some(filename.clone()),
-        None,
-    )
-    .await;
+    // PDF 元数据（后台线程读临时文件，不占用请求内存）；`extract_meta=false` 时整段跳过
+    let meta = if extract_meta {
+        extract_pdf_metadata_from_path_async(
+            temp_upload.path().to_string_lossy().to_string(),
+            Some(filename.clone()),
+            None,
+        )
+        .await
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
 
     let mut doc = Document {
         id: 0,
