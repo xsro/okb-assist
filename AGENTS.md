@@ -145,6 +145,12 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 - 保存时校验：`engine` 只接受 `mutool` / `mupdf`，否则 400；选了 `mupdf` 但当前二进制没编入 feature 也返回 400（回退只用于「配置值来自换过的二进制」这种场景，不在写入口悄悄改写用户选择）。
 - `GET /assist/api/config` 额外下发只读的 `pdf_capabilities: {mutool: true, mupdf: bool, active: "mutool"|"mupdf"}`，前端据此禁用「内置 mupdf」选项并标出实际生效的引擎。
 - 前端：`components/config/PdfEngineSection.vue`（单选卡片 + 生效中/不可用标记；选 mupdf 时提示「检不出可修复的 xref 损坏」）。
+- **版本展示**：日志页「系统版本」的数据来自 `GET /assist/api/admin/` 的 `pdf` 字段 ——
+  `{engine:{configured,active,label}, mutool:{path,available,version,error}, builtin_mupdf:{available,version}}`。
+  `mutool` 由 `services/pdf_engine.rs::mutool_version()` 在请求时跑一次 `mutool -v`（5s 超时、`kill_on_drop`；
+  mutool 把版本打到 **stderr**，所以 stdout/stderr 都看）；`builtin_mupdf.version` 是 `Cargo.toml` 里
+  `mupdf` 依赖的版本号（`build.rs` 解析后注入 `MUPDF_CRATE_VERSION`），`builtin_mupdf.available` 是
+  `cfg!(feature = "mupdf")`，未编入时前端不显示这个标签。
 
 ### 用户与认证（`config.json` 的 `users` 段）
 

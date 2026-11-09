@@ -140,6 +140,8 @@ async fn status() -> Json<Value> {
         "rustc": env!("RUSTC_VERSION"),
         "target": env!("BUILD_HOST"),
         "backend": "rust",
+        // PDF 引擎版本：外部 `mutool -v` + （编入时）内置 mupdf 的版本
+        "pdf": crate::services::pdf_engine::version_report().await,
     }))
 }
 

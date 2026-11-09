@@ -5,6 +5,29 @@
       <div class="version-info" v-if="versionInfo">
         <span class="version-badge">{{ versionInfo.name }} v{{ versionInfo.version }}</span>
         <span class="version-detail">{{ versionInfo.build_profile }} · {{ versionInfo.rustc }}</span>
+        <!-- PDF 引擎版本：系统 mutool -v + （编入时）内置 mupdf -->
+        <span class="version-pdf" v-if="pdfInfo">
+          <span
+            class="version-chip"
+            :class="{
+              'chip-muted': !pdfInfo.mutool?.available,
+              'chip-active': pdfInfo.engine?.active === 'mutool',
+            }"
+            :title="mutoolTitle"
+          >
+            mutool {{ mutoolShort }}
+            <template v-if="pdfInfo.engine?.active === 'mutool'">（生效中）</template>
+          </span>
+          <span
+            class="version-chip"
+            v-if="pdfInfo.builtin_mupdf?.available"
+            :class="{ 'chip-active': pdfInfo.engine?.active === 'mupdf' }"
+            :title="mupdfTitle"
+          >
+            内置 mupdf {{ pdfInfo.builtin_mupdf.version }}
+            <template v-if="pdfInfo.engine?.active === 'mupdf'">（生效中）</template>
+          </span>
+        </span>
         <span class="version-date">构建于 {{ versionInfo.build_time }}</span>
       </div>
       <span
@@ -131,6 +154,24 @@ import { useRequireToken } from '@/composables/useRequireToken'
 import { apiGet } from '@/api/client'
 import type { LogEntry, LogLevel } from '@/api/admin'
 
+interface PdfVersionInfo {
+  engine?: {
+    configured: string
+    active: string
+    label: string
+  }
+  mutool?: {
+    path: string
+    available: boolean
+    version: string | null
+    error: string | null
+  }
+  builtin_mupdf?: {
+    available: boolean
+    version: string
+  }
+}
+
 interface VersionInfo {
   name: string
   version: string
@@ -139,6 +180,8 @@ interface VersionInfo {
   rustc: string
   target: string
   backend: string
+  /** PDF 引擎版本：系统 `mutool -v` + （编入时）内置 mupdf 版本 */
+  pdf?: PdfVersionInfo
 }
 
 const { requireToken } = useRequireToken()
@@ -192,6 +235,33 @@ const visibleLogs = computed(() => {
   const kw = keywordFilter.value.trim().toLowerCase()
   if (!kw) return logs.value
   return logs.value.filter((entry) => JSON.stringify(entry).toLowerCase().includes(kw))
+})
+
+/** PDF 引擎版本信息（日志页「系统版本」的一部分） */
+const pdfInfo = computed<PdfVersionInfo | null>(() => versionInfo.value?.pdf ?? null)
+
+/** 只取 `mutool version 1.28.5` 里的版本号，拿不到就退回可用状态文案 */
+const mutoolShort = computed(() => {
+  const mutool = pdfInfo.value?.mutool
+  if (!mutool?.available) return '不可用'
+  const matched = mutool.version?.match(/\d+(?:\.\d+)+/)
+  return matched ? matched[0] : mutool.version || '版本未知'
+})
+
+const mutoolTitle = computed(() => {
+  const mutool = pdfInfo.value?.mutool
+  if (!mutool) return ''
+  if (!mutool.available) {
+    return `系统 mutool 不可用：${mutool.error || '未知原因'}（路径：${mutool.path}）`
+  }
+  return `系统 mutool：${mutool.version}\n路径：${mutool.path}`
+})
+
+const mupdfTitle = computed(() => {
+  const builtin = pdfInfo.value?.builtin_mupdf
+  if (!builtin?.available) return ''
+  const state = pdfInfo.value?.engine?.active === 'mupdf' ? '当前生效' : '当前未启用'
+  return `内置 mupdf（Cargo.toml 依赖版本 ${builtin.version}）：${state}`
 })
 
 /** 取 `fields` 里的字符串字段（请求类日志才有 method / path / query） */
@@ -462,6 +532,36 @@ onUnmounted(() => {
 .version-date {
   color: var(--text-secondary);
   font-size: 11px;
+}
+
+/* PDF 引擎版本小标签（mutool / 内置 mupdf） */
+.version-pdf {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.version-chip {
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: var(--bg-white);
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  cursor: help;
+}
+
+.version-chip.chip-active {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.version-chip.chip-muted {
+  color: var(--text-secondary);
+  border-style: dashed;
+  opacity: 0.85;
 }
 
 .log-file {
