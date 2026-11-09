@@ -10,6 +10,7 @@ pub mod drive;
 pub mod file_state;
 pub mod image_cache;
 pub mod llm;
+pub mod md_meta;
 pub mod mineru;
 pub mod pdf_meta;
 pub mod pdf_engine;

@@ -76,7 +76,16 @@
       <div class="action-group">
         <span class="action-label">元数据补全</span>
         <div class="action-buttons">
-          <button class="btn" @click="runStage('extract')">从 Markdown 文件</button>
+          <button
+            class="btn"
+            title="用大模型读 Markdown 逐字段校对（慢，但覆盖全）"
+            @click="runStage('extract')"
+          >从 Markdown（大模型）</button>
+          <button
+            class="btn btn-outline"
+            title="只识别 Markdown 里的「引用格式 / 引用本文 / DOI」，几毫秒完成；没有这些线索会跳过"
+            @click="runStage('extract-fast')"
+          >从 Markdown（启发式）</button>
           <button class="btn btn-outline" @click="enrichPdfMeta">PDF 元数据</button>
           <button class="btn btn-outline" @click="enrichCrossref">Crossref</button>
         </div>
@@ -412,10 +421,16 @@ async function runStage(stage: string) {
   try {
     if (stage === 'parse') {
       await parseDocument(id)
+      showSuccess('已提交解析任务')
     } else if (stage === 'extract') {
       await extractDocument(id)
+      showSuccess('已提交「大模型」元数据提取任务')
+    } else if (stage === 'extract-fast') {
+      await extractDocument(id, 'heuristic')
+      showSuccess('已提交「启发式」元数据抽取任务（只识别引用格式 / DOI）')
+    } else {
+      showSuccess('已启动任务')
     }
-    showSuccess('已启动任务')
     setTimeout(load, 2000)
   } catch (err) {
     showError(getErrorMessage(err))

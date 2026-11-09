@@ -998,7 +998,12 @@ fn metadata_is_blank(v: &Value) -> bool {
 /// 把数据库里已有的元数据一并送给模型做校对，
 /// 模型可以改正与正文矛盾的取值，也可以在「正文里也没有正确值」时把它们清空；
 /// 同时把「原元数据 / 模型输出 / 字段变化 / 最终元数据」写入日志。
-async fn do_extract_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
+async fn do_extract_impl(
+    db: Arc<Database>,
+    settings: Arc<Settings>,
+    doc_id: i64,
+    method: ExtractMethod,
+) {
     let doc = match fetch_doc(&db, doc_id).await {
         Some(d) => d,
         None => return,
@@ -1020,27 +1025,67 @@ async fn do_extract_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64
 
     let overwrite = settings.extract_overwrite();
     let old = MetaRecord::from_doc(&doc);
-    info!(
-        "文档 {} 开始提取元数据 (model={}, overwrite={}): 原元数据={}",
-        doc_id,
-        settings.llm_extract_config().model,
-        overwrite,
-        old.to_json()
-    );
-
-    let options = settings.extract_options(Some(old.to_json()));
-    let metadata = match settings.extract_client().extract_metadata(&markdown_content, &options).await {
-        Ok(m) => m,
-        Err(e) => {
-            warn!("文档 {} 元数据抽取失败: {}", doc_id, e);
-            return;
+    let metadata = match method {
+        ExtractMethod::Llm => {
+            info!(
+                "文档 {} 开始提取元数据（大模型 model={}, overwrite={}）: 原元数据={}",
+                doc_id,
+                settings.llm_extract_config().model,
+                overwrite,
+                old.to_json()
+            );
+            let options = settings.extract_options(Some(old.to_json()));
+            match settings
+                .extract_client()
+                .extract_metadata(&markdown_content, &options)
+                .await
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!("文档 {} 元数据抽取失败: {}", doc_id, e);
+                    return;
+                }
+            }
+        }
+        ExtractMethod::Heuristic => {
+            info!(
+                "文档 {} 开始启发式抽取元数据（仅引用格式/引用本文/DOI，overwrite={}）: 原元数据={}",
+                doc_id,
+                overwrite,
+                old.to_json()
+            );
+            // 纯字符串处理：放到 blocking 线程里，别让大 Markdown 卡住运行时
+            let content = markdown_content.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::services::md_meta::extract_metadata_from_markdown(&content)
+            })
+            .await
+            {
+                Ok(meta) => meta,
+                Err(e) => {
+                    warn!("文档 {} 启发式抽取任务失败: {}", doc_id, e);
+                    return;
+                }
+            }
         }
     };
-    info!("文档 {} 模型输出的元数据: {}", doc_id, metadata);
+    info!(
+        "文档 {} {}输出的元数据: {}",
+        doc_id,
+        method.label(),
+        metadata
+    );
 
-    // 模型什么都没给出来（输出被截断 / 返回空对象）时保持原样
+    // 什么都没给出来（模型输出被截断 / Markdown 里既没有引用格式也没有 DOI）时保持原样
     if metadata_is_blank(&metadata) {
-        warn!("文档 {} 模型输出的元数据全为空, 保留原元数据", doc_id);
+        warn!(
+            "文档 {} 的元数据抽取结果为空（{}），保留原元数据",
+            doc_id,
+            match method {
+                ExtractMethod::Llm => "模型未返回有效字段",
+                ExtractMethod::Heuristic => "未找到引用格式/引用本文/DOI",
+            }
+        );
         return;
     }
 
@@ -1052,11 +1097,14 @@ async fn do_extract_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64
         return;
     }
 
-    // 标题与作者同时为空说明这次抽取不可信，放弃写入
-    if merged.is_blank() {
+    // 标题与作者同时为空、且**原来是有的** → 说明这次抽取不可信（会把已有信息抹掉），放弃写入。
+    // 原本就是空记录（比如刚上传、只有 DOI 线索）时允许写入 DOI，否则启发式对空记录永远存不进东西。
+    if merged.is_blank() && !old.is_blank() {
         warn!(
-            "文档 {} 抽取结果会同时清空标题与作者, 已放弃本次更新: 模型输出={}",
-            doc_id, metadata
+            "文档 {} 抽取结果会同时清空标题与作者, 已放弃本次更新（{}输出={}）",
+            doc_id,
+            method.label(),
+            metadata
         );
         return;
     }
@@ -1583,7 +1631,11 @@ async fn process_stage_batch_parse(db: Arc<Database>, settings: Arc<Settings>) {
     BATCH_PAUSED.store(false, Ordering::SeqCst);
 }
 
-async fn process_stage_batch_extract(db: Arc<Database>, settings: Arc<Settings>) {
+async fn process_stage_batch_extract(
+    db: Arc<Database>,
+    settings: Arc<Settings>,
+    method: ExtractMethod,
+) {
     let docs: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
         "SELECT {} FROM documents WHERE COALESCE(md_size,0) > 0", DOC_COLUMNS
     ))
@@ -1603,7 +1655,11 @@ async fn process_stage_batch_extract(db: Arc<Database>, settings: Arc<Settings>)
         }
         let db = db.clone();
         let settings = settings.clone();
-        handles.push(tokio::spawn(run_tracked(doc.id, "extract", do_extract_impl(db, settings, doc.id))));
+        handles.push(tokio::spawn(run_tracked(
+            doc.id,
+            method.task_type(),
+            do_extract_impl(db, settings, doc.id, method),
+        )));
     }
     for h in handles {
         let _ = h.await;
@@ -1784,6 +1840,56 @@ pub fn router() -> axum::Router<()> {
 #[derive(Debug, Deserialize)]
 pub struct IndexQuery {
     pub vector_db_id: Option<String>,
+}
+
+/// 元数据抽取方式（`POST /pipeline/extract/:id?method=heuristic`）
+///
+/// - `llm`（默认）：用 `llm_extract` 配置的模型读 Markdown 校对字段；
+/// - `heuristic`：**不调用模型**，只从 Markdown 里的「引用格式 / 引用本文 / DOI」抽取，
+///   快但不是每篇都有线索（没有就跳过并写日志）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtractMethod {
+    Llm,
+    Heuristic,
+}
+
+impl ExtractMethod {
+    fn parse(raw: Option<&str>) -> Result<Self, String> {
+        let Some(v) = raw.map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()) else {
+            return Ok(ExtractMethod::Llm);
+        };
+        Ok(match v.as_str() {
+            "llm" | "model" | "ai" | "ollama" | "openai" => ExtractMethod::Llm,
+            "heuristic" | "fast" | "citation" | "doi" | "rule" => ExtractMethod::Heuristic,
+            other => {
+                return Err(format!(
+                    "method 取值非法: {}（可用 llm / heuristic，缺省 llm）",
+                    other
+                ))
+            }
+        })
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            ExtractMethod::Llm => "大模型",
+            ExtractMethod::Heuristic => "启发式（引用格式/DOI）",
+        }
+    }
+
+    /// 活跃任务类型（前端状态文案按这个映射）
+    fn task_type(&self) -> &'static str {
+        match self {
+            ExtractMethod::Llm => "extract",
+            ExtractMethod::Heuristic => "extract-heuristic",
+        }
+    }
+}
+
+/// `POST /pipeline/extract/:id?method=llm|heuristic`
+#[derive(Debug, Deserialize, Default)]
+pub struct ExtractQuery {
+    pub method: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1978,18 +2084,28 @@ async fn batch_start_extract(
     Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
+    Query(query): Query<ExtractQuery>,
 ) -> Response {
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
+    let method = match ExtractMethod::parse(query.method.as_deref()) {
+        Ok(m) => m,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response(),
+    };
     let counts = stage_counts(&db).await;
     let count = counts.markdown_done;
     if count == 0 {
         return Json(json!({"detail": "没有待提取元数据的文档", "pending": 0})).into_response();
     }
     BATCH_PAUSED.store(false, Ordering::SeqCst);
-    tokio::spawn(process_stage_batch_extract(db, settings));
-    Json(json!({"detail": format!("批量提取已开始，共 {} 个文档", count), "pending": count})).into_response()
+    tokio::spawn(process_stage_batch_extract(db, settings, method));
+    Json(json!({
+        "detail": format!("批量提取已开始（{}），共 {} 个文档", method.label(), count),
+        "pending": count,
+        "method": method.label()
+    }))
+    .into_response()
 }
 
 async fn batch_start_index(
@@ -2154,10 +2270,15 @@ async fn extract(
     Extension(db): Extension<Arc<Database>>,
     Extension(settings): Extension<Arc<Settings>>,
     Path(id): Path<i64>,
+    Query(query): Query<ExtractQuery>,
 ) -> Response {
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
+    let method = match ExtractMethod::parse(query.method.as_deref()) {
+        Ok(m) => m,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response(),
+    };
     let doc = match fetch_doc(&db, id).await {
         Some(d) => d,
         None => return (StatusCode::NOT_FOUND, Json(json!({"detail": "文献不存在"}))).into_response(),
@@ -2168,9 +2289,18 @@ async fn extract(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "当前没有 Markdown，不允许提取元数据"}))).into_response();
     }
 
-    tokio::spawn(run_tracked(id, "extract", do_extract_impl(db, settings, id)));
+    tokio::spawn(run_tracked(
+        id,
+        method.task_type(),
+        do_extract_impl(db, settings, id, method),
+    ));
 
-    Json(json!({"detail": "元数据提取任务已提交", "status": "markdown_done"})).into_response()
+    Json(json!({
+        "detail": format!("元数据提取任务已提交（{}）", method.label()),
+        "status": "markdown_done",
+        "method": method.label()
+    }))
+    .into_response()
 }
 
 async fn crossref(
@@ -2386,7 +2516,7 @@ async fn full(
         let d = fetch_doc(&db2, id).await;
         if let Some(d) = d {
             if doc_state(&d).status == DocStatus::MarkdownDone {
-                do_extract_impl(db2.clone(), settings2.clone(), id).await;
+                do_extract_impl(db2.clone(), settings2.clone(), id, ExtractMethod::Llm).await;
                 let d2 = fetch_doc(&db2, id).await;
                 if let Some(d2) = d2 {
                     // 提取完成后检查元数据是否已填充
@@ -2527,5 +2657,39 @@ mod meta_tests {
         let mut rec = record();
         rec.apply(&json!({ "doi": "doi:10.5555/xyz." }), true);
         assert_eq!(rec.doi, "10.5555/xyz");
+    }
+}
+
+#[cfg(test)]
+mod extract_method_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_llm() {
+        assert_eq!(ExtractMethod::parse(None).unwrap(), ExtractMethod::Llm);
+        assert_eq!(ExtractMethod::parse(Some("  ")).unwrap(), ExtractMethod::Llm);
+        assert_eq!(ExtractMethod::parse(Some("LLM")).unwrap(), ExtractMethod::Llm);
+    }
+
+    #[test]
+    fn parses_heuristic_aliases() {
+        for raw in ["heuristic", "FAST", " citation ", "doi", "rule"] {
+            assert_eq!(
+                ExtractMethod::parse(Some(raw)).unwrap(),
+                ExtractMethod::Heuristic,
+                "raw={raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_method() {
+        assert!(ExtractMethod::parse(Some("magic")).is_err());
+    }
+
+    #[test]
+    fn task_types_are_distinct() {
+        assert_eq!(ExtractMethod::Llm.task_type(), "extract");
+        assert_eq!(ExtractMethod::Heuristic.task_type(), "extract-heuristic");
     }
 }

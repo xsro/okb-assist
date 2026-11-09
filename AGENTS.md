@@ -395,6 +395,12 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
   - `overwrite = false`：只补空字段。
   - `type` 走 `normalize_doc_type()` 的 Zotero 标准映射；`year` 只接受 1000–2200。
 - **安全阀**：模型输出全空（`metadata_is_blank`）直接放弃写入；合并后标题与作者同时为空也放弃写入。因此可以对同一文档反复抽取以纠正旧值。
+- **两种抽取方式**（`POST /assist/api/pipeline/extract/:id?method=llm|heuristic`，批量端点同样支持 `?method=`）：
+  - `llm`（默认）：上面的模型路径；
+  - `heuristic`：`services/md_meta.rs`，**不调用模型**，只从 Markdown 里的「引用格式 / 引用本文 / Cite this article as」引用块与 `DOI` 抽取
+    （复用 `pdf_meta` 的 `find_citation` / `parse_citation_fields` / `scan_doi`，并截掉「参考文献」之后的内容）。
+    两者都**没有**时返回空对象并打 `warn` 跳过 —— 不做版面/行序猜测。结果与模型输出同形，走同一条 `MetaRecord::apply` 落库；
+    活跃任务类型为 `extract-heuristic`（前端文案「启发式抽取元数据中」）。单篇通常 < 5 ms，适合批量回填。
 - **日志**：`info!` 依次输出“原元数据 → 模型输出 → 字段变化清单（`字段: 旧 → 新`）→ 更新后元数据”，失败/放弃路径用 `warn!`。
 
 ### 问答（Chat，工具页「问答」tab：`/assist/tools?tab=chat`）

@@ -73,7 +73,8 @@ const TASK_LABELS: Record<string, string> = {
   hash: '重算哈希中',
   'pdf-health': 'PDF 健康检查中',
   crossref: '获取 Crossref 中',
-  'extract-pdf-meta': '读取 PDF 元信息中'
+  'extract-pdf-meta': '读取 PDF 元信息中',
+  'extract-heuristic': '启发式抽取元数据中'
 }
 
 /** PDF 健康值 → 中文标签 */

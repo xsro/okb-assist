@@ -31,10 +31,30 @@ export function parseDocument(id: number) {
   )
 }
 
-/** 提取元数据 */
-export function extractDocument(id: number) {
-  return apiPost<{ detail: string; status: string }>(
-    `/assist/api/pipeline/extract/${id}/`
+/** 元数据抽取方式 */
+export type ExtractMethod = 'llm' | 'heuristic'
+
+/**
+ * 提取元数据。
+ *
+ * - `llm`（默认）：让大模型读 Markdown 校对字段，覆盖全但慢；
+ * - `heuristic`：只从 Markdown 的「引用格式 / 引用本文 / DOI」里抽，几毫秒完成，
+ *   没有这些线索的文档会被后端跳过（日志里有说明）。
+ */
+export function extractDocument(id: number, method: ExtractMethod = 'llm') {
+  return apiPost<{ detail: string; status: string; method?: string }>(
+    `/assist/api/pipeline/extract/${id}/`,
+    undefined,
+    { params: { method } }
+  )
+}
+
+/** 批量提取元数据（`method` 含义同 `extractDocument`） */
+export function startBatchExtract(method: ExtractMethod = 'llm') {
+  return apiPost<{ detail: string; pending: number; method?: string }>(
+    '/assist/api/pipeline/batch/start-extract/',
+    undefined,
+    { params: { method } }
   )
 }
 

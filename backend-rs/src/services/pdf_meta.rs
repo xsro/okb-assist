@@ -834,7 +834,7 @@ use std::sync::OnceLock;
 
 /// 首页的一行文本（合并了同一基线上的多段文字）
 #[derive(Debug, Clone, Default)]
-struct TextLine {
+pub(crate) struct TextLine {
     text: String,
     /// 该行最大字号；`0.0` 表示「未知」（纯文本引擎）
     size: f32,
@@ -1093,14 +1093,14 @@ const KEYWORD_BAD: &[&str] = &[
     "文献标志",
 ];
 
-fn is_han(c: char) -> bool {
+pub(crate) fn is_han(c: char) -> bool {
     matches!(
         c as u32,
         0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
     )
 }
 
-fn contains_han(s: &str) -> bool {
+pub(crate) fn contains_han(s: &str) -> bool {
     s.chars().any(is_han)
 }
 
@@ -1129,23 +1129,23 @@ fn content_char_ratio(s: &str) -> f32 {
     content as f32 / total as f32
 }
 
-fn is_garbage_text(s: &str) -> bool {
+pub(crate) fn is_garbage_text(s: &str) -> bool {
     // 用去空白后的文本算占比（中文版式的宽间距不应被当成乱码）
     content_char_ratio(&compact(s)) < 0.55
 }
 
-fn char_count(s: &str) -> usize {
+pub(crate) fn char_count(s: &str) -> usize {
     s.chars().count()
 }
 
-fn truncate_chars(s: &str, max: usize) -> String {
+pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
     if char_count(s) <= max {
         return s.to_string();
     }
     s.chars().take(max).collect()
 }
 
-fn collapse_spaces(s: &str) -> String {
+pub(crate) fn collapse_spaces(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last_space = false;
     for c in s.chars() {
@@ -1287,7 +1287,7 @@ fn unescape_xml(s: &str) -> String {
 }
 
 /// 纯文本按行拆成 `TextLine`（无字号，用递减的 y 表示行序，便于复用“最近行”逻辑）
-fn lines_from_plain_text(text: &str) -> Vec<TextLine> {
+pub(crate) fn lines_from_plain_text(text: &str) -> Vec<TextLine> {
     let mut out = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let t = line.trim();
@@ -1362,7 +1362,7 @@ fn fix_split_markers(rows: &[TextLine]) -> Vec<TextLine> {
 
 // ── 摘要 / 关键词的文本块收集 ────────────────────────────
 
-fn is_stop_line(text: &str) -> bool {
+pub(crate) fn is_stop_line(text: &str) -> bool {
     re(
         &RE_STOP_LINE,
         r"^\s*[【\[(（]?\s*(?:中图分类号|中图法分类号|文献标志码|文献标识码|文章编号|DOI|Abstract|Key\s*-?\s*words?|Keywords|收稿日期|基金项目|作者简介|通信作者|引用格式|Citation|关\s*键\s*[词字]|引\s*言|[0-9]\s*引\s*言|一\s*、)",
@@ -1371,7 +1371,7 @@ fn is_stop_line(text: &str) -> bool {
 }
 
 /// 按行拼接成一段（中文直接相连，英文补空格，断词连字符去掉）
-fn join_lines(parts: &[&str]) -> String {
+pub(crate) fn join_lines(parts: &[&str]) -> String {
     let mut out = String::new();
     for part in parts {
         let p = part.trim();
@@ -1464,7 +1464,7 @@ fn collect_abstract_en(rows: &[TextLine]) -> Option<String> {
     None
 }
 
-fn split_keyword_list(body: &str, cn: bool) -> Vec<String> {
+pub(crate) fn split_keyword_list(body: &str, cn: bool) -> Vec<String> {
     // 先把“中文 空格 中文”的空格去掉（换行拼接留下的）
     let mut normalized = String::with_capacity(body.len());
     let chars: Vec<char> = body.chars().collect();
@@ -1631,7 +1631,7 @@ fn parse_names(raw: &str) -> (Vec<String>, usize) {
 const SURNAMES: &str = "\
 王李张刘陈杨黄赵吴周徐孙马朱胡林郭何高罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤常温康施文牛樊葛邢安齐易乔伍庞颜倪庄聂章鲁岳翟殷詹申敖韦巩聂覃单季裴霍涂成苗谷盛曲翁冉骆蓝路游辛靳管柴蒙鲍华喻祁蒲房滕屈饶解牟艾尤阳时穆农司卓古吉缪简车项连芦麦褚娄窦戚岑景党宫费卜冷晏席卫米柏宗瞿桂全佟应臧闵苟邬边卞姬师和仇栾隋商刁沙荣巫寇桑郎甄丛仲虞敖明佘池查麻苑迟邝封淡楚鞠欧阳司马上官诸葛夏侯东方皇甫尉迟公孙慕容长孙宇文司徒司空令狐端木独孤南宫西门轩辕呼延万俟闻人澹台公冶宗政濮阳淳于单于太叔申屠仲孙钟离拓跋赫连仉督晋楚闫法汝鄢涂钦归海羊舌微生梁丘左丘东门南门居买台智阳衣揭甲毋帅亢况郗汲逯扈郜蔚菅楼闻仝郏鄂钭粟冼藏栗浦盖訾阚隗逄都贲官区蔺匡位诸苟恽邸苑卿惠昝仇栾隋商刁沙荣巫寇桑郎甄丛仲虞敖明佘";
 
-fn has_common_surname(name: &str) -> bool {
+pub(crate) fn has_common_surname(name: &str) -> bool {
     let chars: Vec<char> = name.chars().collect();
     if chars.len() >= 3 {
         let two: String = chars.iter().take(2).collect();
@@ -1645,7 +1645,7 @@ fn has_common_surname(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn looks_like_names(text: &str) -> bool {
+pub(crate) fn looks_like_names(text: &str) -> bool {
     let s = text.trim();
     let n = char_count(s);
     if n == 0 || n > 150 {
@@ -1723,7 +1723,7 @@ fn looks_like_journal(text: &str) -> bool {
 }
 
 /// 全宽字符归一化（中文期刊 PDF 常见：全角标点、全角数字、全角空格）
-fn normalize_fullwidth(text: &str) -> String {
+pub(crate) fn normalize_fullwidth(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             '\u{3000}' | '\u{00A0}' => ' ',
@@ -1787,7 +1787,7 @@ fn strip_title_tail(title: &str) -> String {
     t.trim().to_string()
 }
 
-fn clean_title(title: &str) -> String {
+pub(crate) fn clean_title(title: &str) -> String {
     // 去掉控制字符与私用区字符（期刊水印/图章常被抽成 U+E000..U+F8FF）
     let filtered: String = title
         .chars()
@@ -1831,7 +1831,7 @@ fn clean_title(title: &str) -> String {
 // ── DOI ─────────────────────────────────────────────────
 
 /// 从文本里扫 DOI，兼容「10. 19942/j. issn. …」这种被空格拆开的排版
-fn scan_doi(text: &str) -> Option<String> {
+pub(crate) fn scan_doi(text: &str) -> Option<String> {
     if let Some(m) = re(&RE_DOI_PLAIN, r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+").find(text) {
         return normalize_doi(m.as_str());
     }
@@ -1884,7 +1884,7 @@ const CIT_LABEL_PATTERN: &str = r"(?:引用\s*本文|引用\s*格式|本文\s*�
 /// 范围分隔符：- – — ‐ ‑ − ⁃ ~ ～
 const RANGE_SEP: &str = r"[-－–—‐‑−⁃~～]";
 
-fn find_citation(text: &str) -> Option<String> {
+pub(crate) fn find_citation(text: &str) -> Option<String> {
     let m = re(&RE_CIT_LABEL, CIT_LABEL_PATTERN).find(text)?;
     let rest = &text[m.end()..];
     let mut body = String::new();
@@ -1919,7 +1919,7 @@ fn find_citation(text: &str) -> Option<String> {
     Some(body)
 }
 
-fn parse_citation_fields(body: &str) -> Vec<(String, Value)> {
+pub(crate) fn parse_citation_fields(body: &str) -> Vec<(String, Value)> {
     let mut out: Vec<(String, Value)> = Vec::new();
 
     // ── 年 / 卷 / 期 / 页码 ──
@@ -2570,15 +2570,15 @@ fn apply_labels(rows: &[TextLine], map: &mut serde_json::Map<String, Value>) {
 }
 
 /// 截掉参考文献部分：参考文献里的 DOI / 年份很容易被误当成文献自己的
-fn head_before_references(text: &str) -> &str {
-    match re(&RE_REFERENCE_HEAD, r"(?mi)^\s*(?:参\s*考\s*文\s*献|references?)").find(text) {
+pub(crate) fn head_before_references(text: &str) -> &str {
+    match re(&RE_REFERENCE_HEAD, r"(?mi)^\s*(?:参\s*考\s*文\s*献|references\b)").find(text) {
         Some(m) => &text[..m.start()],
         None => text,
     }
 }
 
 /// 主入口：`lines` 为首页行（可含字号），`plain` 为前 5 页纯文本
-fn analyze_metadata(
+pub(crate) fn analyze_metadata(
     lines: &[TextLine],
     plain: &str,
     filename: Option<&str>,

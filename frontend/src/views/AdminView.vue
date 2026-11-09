@@ -84,6 +84,11 @@
         >批量解析有 PDF 无 Markdown</button>
         <button
           class="btn btn-outline"
+          title="只处理已有 Markdown 的文档；只识别 Markdown 里的「引用格式 / 引用本文 / DOI」，没有线索的会跳过（几毫秒一篇）"
+          @click="batchExtractHeuristic"
+        >批量启发式抽取元数据</button>
+        <button
+          class="btn btn-outline"
           title="只为 PDF/Markdown/资源包 大小为空（NULL）的文档补写大小，不动已有数据"
           @click="syncMissingFileSizes"
         >补充缺失的大小信息</button>
@@ -227,7 +232,7 @@ import {
   deduplicateDocuments,
   syncFileSizes,
 } from '@/api/admin'
-import { startBatchParse } from '@/api/pipeline'
+import { startBatchParse, startBatchExtract } from '@/api/pipeline'
 import { usePipelineStore } from '@/stores/pipeline'
 import { useToast } from '@/composables/useToast'
 import StatusBadge from '@/components/StatusBadge.vue'
@@ -235,7 +240,7 @@ import type { SystemStats } from '@/types/config'
 import type { ActiveTask } from '@/types/pipeline'
 import type { PdfHealthOverview } from '@/api/admin'
 
-const { showToast, showInfo, showError } = useToast()
+const { showToast, showSuccess, showInfo, showError } = useToast()
 const router = useRouter()
 const pipelineStore = usePipelineStore()
 
@@ -292,6 +297,21 @@ async function loadPdfHealth() {
     showError('PDF 健康数据加载失败')
   } finally {
     healthLoading.value = false
+  }
+}
+
+async function batchExtractHeuristic() {
+  if (
+    !confirm(
+      '确定对「已有 Markdown」的文档批量做启发式元数据抽取？\n\n只识别 Markdown 里的「引用格式 / 引用本文 / DOI」，没有这些线索的文档会跳过（不会调用大模型）。'
+    )
+  )
+    return
+  try {
+    const res = await startBatchExtract('heuristic')
+    showSuccess(res.detail || '批量启发式抽取已开始')
+  } catch {
+    showError('批量启发式抽取提交失败')
   }
 }
 
@@ -395,6 +415,7 @@ function taskTypeLabel(type: string): string {
   const labels: Record<string, string> = {
     parse: '解析',
     extract: '元数据提取',
+    'extract-heuristic': '启发式抽取',
     index: '索引',
     crossref: 'Crossref',
     'extract-pdf-meta': 'PDF 元数据',
