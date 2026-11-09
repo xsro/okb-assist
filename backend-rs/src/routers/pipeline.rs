@@ -1465,24 +1465,41 @@ async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id
     let authors_json = serde_json::to_string(&authors).unwrap_or_else(|_| "[]".to_string());
     let keywords = meta.get("keywords").and_then(|a| a.as_array()).cloned();
     let keywords_json = keywords.as_ref().map(|a| serde_json::to_string(a).unwrap_or_else(|_| "[]".to_string()));
+    let keywords_en = meta.get("keywords_en").and_then(|a| a.as_array()).cloned();
+    let keywords_en_json = keywords_en.as_ref().map(|a| serde_json::to_string(a).unwrap_or_else(|_| "[]".to_string()));
+    let authors_en = meta.get("authors_en").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+    let authors_en_json = serde_json::to_string(&authors_en).unwrap_or_else(|_| "[]".to_string());
     let doi_norm = value_str(&meta, "doi").and_then(|d| normalize_doi(&d));
 
+    // 只补空（NULLIF 保证空串不覆盖已有值）：中英文题名/作者/刊名/关键词/摘要一并落库
     let _ = sqlx::query(
         "UPDATE documents SET \
             title = COALESCE(NULLIF(title, ''), ?), \
+            title_en = COALESCE(NULLIF(title_en, ''), ?), \
             authors = COALESCE(NULLIF(authors, ''), ?), \
+            authors_en = COALESCE(NULLIF(authors_en, ''), ?), \
             year = COALESCE(year, ?), \
             doi = COALESCE(NULLIF(doi, ''), ?), \
+            journal = COALESCE(NULLIF(journal, ''), ?), \
+            journal_en = COALESCE(NULLIF(journal_en, ''), ?), \
             keywords = COALESCE(NULLIF(keywords, ''), ?), \
+            keywords_en = COALESCE(NULLIF(keywords_en, ''), ?), \
             abstract = COALESCE(NULLIF(abstract, ''), ?), \
+            abstract_en = COALESCE(NULLIF(abstract_en, ''), ?), \
             updated_at = ? WHERE id = ?",
     )
     .bind(value_str(&meta, "title").unwrap_or_default())
+    .bind(value_str(&meta, "title_en").unwrap_or_default())
     .bind(&authors_json)
+    .bind(&authors_en_json)
     .bind(value_i64(&meta, "year"))
     .bind(doi_norm.unwrap_or_default())
+    .bind(value_str(&meta, "journal").unwrap_or_default())
+    .bind(value_str(&meta, "journal_en").unwrap_or_default())
     .bind(keywords_json.unwrap_or_default())
+    .bind(keywords_en_json.unwrap_or_default())
     .bind(value_str(&meta, "abstract").unwrap_or_default())
+    .bind(value_str(&meta, "abstract_en").unwrap_or_default())
     .bind(now_iso())
     .bind(doc_id)
     .execute(db.pool())

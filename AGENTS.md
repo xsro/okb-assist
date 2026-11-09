@@ -341,6 +341,43 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
   公有文件夹增删改（名称 + 读写阈值）、逐用户配额覆盖。
 - `api/drive.ts`、`types/drive.ts`；导航「网盘」（`/assist/drive/admin` 仅 admin 可见）。
 
+### PDF 元数据启发式抽取（`services/pdf_meta.rs`）
+
+上传/解析时先用规则从 PDF 里抽题名、作者、年份、DOI、刊名、卷期页、摘要、关键词（不需要 LLM，也不依赖 MinerU），
+抽到的字段按「只补空」落库（`pipeline.rs` 的 `run_extract_pdf_meta` 与 `documents.rs` 的 `fill_meta_fields`），
+**中英文一并写**：`title`/`title_en`/`authors`/`authors_en`/`journal`/`journal_en`/`keywords`/`keywords_en`/`abstract`/`abstract_en`。
+
+抽取按可靠性从高到低分层，先到先得、后面的只补空：
+
+1. **引用块**（最准，很多期刊首页/页脚自带）：`引用格式：/引用本文：/Cite this article as:`（冒号可省）后面那段，
+   再解析 `作者．题名[J/OL]．刊名，年，卷（期）：起-止`；没有 `[J]` 标记时退化为「作者．题名．刊名，年，卷（期）：页」。
+   页码范围支持 `- – — ‐ ‑ − ⁃ ~ ～`，期号允许 `S1` 这类。
+2. **显式字段标签**：`题目：/论文题目:/作者:/DOI:`（期刊「网络首发」封面版式）。
+3. **版面推断**（仅 mutool 引擎）：`mutool draw -F stext` 读**首页**逐行字号，最大字号且不是刊头/封面字段/作者行的视为题名，
+   同量级（≥0.7 倍）的后续行接着拼（最多 3 行，重复描边行会去重）；作者取「字号小于题名、形似人名、离题名最近」的一行。
+   刊名 = 短中文行 + 与其行距/字号相近的英文行（`AIR & SPACE DEFENSE` 这种）。
+4. **行序兜底**：没有字号信息时按文本行顺序猜（`title_from_text_order` / `authors_from_text`）。
+5. **文件名兜底**：题名抽不到（扫描件/乱码 PDF）时用文件名（去掉 `_作者` 尾缀、开头的 `20220725` 日期与 ` (1)` 序号）。
+
+几个**必须保留**的清洗规则（都是被真实样本教出来的）：
+
+- `is_garbage_text`：字体没带 ToUnicode 的 PDF 会抽出成片乱码，实义字符（汉字/字母/数字）占比 < 55% 的行既不能当题名也不能当作者；
+  占比按**去空白**后的文本算（中文宽间距不是乱码）。
+- `compact`：去空白 + 去私有区字符（U+E000–U+F8FF）。字体映射残留的私有区占位符会把「导 师」打断成「导\uE5E5师」，
+  导致封面字段识别失效。
+- `has_common_surname`：中文姓名必须以常见姓氏（百家姓 + 复姓表 `SURNAMES`）开头，否则「障碍物」「与状」「方案」这类版面碎片会被当作者；
+  整行一个常见姓氏都没有时才整行否决（宽松保留，避免稀有姓氏丢失）。
+- `COVER_FIELDS` / `COVER_LABEL_PREFIXES` / `JUNK_TITLES` / `NAME_BAD`：学位论文封面（`论文题目` `作者姓名` `指导教师` `学号` `密级`
+  `分类号` `万方数据` `MASTER THESIS` …）既不能当题名也不能当作者，能剥掉前缀的就剥掉（`strip_cover_prefix` / `strip_row_labels`）。
+- 年份：年份候选来源依次是引用块、首页日期行（取最大）、全文（截到「参考文献」之前）四位数、Info 字典 `CreationDate`；
+  比 `CreationDate` 旧 5 年以上时改信 `CreationDate`（正文年份多半来自参考文献），且不允许晚于当前年 + 1。
+- DOI 兼容「10. 19942/j. issn. …」这种被空格拆开的排版，以及从 `/`、`-`、`_` 处断行的情况；先在首页行里找，
+  再在「参考文献之前」的全文里找（避免抓到参考文献的 DOI）。
+- 摘要/关键词先扫首页版面，没有再看全文行序（「网络首发」的摘要常在正文第 2 页）；双栏版式下宁可放弃，也不要拼出「关键词+正文」的垃圾。
+
+引擎差异：`config.json` 的 `pdf.engine = "mupdf"` 时拿不到逐行字号，第 3 层退化为第 4 层（行序兜底），
+要用版面级抽取请把引擎切回 `mutool`（默认）。
+
 ### 元数据抽取（信息补全）的校对语义
 
 实现在 `backend-rs/src/routers/pipeline.rs` 的 `do_extract_impl` + `backend-rs/src/services/llm.rs` 的 `extract_metadata` / `build_extract_prompt`。

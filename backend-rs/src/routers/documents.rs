@@ -1303,6 +1303,50 @@ fn fill_meta_fields(doc: &mut Document, meta: &Value) {
             doc.abstract_text = Some(a.to_string());
         }
     }
+    if doc.journal.is_none() {
+        if let Some(j) = meta.get("journal").and_then(|v| v.as_str()) {
+            if !j.trim().is_empty() {
+                doc.journal = Some(j.to_string());
+            }
+        }
+    }
+    if doc.journal_en.is_none() {
+        if let Some(j) = meta.get("journal_en").and_then(|v| v.as_str()) {
+            if !j.trim().is_empty() {
+                doc.journal_en = Some(j.to_string());
+            }
+        }
+    }
+    if doc.title_en.is_none() {
+        if let Some(t) = meta.get("title_en").and_then(|v| v.as_str()) {
+            if !t.trim().is_empty() {
+                doc.title_en = Some(t.to_string());
+            }
+        }
+    }
+    if doc.authors_en.is_none() {
+        if let Some(a) = meta.get("authors_en").and_then(|v| v.as_array()) {
+            let authors: Vec<String> = a.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+            if !authors.is_empty() {
+                doc.authors_en = Some(serde_json::to_string(&authors).unwrap_or_default());
+            }
+        }
+    }
+    if doc.keywords_en.is_none() {
+        if let Some(k) = meta.get("keywords_en").and_then(|v| v.as_array()) {
+            let kws: Vec<String> = k.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+            if !kws.is_empty() {
+                doc.keywords_en = Some(serde_json::to_string(&kws).unwrap_or_default());
+            }
+        }
+    }
+    if doc.abstract_en.is_none() {
+        if let Some(a) = meta.get("abstract_en").and_then(|v| v.as_str()) {
+            if !a.trim().is_empty() {
+                doc.abstract_en = Some(a.to_string());
+            }
+        }
+    }
 }
 
 /// 插入新文档记录
