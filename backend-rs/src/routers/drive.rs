@@ -448,6 +448,10 @@ async fn upload(
 
     let mut scope_raw = "private".to_string();
     let mut rel = String::new();
+    // 同名文件是否直接覆盖（默认 false：沿用旧行为，自动加 `(1)` 后缀）。
+    // 同步客户端（client-rs sync）传 `overwrite=true`，否则每次覆盖都会变成新文件名。
+    // 注意：必须在 `file` 字段**之前**传，处理器是边收边处理文件的。
+    let mut overwrite = false;
     let mut results: Vec<Value> = Vec::new();
     let mut scope = None;
     let mut quota_used: Option<u64> = None;
@@ -460,6 +464,10 @@ async fn upload(
             }
             "path" => {
                 rel = field.text().await.unwrap_or_default();
+            }
+            "overwrite" => {
+                let v = field.text().await.unwrap_or_default();
+                overwrite = matches!(v.trim(), "true" | "1" | "yes" | "on");
             }
             "file" => {
                 // 作用域在第一个文件前解析（前端保证字段顺序）
@@ -501,7 +509,11 @@ async fn upload(
                 }
 
                 // 边读边写临时文件，超限即中止
-                let target = unique_child(&dir, &filename);
+                let target = if overwrite {
+                    dir.join(&filename)
+                } else {
+                    unique_child(&dir, &filename)
+                };
                 let tmp = dir.join(format!(
                     ".upload-{}-{}.part",
                     std::process::id(),
@@ -556,7 +568,13 @@ async fn upload(
                     results.push(json!({"name": filename, "ok": false, "detail": err}));
                     continue;
                 }
-                if let Err(e) = tokio::fs::rename(&tmp, &target).await {
+                let mut renamed = tokio::fs::rename(&tmp, &target).await;
+                if renamed.is_err() && overwrite {
+                    // 覆盖模式下，目标可能在 Windows 上被占用（rename 不能替换）——先删再改名重试
+                    let _ = tokio::fs::remove_file(&target).await;
+                    renamed = tokio::fs::rename(&tmp, &target).await;
+                }
+                if let Err(e) = renamed {
                     let _ = tokio::fs::remove_file(&tmp).await;
                     results.push(json!({"name": filename, "ok": false, "detail": format!("重命名失败：{e}")}));
                     continue;

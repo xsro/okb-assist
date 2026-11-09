@@ -4,7 +4,7 @@
 //!   zotero <csv_file>   — 从 Zotero 导出的 CSV 导入文献
 //!   dir    <dir>        — 扫描目录中的 PDF，与服务器比对后交互上传
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -39,7 +39,13 @@ enum Command {
     Zotero(ZoteroArgs),
     /// 扫描目录中的 PDF，与服务器比对后交互上传
     Dir(DirArgs),
+    /// 按 ~/.okb/client.json 的 sync 配置同步个人网盘（无命令行参数）
+    Sync(SyncArgs),
 }
+
+/// `sync` 子命令：所有配置（本地目录、网盘目录、同步方向、令牌）均来自客户端配置文件
+#[derive(Parser, Debug)]
+struct SyncArgs {}
 
 /// 上传节流参数（`zotero` / `dir` 两个子命令共用）
 #[derive(clap::Args, Debug, Clone)]
@@ -347,6 +353,70 @@ struct ClientConfig {
     /// Zotero storage 根目录（可被 `--storage-root` 覆盖）
     #[serde(default)]
     storage_root: Option<String>,
+    /// 个人网盘同步配置（`sync` 子命令用）
+    #[serde(default)]
+    sync: Option<SyncConfig>,
+}
+
+/// `sync` 子命令的配置（`~/.okb/client.json` 的 `sync` 段）
+///
+/// 两种写法都支持（推荐用与 `sync` 一起的嵌套写法）：
+/// ```json
+/// "sync": { "personal": { "disk": "D:\\\\okb-disk", "remote": "sync", "direction": "two-way" } }
+/// "sync": { "local": "D:\\\\okb-disk", "remote": "sync", "direction": "two-way" }
+/// ```
+#[derive(Debug, Default, Clone, Deserialize)]
+struct SyncConfig {
+    /// 本地目录（必填；等价于 `personal.disk`）
+    #[serde(default)]
+    local: Option<String>,
+    /// 个人网盘里的子目录（缺省 = 根目录）
+    #[serde(default)]
+    remote: Option<String>,
+    /// 同步方向：`two-way`（缺省）/ `upload` / `download`
+    #[serde(default)]
+    direction: Option<String>,
+    /// 个人网盘的嵌套写法（与平铺字段等价，嵌套优先）
+    #[serde(default)]
+    personal: Option<SyncPersonalConfig>,
+}
+
+/// `sync.personal`：个人网盘同步的目标
+#[derive(Debug, Default, Clone, Deserialize)]
+struct SyncPersonalConfig {
+    /// 本地目录（对应个人网盘根目录）
+    #[serde(default)]
+    disk: Option<String>,
+    /// 个人网盘里的子目录（缺省 = 根目录）
+    #[serde(default)]
+    remote: Option<String>,
+    /// 同步方向：`two-way`（缺省）/ `upload` / `download`
+    #[serde(default)]
+    direction: Option<String>,
+}
+
+impl SyncConfig {
+    fn personal(&self) -> Option<&SyncPersonalConfig> {
+        self.personal.as_ref()
+    }
+
+    fn local(&self) -> Option<&str> {
+        self.local
+            .as_deref()
+            .or_else(|| self.personal().and_then(|p| p.disk.as_deref()))
+    }
+
+    fn remote(&self) -> Option<&str> {
+        self.remote
+            .as_deref()
+            .or_else(|| self.personal().and_then(|p| p.remote.as_deref()))
+    }
+
+    fn direction(&self) -> Option<&str> {
+        self.direction
+            .as_deref()
+            .or_else(|| self.personal().and_then(|p| p.direction.as_deref()))
+    }
 }
 
 impl ClientConfig {
@@ -720,8 +790,17 @@ fn speed_bps(sent: u64, elapsed: std::time::Duration) -> u64 {
     (sent as f64 / secs) as u64
 }
 
+/// 进度行的箭头（上传 ⬆ / 下载 ⬇）
+fn arrow_of(verb: &str) -> &'static str {
+    if verb == "下载" {
+        "⬇"
+    } else {
+        "⬆"
+    }
+}
+
 /// 交互模式下的进度行（单行、原地刷新）
-fn progress_line(sent: u64, total: u64, elapsed: std::time::Duration) -> String {
+fn progress_line(verb: &str, sent: u64, total: u64, elapsed: std::time::Duration) -> String {
     let pct = percent_of(sent, total);
     let filled = (pct as usize * PROGRESS_BAR_WIDTH / 100).min(PROGRESS_BAR_WIDTH);
     let bar = format!(
@@ -731,7 +810,11 @@ fn progress_line(sent: u64, total: u64, elapsed: std::time::Duration) -> String 
     );
     let speed = speed_bps(sent, elapsed);
     let tail = if sent >= total {
-        "传输完成，等待服务端处理…".to_string()
+        if verb == "下载" {
+            "传输完成，正在写入本地…".to_string()
+        } else {
+            "传输完成，等待服务端处理…".to_string()
+        }
     } else if speed > 0 {
         let eta = (total - sent) as f64 / speed as f64;
         format!(
@@ -742,45 +825,44 @@ fn progress_line(sent: u64, total: u64, elapsed: std::time::Duration) -> String 
     } else {
         String::new()
     };
+    let head = format!(
+        "{} {:>3}% [{}] {} / {}",
+        arrow_of(verb),
+        pct,
+        bar,
+        format_bytes(sent),
+        format_bytes(total)
+    );
     if tail.is_empty() {
-        format!(
-            "⬆ {:>3}% [{}] {} / {}",
-            pct,
-            bar,
-            format_bytes(sent),
-            format_bytes(total)
-        )
+        head
     } else {
-        format!(
-            "⬆ {:>3}% [{}] {} / {} · {}",
-            pct,
-            bar,
-            format_bytes(sent),
-            format_bytes(total),
-            tail
-        )
+        format!("{} · {}", head, tail)
     }
 }
 
 /// 非交互模式（重定向到文件/管道）下的进度行，按 10% 粒度打印
-fn progress_line_plain(sent: u64, total: u64) -> String {
+fn progress_line_plain(verb: &str, sent: u64, total: u64) -> String {
     format!(
-        "⬆ 上传 {}% {} / {}",
+        "{} {} {}% {} / {}",
+        arrow_of(verb),
+        verb,
         percent_of(sent, total),
         format_bytes(sent),
         format_bytes(total)
     )
 }
 
-/// 上传进度：传输时只做一次 `fetch_add`，后台任务每 200ms 采样并画一行进度。
+/// 传输进度：传输时只做一次 `fetch_add`，后台任务每 200ms 采样并画一行进度。
 ///
 /// - 终端（stderr 是 TTY）：`\r` 原地刷新，进度独占一行（调用方的半行提示会先补一个换行）；
 /// - 非终端：每 10% 打一行，避免 carriage return 把日志文件刷成一团。
 ///
-/// 结束时（`finish`）打印一行汇总：已发送 / 总大小 / 用时 / 平均速度，失败时标注已发送量。
-struct UploadProgress {
-    /// 已从本地文件读出发送的字节数（multipart 头尾开销不计，按文件大小算百分比）
+/// 结束时（`finish`）打印一行汇总：已传输 / 总大小 / 用时 / 平均速度，失败时标注已传输量。
+struct TransferProgress {
+    /// 已从本地文件读出发送的字节数（上传递增）/ 已写入本地的字节数（下载递增）
     sent: Arc<AtomicU64>,
+    /// 进度文案里的动作（“上传” / “下载”）
+    verb: &'static str,
     total: u64,
     started: std::time::Instant,
     handle: Option<tokio::task::JoinHandle<()>>,
@@ -792,15 +874,26 @@ struct UploadProgress {
     line_started: Arc<AtomicBool>,
 }
 
-impl UploadProgress {
+impl TransferProgress {
+    /// 上传进度（`⬆ 上传`）
     fn start(total: u64) -> Self {
+        Self::start_with(total, "上传")
+    }
+
+    /// 下载进度（`⬇ 下载`）
+    fn start_download(total: u64) -> Self {
+        Self::start_with(total, "下载")
+    }
+
+    fn start_with(total: u64, verb: &'static str) -> Self {
         let enabled = PROGRESS_ENABLED.load(Ordering::Relaxed) && total > 0;
         let interactive = io::stderr().is_terminal();
         let sent = Arc::new(AtomicU64::new(0));
         let last_width = Arc::new(AtomicUsize::new(0));
         let line_started = Arc::new(AtomicBool::new(false));
-        let mut this = UploadProgress {
+        let mut this = TransferProgress {
             sent: sent.clone(),
+            verb,
             total,
             started: std::time::Instant::now(),
             handle: None,
@@ -822,7 +915,7 @@ impl UploadProgress {
                 ticker.tick().await;
                 let current = sent.load(Ordering::Relaxed).min(total);
                 if interactive {
-                    let line = progress_line(current, total, started.elapsed());
+                    let line = progress_line(verb, current, total, started.elapsed());
                     let mut w = io::stderr();
                     if !line_started.swap(true, Ordering::Relaxed) {
                         // 调用方（`上传 ... ` 之类）往往没有换行，先收尾再独占一行
@@ -837,7 +930,7 @@ impl UploadProgress {
                     let pct = percent_of(current, total);
                     if pct / 10 > last_milestone / 10 {
                         last_milestone = pct;
-                        eprintln!("{}", progress_line_plain(current, total));
+                        eprintln!("{}", progress_line_plain(verb, current, total));
                     }
                 }
             }
@@ -861,9 +954,17 @@ impl UploadProgress {
         let sent = self.sent.load(Ordering::Relaxed).min(self.total);
         let elapsed = self.started.elapsed();
         let speed = speed_bps(sent, elapsed);
+        let arrow = arrow_of(self.verb);
+        let (done, interrupted) = if self.verb == "下载" {
+            ("已下载", "下载中断：已接收")
+        } else {
+            ("已发送", "上传中断：已发送")
+        };
         let line = if ok {
             format!(
-                "⬆ 已发送 {} / {}（用时 {}，平均 {}/s）",
+                "{} {} {} / {}（用时 {}，平均 {}/s）",
+                arrow,
+                done,
                 format_bytes(sent),
                 format_bytes(self.total),
                 format_duration(elapsed),
@@ -871,13 +972,16 @@ impl UploadProgress {
             )
         } else {
             format!(
-                "⬆ 上传中断：已发送 {} / {}（{}%），用时 {}",
+                "{} {} {} / {}（{}%），用时 {}",
+                arrow,
+                interrupted,
                 format_bytes(sent),
                 format_bytes(self.total),
                 percent_of(sent, self.total),
                 format_duration(elapsed)
             )
         };
+
         if self.interactive {
             let mut w = io::stderr();
             if !self.line_started.swap(true, Ordering::Relaxed) {
@@ -895,7 +999,7 @@ impl UploadProgress {
     }
 }
 
-impl Drop for UploadProgress {
+impl Drop for TransferProgress {
     fn drop(&mut self) {
         // 未走到 `finish`（提前 return / panic）时别把采样任务留在后台
         if let Some(handle) = self.handle.take() {
@@ -958,7 +1062,7 @@ async fn post_pdf(
 
     // 流式 multipart：必须带长度，否则 reqwest 会改成 chunked。
     // 下游 map 只做一次 `fetch_add`（零拷贝），进度由 `UploadProgress` 的后台任务采样绘制。
-    let progress = UploadProgress::start(size);
+    let progress = TransferProgress::start(size);
     let counter = progress.counter();
     let part = reqwest::multipart::Part::stream_with_length(
         reqwest::Body::wrap_stream(
@@ -2825,6 +2929,1181 @@ async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     Ok(())
 }
 
+// ==================== 网盘同步（sync 子命令） ====================
+//
+// 设计要点：
+//   - 只碰**个人网盘**（`scope=private`），不涉及公有文件夹；
+//   - 所有配置来自 `~/.okb/client.json` 的 `sync` 段，命令本身无参数；
+//   - 三方比对：本地（size + mtime）、网盘（size + `modified`）、上次同步记录
+//     （`~/.okb/client/sync-state.json`），据此判定该上传/下载/跳过；
+//   - 不传播删除：一侧删掉的文件会在下次同步时从另一侧补回（删除请用网盘页面）；
+//   - 空目录：双向/上传会在网盘上创建，双向/下载会在本地创建。
+
+/// 同步方向
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncDirection {
+    /// 双向（默认）：本地 ⇄ 网盘
+    TwoWay,
+    /// 单向上传：以本地为准，只写网盘
+    Upload,
+    /// 单向下载：以网盘为准，只写本地
+    Download,
+}
+
+impl SyncDirection {
+    fn parse(raw: Option<&str>) -> Result<Self> {
+        let Some(v) = raw
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(SyncDirection::TwoWay);
+        };
+        Ok(match v.as_str() {
+            "two-way" | "two_way" | "twoway" | "both" | "bidirectional" | "双向" => {
+                SyncDirection::TwoWay
+            }
+            "upload" | "up" | "push" | "to-remote" | "one-way-upload" | "上传" | "单向上传" => {
+                SyncDirection::Upload
+            }
+            "download" | "down" | "pull" | "to-local" | "one-way-download" | "下载"
+            | "单向下载" => SyncDirection::Download,
+            other => bail!(
+                "sync.direction 取值非法: {}（可用 two-way / upload / download，缺省 two-way）",
+                other
+            ),
+        })
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            SyncDirection::TwoWay => "双向同步（本地 ⇄ 网盘）",
+            SyncDirection::Upload => "单向上传（本地 → 网盘，以本地为准）",
+            SyncDirection::Download => "单向下载（网盘 → 本地，以网盘为准）",
+        }
+    }
+
+    /// 可以把本地文件写到网盘上
+    fn can_upload(&self) -> bool {
+        !matches!(self, SyncDirection::Download)
+    }
+
+    /// 可以把网盘文件写到本地
+    fn can_download(&self) -> bool {
+        !matches!(self, SyncDirection::Upload)
+    }
+}
+
+/// 本地文件签名（大小 + mtime 毫秒）
+#[derive(Debug, Clone, PartialEq)]
+struct LocalSig {
+    size: u64,
+    mtime_ms: u64,
+}
+
+/// 网盘文件签名（大小 + 服务端 `modified` 时间串）
+#[derive(Debug, Clone, PartialEq)]
+struct RemoteSig {
+    size: u64,
+    modified: Option<String>,
+}
+
+impl RemoteSig {
+    /// `modified` 解析成毫秒时间戳（解析失败当 0），用于「双方都改过时取较新一方」
+    fn modified_ms(&self) -> u64 {
+        self.modified
+            .as_deref()
+            .and_then(parse_rfc3339_ms)
+            .unwrap_or(0)
+    }
+}
+
+/// 上次同步完成时两侧的样子
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct SyncStateEntry {
+    local_size: u64,
+    local_mtime_ms: u64,
+    remote_size: u64,
+    #[serde(default)]
+    remote_modified: Option<String>,
+}
+
+impl SyncStateEntry {
+    fn record(local: &LocalSig, remote: &RemoteSig) -> Self {
+        SyncStateEntry {
+            local_size: local.size,
+            local_mtime_ms: local.mtime_ms,
+            remote_size: remote.size,
+            remote_modified: remote.modified.clone(),
+        }
+    }
+
+    fn local_changed(&self, local: &LocalSig) -> bool {
+        self.local_size != local.size || self.local_mtime_ms != local.mtime_ms
+    }
+
+    fn remote_changed(&self, remote: &RemoteSig) -> bool {
+        self.remote_size != remote.size || self.remote_modified != remote.modified
+    }
+}
+
+/// 对单个文件的处理动作
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncAction {
+    Skip,
+    Upload,
+    Download,
+}
+
+/// 根据「本地签名 / 网盘签名 / 上次状态 / 方向」判定动作（纯函数，便于单测）
+fn decide_action(
+    direction: SyncDirection,
+    local: Option<&LocalSig>,
+    remote: Option<&RemoteSig>,
+    saved: Option<&SyncStateEntry>,
+) -> SyncAction {
+    let (Some(l), Some(r)) = (local, remote) else {
+        return match (local, remote) {
+            (Some(_), None) => {
+                if direction.can_upload() {
+                    SyncAction::Upload
+                } else {
+                    SyncAction::Skip
+                }
+            }
+            (None, Some(_)) => {
+                if direction.can_download() {
+                    SyncAction::Download
+                } else {
+                    SyncAction::Skip
+                }
+            }
+            _ => SyncAction::Skip,
+        };
+    };
+
+    let same_size = l.size == r.size;
+    match direction {
+        // 单向上传：只要不是「两侧都没动过」就覆盖网盘（本地为准）
+        SyncDirection::Upload => match saved {
+            Some(s) if !s.local_changed(l) && !s.remote_changed(r) => SyncAction::Skip,
+            Some(_) => SyncAction::Upload,
+            // 首次见到：大小相同就当已同步，避免无谓的全量重传
+            None => {
+                if same_size {
+                    SyncAction::Skip
+                } else {
+                    SyncAction::Upload
+                }
+            }
+        },
+        // 单向下载：对称
+        SyncDirection::Download => match saved {
+            Some(s) if !s.local_changed(l) && !s.remote_changed(r) => SyncAction::Skip,
+            Some(_) => SyncAction::Download,
+            None => {
+                if same_size {
+                    SyncAction::Skip
+                } else {
+                    SyncAction::Download
+                }
+            }
+        },
+        // 双向：三方比对；双方都改过时取 mtime 较新的一方（网盘 mtime = 上传时间）
+        SyncDirection::TwoWay => match saved {
+            Some(s) => match (s.local_changed(l), s.remote_changed(r)) {
+                (false, false) => SyncAction::Skip,
+                (true, false) => SyncAction::Upload,
+                (false, true) => SyncAction::Download,
+                (true, true) => {
+                    if r.modified_ms() > l.mtime_ms {
+                        SyncAction::Download
+                    } else {
+                        SyncAction::Upload
+                    }
+                }
+            },
+            None => {
+                if same_size {
+                    SyncAction::Skip
+                } else if r.modified_ms() > l.mtime_ms {
+                    SyncAction::Download
+                } else {
+                    SyncAction::Upload
+                }
+            }
+        },
+    }
+}
+
+/// 把 RFC3339（`2026-11-09T10:29:05.123456789+00:00` / `...Z`）解析成 Unix 毫秒
+///
+/// 不引 chrono：只需要给「谁更新」做比较，手写 civil-date 换算即可。
+fn parse_rfc3339_ms(raw: &str) -> Option<u64> {
+    let s = raw.trim();
+    let (date, rest) = s.split_once('T')?;
+    let mut dp = date.split('-');
+    let y: i64 = dp.next()?.parse().ok()?;
+    let mo: i64 = dp.next()?.parse().ok()?;
+    let d: i64 = dp.next()?.parse().ok()?;
+
+    let tz_start = rest.find(['+', 'Z']).unwrap_or(rest.len());
+    let time = &rest[..tz_start];
+    let tz = &rest[tz_start..];
+    let mut tp = time.split(':');
+    let h: i64 = tp.next()?.parse().ok()?;
+    let mi: i64 = tp.next()?.parse().ok()?;
+    let sec_raw = tp.next()?;
+    let (sec_s, frac_s) = sec_raw.split_once('.').unwrap_or((sec_raw, ""));
+    let sec: i64 = sec_s.parse().ok()?;
+    let frac_ms: i64 = {
+        let digits: String = frac_s.chars().take(3).collect();
+        let padded = format!("{:0<3}", digits);
+        padded.parse::<i64>().unwrap_or(0)
+    };
+
+    let offset_sec: i64 = if tz.is_empty() || tz == "Z" {
+        0
+    } else {
+        let sign = if tz.starts_with('-') { -1 } else { 1 };
+        let body = &tz[1..];
+        let (oh, om) = body.split_once(':').unwrap_or((body, "0"));
+        let oh: i64 = oh.parse().unwrap_or(0);
+        let om: i64 = om.parse().unwrap_or(0);
+        sign * (oh * 3600 + om * 60)
+    };
+
+    let days = days_from_civil(y, mo, d);
+    let epoch_ms = (days * 86_400 + h * 3_600 + mi * 60 + sec - offset_sec) * 1000 + frac_ms;
+    if epoch_ms < 0 {
+        None
+    } else {
+        Some(epoch_ms as u64)
+    }
+}
+
+/// 公历日期 → Unix 纪元后的天数（Howard Hinnant 的 days_from_civil）
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// 同步状态文件（`~/.okb/client/sync-state.json`）
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SyncState {
+    #[serde(default = "sync_state_version")]
+    version: u32,
+    /// 记录对应的网盘子目录（改了 `sync.remote` 就作废重建）
+    #[serde(default)]
+    remote: String,
+    #[serde(default)]
+    entries: BTreeMap<String, SyncStateEntry>,
+}
+
+fn sync_state_version() -> u32 {
+    1
+}
+
+fn sync_state_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".okb").join("client").join("sync-state.json"))
+}
+
+fn load_sync_state(remote_root: &str) -> SyncState {
+    let Some(path) = sync_state_path() else {
+        return SyncState {
+            version: sync_state_version(),
+            remote: remote_root.to_string(),
+            entries: BTreeMap::new(),
+        };
+    };
+    let state = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<SyncState>(&text).unwrap_or_else(|e| {
+            eprintln!("警告: {} 解析失败（按空状态重建）: {}", path.display(), e);
+            SyncState::default()
+        }),
+        Err(e) => {
+            if e.kind() != io::ErrorKind::NotFound {
+                eprintln!("警告: 无法读取 {}: {}", path.display(), e);
+            }
+            SyncState::default()
+        }
+    };
+    if state.remote != remote_root {
+        // 网盘子目录换了，旧记录对新目录没有意义
+        return SyncState {
+            version: sync_state_version(),
+            remote: remote_root.to_string(),
+            entries: BTreeMap::new(),
+        };
+    }
+    SyncState {
+        version: sync_state_version(),
+        remote: remote_root.to_string(),
+        entries: state.entries,
+    }
+}
+
+/// 原子写状态文件（先写 `.tmp` 再 rename）
+fn save_sync_state(state: &SyncState) {
+    let Some(path) = sync_state_path() else {
+        eprintln!("警告: 无法定位 ~/.okb/client/sync-state.json，同步状态未保存");
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("警告: 无法创建目录 {}: {}", parent.display(), e);
+            return;
+        }
+    }
+    let body = match serde_json::to_string_pretty(state) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("警告: 同步状态序列化失败: {}", e);
+            return;
+        }
+    };
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, body) {
+        eprintln!("警告: 无法写入 {}: {}", tmp.display(), e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        eprintln!("警告: 无法保存 {}: {}", path.display(), e);
+    }
+}
+
+/// 网盘目录列表里的一项
+#[derive(Debug, Clone)]
+struct RemoteEntry {
+    name: String,
+    is_dir: bool,
+    size: u64,
+    modified: Option<String>,
+}
+
+/// 本地目录列表里的一项
+struct LocalEntry {
+    name: String,
+    is_dir: bool,
+    sig: LocalSig,
+}
+
+/// 不参与同步的文件名（临时文件与 Windows/macOS 垃圾文件）
+fn is_ignored_name(name: &str) -> bool {
+    name.ends_with(".okbsync-part")
+        || matches!(name, "Thumbs.db" | "desktop.ini" | ".DS_Store")
+}
+
+/// 相对路径拼接（统一用 `/`）
+fn join_rel(rel: &str, name: &str) -> String {
+    if name.is_empty() {
+        rel.to_string()
+    } else if rel.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}/{}", rel, name)
+    }
+}
+
+/// 网盘内的目标路径 = `sync.remote` + 相对路径
+fn remote_join(root: &str, rel: &str) -> String {
+    join_rel(root, rel)
+}
+
+/// 查询串里的路径百分号编码（只保留 unreserved 与 `/`）
+fn encode_query_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// `GET /assist/api/drive/list?scope=private&path=…`
+async fn drive_list(
+    client: &Client,
+    base_url: &str,
+    token: &Option<String>,
+    rel: &str,
+) -> Result<Vec<RemoteEntry>> {
+    let url = format!(
+        "{}/assist/api/drive/list?scope=private&path={}",
+        base_url,
+        encode_query_path(rel)
+    );
+    let mut req = client.get(&url);
+    if let Some(t) = token {
+        req = req.header("X-Token", t.as_str());
+    }
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("列网盘目录失败: /{}", rel))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        bail!(
+            "列网盘目录失败（{} /{}）: {}",
+            status,
+            rel,
+            truncate_body(&body, 300)
+        );
+    }
+    let value: serde_json::Value = resp.json().await.context("列网盘目录响应解析失败")?;
+    let mut out = Vec::new();
+    for item in value
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+    {
+        let name = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if name.is_empty() || is_ignored_name(&name) {
+            continue;
+        }
+        out.push(RemoteEntry {
+            name,
+            is_dir: item.get("is_dir").and_then(|v| v.as_bool()).unwrap_or(false),
+            size: item.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+            modified: item
+                .get("modified")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        });
+    }
+    Ok(out)
+}
+
+/// `POST /assist/api/drive/mkdir`（已存在视为成功）
+async fn drive_mkdir(
+    client: &Client,
+    base_url: &str,
+    token: &Option<String>,
+    parent: &str,
+    name: &str,
+) -> Result<()> {
+    let url = format!("{}/assist/api/drive/mkdir", base_url);
+    let mut req = client
+        .post(&url)
+        .json(&serde_json::json!({"scope": "private", "path": parent, "name": name}));
+    if let Some(t) = token {
+        req = req.header("X-Token", t.as_str());
+    }
+    let resp = req.send().await.context("建网盘目录请求失败")?;
+    let status = resp.status();
+    if status.is_success() || status == reqwest::StatusCode::CONFLICT {
+        return Ok(());
+    }
+    let body = resp.text().await.unwrap_or_default();
+    bail!(
+        "建网盘目录失败（{} /{}/{}）: {}",
+        status,
+        parent,
+        name,
+        truncate_body(&body, 200)
+    )
+}
+
+/// 按层级创建网盘目录（`a/b/c`），已存在的层级静默跳过
+async fn ensure_remote_dir(
+    client: &Client,
+    base_url: &str,
+    token: &Option<String>,
+    rel: &str,
+) -> Result<()> {
+    let mut acc = String::new();
+    for seg in rel.split('/').filter(|s| !s.is_empty()) {
+        drive_mkdir(client, base_url, token, &acc, seg).await?;
+        acc = join_rel(&acc, seg);
+    }
+    Ok(())
+}
+
+/// 上传一个文件到网盘目录（`overwrite=true`，同名直接覆盖而不是生成 `(1)`）
+async fn drive_upload_file(
+    base_url: &str,
+    token: &Option<String>,
+    dir_rel: &str,
+    file_path: &Path,
+) -> Result<u64> {
+    let size = tokio::fs::metadata(file_path)
+        .await
+        .with_context(|| format!("无法读取文件信息: {}", file_path.display()))?
+        .len();
+    let name = file_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let file = tokio::fs::File::open(file_path)
+        .await
+        .with_context(|| format!("无法读取文件: {}", file_path.display()))?;
+
+    let progress = TransferProgress::start(size);
+    let counter = progress.counter();
+    let part = reqwest::multipart::Part::stream_with_length(
+        reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file).map(move |chunk| {
+            if let Ok(bytes) = &chunk {
+                counter.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            }
+            chunk
+        })),
+        size,
+    )
+    .file_name(name)
+    .mime_str("application/octet-stream")?;
+
+    // 字段顺序敏感：网盘上传处理器边收边处理，`overwrite` 必须在 `file` 之前
+    let form = reqwest::multipart::Form::new()
+        .text("scope", "private")
+        .text("path", dir_rel.to_string())
+        .text("overwrite", "true")
+        .part("file", part);
+
+    let client = upload_client(size, None)?;
+    let url = format!("{}/assist/api/drive/upload", base_url);
+    let mut req = client.post(&url).multipart(form);
+    if let Some(t) = token {
+        req = req.header("X-Token", t.as_str());
+    }
+    let result = req.send().await;
+    progress.finish(result.is_ok());
+    let resp = result?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+    let file_ok = parsed
+        .pointer("/files/0/ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !status.is_success() || !file_ok {
+        let detail = parsed
+            .pointer("/files/0/detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        bail!(
+            "上传失败（{}）: {}{}",
+            status,
+            truncate_body(&body, 200),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" - {}", detail)
+            }
+        );
+    }
+    Ok(size)
+}
+
+/// 从网盘下载一个文件到本地（先写 `.okbsync-part` 再改名，不会留下半截文件）
+async fn drive_download_file(
+    client: &Client,
+    base_url: &str,
+    token: &Option<String>,
+    rel: &str,
+    dest: &Path,
+    expect_size: u64,
+) -> Result<u64> {
+    let url = format!(
+        "{}/assist/api/drive/download?scope=private&path={}",
+        base_url,
+        encode_query_path(rel)
+    );
+    let mut req = client.get(&url);
+    if let Some(t) = token {
+        req = req.header("X-Token", t.as_str());
+    }
+    let mut resp = req
+        .send()
+        .await
+        .with_context(|| format!("下载请求失败: {}", rel))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        bail!(
+            "下载失败（{}）: {}",
+            status,
+            truncate_body(&body, 200)
+        );
+    }
+
+    let total = resp.content_length().filter(|n| *n > 0).unwrap_or(expect_size);
+    let progress = TransferProgress::start_download(total);
+    let counter = progress.counter();
+
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await.ok();
+    }
+    let tmp = dest.with_file_name(format!(
+        ".{}.okbsync-part",
+        dest.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "download".to_string())
+    ));
+
+    let written: Result<u64> = async {
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::File::create(&tmp)
+            .await
+            .with_context(|| format!("无法写入临时文件: {}", tmp.display()))?;
+        let mut written: u64 = 0;
+        loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    written += chunk.len() as u64;
+                    counter.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                    file.write_all(&chunk).await.context("写入本地文件失败")?;
+                }
+                Ok(None) => break,
+                Err(e) => return Err(e).context("下载中断"),
+            }
+        }
+        file.flush().await.context("刷新本地文件失败")?;
+        Ok(written)
+    }
+    .await;
+    progress.finish(written.is_ok());
+
+    let written = match written {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e);
+        }
+    };
+
+    // 覆盖目标：Windows 上目标被占用时 rename 会失败，先删再改名
+    let _ = tokio::fs::remove_file(dest).await;
+    tokio::fs::rename(&tmp, dest)
+        .await
+        .with_context(|| format!("保存到 {} 失败", dest.display()))?;
+    Ok(written)
+}
+
+/// 同步上下文（配置 + 进度统计 + 状态）
+struct SyncCtx {
+    /// 小请求用（列目录/建目录），带 120s 超时
+    client: Client,
+    /// 下载用：不设总超时，否则大文件必然被 120s 掐断
+    download_client: Client,
+    base_url: String,
+    token: Option<String>,
+    local_root: PathBuf,
+    remote_root: String,
+    direction: SyncDirection,
+    state: SyncState,
+    uploaded: usize,
+    downloaded: usize,
+    skipped: usize,
+    conflicts: usize,
+    failed: usize,
+    uploaded_bytes: u64,
+    downloaded_bytes: u64,
+    /// 状态是否有变化（决定是否重写状态文件）
+    state_dirty: bool,
+}
+
+impl SyncCtx {
+    fn local_dir(&self, rel: &str) -> PathBuf {
+        let mut path = self.local_root.clone();
+        for seg in rel.split('/').filter(|s| !s.is_empty()) {
+            path.push(seg);
+        }
+        path
+    }
+
+    /// 该相对路径在网盘里的绝对（相对网盘根）路径
+    fn remote_of(&self, rel: &str) -> String {
+        remote_join(&self.remote_root, rel)
+    }
+}
+
+/// 列本地目录（跳过符号链接与同步临时文件）
+async fn local_entries(dir: &Path) -> Result<Vec<LocalEntry>> {
+    let mut out = Vec::new();
+    let mut rd = match tokio::fs::read_dir(dir).await {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e).with_context(|| format!("无法读取目录: {}", dir.display())),
+    };
+    while let Some(item) = rd.next_entry().await? {
+        let name = item.file_name().to_string_lossy().to_string();
+        if is_ignored_name(&name) {
+            continue;
+        }
+        let meta = match tokio::fs::symlink_metadata(item.path()).await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        let is_dir = meta.is_dir();
+        let mtime_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        out.push(LocalEntry {
+            name,
+            is_dir,
+            sig: LocalSig {
+                size: if is_dir { 0 } else { meta.len() },
+                mtime_ms,
+            },
+        });
+    }
+    Ok(out)
+}
+
+/// 本地文件签名（同步结束后写状态用）
+async fn local_sig(path: &Path) -> Option<LocalSig> {
+    let meta = tokio::fs::metadata(path).await.ok()?;
+    if meta.is_dir() {
+        return None;
+    }
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Some(LocalSig {
+        size: meta.len(),
+        mtime_ms,
+    })
+}
+
+/// 同步一个目录（非递归：子目录压入队列）
+async fn sync_one_dir(ctx: &mut SyncCtx, rel: &str, queue: &mut Vec<String>) -> Result<()> {
+    let local_dir = ctx.local_dir(rel);
+    let remote_rel = ctx.remote_of(rel);
+    if let Err(e) = tokio::fs::create_dir_all(&local_dir).await {
+        if ctx.direction.can_download() {
+            bail!("无法创建本地目录 {}: {}", local_dir.display(), e);
+        }
+    }
+
+    let remote_entries = drive_list(&ctx.client, &ctx.base_url, &ctx.token, &remote_rel).await?;
+    let local = local_entries(&local_dir).await?;
+
+    // 记录本层最终的「两侧都有」的文件，用于刷新状态
+    let mut written: HashSet<String> = HashSet::new();
+    let mut transferred = false;
+
+    // ── 目录：缺失的一侧补齐 ───────────────────────────────
+    let local_dirs: HashMap<String, bool> = local
+        .iter()
+        .filter(|e| e.is_dir)
+        .map(|e| (e.name.clone(), true))
+        .collect();
+    let local_files: Vec<&LocalEntry> = local.iter().filter(|e| !e.is_dir).collect();
+    let mut remote_dirs: HashMap<String, bool> = HashMap::new();
+    let mut remote_files: HashMap<String, RemoteSig> = HashMap::new();
+    for entry in &remote_entries {
+        if entry.is_dir {
+            remote_dirs.insert(entry.name.clone(), true);
+        } else {
+            remote_files.insert(
+                entry.name.clone(),
+                RemoteSig {
+                    size: entry.size,
+                    modified: entry.modified.clone(),
+                },
+            );
+        }
+    }
+
+    for name in local_dirs.keys() {
+        // 本地是目录、网盘同名的是文件：无法当成目录用，报冲突跳过
+        if remote_files.contains_key(name) {
+            println!(
+                "  ⚠ 类型冲突（本地目录 / 网盘同名文件）: {}/{}，跳过",
+                rel, name
+            );
+            ctx.skipped += 1;
+            continue;
+        }
+        let remote_has_dir = remote_dirs.contains_key(name);
+        if !remote_has_dir && ctx.direction.can_upload() {
+            match drive_mkdir(&ctx.client, &ctx.base_url, &ctx.token, &remote_rel, name).await {
+                Ok(()) => {
+                    remote_dirs.insert(name.clone(), true);
+                }
+                Err(e) => {
+                    ctx.failed += 1;
+                    println!("  建网盘目录失败 {}/{}: {}", remote_rel, name, e);
+                }
+            }
+        }
+        // 单向下载时，网盘上没有的目录不必下去扫（扫了也只能拿到空列表）
+        if ctx.direction.can_upload() || remote_has_dir {
+            queue.push(join_rel(rel, name));
+        }
+    }
+    for name in remote_dirs.keys() {
+        if local_dirs.contains_key(name) {
+            continue;
+        }
+        if local.iter().any(|e| !e.is_dir && &e.name == name) {
+            println!(
+                "  ⚠ 类型冲突（本地同名文件 / 网盘同名目录）: {}/{}，跳过",
+                rel, name
+            );
+            ctx.skipped += 1;
+            continue;
+        }
+        if !ctx.direction.can_download() {
+            continue;
+        }
+        let dir = ctx.local_dir(&join_rel(rel, name));
+        match tokio::fs::create_dir_all(&dir).await {
+            Ok(()) => queue.push(join_rel(rel, name)),
+            Err(e) => {
+                ctx.failed += 1;
+                println!("  建本地目录失败 {}: {}", dir.display(), e);
+            }
+        }
+    }
+
+    // ── 文件 ────────────────────────────────────────────────
+    for entry in &local_files {
+        let file_rel = join_rel(rel, &entry.name);
+        let local_path = ctx.local_dir(&file_rel);
+        if remote_dirs.contains_key(&entry.name) {
+            println!(
+                "  ⚠ 类型冲突（本地同名文件 / 网盘同名目录）: {}，跳过",
+                file_rel
+            );
+            ctx.skipped += 1;
+            continue;
+        }
+        let saved = ctx.state.entries.get(&file_rel).cloned();
+        let remote_sig = remote_files.get(&entry.name).cloned();
+        let action = decide_action(
+            ctx.direction,
+            Some(&entry.sig),
+            remote_sig.as_ref(),
+            saved.as_ref(),
+        );
+        // 双向：双方都改过 → 记一次冲突提示
+        if ctx.direction == SyncDirection::TwoWay {
+            if let (Some(s), Some(r)) = (saved.as_ref(), remote_sig.as_ref()) {
+                if s.local_changed(&entry.sig) && s.remote_changed(r) {
+                    ctx.conflicts += 1;
+                    println!(
+                        "  ⚠ 冲突 {}: 两侧都改过，采用较新的一方（{}）",
+                        file_rel,
+                        if action == SyncAction::Download {
+                            "网盘"
+                        } else {
+                            "本地"
+                        }
+                    );
+                }
+            }
+        }
+        match action {
+            SyncAction::Skip => {
+                ctx.skipped += 1;
+                if let Some(r) = remote_sig.as_ref() {
+                    ctx.remember(&file_rel, &entry.sig, r);
+                    written.insert(file_rel.clone());
+                }
+            }
+            SyncAction::Upload => {
+                println!(
+                    "  上传 {}（{}）",
+                    file_rel,
+                    format_bytes(entry.sig.size)
+                );
+                match drive_upload_file(&ctx.base_url, &ctx.token, &remote_rel, &local_path).await {
+                    Ok(size) => {
+                        ctx.uploaded += 1;
+                        ctx.uploaded_bytes += size;
+                        transferred = true;
+                    }
+                    Err(e) => {
+                        ctx.failed += 1;
+                        println!("  上传失败 {}: {}\n", file_rel, e);
+                    }
+                }
+            }
+            SyncAction::Download => {
+                println!(
+                    "  下载 {}（{}）",
+                    file_rel,
+                    format_bytes(remote_sig.as_ref().map(|r| r.size).unwrap_or(0))
+                );
+                let dest = ctx.local_dir(&file_rel);
+                match drive_download_file(
+                    &ctx.download_client,
+                    &ctx.base_url,
+                    &ctx.token,
+                    &ctx.remote_of(&file_rel),
+                    &dest,
+                    remote_sig.as_ref().map(|r| r.size).unwrap_or(0),
+                )
+                .await
+                {
+                    Ok(size) => {
+                        ctx.downloaded += 1;
+                        ctx.downloaded_bytes += size;
+                        transferred = true;
+                    }
+                    Err(e) => {
+                        ctx.failed += 1;
+                        println!("  下载失败 {}: {}\n", file_rel, e);
+                    }
+                }
+            }
+        }
+    }
+
+    for (name, remote_sig) in &remote_files {
+        if local_files.iter().any(|e| &e.name == name) {
+            continue;
+        }
+        let file_rel = join_rel(rel, name);
+        if !ctx.direction.can_download() {
+            ctx.skipped += 1;
+            continue;
+        }
+        println!("  下载 {}（{}）", file_rel, format_bytes(remote_sig.size));
+        let dest = ctx.local_dir(&file_rel);
+        match drive_download_file(
+            &ctx.download_client,
+            &ctx.base_url,
+            &ctx.token,
+            &ctx.remote_of(&file_rel),
+            &dest,
+            remote_sig.size,
+        )
+        .await
+        {
+            Ok(size) => {
+                ctx.downloaded += 1;
+                ctx.downloaded_bytes += size;
+                transferred = true;
+            }
+            Err(e) => {
+                ctx.failed += 1;
+                println!("  下载失败 {}: {}\n", file_rel, e);
+            }
+        }
+    }
+
+    // ── 刷新状态（本层）────────────────────────────────────
+    // 有传输时两侧都要重新取：网盘的 `modified` 变了、下载的文件也没在初始列表里
+    let local_after = if transferred {
+        local_entries(&local_dir).await.unwrap_or_default()
+    } else {
+        local
+    };
+    let remote_after = if transferred {
+        drive_list(&ctx.client, &ctx.base_url, &ctx.token, &remote_rel)
+            .await
+            .unwrap_or(remote_entries)
+    } else {
+        remote_entries
+    };
+    let mut remote_files_after: HashMap<String, RemoteSig> = HashMap::new();
+    for entry in &remote_after {
+        if !entry.is_dir {
+            remote_files_after.insert(
+                entry.name.clone(),
+                RemoteSig {
+                    size: entry.size,
+                    modified: entry.modified.clone(),
+                },
+            );
+        }
+    }
+    for entry in local_after.iter().filter(|e| !e.is_dir) {
+        let key = join_rel(rel, &entry.name);
+        let Some(r) = remote_files_after.get(&entry.name) else {
+            continue;
+        };
+        let sig = if transferred {
+            match local_sig(&ctx.local_dir(&key)).await {
+                Some(s) => s,
+                None => continue,
+            }
+        } else {
+            entry.sig.clone()
+        };
+        ctx.remember(&key, &sig, r);
+        written.insert(key);
+    }
+
+    // 清掉本层里已经不存在的记录（文件被删/改名了）
+    let prefix = if rel.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", rel)
+    };
+    let stale: Vec<String> = ctx
+        .state
+        .entries
+        .keys()
+        .filter(|key| match key.strip_prefix(&prefix) {
+            Some(rest) => !rest.contains('/') && !written.contains(key.as_str()),
+            None => false,
+        })
+        .cloned()
+        .collect();
+    for key in stale {
+        ctx.state.entries.remove(&key);
+        ctx.state_dirty = true;
+    }
+
+    Ok(())
+}
+
+impl SyncCtx {
+    fn remember(&mut self, rel: &str, local: &LocalSig, remote: &RemoteSig) {
+        let entry = SyncStateEntry::record(local, remote);
+        if self.state.entries.get(rel) != Some(&entry) {
+            self.state.entries.insert(rel.to_string(), entry);
+            self.state_dirty = true;
+        }
+    }
+}
+
+/// `sync` 子命令入口：配置全部来自 `~/.okb/client.json`
+async fn run_sync() -> Result<()> {
+    let cfg = load_config();
+    let sync_cfg = cfg.sync.clone().unwrap_or_default();
+    let local_raw = sync_cfg
+        .local()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let Some(local_raw) = local_raw else {
+        bail!(
+            "~/.okb/client.json 缺少 sync 的本地目录。示例：\n\
+             \"sync\": {{\"personal\": {{\"disk\": \"D:\\\\okb-disk\", \"remote\": \"sync\", \"direction\": \"two-way\"}}}}\n\
+             （personal.disk 必填；personal.remote 缺省 = 个人网盘根目录；\n\
+             personal.direction 缺省 two-way，可选 upload / download；\n\
+             也可用平铺写法 sync.local / sync.remote / sync.direction）"
+        );
+    };
+    let local_root = PathBuf::from(&local_raw);
+    let remote_root = sync_cfg
+        .remote()
+        .map(|s| s.trim().trim_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    let direction = SyncDirection::parse(sync_cfg.direction())?;
+    let base_url = cfg.base_url();
+    let token = cfg.token.clone();
+
+    println!("网盘同步（sync）");
+    println!("  服务地址: {}", base_url);
+    println!("  本地目录: {}", local_root.display());
+    println!(
+        "  网盘目录: {}",
+        if remote_root.is_empty() {
+            "/（个人网盘根目录）".to_string()
+        } else {
+            format!("/{}", remote_root)
+        }
+    );
+    println!("  同步方向: {}", direction.label());
+    if token.is_none() {
+        println!("  ⚠ 未配置 token（仅受信任子网免鉴权时可用）");
+    }
+    println!("  说明: 删除不传播（一侧删掉的文件会从另一侧补回）；跳过 Thumbs.db / desktop.ini / .DS_Store");
+    println!();
+
+    tokio::fs::create_dir_all(&local_root)
+        .await
+        .with_context(|| format!("无法创建本地目录: {}", local_root.display()))?;
+
+    let client = http_client()?;
+    let download_client = Client::builder()
+        .redirect(reqwest::redirect::Policy::default())
+        .build()
+        .context("无法创建下载客户端")?;
+    if direction.can_upload() {
+        ensure_remote_dir(&client, &base_url, &token, &remote_root).await?;
+    }
+
+    let state = load_sync_state(&remote_root);
+    let mut ctx = SyncCtx {
+        client,
+        download_client,
+        base_url,
+        token,
+        local_root,
+        remote_root,
+        direction,
+        state,
+        uploaded: 0,
+        downloaded: 0,
+        skipped: 0,
+        conflicts: 0,
+        failed: 0,
+        uploaded_bytes: 0,
+        downloaded_bytes: 0,
+        state_dirty: false,
+    };
+
+    let started = std::time::Instant::now();
+    let mut queue: Vec<String> = vec![String::new()];
+    while let Some(rel) = queue.pop() {
+        println!("[{}]", if rel.is_empty() { "/".to_string() } else { format!("/{}/", rel) });
+        if let Err(e) = sync_one_dir(&mut ctx, &rel, &mut queue).await {
+            ctx.failed += 1;
+            println!("  同步目录失败 {}: {}", rel, e);
+        }
+    }
+
+    if ctx.state_dirty {
+        save_sync_state(&ctx.state);
+    }
+
+    println!();
+    println!("==================================================");
+    println!(
+        "上传:   {} 个（{}）",
+        ctx.uploaded,
+        format_bytes(ctx.uploaded_bytes)
+    );
+    println!(
+        "下载:   {} 个（{}）",
+        ctx.downloaded,
+        format_bytes(ctx.downloaded_bytes)
+    );
+    println!("跳过:   {} 个（已同步 / 方向不适用）", ctx.skipped);
+    if ctx.conflicts > 0 {
+        println!("冲突:   {} 个（已按较新一方处理）", ctx.conflicts);
+    }
+    println!("失败:   {} 个", ctx.failed);
+    println!("用时:   {}", format_duration(started.elapsed()));
+    println!("==================================================");
+
+    if ctx.failed > 0 {
+        bail!("同步完成，但有 {} 项失败", ctx.failed);
+    }
+    Ok(())
+}
+
+
 // ==================== 入口 ====================
 
 #[tokio::main]
@@ -2833,6 +4112,7 @@ async fn main() -> Result<()> {
     match &cli.command {
         Command::Zotero(args) => run_zotero(args).await,
         Command::Dir(args) => run_dir(args).await,
+        Command::Sync(_) => run_sync().await,
     }
 }
 #[cfg(test)]
@@ -2912,5 +4192,195 @@ mod hash_doi_tests {
         assert!(t.contains(&"brogliato".to_string()));
         assert!(t.contains(&"utkin".to_string()));
         assert!(!t.iter().any(|w| w == "and" || w == "the"));
+    }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+
+    fn lsig(size: u64, mtime_ms: u64) -> LocalSig {
+        LocalSig { size, mtime_ms }
+    }
+    fn rsig(size: u64, modified: &str) -> RemoteSig {
+        RemoteSig {
+            size,
+            modified: Some(modified.to_string()),
+        }
+    }
+
+    #[test]
+    fn parses_rfc3339_to_epoch_ms() {
+        // 2026-11-09T00:00:00Z = 1794182400 s
+        assert_eq!(
+            parse_rfc3339_ms("2026-11-09T00:00:00Z"),
+            Some(1_794_182_400_000)
+        );
+        // 东八区同样时刻
+        assert_eq!(
+            parse_rfc3339_ms("2026-11-09T08:00:00+08:00"),
+            Some(1_794_182_400_000)
+        );
+        // 小数秒保留到毫秒
+        assert_eq!(
+            parse_rfc3339_ms("2026-11-09T00:00:00.123456789+00:00"),
+            Some(1_794_182_400_123)
+        );
+        assert_eq!(parse_rfc3339_ms("不是时间"), None);
+    }
+
+    #[test]
+    fn direction_default_and_aliases() {
+        assert_eq!(SyncDirection::parse(None).unwrap(), SyncDirection::TwoWay);
+        assert_eq!(
+            SyncDirection::parse(Some("  ")).unwrap(),
+            SyncDirection::TwoWay
+        );
+        assert_eq!(
+            SyncDirection::parse(Some("two_way")).unwrap(),
+            SyncDirection::TwoWay
+        );
+        assert_eq!(
+            SyncDirection::parse(Some("Push")).unwrap(),
+            SyncDirection::Upload
+        );
+        assert_eq!(
+            SyncDirection::parse(Some("pull")).unwrap(),
+            SyncDirection::Download
+        );
+        assert!(SyncDirection::parse(Some("mirror")).is_err());
+    }
+
+    #[test]
+    fn two_way_three_way_merge() {
+        let saved = SyncStateEntry {
+            local_size: 10,
+            local_mtime_ms: 1_000,
+            remote_size: 10,
+            remote_modified: Some("2026-11-09T00:00:00+00:00".into()),
+        };
+        let remote_old = rsig(10, "2026-11-09T00:00:00+00:00");
+        let remote_new = rsig(20, "2026-11-10T00:00:00+00:00");
+        // 两侧都没动 → 跳过
+        assert_eq!(
+            decide_action(SyncDirection::TwoWay, Some(&lsig(10, 1_000)), Some(&remote_old), Some(&saved)),
+            SyncAction::Skip
+        );
+        // 只有本地改了 → 上传
+        assert_eq!(
+            decide_action(SyncDirection::TwoWay, Some(&lsig(12, 2_000)), Some(&remote_old), Some(&saved)),
+            SyncAction::Upload
+        );
+        // 只有网盘改了 → 下载
+        assert_eq!(
+            decide_action(SyncDirection::TwoWay, Some(&lsig(10, 1_000)), Some(&remote_new), Some(&saved)),
+            SyncAction::Download
+        );
+        // 两侧都改了 → 网盘的 mtime 更新，选下载
+        assert_eq!(
+            decide_action(SyncDirection::TwoWay, Some(&lsig(12, 2_000)), Some(&remote_new), Some(&saved)),
+            SyncAction::Download
+        );
+        // 两侧都改了 → 本地更新，选上传
+        let remote_mid = rsig(20, "2026-11-09T00:00:30+00:00");
+        // 本地 mtime 比网盘那次上传晚 1 秒 → 上传
+        assert_eq!(
+            decide_action(
+                SyncDirection::TwoWay,
+                Some(&lsig(12, 1_794_182_431_000)),
+                Some(&remote_mid),
+                Some(&saved)
+            ),
+            SyncAction::Upload
+        );
+    }
+
+    #[test]
+    fn one_side_only_respects_direction() {
+        let local = lsig(10, 1_000);
+        let remote = rsig(10, "2026-11-09T00:00:00+00:00");
+        // 双向：补齐缺失的一侧
+        assert_eq!(
+            decide_action(SyncDirection::TwoWay, Some(&local), None, None),
+            SyncAction::Upload
+        );
+        assert_eq!(
+            decide_action(SyncDirection::TwoWay, None, Some(&remote), None),
+            SyncAction::Download
+        );
+        // 单向上传：本地独有的传上去，网盘独有的不动
+        assert_eq!(
+            decide_action(SyncDirection::Upload, Some(&local), None, None),
+            SyncAction::Upload
+        );
+        assert_eq!(
+            decide_action(SyncDirection::Upload, None, Some(&remote), None),
+            SyncAction::Skip
+        );
+        // 单向下载：对称
+        assert_eq!(
+            decide_action(SyncDirection::Download, Some(&local), None, None),
+            SyncAction::Skip
+        );
+        assert_eq!(
+            decide_action(SyncDirection::Download, None, Some(&remote), None),
+            SyncAction::Download
+        );
+    }
+
+    #[test]
+    fn first_sync_same_size_is_skipped() {
+        // 没有状态记录、大小一致 → 当成已同步（避免全量重传）
+        let remote = rsig(10, "2026-11-09T00:00:00+00:00");
+        assert_eq!(
+            decide_action(SyncDirection::TwoWay, Some(&lsig(10, 1_000)), Some(&remote), None),
+            SyncAction::Skip
+        );
+        // 大小不同 → 看谁更新（网盘 2026 年 > 本地 1970 年）
+        assert_eq!(
+            decide_action(SyncDirection::TwoWay, Some(&lsig(10, 1_000)), Some(&rsig(20, "2026-11-09T00:00:00+00:00")), None),
+            SyncAction::Download
+        );
+        assert_eq!(
+            decide_action(SyncDirection::TwoWay, Some(&lsig(10, 1_000)), Some(&rsig(20, "1970-01-01T00:00:01+00:00")), None),
+            SyncAction::Upload
+        );
+    }
+
+    #[test]
+    fn upload_direction_always_wins_over_remote_change() {
+        let saved = SyncStateEntry {
+            local_size: 10,
+            local_mtime_ms: 1_000,
+            remote_size: 10,
+            remote_modified: Some("2026-11-09T00:00:00+00:00".into()),
+        };
+        // 网盘被人改过，但单向上传仍以本地为准
+        assert_eq!(
+            decide_action(
+                SyncDirection::Upload,
+                Some(&lsig(10, 1_000)),
+                Some(&rsig(30, "2026-11-10T00:00:00+00:00")),
+                Some(&saved)
+            ),
+            SyncAction::Upload
+        );
+    }
+
+    #[test]
+    fn ignores_sync_temp_and_junk_files() {
+        assert!(is_ignored_name(".a.pdf.okbsync-part"));
+        assert!(is_ignored_name("Thumbs.db"));
+        assert!(is_ignored_name("desktop.ini"));
+        assert!(is_ignored_name(".DS_Store"));
+        assert!(!is_ignored_name("paper.pdf"));
+    }
+
+    #[test]
+    fn remote_path_join() {
+        assert_eq!(remote_join("", ""), "");
+        assert_eq!(remote_join("sync", ""), "sync");
+        assert_eq!(remote_join("", "a.pdf"), "a.pdf");
+        assert_eq!(remote_join("sync", "a/b.pdf"), "sync/a/b.pdf");
     }
 }

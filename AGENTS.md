@@ -82,7 +82,7 @@ cargo build --release
 | `backend-rs/src/settings.rs`、`backend-rs/src/utils.rs` | 全局 Settings 单例、工具函数（含 `resolve_token`：解析 `!cat <path>` 形式的敏感值） |
 | `backend-rs/config.json` | 服务配置（MinerU/LLM/向量库），可由 UI 编辑 |
 | `backend-rs/system.json` | 系统配置（token、MCP token、白名单、DB URL、上传路径、路径模板），需手动改 |
-| `client-rs/` | Zotero CSV 导入客户端（Rust）。配置默认读 `~/.okb/client.json`（`url`/`base_url`、`token`、`storage_root`），成功拉到的 doi-hash 全量索引会自动写到 `~/.okb/client/docs.json`。上传走流式 `post_pdf()`，传输时在终端实时显示进度（已发送 / 总大小、百分比、速度、剩余时间，非 TTY 自动降为每 10% 一行），`--no-progress` 关闭 |
+| `client-rs/` | Zotero CSV 导入客户端（Rust）。配置默认读 `~/.okb/client.json`（`url`/`base_url`、`token`、`storage_root`、`sync`），成功拉到的 doi-hash 全量索引会自动写到 `~/.okb/client/docs.json`。三个子命令：`zotero`（CSV 导入）、`dir`（目录批量上传）、`sync`（按配置文件在本地目录 ⇄ 个人网盘之间双向/单向同步，无参数，状态存 `~/.okb/client/sync-state.json`，上传带 `overwrite=true`）。上传走流式 `post_pdf()`，传输时在终端实时显示进度（已发送 / 总大小、百分比、速度、剩余时间，非 TTY 自动降为每 10% 一行），`--no-progress` 关闭（`sync` 无参数，总是显示） |
 | `frontend/src/components/` | Vue 组件 — 见下方「前端架构 → 组件一览」 |
 | `frontend/src/views/` | 页面视图 — 见下方「前端架构 → 路由」 |
 | `frontend/src/router/index.ts` | Vue Router 配置（14 路由，`base: '/assist/'`） |
@@ -313,7 +313,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 |---|---|---|---|
 | GET | `/assist/api/drive` | 已登录 | 概览：开关、配额、当前用户可访问的公有文件夹（含 `can_write`） |
 | GET | `/assist/api/drive/list?scope&path` | 已登录 | 列目录（`scope=private` 或 `public:<id>`），返回面包屑/占用/上限 |
-| POST | `/assist/api/drive/upload` | 已登录 | multipart：`scope`、`path` + 一个或多个 `file`（字段顺序敏感） |
+| POST | `/assist/api/drive/upload` | 已登录 | multipart：`scope`、`path`、可选 `overwrite`（`true` = 同名直接覆盖，缺省 false 仍自动加 `(1)`）+ 一个或多个 `file`（字段顺序敏感，`overwrite` 必须在 `file` 之前） |
 | POST | `/assist/api/drive/mkdir` | 有写权限 | 新建文件夹 |
 | POST | `/assist/api/drive/rename` | 有写权限 | 重命名 |
 | POST | `/assist/api/drive/move` | 有写权限 | 移动到目录（同名自动加 `(n)` 后缀） |

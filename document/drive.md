@@ -49,6 +49,28 @@
 - 只读：只能浏览、预览、下载；
 - 可写：可以上传、新建文件夹、重命名、移动、删除。
 
+### 命令行同步（`okb-client sync`）
+
+除了网页端，也可以用仓库自带的客户端把个人网盘跟本地目录同步（双向 / 单向，无需 WebDAV）：
+
+```json
+// ~/.okb/client.json
+{
+  "url": "http://192.168.1.162:5001",
+  "token": "okb_xxxxxxxx",
+  "sync": { "personal": { "disk": "D:\\liuch586\\Sync\\okb-disk", "remote": "sync", "direction": "two-way" } }
+}
+```
+
+```
+okb-client sync      # 无参数，配置全部来自上面这个文件
+```
+
+- `direction`：`two-way`（默认，双向）/ `upload`（只写网盘）/ `download`（只写本地）；
+- `remote`：个人网盘内的子目录（缺省 = 根目录）；`disk`：本地目录；
+- 只同步**个人网盘**（不支持公有文件夹）；同步状态存 `~/.okb/client/sync-state.json`；
+- **删除不传播**：一侧删掉的文件会从另一侧补回。详见 `client-rs/README.md` 的 `sync` 一节。
+
 ### 预览说明
 
 | 类型 | 行为 |
