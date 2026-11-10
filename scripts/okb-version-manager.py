@@ -38,7 +38,18 @@ Token 来源 (la 需要，401 时自动尝试下一个)：
   ~/.okb/releases/{tag_name}/  按 Release 标签名解压的目录 (后端/前端)
   ~/.okb/versions/latest/okb-assist  最新安装版本二进制的软链接
                              (install la / install lr 后自动更新)
+
+产物命名 (与 .github/workflows/build-backends.yml 一致):
+  okb-assist-linux-x64         Linux x86_64 (gnu，内嵌 mupdf)
+  okb-assist-linux-arm64-musl  Linux ARM64 (静态 musl，PDF 引擎用外部 mutool)
+  okb-assist-macos-arm64       macOS ARM64 (内嵌 mupdf)
+  okb-assist-win-x64.exe       Windows x64 (内嵌 mupdf)
+  名称会按平台自动探测，CI 改名时会在最近产物里回退匹配。
 """
+
+# Python 3.9 的运行环境（如 Debian 11 / 树莓派）不支持在运行时求值 `dict | None`
+# 这类注解，用 PEP 563 把注解变成字符串，脚本可在 3.9+ 运行。
+from __future__ import annotations
 
 import argparse
 import json
@@ -72,26 +83,111 @@ LATEST_LINK_NAME = "okb-assist"
 
 # ── 平台探测 ──
 
-def detect_platform_artifact_name() -> str:
-    system_map = {
-        "linux": "linux",
-        "darwin": "macos",
-        "windows": "windows",
-    }
-    arch_map = {
-        "x86_64": "x86_64",
-        "amd64": "x86_64",
-        "aarch64": "arm64",
-        "arm64": "arm64",
-        "armv7l": "armv7",
-    }
+# 产物命名与 .github/workflows/build-backends.yml 保持一致：
+#   okb-assist-linux-x64          Linux x86_64，gnu 动态链接，含内嵌 mupdf
+#   okb-assist-linux-arm64-musl   Linux ARM64，静态 musl，**不含**内嵌 mupdf
+#                                 （PDF 引擎走 system.json 的 mutool_path）
+#   okb-assist-macos-arm64        macOS ARM64，含内嵌 mupdf
+#   okb-assist-win-x64.exe        Windows x64，含内嵌 mupdf
+# Windows 的系统段在工作流里写作 `win`（不是 `windows`）。
+SYSTEM_ALIASES = {
+    "linux": "linux",
+    "darwin": "macos",
+    "windows": "win",
+}
+ARCH_ALIASES = {
+    "x86_64": "x64",
+    "amd64": "x64",
+    "aarch64": "arm64",
+    "arm64": "arm64",
+    "armv7l": "armv7",
+    "armv7": "armv7",
+}
+
+
+def platform_parts() -> tuple[str, str]:
+    """返回产物名里的（系统段, 架构段），如 ("linux", "arm64")。"""
     raw_sys = platform.system().lower()
     raw_machine = platform.machine().lower()
-    sys_name = system_map.get(raw_sys, raw_sys)
-    arch_name = arch_map.get(raw_machine, raw_machine)
-    if sys_name == "windows":
-        return f"okb-assist-{sys_name}-{arch_name}.exe"
-    return f"okb-assist-{sys_name}-{arch_name}"
+    return (SYSTEM_ALIASES.get(raw_sys, raw_sys),
+            ARCH_ALIASES.get(raw_machine, raw_machine))
+
+
+def detect_platform_artifact_names() -> list[str]:
+    """当前平台可用的 artifact/asset 名称，按优先级从高到低。
+
+    Linux 上 CI 对两种架构的构建方式不同，所以「优先项」也不同：
+      - ARM64 只有静态 musl 构建（`-musl` 后缀），历史 Release 里的 glibc 版本只作回退；
+      - x86_64 是 gnu 构建（含内嵌 mupdf），将来若出 musl 版本也只作回退。
+    这样 CI 增删 `-musl` 后缀时脚本不必跟着改。
+    """
+    sys_name, arch_name = platform_parts()
+    ext = ".exe" if sys_name == "win" else ""
+    base = f"okb-assist-{sys_name}-{arch_name}"
+    if sys_name == "linux":
+        musl, plain = f"{base}-musl{ext}", f"{base}{ext}"
+        return [musl, plain] if arch_name.startswith("arm") else [plain, musl]
+    return [f"{base}{ext}"]
+
+
+def detect_platform_artifact_name() -> str:
+    """当前平台首选的 artifact/asset 名称（仅用于展示/兜底）。"""
+    return detect_platform_artifact_names()[0]
+
+
+def artifact_name_candidates() -> list[str]:
+    """--artifact-name 优先；否则按平台探测的候选列表。"""
+    forced = getattr(args, "artifact_name", None)
+    return [forced] if forced else detect_platform_artifact_names()
+
+
+def binary_name_candidates() -> list[str]:
+    """解压目录里可能的二进制文件名（Cargo 名 + 各候选产物名）。"""
+    return [BINARY_NAME, *artifact_name_candidates()]
+
+
+def is_backend_artifact_name(name: str) -> bool:
+    """后端产物以 okb-assist- 开头；排除客户端（okb-client-*）与前端 zip。"""
+    n = name.lower()
+    if not n.startswith("okb-assist-"):
+        return False
+    return not n.endswith(".zip")
+
+
+def backend_artifact_score(name: str) -> int:
+    """给 Release asset / Actions artifact 名打分，0 = 不是当前平台的后端产物。
+
+    先精确命中平台候选名（越靠前的候选分越高），再退化为「系统段 + 架构段」
+    模糊匹配，这样 CI 改了产物命名时仍能挑到合适的二进制。
+    """
+    n = name.lower()
+    if not is_backend_artifact_name(n):
+        return 0
+    for idx, cand in enumerate(artifact_name_candidates()):
+        if n == cand.lower():
+            return 1000 - idx * 10
+    sys_name, arch_name = platform_parts()
+    score = 0
+    if sys_name and sys_name in n:
+        score += 20
+    if arch_name and arch_name in n:
+        score += 20
+    if not score:
+        raw_sys = platform.system().lower()
+        if raw_sys and raw_sys in n:  # 兼容 darwin / windows 原始写法
+            score += 10
+    return score
+
+
+def pick_backend_artifact(artifacts: list[dict]) -> dict | None:
+    """从 asset/artifact 列表里挑出当前平台的后端产物（无匹配返回 None）。"""
+    scored = [(backend_artifact_score(a.get("name", "")), a)
+              for a in artifacts]
+    scored = [item for item in scored if item[0] > 0]
+    if not scored:
+        return None
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
 
 
 # ── 色彩输出 ──
@@ -492,9 +588,9 @@ def extract_archive(archive_path: Path, output_dir: Path):
 # ── 查找二进制 ──
 
 def find_binary_in_dir(directory: Path) -> Path | None:
-    artifact_name = (getattr(args, 'artifact_name', None)
-                     or detect_platform_artifact_name())
-    candidates = [BINARY_NAME, artifact_name]
+    # 解压出来的文件名就是产物名（如 okb-assist-linux-arm64-musl），
+    # 所以必须把整条候选链都试一遍，不能只试首选名。
+    candidates = binary_name_candidates()
 
     for name in candidates:
         target = directory / name
@@ -517,21 +613,39 @@ def find_binary_in_dir(directory: Path) -> Path | None:
 # ── Artifact 操作 ──
 
 def get_latest_artifact_info(token: str) -> dict:
-    artifact_name = (getattr(args, 'artifact_name', None)
-                     or detect_platform_artifact_name())
     repo = getattr(args, 'repo', REPO)
-    info(f"查找最新 Artifact: {artifact_name} (repo: {repo})")
+    names = artifact_name_candidates()
+    info(f"查找最新 Artifact: {' / '.join(names)} (repo: {repo})")
 
-    url = (f"https://api.github.com/repos/{repo}/actions/artifacts"
-           f"?name={artifact_name}&per_page=1")
-    raw = _curl_get_json(url, token)
-    data = json.loads(raw)
-    artifacts = data.get("artifacts", [])
-    if not artifacts:
-        err(f"未找到名为 '{artifact_name}' 的 Artifact")
-        sys.exit(1)
+    data = None
+    for name in names:
+        url = (f"https://api.github.com/repos/{repo}/actions/artifacts"
+               f"?name={name}&per_page=1")
+        raw = _curl_get_json(url, token)
+        artifacts = json.loads(raw).get("artifacts", [])
+        if artifacts:
+            data = artifacts[0]
+            break
 
-    data = artifacts[0]
+    if data is None:
+        # 名称全部未命中（CI 又改了产物命名）时，退回「最近的 artifact 列表里挑最像的」
+        info("按名称未命中，改为在最近的 Artifact 列表里匹配 ...")
+        url = (f"https://api.github.com/repos/{repo}/actions/artifacts"
+               f"?per_page=100")
+        raw = _curl_get_json(url, token)
+        artifacts = [a for a in json.loads(raw).get("artifacts", [])
+                     if not a.get("expired")]
+        data = pick_backend_artifact(artifacts)
+        if data is None:
+            err("未找到匹配当前平台的 Artifact")
+            err(f"已尝试名称: {', '.join(names)}")
+            if artifacts:
+                print("  最近的 Artifacts:")
+                for a in artifacts:
+                    print(f"    - {a['name']}  "
+                          f"({fmt_size(a.get('size_in_bytes', 0))})")
+            sys.exit(1)
+        warn(f"已回退匹配到: {data['name']}")
     workflow = data.get("workflow_run", {})
     run_id = workflow.get("id")
     head_sha = workflow.get("head_sha")
@@ -594,30 +708,7 @@ def get_latest_release_info() -> dict:
 
 def find_best_backend_asset(assets: list[dict]) -> dict | None:
     """在 Release assets 中找到匹配当前平台的后端二进制。"""
-    artifact_name = (getattr(args, 'artifact_name', None)
-                     or detect_platform_artifact_name())
-    system = platform.system().lower()
-    machine = platform.machine().lower()
-
-    def score_asset(name: str) -> int:
-        n = name.lower()
-        score = 0
-        if artifact_name.lower() in n:
-            score += 100
-        if system in n:
-            score += 10
-        if machine[:4] in n:
-            score += 10
-        return score
-
-    scored = [(score_asset(a["name"]), a) for a in assets]
-    scored.sort(key=lambda x: x[0], reverse=True)
-    best_score, best_asset = scored[0]
-
-    if best_score == 0 or best_asset is None:
-        return None
-
-    return best_asset
+    return pick_backend_artifact(assets)
 
 
 def find_frontend_asset(assets: list[dict]) -> dict | None:
@@ -841,7 +932,9 @@ def cmd_install_release():
         asset = find_best_backend_asset(assets)
         if not asset:
             err("未在 Release 中找到匹配当前平台的后端")
-            print(f"  平台: {platform.system().lower()} / {platform.machine().lower()}")
+            print(f"  平台: {platform.system().lower()} / "
+                  f"{platform.machine().lower()}")
+            print(f"  期望名称: {', '.join(artifact_name_candidates())}")
             print(f"  可用的 assets:")
             for a in assets:
                 print(f"    - {a['name']}  ({fmt_size(a['size'])})")
