@@ -65,6 +65,14 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/admin/dedup", post(dedup))
         .route("/assist/api/admin/logs/", get(get_logs))
         .route("/assist/api/admin/logs", get(get_logs))
+        .route(
+            "/assist/api/admin/database/checkpoint/",
+            post(checkpoint_database),
+        )
+        .route(
+            "/assist/api/admin/database/checkpoint",
+            post(checkpoint_database),
+        )
 }
 
 async fn dedup(
@@ -1058,6 +1066,139 @@ async fn check_document_pdf_health(
 /// 非阻塞：请求立即返回，后台遍历文档执行 stat。
 ///
 /// `?only_missing=1` 时只处理 `pdf_size` / `md_size` / `zip_size` 中有 `NULL` 的文档。
+// ── SQLite WAL checkpoint（运维） ───────────────────────────
+
+/// `POST /assist/api/admin/database/checkpoint` 的查询参数。
+#[derive(Debug, Deserialize)]
+pub struct CheckpointQuery {
+    /// `passive` / `full` / `restart` / `truncate`（默认 `truncate`）
+    pub mode: Option<String>,
+}
+
+/// SQLite WAL checkpoint：把 `-wal` 里的页面合并回主库。
+///
+/// 用途：备份前想让「只拷 `okb_assist.db`」也完整，或 WAL 涨得太大时手动收一下。
+/// `truncate`（默认）会把 WAL 截断为 0 字节，但需要没有活跃读事务；
+/// 有并发请求时返回 `ok=false` + `busy=true`，稍后重试即可。
+async fn checkpoint_database(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+    Query(q): Query<CheckpointQuery>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
+
+    let mode = q
+        .mode
+        .as_deref()
+        .unwrap_or("truncate")
+        .trim()
+        .to_ascii_lowercase();
+    let mode_sql = match mode.as_str() {
+        "passive" => "PASSIVE",
+        "full" => "FULL",
+        "restart" => "RESTART",
+        "truncate" => "TRUNCATE",
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "detail": format!("mode 取值非法：{}（passive/full/restart/truncate）", other)
+                })),
+            )
+                .into_response()
+        }
+    };
+
+    // TRUNCATE/RESTART 会等读者释放快照；给个上限，避免请求一直挂着。
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        sqlx::query_as::<_, (i64, i64, i64)>(&format!("PRAGMA wal_checkpoint({})", mode_sql))
+            .fetch_one(db.pool()),
+    )
+    .await;
+
+    let mut timed_out = false;
+    let (busy, wal_frames, checkpointed) = match result {
+        Ok(Ok(row)) => (Some(row.0), Some(row.1), Some(row.2)),
+        Ok(Err(e)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "detail": e.to_string() })),
+            )
+                .into_response()
+        }
+        Err(_) => {
+            timed_out = true;
+            (None, None, None)
+        }
+    };
+
+    let path = database_file_path(db.pool()).await.unwrap_or_default();
+    let file_size = |p: &str| std::fs::metadata(p).map(|m| m.len()).ok();
+    let (database_size, wal_size, shm_size) = if path.is_empty() {
+        (None, None, None)
+    } else {
+        (
+            file_size(&path),
+            file_size(&format!("{}-wal", path)),
+            file_size(&format!("{}-shm", path)),
+        )
+    };
+
+    let ok = !timed_out && busy == Some(0);
+    let detail = if ok {
+        format!(
+            "checkpoint 完成：写回 {} 帧，WAL 剩余 {} 帧",
+            checkpointed.unwrap_or(0),
+            wal_frames.unwrap_or(0)
+        )
+    } else if timed_out {
+        "checkpoint 等待超时（有活跃读写），稍后重试".to_string()
+    } else {
+        format!(
+            "checkpoint 未完成（busy）：WAL 剩余 {} 帧，可能有活跃读事务，稍后重试",
+            wal_frames.unwrap_or(0)
+        )
+    };
+    if ok {
+        tracing::info!("数据库 checkpoint({}) {}", mode_sql, detail);
+    } else {
+        tracing::warn!("数据库 checkpoint({}) {}", mode_sql, detail);
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": ok,
+            "mode": mode,
+            "busy": busy.map(|v| v != 0),
+            "timed_out": timed_out,
+            "wal_frames": wal_frames,
+            "checkpointed_frames": checkpointed,
+            "database_path": path,
+            "database_size": database_size,
+            "wal_size": wal_size,
+            "shm_size": shm_size,
+            "detail": detail,
+        })),
+    )
+        .into_response()
+}
+
+/// 当前数据库主文件路径（`PRAGMA database_list` 里 `name = main` 的那一项）。
+async fn database_file_path(pool: &sqlx::SqlitePool) -> Option<String> {
+    let rows: Vec<(i64, String, String)> = sqlx::query_as("PRAGMA database_list")
+        .fetch_all(pool)
+        .await
+        .ok()?;
+    rows.into_iter()
+        .find(|(_, name, _)| name == "main")
+        .map(|(_, _, file)| file)
+        .filter(|file| !file.is_empty())
+}
+
 async fn sync_file_sizes(
     Extension(role): Extension<auth::Role>,
     Extension(db): Extension<Arc<Database>>,

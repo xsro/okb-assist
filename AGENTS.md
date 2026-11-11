@@ -687,6 +687,12 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 - **批量进度 / 暂停状态存于进程内存**：模块级全局变量，**进程重启即丢失**。重启后需手动重新触发。
 - **维护类任务也走后台**：`POST /assist/api/admin/recalculate-hashes`（重算 `file_hash`）、`POST /assist/api/admin/check-pdf-health`（批量 PDF 健康检查）、`POST /assist/api/admin/sync-file-sizes`（同步文件大小）都立即返回、后台执行。三者都支持 `?only_missing=1`（也接受 `true` / `yes` / `on`）：只处理「缺失」的文档 —— `file_hash` 为空 / `pdf_health` 为空 / **`fs_synced_at` 为空（从未同步过文件事实）**，即「补缺」而非全量重做（注意：`size` 列为 `NULL` 现在表示「文件确实不存在」，**不再**是「缺失」），返回体里的 `only_missing` 回显实际模式；管理页「维护操作」里「补充缺失 …」与「… 全部」按钮成对使用同一端点。重算哈希与健康检查都是**逐个串行**（不并发、不占流水线信号量），每条用 `pipeline::track_maintenance_task()` 登记到「活跃任务」表（`task_type = "hash"` / `"pdf-health"`，进度为「第 i/N 条」，文案只存进程内、不写 `documents.status_message`）；进程内各有 `HASH_RECALC_RUNNING` / `PDF_HEALTH_RUNNING` 标记防止重复提交，进程重启即中断。
 
+另有**同步**运维端点 `POST /assist/api/admin/database/checkpoint?mode=truncate`（admin）：执行
+`PRAGMA wal_checkpoint(<mode>)` 把 WAL 合并回主库（`passive` / `full` / `restart` / `truncate`，默认 `truncate`）。
+备份前想让「只拷 `okb_assist.db`」也完整时用它；TRUNCATE/RESTART 需要没有活跃读事务，5 秒内拿不到就返回
+`ok=false` + `busy`/`timed_out`（稍后重试即可），响应同时给出 `database_path` 与三个文件大小。
+项目没有注册优雅停机，所以停服不会自动 checkpoint —— 要么调这个端点，要么停服后用 `sqlite3 db "PRAGMA wal_checkpoint(TRUNCATE);"`。
+
 ### PDF 健康检查（`services/pdf_health.rs`）
 
 后台串行检查每篇文档的 PDF 能否使用，结果写 `documents.pdf_health`（`ok` / `warning` / `error` / `missing`，`NULL` = 未检查）与 `documents.pdf_health_message`（原因）。
