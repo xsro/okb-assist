@@ -74,7 +74,7 @@ cargo build --release
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`drive.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/drive.rs` | 用户网盘：路径安全、角色阈值、配额统计、目录列举、Content-Type 推断 |
 | `backend-rs/src/services/pdf_engine.rs` | PDF 解析引擎运行时选择（`mutool` 命令行 / 内置 `mupdf`，含能力兜底） |
-| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`file_state.rs`（文件事实 → 文献状态推导 + 运行时状态注册表）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存） |
+| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`doc_type.rs`（**文档类型唯一词表**：归一化 / 标准列表 / Crossref 映射，见下方「文档类型词表」）、`file_state.rs`（文件事实 → 文献状态推导 + 运行时状态注册表）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
@@ -390,6 +390,42 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 引擎差异：`config.json` 的 `pdf.engine = "mupdf"` 时拿不到逐行字号，第 3 层退化为第 4 层（行序兜底），
 要用版面级抽取请把引擎切回 `mutool`（默认）。
 
+### 文档类型（`doc_type`）词表与归一化
+
+`documents.doc_type` **只认 Zotero 标准类型名**，唯一真相是 `backend-rs/src/services/doc_type.rs` 的 `STANDARD`：
+
+```
+journalArticle / conferencePaper / thesis / book / bookSection / preprint / report /
+patent / review / webpage / presentation / manuscript / document
+```
+
+历史教训：同一列上叠过至少四套词表 —— Crossref 回填写 `journal` / `conference`（`crossref.rs::doc_type_map` 当时返回的是 Crossref 风格值）、
+BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实现写 `article`、手改过 `book_section` / `misc`。
+后果有两个：MCP `library_stats` 的 `type_counts` 被拆成一堆一次性碎片；`citation.rs::from_document`
+手工匹配小写连字符形式（`journal` / `conference` / `book-chapter`），反而**匹配不到**库里真正的标准名，
+生成出来的 BibTeX 全是 `@misc`、GB/T 7714 类型标识全是 `Z`。
+
+现在的约定：
+
+| 场景 | 入口 |
+|---|---|
+| 归一化（所有写入路径） | `services::doc_type::normalize()`（`pipeline::normalize_doc_type` 是薄封装，保留旧名字） |
+| 逗号分隔的筛选值（`?doc_type_filter=`、`type:a,b`、MCP `doc_type`） | `services::doc_type::normalize_many()` |
+| 需要 Crossref 词表（引用条目） | `services::doc_type::to_crossref()` |
+| 前端候选列表 | `GET /assist/api/documents/doc-types` 的 `standard`（值 + 中文标签） |
+
+- **写入口**：上传/登记（`doc_type` 为空）、Crossref 回填（`run_crossref` / `run_crossref_override` 双保险再归一）、
+  元数据抽取（`MetaRecord::apply`）、手工编辑（`update_document`，顺手 `info` 日志说明归一到谁）、BibTeX 导入、`merge_documents`。
+  **新增任何写 `doc_type` 的路径必须先过 `normalize()`**，不要在别处再造映射表。
+- **存量数据**：`database.rs::init()` 里的 `migrate_doc_types()` 启动时把历史同义词一次性改写为标准名（幂等，
+  已标准的行走快路径跳过），日志打「N 行的 doc_type 归一化」。
+- **筛选宽容**：列表 `?doc_type_filter=`、高级搜索 `type:`、MCP 工具的 `doc_type` 参数都会先归一化，
+  所以用户/模型写 `type:article`、`type:journal` 照样命中（否则一改词表旧条件就全空）。
+- **前端**：`frontend/src/utils/docType.ts` 是候选词表（`DOC_TYPE_OPTIONS`）与中文标签的唯一来源（
+  `docTypeLabel()` / `normalizeDocType()`）；`DocManageView.vue` 里是真正的 `<select>`（拉不到后端词表时用静态表，
+  历史脏值单独列一项提示「保存后归一为 …」），`QueryBuilder.vue` 的「文献类型」筛选也用它，
+  列表/详情页显示中文标签（原始值放 `title` / 括号里）。**不要在模板里手写 `<option>`**。
+
 ### 元数据抽取（信息补全）的校对语义
 
 实现在 `backend-rs/src/routers/pipeline.rs` 的 `do_extract_impl` + `backend-rs/src/services/llm.rs` 的 `extract_metadata` / `build_extract_prompt`。
@@ -549,7 +585,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
    - `GET /assist/api/documents/:id/citation?format=bibtex|gbt7714&source=auto|crossref|document` —— 生成引用条目，返回 `{format, source, key, content}`。默认 `source=auto`：有 Crossref 记录就用它，否则退化为数据库元数据（`source=document`，卷期页会缺失）；`source=crossref` 且无记录时返回 404。引用键为「第一作者姓 + 年份 + 标题首个实词」。
    - **访客公开详情**（`GET /assist/api/documents/public/:id`）：仅当 `system.json` 的 `public_detail_enabled = true` 时由 `token_middleware` 放行（匿名主体注入 `ViewOnly`）；返回 `PublicDocumentOut`（`documents.rs`）—— 只有书目元数据 + 摘要（含双语），**不含**文件名/哈希/文件大小/PDF 健康/索引库/运行时任务/时间戳，也不做实时 stat。前端 `DetailView.vue` 用 `isGuest = !tokenStore.isAuthenticated` 区分：访客不渲染操作按钮与三个折叠区（改为「登录后可查看」占位卡），顶部给登录横幅；访问其它路由仍会被守卫跳登录页。
    - **DOI 比对统一归一化**：`doi_key()`（`normalize_doi` 去 `https://doi.org/` 等前缀与尾部标点 + 转小写）用于 `GET /documents/by-doi/:doi`（先精确匹配，未命中再 `LIKE` 粗筛 + `doi_key` 校验，兼容历史数据里带前缀/大小写不一致的值）与 `POST /documents/diff-dois`；写入口也归一化 —— `PUT /documents/:id`（`update_document`）与 `pipeline` 的 `MetaRecord::apply`。新增 DOI 写/比对照旧走这几个入口，别再直接字符串相等比较。
-   - **元数据编辑语义**（`PUT /documents/:id`，`update_document`）：请求体的 16 个元数据字段遵循「**键缺省 = 不修改**、**空串 / 纯空白 = 清空为 `NULL`**、其他值 = 去首尾空白后写入」；`year` 接受数字 / 数字字符串 / `null` / `""`（后两者清空；`<input type="number">` 清空后的 `""` 不再引发 422）；摘要键 `abstract` 与 `abstract_text` **都接受**（`DocumentOut` 下发的是 `abstract`，历史上前端只发 `abstract` 而结构体只认 `abstract_text`，导致摘要永远存不进去）；`doc_type` 与抽取路径共用 `pipeline::normalize_doc_type`；**响应回传更新后的完整 `DocumentOut`**（不要再回 `{status:"ok"}`，前端会把它当文档赋回去）。前端 `DocManageView.vue` 的表单覆盖全部 16 个字段并只提交这 16 个字段的白名单（不再回传整份 `DocumentOut`），`DetailView.vue` 展示 `source` / `category` / `language`。
+   - **元数据编辑语义**（`PUT /documents/:id`，`update_document`）：请求体的 16 个元数据字段遵循「**键缺省 = 不修改**、**空串 / 纯空白 = 清空为 `NULL`**、其他值 = 去首尾空白后写入」；`year` 接受数字 / 数字字符串 / `null` / `""`（后两者清空；`<input type="number">` 清空后的 `""` 不再引发 422）；摘要键 `abstract` 与 `abstract_text` **都接受**（`DocumentOut` 下发的是 `abstract`，历史上前端只发 `abstract` 而结构体只认 `abstract_text`，导致摘要永远存不进去）；`doc_type` 与抽取路径共用 `services::doc_type::normalize`（`pipeline::normalize_doc_type` 是它的薄封装）；客户端填了同义词（`article` / `book_section` …）时会打一条 `info` 日志说明归一到哪个标准值；**响应回传更新后的完整 `DocumentOut`**（不要再回 `{status:"ok"}`，前端会把它当文档赋回去）。前端 `DocManageView.vue` 的表单覆盖全部 16 个字段并只提交这 16 个字段的白名单（不再回传整份 `DocumentOut`），`DetailView.vue` 展示 `source` / `category` / `language`。
    - **列表列的存储格式**：`authors` / `authors_en` / `keywords` / `keywords_en` 四列统一存 **`; ` 分隔纯文本**（写入一律走 `pipeline::list_to_db`，空数组 → 空串；**不要再写 JSON 数组字符串**）。历史数据里的 `["A","B"]` 由 `database.rs::migrate_list_columns` 在启动时一次性转换（幂等，解析失败的行原样保留）。读取侧一律用 `parse_str_list`（先试 JSON、再按 `; , 、 ，` 拆），**不要再 `serde_json::from_str` 猜格式**——它遇到纯文本会直接落到 `[]`（向量库 payload 的 `authors`/`keywords` 就是这么丢的）。向量库 payload 仍下发字符串数组（`parse_str_list` 产出，`vector_db.rs` 按数组写入）。
    - **文件事実筛选与文件构成统计**：列取端点 `?pdf_state=｜md_state=｜zip_state=`（`present` / `absent` / `unknown`，逗号多选，非法值 400）与 `search-info` **共用** `documents::state_condition(kind, raw)`（不占绑定参数），所以从监控面板带入的筛选在搜索时不会丢掉；`GET /assist/api/admin/stats` 额外返回 `file_counts`（`pdf_only` / `pdf_and_md` / `md_only` / `none` / `with_zip`，按 `pdf_size`/`md_size`/`zip_size` 聚合，零磁盘 IO），前端「监控面板」的「文件构成」卡片点进去就是带 `?pdf_state=&md_state=` 的文献列表（`md_size` 为 `NULL`/`0` 都算「不存在」）。
    - **全量比对索引**（`GET /documents/doi-hash-index`）：一次返回库内全部文献的 `{count, with_doi, with_hash, generated_at, documents:[{id, doi, doi_key, file_hash, pdf_health}]}`（`doi_key` 已归一化小写，空 DOI/空哈希为 `null`），供 `client-rs` 批量比对；客户端拉一次就完成整库比对，不再按 DOI 逐条请求 `by-doi`。只返回比对必需字段（不带 title/abstract），新增字段时注意保持轻量。
@@ -834,6 +870,16 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
     历史教训：`import_bibtex` 用 `sqlx::query_as(...).fetch_all().await.unwrap_or_default()` 吞掉这个错误，索引变成空表 → 一个重复都检不出来（131 条全部报「可新建」，直接导入会造出 131 条重复记录）。
     现有约定：`DOC_COLUMNS`（documents.rs / pipeline.rs / mcp_server.rs 三份）+ `import_bibtex` 的索引查询都带这个 CAST；`database.rs::init()` 启动时还会把历史 TEXT 年份一次性修成 INTEGER/NULL。
     **新增任何读取 `year` 的查询都必须带 CAST，且不要再对查询结果 `unwrap_or_default()`**（读不到就该报错，不能静默当成空库）。
+
+26. **`doc_type` 只能写标准名，写入口必须先过 `services::doc_type::normalize()`**：库里现在只保留
+    `journalArticle` / `conferencePaper` / `thesis` / `book` / `bookSection` / `preprint` / `report` / `patent` /
+    `review` / `webpage` / `presentation` / `manuscript` / `document` 十三种值。历史上 Crossref 回填写 `journal` / `conference`、
+    旧实现写 `article`、手改过 `book_section`，把 `type_counts` 拆成了碎片，也让 `citation.rs` 的类型判断失效（引用退化成 `@misc` / `Z`）。
+    - 新增写 `doc_type` 的路径：先 `normalize()`；需要其他词表（Crossref / BibTeX）用 `to_crossref()`，**不要另写 match**；
+    - 新增加 `doc_type` 筛选：先 `normalize_many()`，否则 `type:article` 这类旧写法会搜不到；
+    - 前端候选只从 `frontend/src/utils/docType.ts` 取（与后端 `STANDARD` 对应，`doc-types` 接口下发 `standard`），不要手写 `<option>`；
+    - 存量数据由 `database.rs::migrate_doc_types()` 在启动时归一（幂等）。
+    - 注意 `list_doc_types` / MCP `library_stats` 的 `type_counts` 是**按原值分组**的：一旦有脏值回流，这里会立刻多条一次性碎片，请拿它当回归哨兵。
 
 ## 入口与关键文件速查
 

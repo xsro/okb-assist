@@ -116,18 +116,12 @@
         <div class="qb-grid">
           <div class="qb-section">
             <label class="qb-label">文献类型</label>
+            <!-- 候选统一来自 `utils/docType`（与后端标准词表一致），不要在这里手写同义词 -->
             <select v-model="form.docType" class="qb-select">
               <option value="">全部</option>
-              <option value="article">article（期刊论文）</option>
-              <option value="book">book（专著）</option>
-              <option value="bookSection">bookSection（章节）</option>
-              <option value="thesis">thesis（学位论文）</option>
-              <option value="conferencePaper">conferencePaper（会议论文）</option>
-              <option value="report">report（报告）</option>
-              <option value="journalArticle">journalArticle（期刊文章）</option>
-              <option value="preprint">preprint（预印本）</option>
-              <option value="patent">patent（专利）</option>
-              <option value="dataset">dataset（数据集）</option>
+              <option v-for="opt in DOC_TYPE_OPTIONS" :key="opt.value" :value="opt.value">
+                {{ opt.label }}（{{ opt.value }}）
+              </option>
             </select>
           </div>
           <div class="qb-section">
@@ -292,6 +286,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed } from 'vue'
+import { DOC_TYPE_OPTIONS } from '@/utils/docType'
 
 interface ColumnDef {
   key: string

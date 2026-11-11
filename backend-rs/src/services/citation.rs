@@ -151,18 +151,13 @@ impl CitationRecord {
             .map(parse_author_name)
             .collect::<Vec<_>>();
 
-        let doc_type = doc.doc_type.clone().unwrap_or_default().to_lowercase();
-        let crossref_type = match doc_type.as_str() {
-            "journal" | "article" | "journal-article" => "journal-article",
-            "book" | "monograph" => "book",
-            "book-chapter" | "chapter" | "incollection" => "book-chapter",
-            "conference" | "proceedings" | "conference-paper" => "proceedings-article",
-            "thesis" | "dissertation" => "thesis",
-            "report" => "report",
-            "preprint" => "posted-content",
-            "dataset" => "dataset",
-            _ => "",
-        }
+        // 统一走 `services::doc_type::to_crossref`：以前在这里手写匹配，只认小写了连字符的形式
+        // （`journal` / `conference` / `book-chapter`），于是库里真正的标准名
+        // `journalArticle` / `conferencePaper` / `bookSection` 一个都匹配不到，
+        // 生成出来的 BibTeX 全是 `misc`、GB/T 类型标识全是 `Z`。
+        let crossref_type = crate::services::doc_type::to_crossref(
+            doc.doc_type.as_deref().unwrap_or_default(),
+        )
         .to_string();
 
         let language = doc.language.clone().unwrap_or_else(|| {

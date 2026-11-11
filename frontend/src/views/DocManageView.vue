@@ -270,10 +270,17 @@
         </div>
         <div class="form-group">
           <label>文档类型</label>
-          <input v-model="form.doc_type" type="text" list="doc-type-options" placeholder="journalArticle" />
-          <datalist id="doc-type-options">
-            <option v-for="t in DOC_TYPE_OPTIONS" :key="t" :value="t" />
-          </datalist>
+          <select v-model="form.doc_type" class="doc-type-select">
+            <option value="">（未设置）</option>
+            <!-- 历史遗留值不在标准词表里时单独列出来，避免打开编辑页就被悄悄改掉 -->
+            <option v-if="legacyDocType" :value="legacyDocType">
+              {{ legacyDocType }}（历史值，保存后归一为 {{ docTypeLabel(normalizeDocType(legacyDocType)) }}）
+            </option>
+            <option v-for="opt in docTypeOptions" :key="opt.value" :value="opt.value">
+              {{ opt.label }}（{{ opt.value }}）
+            </option>
+          </select>
+          <p class="form-hint">候选来自后端标准词表（Zotero 类型名）；填其他值后端会归一化到最接近的候选。</p>
         </div>
         <div class="form-group">
           <label>DOI</label>
@@ -309,7 +316,16 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getDocument, updateDocument, replacePdf, replaceMarkdown, replaceAsset, deleteDocument, rehashDocument } from '@/api/documents'
+import {
+  getDocument,
+  getDocTypes,
+  updateDocument,
+  replacePdf,
+  replaceMarkdown,
+  replaceAsset,
+  deleteDocument,
+  rehashDocument
+} from '@/api/documents'
 import { getServiceConfig } from '@/api/config'
 import {
   parseDocument,
@@ -326,6 +342,12 @@ import { useTokenStore } from '@/stores/token'
 import { checkDocumentPdfHealth } from '@/api/admin'
 import type { Document } from '@/types/document'
 import { deriveDocStatus } from '@/utils/docStatus'
+import {
+  DOC_TYPE_OPTIONS,
+  normalizeDocType,
+  docTypeLabel,
+  type DocTypeOption
+} from '@/utils/docType'
 import type { VectorDbConfig } from '@/types/config'
 import type { DocumentIndexInfo } from '@/types/pipeline'
 
@@ -341,22 +363,14 @@ const doc = ref<Document | null>(null)
 const derivedStatus = computed(() => (doc.value ? deriveDocStatus(doc.value) : null))
 const form = ref<Partial<Document>>({})
 const saving = ref(false)
-/** 文档类型下拉候选（与后端 `pipeline::normalize_doc_type` 的输出保持一致） */
-const DOC_TYPE_OPTIONS = [
-  'journalArticle',
-  'conferencePaper',
-  'thesis',
-  'book',
-  'bookSection',
-  'preprint',
-  'report',
-  'webpage',
-  'document',
-  'presentation',
-  'manuscript',
-  'patent',
-  'review'
-]
+/** 文档类型候选：先取前端静态词表，挂载后用后端 `/documents/doc-types` 的 `standard` 覆盖 */
+const docTypeOptions = ref<DocTypeOption[]>([...DOC_TYPE_OPTIONS])
+/** 当前值不在标准词表里（历史脏值）时单独展示，避免用户以为丢了数据 */
+const legacyDocType = computed(() => {
+  const value = (form.value.doc_type || '').trim()
+  if (!value) return ''
+  return docTypeOptions.value.some((o) => o.value === value) ? '' : value
+})
 const LANGUAGE_OPTIONS = ['zh', 'en', 'ja', 'ko', 'fr', 'de', 'ru']
 const replacePdfInput = ref<HTMLInputElement>()
 const replaceMarkdownInput = ref<HTMLInputElement>()
@@ -731,8 +745,21 @@ async function rehash() {
 watch(() => route.params.id, load)
 onMounted(() => {
   loadVectorDbs()
+  loadDocTypeOptions()
   load()
 })
+
+/** 用后端下发的标准词表覆盖静态候选（拉不到就继续用静态表，不影响编辑） */
+async function loadDocTypeOptions() {
+  try {
+    const res = await getDocTypes()
+    if (Array.isArray(res?.standard) && res.standard.length) {
+      docTypeOptions.value = res.standard
+    }
+  } catch {
+    /* 词表接口失败不阻塞页面：静态候选与后端一致 */
+  }
+}
 
 function formatSize(bytes: number | null): string {
   if (!bytes) return '-'
@@ -1012,6 +1039,20 @@ function formatFile(size: number | null): string {
 
 .form-row .form-group {
   flex: 1;
+}
+
+.form-group select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color, #d1d5db);
+  border-radius: 6px;
+  background: var(--bg-card, #fff);
+  color: var(--text-primary, #111827);
+  font-size: 14px;
+}
+
+.form-group .form-hint {
+  margin: 6px 0 0;
 }
 
 .form-hint {

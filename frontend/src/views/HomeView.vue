@@ -105,7 +105,9 @@
           <td v-if="visibleColumns.authors">{{ doc.authors || '-' }}</td>
           <td v-if="visibleColumns.journal">{{ doc.journal || '-' }}</td>
           <td v-if="visibleColumns.year">{{ doc.year || '-' }}</td>
-          <td v-if="visibleColumns.doc_type">{{ doc.doc_type || '-' }}</td>
+          <td v-if="visibleColumns.doc_type">
+            <span :title="doc.doc_type || ''">{{ docTypeLabel(doc.doc_type) || '-' }}</span>
+          </td>
           <td v-if="visibleColumns.status">
             <StatusBadge :doc="doc" />
             <span v-if="doc.indexed_dbs && doc.indexed_dbs.length" class="index-dbs">
@@ -163,7 +165,7 @@
         <div class="doc-card-meta">
           <span v-if="doc.authors">👤 {{ doc.authors }}</span>
           <span v-if="doc.year">📅 {{ doc.year }}</span>
-          <span v-if="doc.doc_type">📋 {{ doc.doc_type }}</span>
+          <span v-if="doc.doc_type" :title="doc.doc_type">📋 {{ docTypeLabel(doc.doc_type) }}</span>
         </div>
         <div v-if="visibleColumns.files" class="doc-card-files">
           <span>PDF: {{ formatFile(doc.pdf_size) }}</span>
@@ -249,6 +251,7 @@ import { useTokenStore } from '@/stores/token'
 import StatusBadge from '@/components/StatusBadge.vue'
 import QueryBuilder from '@/components/QueryBuilder.vue'
 import ErrorBoundary from '@/components/ErrorBoundary.vue'
+import { docTypeLabel } from '@/utils/docType'
 import type { Document } from '@/types/document'
 import {
   parseSearchQuery,

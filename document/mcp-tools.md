@@ -15,7 +15,7 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | `list_documents` | 搜索/列出文献，支持标题/作者搜索、**文件事实过滤**（`md_state`/`pdf_state`/`zip_state`/`synced`/`has_*`/`pdf_health`）与类型过滤、字段过滤、排序 | `query`, `doc_type`, `md_state`, `pdf_state`, `zip_state`, `synced`, `has_md`, `has_pdf`, `has_zip`, `pdf_health`, `page`, `page_size`, `fields`, `sort_by`, `sort_order` |
 | `get_document_abstract` | 获取文献摘要（中英文） | `id` |
 | `get_stats` | 获取知识库统计信息（总数、状态分布、类型分布） | 无 |
-| `list_doc_types` | 列出所有已使用的文献类型 | 无 |
+| `list_doc_types` | 列出所有已使用的文献类型 + 标准类型词表（`standard`，含中文标签；筛选时应以它为准） | 无 |
 | `get_toc` | 获取文献目录（标题+行号），不受分页影响 | `id` |
 | `edit_markdown` 🔒 | **编辑**文献 Markdown 源码（按行范围替换/插入/删行，支持 `expected_text` 校验与 `dry_run` 预览） | `id`, `line_start`, `line_count`, `content`, `delete`, `expected_text`, `base_hash`, `dry_run` |
 | `replace_markdown` 🔒 | **整篇覆盖**文献 Markdown（要求显式提供非空内容） | `id`, `content`, `base_hash`, `dry_run` |

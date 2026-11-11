@@ -1008,7 +1008,12 @@ impl McpServer {
                 .unwrap_or_default();
         let mut types: Vec<String> = rows.into_iter().filter_map(|(t,)| t).collect();
         types.sort();
-        Self::pretty(&json!({"doc_types": types}))
+        // `standard` = 唯一认可的候选词表（模型筛选时应该用它，而不是库里遗留的碎片值）
+        let standard: Vec<Value> = crate::services::doc_type::STANDARD
+            .iter()
+            .map(|(value, label)| json!({"value": value, "label": label}))
+            .collect();
+        Self::pretty(&json!({"doc_types": types, "standard": standard}))
     }
 
     async fn tool_get_toc(&self, args: &Value) -> String {
@@ -1498,8 +1503,9 @@ fn append_list_filters<'a>(
             .push(" OR authors LIKE ").push_bind(like.clone())
             .push(" OR filename LIKE ").push_bind(like).push(")");
     }
-    if !doc_type.trim().is_empty() {
-        let types: Vec<String> = doc_type.split(',').map(|s| s.trim().to_string()).collect();
+    // 类型先归一到标准词表：模型（或用户）传 `article` / `journal` 也能命中
+    let types = crate::services::doc_type::normalize_many(doc_type);
+    if !types.is_empty() {
         qb.push(" AND doc_type IN (");
         for (i, t) in types.iter().enumerate() {
             if i > 0 {
@@ -1605,8 +1611,9 @@ fn append_search_info_filters<'a>(
     if year_to > 0 {
         qb.push(" AND year <= ").push_bind(year_to);
     }
-    if !doc_type.trim().is_empty() {
-        let types: Vec<String> = doc_type.split(',').map(|s| s.trim().to_string()).collect();
+    // 类型先归一到标准词表：模型（或用户）传 `article` / `journal` 也能命中
+    let types = crate::services::doc_type::normalize_many(doc_type);
+    if !types.is_empty() {
         qb.push(" AND doc_type IN (");
         for (i, t) in types.iter().enumerate() {
             if i > 0 {

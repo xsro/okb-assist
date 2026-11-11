@@ -228,7 +228,50 @@ impl Database {
             );
         }
 
+        // ── 文档类型归一化（同义词 → Zotero 标准名）────────────────────
+        // 历史：Crossref 回填写 `journal`/`conference`、BibTeX 直接落 `inproceedings`、
+        // 旧版实现写 `article`、手改过 `book_section`，于是 `type_counts` 被拆成多套词表，
+        // 且 `citation.rs` 里标准名 `journalArticle` 匹配不到任何分支（引用类型退成 misc/Z）。
+        // 这里把存量行一次性归一到 `services::doc_type::STANDARD`（幂等）。
+        let converted_types = Self::migrate_doc_types(&self.pool).await?;
+        if converted_types > 0 {
+            tracing::info!(
+                "数据库迁移：{} 行的 doc_type 归一化为 Zotero 标准类型名",
+                converted_types
+            );
+        }
+
         Ok(())
+    }
+
+    /// 把 `documents.doc_type` 里的历史同义词（`article` / `journal` / `conference` /
+    /// `book_section` / `inproceedings` / `misc` …）改写为 Zotero 标准名，返回改写行数。
+    /// 幂等：已经是标准值的行不动；无法识别的值落为 `document`。
+    async fn migrate_doc_types(pool: &SqlitePool) -> anyhow::Result<usize> {
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, doc_type FROM documents WHERE doc_type IS NOT NULL AND TRIM(doc_type) != ''",
+        )
+        .fetch_all(pool)
+        .await?;
+
+        let mut converted = 0usize;
+        for (id, raw) in rows {
+            // 快路径：已经是标准名的行直接跳过（绝大多数行不用再跑归一化）
+            if crate::services::doc_type::is_standard(&raw) {
+                continue;
+            }
+            let normalized = crate::services::doc_type::normalize(&raw);
+            if normalized.is_empty() || normalized == raw {
+                continue;
+            }
+            sqlx::query("UPDATE documents SET doc_type = ? WHERE id = ?")
+                .bind(&normalized)
+                .bind(id)
+                .execute(pool)
+                .await?;
+            converted += 1;
+        }
+        Ok(converted)
     }
 
     /// 把 `authors` / `authors_en` / `keywords` / `keywords_en` 里的历史 JSON 数组字符串

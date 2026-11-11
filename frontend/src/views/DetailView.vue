@@ -30,7 +30,7 @@
         <tr><th>作者</th><td>{{ meta.authors || '-' }}</td></tr>
         <tr><th>期刊</th><td>{{ meta.journal || '-' }}</td></tr>
         <tr><th>年份</th><td>{{ meta.year || '-' }}</td></tr>
-        <tr><th>文档类型</th><td>{{ meta.doc_type || '-' }}</td></tr>
+        <tr><th>文档类型</th><td>{{ docTypeText || '-' }}</td></tr>
         <tr>
           <th>DOI</th>
           <td>
@@ -105,7 +105,7 @@
         </div>
         <div class="info-row">
           <span class="info-label">文档类型</span>
-          <span class="info-value">{{ meta.doc_type || '-' }}</span>
+          <span class="info-value">{{ docTypeText || '-' }}</span>
         </div>
         <div class="info-row">
           <span class="info-label">DOI</span>
@@ -242,6 +242,7 @@ import { useResponsive } from '@/composables/useResponsive'
 import { useTokenStore } from '@/stores/token'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { deriveDocStatus } from '@/utils/docStatus'
+import { docTypeLabelWithValue } from '@/utils/docType'
 import DocumentPdfInfoPanel from '@/components/detail/DocumentPdfInfoPanel.vue'
 import DocumentCrossrefPanel from '@/components/detail/DocumentCrossrefPanel.vue'
 import DocumentCitationPanel from '@/components/detail/DocumentCitationPanel.vue'
@@ -289,6 +290,9 @@ const meta = computed(() => {
     abstract_en: d?.abstract_en || p?.abstract_en || ''
   }
 })
+
+/** 文档类型显示为「中文标签（原始值）」，历史脏值也能看出来 */
+const docTypeText = computed(() => docTypeLabelWithValue(meta.value.doc_type))
 
 /** 登录 / 注册后回到当前详情页 */
 function goLogin() {

@@ -773,13 +773,13 @@ async fn list_documents(
         }
     }
     if let Some(dt) = &params.doc_type_filter {
-        let types: Vec<&str> = dt.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        // 归一化后再比对：前端/API 传 `article`、`journal`、`book_section` 这类历史同义词
+        // 也能命中库里统一后的标准值（否则一改词表，旧筛选条件就全空）。
+        let types = crate::services::doc_type::normalize_many(dt);
         if !types.is_empty() {
             let placeholders = types.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             conditions.push(format!("doc_type IN ({})", placeholders));
-            for t in types {
-                binds.push(t.to_string());
-            }
+            binds.extend(types);
         }
     }
     if let Some(year) = params.year {
@@ -1124,7 +1124,20 @@ async fn update_document(
     if let Some(raw) = body.doc_type {
         doc.doc_type = match blank_to_none(raw) {
             None => None,
-            Some(raw) => Some(crate::routers::pipeline::normalize_doc_type(&raw)),
+            Some(raw) => {
+                let normalized = crate::routers::pipeline::normalize_doc_type(&raw);
+                // 用户/客户端填了同义词（`article`、`book_section` …）时告诉他落到了哪个标准值
+                if normalized != raw.trim() {
+                    tracing::info!(
+                        "文档 {} 的 doc_type `{}` 归一下为 `{}`（{}）",
+                        id,
+                        raw.trim(),
+                        normalized,
+                        crate::services::doc_type::label(&normalized)
+                    );
+                }
+                Some(normalized)
+            }
         };
     }
 
@@ -2276,10 +2289,14 @@ async fn insert_bibtex_document(db: &Database, rec: &bibtex::BibRecord) -> Resul
     };
     let doi = normalize_doi(&rec.doi);
     let filename = bibtex_filename(rec);
-    let doc_type = if rec.doc_type.trim().is_empty() {
-        "document".to_string()
-    } else {
-        rec.doc_type.trim().to_string()
+    // `bibtex::doc_type_of` 已经产出标准名，这里再归一一次作为双保险（以后改了映射表也不会漏）
+    let doc_type = {
+        let norm = crate::services::doc_type::normalize(&rec.doc_type);
+        if norm.is_empty() {
+            crate::services::doc_type::FALLBACK.to_string()
+        } else {
+            norm
+        }
     };
 
     let result = sqlx::query(
@@ -2566,7 +2583,17 @@ async fn list_doc_types(
     .await
     .unwrap_or_default();
 
-    Json(json!({"doc_types": types.into_iter().map(|(t,)| t).collect::<Vec<_>>()}))
+    // `doc_types` = 库里实际用到的值（兼容旧调用方）；
+    // `standard` = 唯一认可的候选词表（值 + 中文标签，顺序即前端下拉顺序），前端编辑/筛选都用它。
+    let standard: Vec<Value> = crate::services::doc_type::STANDARD
+        .iter()
+        .map(|(value, label)| json!({"value": value, "label": label}))
+        .collect();
+
+    Json(json!({
+        "doc_types": types.into_iter().map(|(t,)| t).collect::<Vec<_>>(),
+        "standard": standard,
+    }))
 }
 
 /// 元数据搜索（标题、作者、期刊、关键词、摘要、DOI）

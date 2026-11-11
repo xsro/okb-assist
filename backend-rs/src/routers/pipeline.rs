@@ -46,29 +46,13 @@ const QDRANT_USER_ID: i64 = 0;
 const CHUNK_SIZE: usize = 1000;
 const MIN_CHUNK_SIZE: usize = 100;
 
-/// Zotero 标准类型映射（`documents::update_document` 手工编辑也复用这一套）
+/// Zotero 标准类型归一化（保留旧名字，实现统一在 `services::doc_type`）。
+///
+/// **新增写入 `doc_type` 的地方一律调这个函数**（或直接 `services::doc_type::normalize`），
+/// 不要在别处再造一套同义词表——历史上 `crossref` 回填写 `journal`/`conference`、
+/// 旧实现写 `article`，导致同一份数据出现多套词表。
 pub(crate) fn normalize_doc_type(raw: &str) -> String {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return String::new();
-    }
-    let lower = raw.to_lowercase();
-    match lower.as_str() {
-        "article" | "journalarticle" | "journal article" => "journalArticle".to_string(),
-        "conference" | "conferencepaper" | "conference paper" | "inproceedings" | "conference proceedings" => "conferencePaper".to_string(),
-        "thesis" | "dissertation" | "硕士学位论文" | "博士学位论文" | "mastersthesis" | "phdthesis" => "thesis".to_string(),
-        "book" => "book".to_string(),
-        "booksection" | "book section" => "bookSection".to_string(),
-        "preprint" => "preprint".to_string(),
-        "report" => "report".to_string(),
-        "webpage" => "webpage".to_string(),
-        "document" => "document".to_string(),
-        "presentation" => "presentation".to_string(),
-        "manuscript" => "manuscript".to_string(),
-        "patent" => "patent".to_string(),
-        "review" => "review".to_string(),
-        _ => "document".to_string(),
-    }
+    crate::services::doc_type::normalize(raw)
 }
 
 // ── 全局状态（进程内，重启即丢失） ──
@@ -1387,7 +1371,8 @@ async fn run_crossref(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
     .bind(value_str(parsed, "journal").unwrap_or_default())
     .bind(&keywords_text)
     .bind(value_str(parsed, "abstract").unwrap_or_default())
-    .bind(value_str(parsed, "doc_type").unwrap_or_default())
+    // 双保险：crossref 侧已经归一到标准名，这里再归一一次（老记录 / 手改过的映射不会再漏）
+    .bind(normalize_doc_type(&value_str(parsed, "doc_type").unwrap_or_default()))
     .bind(value_str(parsed, "language").unwrap_or_default())
     .bind(value_str(parsed, "title_en").unwrap_or_default())
     .bind(&authors_en_text)
@@ -1468,7 +1453,7 @@ pub(crate) async fn run_crossref_override(db: Arc<Database>, settings: Arc<Setti
     .bind(value_str(parsed, "journal"))
     .bind(keywords_text)
     .bind(value_str(parsed, "abstract"))
-    .bind(value_str(parsed, "doc_type"))
+    .bind(value_str(parsed, "doc_type").map(|t| normalize_doc_type(&t)))
     .bind(value_str(parsed, "language"))
     .bind(value_str(parsed, "title_en"))
     .bind(authors_en_text)

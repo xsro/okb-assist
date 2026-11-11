@@ -137,21 +137,12 @@ fn crossref_authors(item: &Value) -> Vec<String> {
 }
 
 /// 映射 Crossref 类型到文档类型
-fn doc_type_map(crossref_type: &str) -> &'static str {
-    match crossref_type.to_lowercase().as_str() {
-        "journal-article" => "journal",
-        "book" => "book",
-        "book-chapter" => "book",
-        "proceedings-article" => "conference",
-        "conference-paper" => "conference",
-        "dataset" => "dataset",
-        "report" => "report",
-        "thesis" => "thesis",
-        "posted-content" => "preprint",
-        "reference-entry" => "reference",
-        "peer-review" => "other",
-        _ => "other",
-    }
+///
+/// **返回值必须是 `services::doc_type::normalize` 认的标准名**：这里以前返回
+/// `journal` / `conference` / `dataset` / `other`，直接落库后又成了 `type_counts` 里的碎片
+/// （`journal` 80 条、`conference` 269 条都是这么来的）。现在统一过一遍归一化。
+fn doc_type_map(crossref_type: &str) -> String {
+    crate::services::doc_type::normalize(crossref_type)
 }
 
 /// 解析 Crossref 条目（供 Crossref 记录展示与引用生成复用）

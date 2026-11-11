@@ -465,9 +465,15 @@ pub fn build_where_clause(
             conditions.push(format!("{} IN ({})", column, placeholders.join(",")));
             binds.extend(values.iter().cloned());
         } else if column == "doc_type" {
+            // 类型用枚举精确匹配，但先归一化：`type:article` / `type:journal` 都能命中
+            // 库里统一后的标准值（否则老习惯的写法一律搜不到）
+            let values = super::doc_type::normalize_many(&values.join(","));
+            if values.is_empty() {
+                continue;
+            }
             let placeholders: Vec<String> = values.iter().map(|_| "?".to_string()).collect();
             conditions.push(format!("{} IN ({})", column, placeholders.join(",")));
-            binds.extend(values.iter().cloned());
+            binds.extend(values);
         } else if column == "language" {
             let like = format!("%{}%", values.join(" "));
             conditions.push(format!("{} LIKE ?", column));

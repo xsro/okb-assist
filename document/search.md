@@ -31,7 +31,7 @@ transformer attention
 | `source:来源` | 按来源搜索 | `source:arxiv` |
 | `filename:文件名` | 按 PDF 文件名搜索 | `filename:paper.pdf` |
 | `category:分类` | 按分类搜索 | `category:AI` |
-| `type:类型` | 按文献类型筛选 | `type:article` |
+| `type:类型` | 按文献类型筛选（Zotero 标准类型名；`article` / `journal` / `conference` 等同义词会自动归一） | `type:journalArticle` |
 | `doc_type:类型` | 同 type | `doc_type:book` |
 | `lang:语言` | 按语言筛选 | `lang:en` |
 | `language:语言` | 同 lang | `language:zh` |
@@ -195,7 +195,7 @@ build_where_clause() / build_search_sql()（SQL WHERE 构建）→ 结果列表
   type:book md:present
 
 # 查找摘要中包含 pre-training 的 2023 年文章（按标题排序）
-  abstract:pre-training year:2023 type:article sort:title
+  abstract:pre-training year:2023 type:journalArticle sort:title
 
 # 排除某些年份
   transformer -year:2021 -year:2022

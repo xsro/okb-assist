@@ -444,9 +444,16 @@ export function getImageUrl(id: number, filename: string): string {
 
 // ── 辅助查询 ────────────────────────────────────────────
 
-/** 获取所有文档类型 */
+/** 获取所有文档类型
+ *
+ * `doc_types` = 库里实际用到的值（可能还有历史脏值）；
+ * `standard`  = 唯一认可的标准词表（值 + 中文标签），编辑/筛选都用它。
+ */
 export function getDocTypes() {
-  return apiGet<{ doc_types: string[] }>('/assist/api/documents/doc-types/')
+  return apiGet<{
+    doc_types: string[]
+    standard?: Array<{ value: string; label: string }>
+  }>('/assist/api/documents/doc-types/')
 }
 
 /** 获取相似标题分组（去重用，后端按归一化标题 + 编辑距离聚类） */
