@@ -71,6 +71,23 @@ pub async fn check_pdf_health(path: String) -> PdfHealth {
         })
 }
 
+/// 只取 PDF 页数（异步，可能阻塞，内部走 spawn_blocking）。
+///
+/// 供分片解析判断是否需要切片使用：只做轻量的结构检查（读页数），
+/// 不像 [`check_pdf_health`] 那样连文件头尾与诊断一起判。
+/// 解析引擎不可用 / 文件损坏时返回 `None`。
+pub async fn page_count(path: String) -> Option<i64> {
+    tokio::task::spawn_blocking(move || page_count_sync(Path::new(&path)))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// 只取 PDF 页数（同步，可能阻塞，请在 `spawn_blocking` 里调用）
+pub fn page_count_sync(path: &Path) -> Option<i64> {
+    inspect_structure(path).page_count
+}
+
 /// 结构检查结果（由 mutool 或 mupdf 提供）
 struct Structure {
     page_count: Option<i64>,

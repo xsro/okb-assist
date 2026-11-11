@@ -122,18 +122,43 @@ impl MinerUClient {
 
     /// 提交解析任务，返回 task_id / job_id / request_id
     pub async fn submit_parse_task(&self, file_path: &str) -> anyhow::Result<String> {
+        self.submit_parse_task_with_range(file_path, None).await
+    }
+
+    /// 带页码范围提交解析任务（`page_range` 形如 `"1-100"`，`None` = 整份文档）
+    ///
+    /// 各类型的能力差异：
+    /// - `local`（V1）：`files[].page_range`
+    /// - `official`（V4）：`files[].page_ranges`（**必须放 files[] 里，放顶层会被忽略**）
+    /// - `datalab`：multipart 的 `page_range` 字段
+    /// - `official-lightweight`：**不支持**页码范围，传了会被忽略（打 warn）
+    pub async fn submit_parse_task_with_range(
+        &self,
+        file_path: &str,
+        page_range: Option<&str>,
+    ) -> anyhow::Result<String> {
         match self.mineru_type {
-            MineruType::Local => self.submit_parse_task_v1(file_path).await,
-            MineruType::Official => self.submit_parse_task_v4(file_path).await,
-            MineruType::OfficialLightweight => self.submit_parse_task_lightweight(file_path).await,
+            MineruType::Local => self.submit_parse_task_v1(file_path, page_range).await,
+            MineruType::Official => self.submit_parse_task_v4(file_path, page_range).await,
+            MineruType::OfficialLightweight => {
+                if page_range.is_some() {
+                    warn!("MinerU 轻量 API 不支持页码范围，忽略分片页码（整份文档提交）");
+                }
+                self.submit_parse_task_lightweight(file_path).await
+            }
             MineruType::Datalab => {
                 if let Some(ref client) = self.datalab_client {
-                    client.submit_parse_task(file_path).await
+                    client.submit_parse_task(file_path, page_range).await
                 } else {
                     anyhow::bail!("Datalab 客户端未初始化")
                 }
             }
         }
+    }
+
+    /// 该类型是否支持页码范围（分片解析的前提）
+    pub fn supports_page_range(&self) -> bool {
+        !matches!(self.mineru_type, MineruType::OfficialLightweight)
     }
 
     /// 检查任务状态，返回标准化 Value
@@ -242,10 +267,199 @@ impl MinerUClient {
     }
 
     // ════════════════════════════════════════════════════════
+    //  分片解析（超过单次页数上限的 PDF）
+    // ════════════════════════════════════════════════════════
+
+    /// 分片解析：按 `chunks` 逐片提交、轮询、下载，最后合并 Markdown 与图片。
+    ///
+    /// - `total_pages` 用于进度汇报与日志；
+    /// - `on_progress(已解析页数, 总页数)` 在每个分片开始/结束以及轮询过程中被调用；
+    /// - 返回**合并后**的 Markdown 路径（与单任务结果同形，可直接交给 `finish_parse_result`）。
+    ///
+    /// 每个分片的结果落到 `output_dir/chunk_NNN/`，合并统一在本函数末尾完成，
+    /// 图片同名不同内容时会改名并同步改写正文引用（见 [`merge_chunk_results`]）。
+    /// 本地切页产生的临时 PDF（`page_range` 为 `None`）在结果下载后立即删除，不占盘。
+    pub async fn parse_pdf_chunks(
+        &self,
+        output_dir: &str,
+        doc_id: Option<i64>,
+        timeout_secs: u64,
+        total_pages: i64,
+        chunks: &[ParseChunk],
+        on_progress: &(dyn Fn(i64, i64) + Send + Sync),
+    ) -> anyhow::Result<String> {
+        if chunks.is_empty() {
+            anyhow::bail!("分片列表为空");
+        }
+
+        let base = Path::new(output_dir);
+        std::fs::create_dir_all(base)?;
+        let total = chunks.len();
+
+        let mut md_paths: Vec<String> = Vec::with_capacity(total);
+        let mut pages_done: i64 = 0;
+
+        info!(
+            "开始分片解析: 共 {} 页，分 {} 片（{}）",
+            total_pages,
+            total,
+            if chunks.iter().all(|c| c.page_range.is_none()) {
+                "本地切页"
+            } else {
+                "按页码范围提交"
+            }
+        );
+
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let chunk_dir = base.join(format!("chunk_{:03}", idx + 1));
+            let _ = std::fs::remove_dir_all(&chunk_dir);
+            std::fs::create_dir_all(&chunk_dir)?;
+            let chunk_dir_str = chunk_dir.to_string_lossy().to_string();
+
+            info!(
+                "分片解析 [{}/{}]: {}，task_id 提交中...",
+                idx + 1,
+                total,
+                chunk.label()
+            );
+            on_progress(pages_done, total_pages);
+
+            let task_id = match self
+                .submit_parse_task_with_range(&chunk.file_path, chunk.page_range.as_deref())
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    cleanup_split_file(chunk);
+                    anyhow::bail!("分片 {}/{} 提交失败: {}", idx + 1, total, e);
+                }
+            };
+            info!(
+                "分片解析 [{}/{}]: 已提交 task_id={}",
+                idx + 1,
+                total,
+                task_id
+            );
+
+            let base_pages = pages_done;
+            let progress = |extracted: i64| {
+                // 分片内的已解析页数 + 之前完成的分片页数 = 全文进度
+                let done = (base_pages + extracted).min(total_pages);
+                on_progress(done, total_pages);
+            };
+            let polled = self.poll_chunk_task(&task_id, timeout_secs, &progress).await;
+            if let Err(e) = polled {
+                cleanup_split_file(chunk);
+                return Err(anyhow::anyhow!(
+                    "分片 {}/{} 解析失败: {}",
+                    idx + 1,
+                    total,
+                    e
+                ));
+            }
+
+            let md_path = match self
+                .get_task_result(&task_id, &chunk_dir_str, doc_id)
+                .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    cleanup_split_file(chunk);
+                    anyhow::bail!(
+                        "分片 {}/{} 获取结果失败: {}",
+                        idx + 1,
+                        total,
+                        e
+                    );
+                }
+            };
+            info!(
+                "分片解析 [{}/{}]: 结果已下载 {}",
+                idx + 1,
+                total,
+                md_path
+            );
+            md_paths.push(md_path);
+            pages_done += chunk.pages;
+            on_progress(pages_done.min(total_pages), total_pages);
+            // 每一片的临时 PDF 用完就删，大文件不会在临时目录里成倍占盘
+            cleanup_split_file(chunk);
+        }
+
+        let merged = merge_chunk_results(&md_paths, output_dir, doc_id)?;
+        info!("分片解析完成: {} 片已合并 → {}", total, merged);
+        Ok(merged)
+    }
+
+    /// 轮询单个分片任务，并把 API 回传的已解析页数换算成全局页数进度
+    async fn poll_chunk_task(
+        &self,
+        task_id: &str,
+        timeout_secs: u64,
+        on_progress: &(dyn Fn(i64) + Send + Sync),
+    ) -> anyhow::Result<Value> {
+        let poll_interval = match self.mineru_type {
+            MineruType::Local => 2u64,
+            MineruType::Official => 5u64,
+            MineruType::OfficialLightweight => 3u64,
+            MineruType::Datalab => 3u64,
+        };
+        let max_polls = if timeout_secs > 0 {
+            timeout_secs / poll_interval
+        } else {
+            u64::MAX
+        };
+
+        for i in 0..max_polls {
+            let status_result = self.check_task_status(task_id).await;
+
+            if let Some(progress) = status_result.get("extract_progress") {
+                if let Some(extracted) = progress["extracted_pages"].as_i64() {
+                    on_progress(extracted.max(0));
+                }
+            }
+
+            if status_result
+                .get("_done")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                return Ok(status_result);
+            }
+
+            match status_result["status"].as_str().unwrap_or("unknown") {
+                "failed" => {
+                    let error = status_result["error"].as_str().unwrap_or("Unknown error");
+                    anyhow::bail!("MinerU task failed: {}", error);
+                }
+                "canceled" => anyhow::bail!("MinerU task was canceled"),
+                status => {
+                    if i > 0 && i % 10 == 0 {
+                        debug!(
+                            "分片任务 task_id={} [{}/{}], status={}",
+                            task_id,
+                            i + 1,
+                            max_polls,
+                            status
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
+                }
+            }
+        }
+
+        anyhow::bail!("MinerU 分片任务超时: {}", task_id);
+    }
+
+    // ════════════════════════════════════════════════════════
     //  实现：V1 自部署 API（type=local）
     // ════════════════════════════════════════════════════════
 
-    async fn submit_parse_task_v1(&self, file_path: &str) -> anyhow::Result<String> {
+    async fn submit_parse_task_v1(
+        &self,
+        file_path: &str,
+        page_range: Option<&str>,
+    ) -> anyhow::Result<String> {
         let file_name = Path::new(file_path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -263,7 +477,7 @@ impl MinerUClient {
         }
 
         let file_id = self.v1_complete_upload(&upload_id).await?;
-        let job_id = self.v1_submit_job(&file_id).await?;
+        let job_id = self.v1_submit_job(&file_id, page_range).await?;
         Ok(job_id)
     }
 
@@ -384,11 +598,16 @@ impl MinerUClient {
     }
 
     /// V1: 提交解析任务 → job_id
-    async fn v1_submit_job(&self, file_id: &str) -> anyhow::Result<String> {
+    async fn v1_submit_job(&self, file_id: &str, page_range: Option<&str>) -> anyhow::Result<String> {
+        let mut file_entry = json!({
+            "source": { "type": "file_id", "file_id": file_id }
+        });
+        // `files[].page_range`：分片解析时只取这一段页码（仅 PDF 支持）
+        if let Some(range) = page_range {
+            file_entry["page_range"] = json!(range);
+        }
         let body = json!({
-            "files": [{
-                "source": { "type": "file_id", "file_id": file_id }
-            }],
+            "files": [file_entry],
             "tier": self.tier,
             "output_formats": ["markdown", "zip"],
         });
@@ -589,7 +808,11 @@ impl MinerUClient {
     /// V4: 通过批量文件上传提交任务
     /// 流程：获取预签名上传 URL → 上传文件 → 提交解析任务 → 轮询 → 获取结果
     /// 返回 submit_batch_id（用于后续轮询任务状态）
-    async fn submit_parse_task_v4(&self, file_path: &str) -> anyhow::Result<String> {
+    async fn submit_parse_task_v4(
+        &self,
+        file_path: &str,
+        page_range: Option<&str>,
+    ) -> anyhow::Result<String> {
         let file_name = Path::new(file_path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -605,11 +828,19 @@ impl MinerUClient {
 
         // Step 1: 获取预签名上传 URL
         // 注意：model_version 参数已被官方 V4 API 移除，不再发送
+        // `files[].page_ranges`：分片解析时只解析这一段页码，无需本地切 PDF。
+        // 实测（2026-11）页码必须放在 **files[] 条目里**，放顶层会被静默忽略，
+        // 结果仍是整份文档（extract_progress.total_pages 依旧是全文页数）。
+        // 代价是每个分片都要重新上传一次整份文件（API 限制）。
+        let mut file_entry = json!({
+            "name": file_name,
+            "data_id": data_id,
+        });
+        if let Some(range) = page_range {
+            file_entry["page_ranges"] = json!(range);
+        }
         let body = json!({
-            "files": [{
-                "name": file_name,
-                "data_id": data_id,
-            }],
+            "files": [file_entry],
         });
 
         debug!("V4 请求上传 URL: {}", body.to_string());
@@ -1303,6 +1534,236 @@ fn save_images_zip(output_dir: &str, images: &[(String, Vec<u8>)]) {
             tracing::warn!("无法创建 images.zip: {}", e);
         }
     }
+}
+
+/// 一个解析分片。
+///
+/// - **本地切页**（首选）：`file_path` 是 mutool 切出来的临时 PDF，`page_range = None`、
+///   `temporary = true`，解析完即删除；
+/// - **按页码范围提交**（本地切页不可用时的退路）：`file_path` 是原文件，
+///   `page_range = Some("1-100")`，`temporary = false`（**绝不能删原文件**）。
+#[derive(Debug, Clone)]
+pub struct ParseChunk {
+    pub file_path: String,
+    pub page_range: Option<String>,
+    /// 这一片包含多少页（仅用于进度汇报）
+    pub pages: i64,
+    /// 是否是本地切页产生的临时文件（true = 用完可删）
+    pub temporary: bool,
+}
+
+impl ParseChunk {
+    /// 日志里的分片描述
+    fn label(&self) -> String {
+        match (&self.page_range, self.temporary) {
+            (Some(range), _) => format!("页码 {}", range),
+            (None, true) => format!("本地分片 {} 页", self.pages),
+            (None, false) => format!("{} 页", self.pages),
+        }
+    }
+}
+
+/// 删掉本地切页产生的临时 PDF（`temporary = false` 时不动，避免误删原文件）
+fn cleanup_split_file(chunk: &ParseChunk) {
+    if chunk.temporary {
+        let _ = std::fs::remove_file(&chunk.file_path);
+    }
+}
+
+/// 规划分片来源：**优先本地切页**（mutool，总上传量 = 原文件大小），
+/// 切页不可用时退回「整份原文件 + 页码范围」（要求该 API 支持页码参数）。
+///
+/// 返回空列表表示分不了片，调用方按「整份提交」继续。
+pub async fn plan_chunks(
+    src: &str,
+    ranges: &[String],
+    split_dir: &str,
+    api_supports_page_range: bool,
+) -> Vec<ParseChunk> {
+    if ranges.is_empty() {
+        return Vec::new();
+    }
+    match crate::services::pdf_split::split_pdf(src, ranges, split_dir).await {
+        Ok(files) if files.len() == ranges.len() => files
+            .into_iter()
+            .zip(ranges.iter())
+            .map(|(path, range)| ParseChunk {
+                file_path: path,
+                page_range: None,
+                pages: pages_in_range(range),
+                temporary: true,
+            })
+            .collect(),
+        Ok(files) => {
+            warn!(
+                "本地切页数量不符（{} != {}），退回按页码范围提交",
+                files.len(),
+                ranges.len()
+            );
+            let _ = std::fs::remove_dir_all(split_dir);
+            page_range_chunks(src, ranges, api_supports_page_range)
+        }
+        Err(e) => {
+            warn!("本地切页不可用（{}），退回按页码范围提交", e);
+            page_range_chunks(src, ranges, api_supports_page_range)
+        }
+    }
+}
+
+/// 退路：同一个原文件 + 每片各自的页码范围（每片都要重新上传整份文件）
+fn page_range_chunks(
+    src: &str,
+    ranges: &[String],
+    api_supports_page_range: bool,
+) -> Vec<ParseChunk> {
+    if !api_supports_page_range {
+        warn!(
+            "当前 MinerU 类型不支持页码范围，且本地切页不可用 → 只能整份提交（可能触发官方 API 页数上限）"
+        );
+        return Vec::new();
+    }
+    ranges
+        .iter()
+        .map(|range| ParseChunk {
+            file_path: src.to_string(),
+            page_range: Some(range.clone()),
+            pages: pages_in_range(range),
+            temporary: false,
+        })
+        .collect()
+}
+
+/// 按 `page_step` 页一片生成页码范围（1-based、含端点），如 250 页 / 100 → `["1-100","101-200","201-250"]`
+///
+/// `total_pages` 或 `page_step` 非正时返回空列表（调用方按「不分片」处理）。
+pub fn plan_page_ranges(total_pages: i64, page_step: i64) -> Vec<String> {
+    if total_pages <= 0 || page_step <= 0 {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut start = 1i64;
+    while start <= total_pages {
+        let end = (start + page_step - 1).min(total_pages);
+        ranges.push(format!("{}-{}", start, end));
+        start = end + 1;
+    }
+    ranges
+}
+
+/// 页码范围内包含多少页（`"101-200"` → 100；解析失败按 0 计，仅用于进度估算）
+fn pages_in_range(range: &str) -> i64 {
+    let range = range.trim();
+    match range.split_once('-') {
+        Some((a, b)) => match (a.trim().parse::<i64>(), b.trim().parse::<i64>()) {
+            (Ok(a), Ok(b)) if b >= a => b - a + 1,
+            _ => 0,
+        },
+        None => range.parse::<i64>().map(|_| 1).unwrap_or(0),
+    }
+}
+
+/// 是否为图片文件名（与 [`extract_from_zip`] 认可的扩展名一致）
+fn is_image_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    [
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp",
+    ]
+    .iter()
+    .any(|ext| lower.ends_with(ext))
+}
+
+/// 合并各分片的结果目录为单一 Markdown + images.zip。
+///
+/// - Markdown 按分片顺序用空行拼接（分片顺序 = 页码范围顺序 = 文档页序）；
+/// - 图片同名同内容只保留一份；同名**不同内容**时改名为 `chunkN__原名` 并同步改写
+///   该分片正文里的引用（前端 `read_image` 只认 basename，所以只改文件名即可）。
+fn merge_chunk_results(
+    md_paths: &[String],
+    output_dir: &str,
+    doc_id: Option<i64>,
+) -> anyhow::Result<String> {
+    let out_dir = Path::new(output_dir);
+    std::fs::create_dir_all(out_dir)?;
+
+    let mut merged = String::new();
+    // 已合并的图片：文件名 → 内容（用于判重与打包）
+    let mut images: HashMap<String, Vec<u8>> = HashMap::new();
+
+    for (idx, md_path) in md_paths.iter().enumerate() {
+        let md_path = Path::new(md_path);
+        let mut content = std::fs::read_to_string(md_path).unwrap_or_default();
+        let chunk_dir = md_path.parent().unwrap_or(out_dir);
+
+        let mut renames = 0usize;
+        if let Ok(entries) = std::fs::read_dir(chunk_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(name) = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                else {
+                    continue;
+                };
+                if !is_image_name(&name) {
+                    continue;
+                }
+                let Ok(data) = std::fs::read(&path) else {
+                    continue;
+                };
+                match images.get(&name) {
+                    // 同名同内容（重复图片）：只保留一份
+                    Some(existing) if existing == &data => {}
+                    None => {
+                        images.insert(name, data);
+                    }
+                    // 同名不同内容：改名，避免后一片盖掉前一片的图
+                    Some(_) => {
+                        let renamed = format!("chunk{}__{}", idx + 1, name);
+                        content = content.replace(&name, &renamed);
+                        debug!("分片 {} 图片重名，{} → {}", idx + 1, name, renamed);
+                        renames += 1;
+                        images.insert(renamed, data);
+                    }
+                }
+            }
+        }
+        if renames > 0 {
+            debug!("分片 {} 共 {} 张重名图片已改名", idx + 1, renames);
+        }
+
+        let trimmed = content.trim_end();
+        if trimmed.is_empty() {
+            warn!("分片 {} 的 Markdown 为空，跳过", idx + 1);
+            continue;
+        }
+        if !merged.is_empty() {
+            merged.push_str("\n\n");
+        }
+        merged.push_str(trimmed);
+    }
+
+    if merged.is_empty() {
+        anyhow::bail!("分片解析结果合并后 Markdown 为空");
+    }
+
+    if !images.is_empty() {
+        let list: Vec<(String, Vec<u8>)> = images.into_iter().collect();
+        info!("分片解析合并图片 {} 张", list.len());
+        save_images_zip(output_dir, &list);
+    }
+
+    let md_filename = match doc_id {
+        Some(id) => format!("{}.md", id),
+        None => "output.md".to_string(),
+    };
+    let md_path = out_dir.join(&md_filename);
+    // 合并后的 Markdown 必须是「图片与 images.zip 的同级目录」，
+    // finish_parse_result 就按这个约定去找 images.zip。
+    std::fs::write(&md_path, merged)?;
+    Ok(md_path.to_string_lossy().to_string())
 }
 
 /// 解析 URL：将相对路径拼接到 base_url 上

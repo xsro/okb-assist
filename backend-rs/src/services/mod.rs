@@ -16,6 +16,7 @@ pub mod mineru;
 pub mod pdf_meta;
 pub mod pdf_engine;
 pub mod pdf_health;
+pub mod pdf_split;
 pub mod qdrant;
 pub mod query_parser;
 pub mod vector_db;

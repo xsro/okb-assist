@@ -47,7 +47,13 @@ impl DatalabClient {
     // ════════════════════════════════════════════════════════
 
     /// 提交文档转换任务，返回 request_id
-    pub async fn submit_parse_task(&self, file_path: &str) -> anyhow::Result<String> {
+    ///
+    /// `page_range` 形如 `"1-100"`（Datalab 的 `page_range` 表单字段），`None` = 整份文档
+    pub async fn submit_parse_task(
+        &self,
+        file_path: &str,
+        page_range: Option<&str>,
+    ) -> anyhow::Result<String> {
         let file_name = Path::new(file_path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -65,6 +71,11 @@ impl DatalabClient {
             .part("file", part)
             .text("output_format", "markdown")
             .text("mode", "fast");
+        // Datalab 的 `page_range`：分片解析时只转换这一段页码
+        let form = match page_range {
+            Some(range) => form.text("page_range", range.to_string()),
+            None => form,
+        };
 
         let resp = self
             .http

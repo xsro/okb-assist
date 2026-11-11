@@ -107,6 +107,12 @@ async function load() {
     if (!Array.isArray(raw.mineru)) {
       raw.mineru = [raw.mineru]
     }
+    // 分片解析每片页数：缺省 100（0 = 不分片，必须保留）
+    for (const mu of raw.mineru) {
+      if (typeof mu.page_chunk !== 'number' || Number.isNaN(mu.page_chunk)) {
+        mu.page_chunk = 100
+      }
+    }
     // PDF 解析引擎：缺省按 mutool（服务端也会补齐，这里只是保证表单可控）
     if (!raw.pdf || typeof raw.pdf !== 'object') {
       raw.pdf = { engine: 'mutool' }

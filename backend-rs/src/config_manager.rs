@@ -119,6 +119,8 @@ pub fn default_config() -> serde_json::Value {
                 "url": "http://127.0.0.1:8000",
                 "key": "key",
                 "max_tasks": 3,
+                // 分片解析每片页数（0 = 不分片）：官方 API 单文件上限 200 页
+                "page_chunk": 100,
                 "task_timeout": 300,
                 "tier": "standard"
             }

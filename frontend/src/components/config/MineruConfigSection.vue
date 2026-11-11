@@ -82,6 +82,20 @@
             <label>最大并发任务数</label>
             <input v-model.number="mu.max_tasks" type="number" @input="emitUpdate" />
           </div>
+          <div class="form-group">
+            <label>分片页数（0 = 不分片）</label>
+            <input
+              v-model.number="mu.page_chunk"
+              type="number"
+              min="0"
+              step="10"
+              placeholder="100"
+              @input="emitUpdate"
+            />
+            <p class="field-hint">
+              超过该页数时按此页数切片逐片解析再合并（官方 API 单文件上限 200 页）
+            </p>
+          </div>
           </div>
         <div class="status-test-row">
           <span class="status-dot" :class="getStatusClass(idx)"></span>
@@ -157,7 +171,8 @@ function defaultMineruConfig(): MinerUConfig {
     name: '',
     task_timeout: 300,
     tier: 'standard',
-    max_tasks: 3
+    max_tasks: 3,
+    page_chunk: 100
   }
 }
 
@@ -397,6 +412,12 @@ defineExpose({ syncStatus })
 }
 
 .hint { display: none; }
+.field-hint {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
 
 .input-with-toggle {
   display: flex;

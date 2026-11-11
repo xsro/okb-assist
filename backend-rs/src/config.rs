@@ -16,6 +16,7 @@ use crate::services::llm::{ExtractOptions, LlmClient, Protocol};
 /// - `tier`: 解析档位，可选 "flash" / "basic" / "standard" / "advanced"
 /// - 本地和官方云均使用相同的 V1 API 端点
 /// - `enabled`: 是否启用此配置（false 表示跳过，默认 true）
+/// - `page_chunk`: 分片解析的每片页数（0 = 不分片），默认 100
 #[derive(Debug, Clone)]
 pub struct MinerUConfig {
     pub url: String,
@@ -23,8 +24,13 @@ pub struct MinerUConfig {
     pub name: String,
     pub mineru_type: String,
     pub tier: String,
+    /// 单个解析任务超时（秒）。分片解析时**每片各自计一份超时**。
     pub task_timeout: u64,
     pub max_tasks: usize,
+    /// 分片解析每片页数：官方精准解析 API 单文件最多 200 页，超过这个页数时
+    /// 按 `page_chunk` 页切片逐片提交，最后合并 Markdown 与图片。
+    /// `0` = 不分片（整份 PDF 一次提交）。
+    pub page_chunk: usize,
 }
 
 /// 单个模型端点配置（协议 + 地址 + 凭据 + 模型名）。
@@ -143,6 +149,8 @@ impl Settings {
                 tier: v["tier"].as_str().unwrap_or("standard").to_string(),
                 task_timeout: v["task_timeout"].as_u64().unwrap_or(300),
                 max_tasks: v["max_tasks"].as_u64().unwrap_or(3) as usize,
+                // 缺省 100 页：既照顾官方 API 的 200 页上限，也不会把任务切得太碎
+                page_chunk: v["page_chunk"].as_u64().unwrap_or(100) as usize,
             })
             .collect()
     }

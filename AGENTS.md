@@ -74,7 +74,7 @@ cargo build --release
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`drive.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/drive.rs` | 用户网盘：路径安全、角色阈值、配额统计、目录列举、Content-Type 推断 |
 | `backend-rs/src/services/pdf_engine.rs` | PDF 解析引擎运行时选择（`mutool` 命令行 / 内置 `mupdf`，含能力兜底） |
-| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`doc_type.rs`（**文档类型唯一词表**：归一化 / 标准列表 / Crossref 映射，见下方「文档类型词表」）、`file_state.rs`（文件事实 → 文献状态推导 + 运行时状态注册表）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存） |
+| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`doc_type.rs`（**文档类型唯一词表**：归一化 / 标准列表 / Crossref 映射，见下方「文档类型词表」）、`file_state.rs`（文件事实 → 文献状态推导 + 运行时状态注册表）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存）、`pdf_split.rs`（mutool 按页切分 PDF，供 MinerU 分片解析） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
@@ -102,8 +102,43 @@ cargo build --release
 - `backend-rs/system.json`：系统配置，改后**必须重启进程**才生效（进程内缓存）。
 - 配置读取层：`backend-rs/src/config_manager.rs`（带锁 + 进程内缓存）；`backend-rs/src/config.rs:Settings` 是单例代理，属性每次从 JSON 实时读取。
 - 添加新配置字段时：在 `config_manager.rs` 的默认值中加默认值；若是敏感字段，扩展脱敏函数。
-- `config.json` 中 MinerU 配置支持多配置数组，通过 `active_mineru` 按 `name` 选择当前使用的配置。每个配置的 `max_tasks` 控制该 MinerU 服务的并发解析数（对应 `pipeline.rs` 中独立的 `MINERU_SEMAPHORE`），`task_timeout` 控制单任务超时，`token` 为 API 认证凭据。
+- `config.json` 中 MinerU 配置支持多配置数组，通过 `active_mineru` 按 `name` 选择当前使用的配置。每个配置的 `max_tasks` 控制该 MinerU 服务的并发解析数（对应 `pipeline.rs` 中独立的 `MINERU_SEMAPHORE`），`task_timeout` 控制单任务超时，`page_chunk` 控制分片解析的每片页数（默认 100，见下方「MinerU 分片解析」），`token` 为 API 认证凭据。
 - 文件路径来自 `system.json` 的路径模板（含 `{id}` 占位符），在 `backend-rs/src/paths.rs` 解析，**不要**在 `Document` 模型里加路径列。
+
+### MinerU 分片解析（`config.json` 的 `mineru[].page_chunk`）
+
+官方精准解析 API 限制**单文件 ≤ 200 页**，超过会直接报错。为此每个 MinerU 配置多了一个
+`page_chunk`（每片页数，**默认 100**，`0` = 不分片），前端「配置 → MinerU → 分片页数」可直接改：
+
+```json
+{ "mineru": [{ "name": "官方标准", "type": "official", "page_chunk": 100 }] }
+```
+
+- **何时切片**：`pdf_health::page_count()`（mutool / 内置 mupdf 的轻量结构检查，只读页数）
+  得到的页数 > `page_chunk` 且 `page_chunk > 0`。读不到页数（mutool 不可用 / 文件损坏）时不切片、
+  整份提交并打 `warn`；页数 ≤ `page_chunk` 时与以前完全一致（单任务 + 断点续传）。
+- **切页方式（首选本地切）**：`mineru::plan_chunks()` 先用 `services/pdf_split.rs`（`mutool clean -ggg -D`
+  按页切分）把 PDF 切到 `uploads/{id}/_split/part_NNN.pdf`，**每片只上传自己那部分**
+  （总上传量 = 原文件大小，不像页码范围方案那样每片重传整份）。每片结果下载后临时 PDF 立即删除，
+  切到一半失败会把 `_split` 整个清掉，不留半成品。
+  `-D` 是**去加密**：国内学位论文常见「空用户口令 + AES-128」（CNKI / ReaderEx 导出），
+  去加密后 MinerU 不会因权限位拒绝。
+- **退路（没有 mutool 时）**：切页失败（未安装 mutool / 文件异常）自动退回「整份原文件 + 页码范围」，
+  打 `warn` 说明原因；这条路径要求 API 支持页码参数，且**每片都要重传一次整份 PDF**。
+  轻量 API（`official-lightweight`）不支持页码参数，此时只能整份提交（`warn` 提示可能触发页数上限）。
+- **主流程**：`mineru::plan_page_ranges()` 生成 `1-100 / 101-200 / …` → `plan_chunks()` 决定每片的
+  「文件 + 可选页码范围」→ `MinerUClient::parse_pdf_chunks()` 逐片「提交 → 轮询 → 下载」到
+  `uploads/{id}/chunk_NNN/` → `merge_chunk_results()` 按页序拼接 Markdown、合并图片为单一 `images.zip`
+  （同名**不同内容**的图片改名为 `chunkN__原名` 并同步改写正文引用）。产物与单任务结果同形，
+  直接交给 `finish_parse_result()`，所以后续 extract/index 完全无感。
+- **页码参数（退路）因 API 而异**，统一走 `submit_parse_task_with_range()`：
+  `local` → `files[].page_range`；`official` → **`files[].page_ranges`（必须放在 `files[]` 条目里，
+  放顶层会被静默忽略、返回整份文档——实测踩过）**；`datalab` → multipart 的 `page_range`；
+  `official-lightweight` → `supports_page_range()` 为 false。
+- `task_timeout` 在分片模式下**按片计时**（每片各自一份超时），不是整份文档的总超时。
+- 分片模式**没有断点续传**：一次调用里串行跑完所有分片，`mineru_task_id` 全程为空（进入分片前会清空），
+  进度按「已解析页数 / 总页数」上报（`track_task_progress` + `track_task_clear_progress`，
+  文案「分片解析中：已解析 x/y 页」）。进程重启后需重新触发解析。
 
 ### LLM / 信息补全 / Embedding 配置（`config.json`）
 
@@ -880,6 +915,16 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
     - 前端候选只从 `frontend/src/utils/docType.ts` 取（与后端 `STANDARD` 对应，`doc-types` 接口下发 `standard`），不要手写 `<option>`；
     - 存量数据由 `database.rs::migrate_doc_types()` 在启动时归一（幂等）。
     - 注意 `list_doc_types` / MCP `library_stats` 的 `type_counts` 是**按原值分组**的：一旦有脏值回流，这里会立刻多条一次性碎片，请拿它当回归哨兵。
+
+27. **MinerU 分片先本地切页，退路的页码范围参数位置别写错**：分片优先用
+    `mutool clean -ggg -D <in> <out> <pages>` 本地切（模块 `services/pdf_split.rs`；
+    `-D` 顺带去掉「空用户口令」加密，产物必须校验非空——mutool 对写空的产物也返回 0），
+    只有切页不可用时才退回「整份 + 页码范围」。退路里官方 V4 的 `page_ranges` **必须放在
+    `files[]` 条目里**（`{"files":[{"name":..,"page_ranges":"1-100"}]}`），放**顶层**时 API 返回 `code:0`
+    且不报错，但会**静默忽略**、照整份文档解析——症状是两个分片各返回一份全文，合并后正文重复两遍。
+    判断依据：`/api/v4/extract-results/batch/{id}` 的 `extract_progress.total_pages` 仍是全文页数
+    （切片成功时是这片页数）。本地 V1 是 `files[].page_range`（单数），Datalab 是 multipart 字段
+    `page_range`，轻量 API 不支持页码参数（但支持本地切页）。
 
 ## 入口与关键文件速查
 

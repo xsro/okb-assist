@@ -24,7 +24,7 @@ use crate::models::{Document, DocStatus, DocumentVectorIndex};
 use crate::paths;
 use crate::services::crossref::CrossrefClient;
 use crate::services::image_cache;
-use crate::services::mineru::MinerUClient;
+use crate::services::mineru::{plan_chunks, plan_page_ranges, MinerUClient};
 use crate::services::pdf_meta::{extract_pdf_metadata_from_path_async, looks_like_placeholder, normalize_doi};
 use crate::services::vector_db::{chunk_text_by_markdown, get_vector_db};
 use crate::utils::{absolute_path, now_iso};
@@ -189,6 +189,14 @@ fn track_task_set_mineru_config(doc_id: i64, config_name: &str) {
 fn track_task_set_progress(doc_id: i64, progress: f64) {
     if let Some(t) = active_tasks_map().write().unwrap().get_mut(&doc_id) {
         t.progress = Some(progress.clamp(0.0, 100.0));
+    }
+}
+
+/// 清掉固定百分比进度：之后进度改按「页数比」算（见 [`runtime_task`]）。
+/// 分片解析用它，否则进度条会一直卡在入口处设的百分比上。
+fn track_task_clear_progress(doc_id: i64) {
+    if let Some(t) = active_tasks_map().write().unwrap().get_mut(&doc_id) {
+        t.progress = None;
     }
 }
 
@@ -520,10 +528,124 @@ async fn do_parse_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) 
     }
 
     // 使用选中的 MinerU 配置提交解析任务
+    let client = MinerUClient::new(&active_config);
+
+    // ── 分片解析：官方 API 单文件最多 200 页，超过 page_chunk 页时逐片提交再合并 ──
+    // `page_chunk = 0` = 不分片。分片**优先用 mutool 在本地切页**（总上传量 = 原文件大小），
+    // 切页不可用时退回「整份上传 + 页码范围」；轻量 API 两者都不支持，只能整份提交。
+    if active_config.page_chunk > 0 {
+        let page_step = active_config.page_chunk as i64;
+        match crate::services::pdf_health::page_count(abs_file_path.clone()).await {
+            Some(total_pages) if total_pages > page_step => {
+                let ranges = plan_page_ranges(total_pages, page_step);
+                let split_dir = output_dir.join("_split");
+                let chunks = plan_chunks(
+                    &abs_file_path,
+                    &ranges,
+                    &split_dir.to_string_lossy(),
+                    client.supports_page_range(),
+                )
+                .await;
+
+                if chunks.is_empty() {
+                    warn!(
+                        "文档 {} 需要分片（{} 页 > 每片 {} 页）但既切不了页也提交不了页码范围，退回整份提交",
+                        doc_id, total_pages, page_step
+                    );
+                } else {
+                    let local_split = chunks.iter().all(|c| c.temporary);
+                    info!(
+                        "文档 {} PDF 共 {} 页，超过每片 {} 页，改为分片解析（{} 片，{}）",
+                        doc_id,
+                        total_pages,
+                        page_step,
+                        chunks.len(),
+                        if local_split { "本地 mutool 切页" } else { "按页码范围提交" }
+                    );
+                    // 分片解析一次提交多个任务，没有「单任务断点续传」可言，先清掉旧指针，
+                    // 否则重启后规则 4 会让它看起来一直在解析。
+                    clear_mineru_task_id(&db, doc_id).await;
+                    set_runtime_state(
+                        &db,
+                        doc_id,
+                        DocStatus::Parsing,
+                        Some(&format!(
+                            "分片解析中（共 {} 页，每片 {} 页，{} 片）",
+                            total_pages,
+                            page_step,
+                            chunks.len()
+                        )),
+                        // 进度不写百分比：留空才会用下面按「页」上报的页数比（见 runtime_task）
+                        None,
+                    )
+                    .await;
+                    // 入口处 `parse` 已把百分比设成 10，这里清掉，让进度条改跟页数比
+                    track_task_clear_progress(doc_id);
+
+                    let progress = |done: i64, total: i64| {
+                        track_task_progress(doc_id, done as i32, total as i32);
+                        track_task_update(
+                            doc_id,
+                            &format!(
+                                "分片解析中：已解析 {}/{} 页",
+                                done.min(total).max(0),
+                                total
+                            ),
+                        );
+                    };
+                    match client
+                        .parse_pdf_chunks(
+                            output_dir.to_str().unwrap_or(""),
+                            Some(doc_id),
+                            active_config.task_timeout,
+                            total_pages,
+                            &chunks,
+                            &progress,
+                        )
+                        .await
+                    {
+                        Ok(md_path) => {
+                            info!(
+                                "文档 {} 分片解析完成，合并后 markdown={}",
+                                doc_id, md_path
+                            );
+                            finish_parse_result(&db, &settings, doc_id, &md_path).await;
+                            return;
+                        }
+                        Err(e) => {
+                            error!("文档 {} 分片解析失败: {}", doc_id, e);
+                            let err_msg = format!("分片解析失败: {}", e);
+                            set_runtime_state(
+                                &db,
+                                doc_id,
+                                DocStatus::Error,
+                                Some(&err_msg),
+                                None,
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
+            }
+            Some(total_pages) => {
+                info!(
+                    "文档 {} PDF 共 {} 页（≤ 每片 {} 页），整份提交",
+                    doc_id, total_pages, page_step
+                );
+            }
+            None => {
+                warn!(
+                    "文档 {} 无法读取 PDF 页数（mutool/内置 mupdf 不可用？），跳过页数分片，整份提交",
+                    doc_id
+                );
+            }
+        }
+    }
+
     set_runtime_state(&db, doc_id, DocStatus::Parsing, Some("正在提交解析任务..."), Some(15.0)).await;
     info!("文档 {} 提交解析任务: MinerU='{}', pdf={}", doc_id, active_config.name, abs_file_path);
 
-    let client = MinerUClient::new(&active_config);
     match client.submit_parse_task(&abs_file_path).await {
         Ok(task_id) => {
             info!("文档 {} 提交解析成功, task_id={}", doc_id, task_id);

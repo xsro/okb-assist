@@ -107,12 +107,12 @@ curl -s -X POST "https://mineru.net/api/v4/file-urls/batch" \
 |------|------|------|------|
 | `files[].name` | string | 是 | 文件名 |
 | `files[].data_id` | string | 否 | 自定义数据 ID（用于后续追踪）|
+| `files[].page_ranges` | string | 否 | 页码范围，如 `"2,4-6"`、`"1-100"`。**必须放在 files[] 条目里**（实测 2026-11：放顶层会被静默忽略，结果仍是整份文档） |
 | `model_version` | string | 否 | `pipeline`/`vlm`(推荐)/`MinerU-HTML`，默认 `pipeline` |
 | `is_ocr` | bool | 否 | 启用 OCR，默认 false |
 | `enable_formula` | bool | 否 | 启用公式识别，默认 true |
 | `enable_table` | bool | 否 | 启用表格识别，默认 true |
 | `language` | string | 否 | 文档语言，默认 `ch` |
-| `page_ranges` | string | 否 | 页码范围，如 `"2,4-6"` |
 | `extra_formats` | array | 否 | 额外导出格式，如 `["docx","html"]` |
 
 **响应：**
