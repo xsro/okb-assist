@@ -566,19 +566,48 @@ pub(crate) async fn fetch_doc(db: &Database, id: i64) -> Result<Option<Document>
 }
 
 /// 查找下一个可用（最小的未被占用的）ID
-async fn next_available_id(db: &Database) -> Option<i64> {
-    let rows: Vec<(i64,)> = sqlx::query_as("SELECT id FROM documents ORDER BY id")
-        .fetch_all(db.pool())
-        .await
-        .ok()?;
-    let mut expected = 1;
-    for (id,) in rows {
-        if id != expected {
-            return Some(expected);
+/// 「最小空号」SQL 表达式：用于 `INSERT ... SELECT` 的 `id` 列。
+///
+/// - `id = 1` 空缺 → `1`；
+/// - 否则取最小的 `id + 1` 缺口；
+/// - 全连续（没有空号）→ `NULL`，SQLite 对 `INTEGER PRIMARY KEY` 会自动分配 `max(id) + 1`。
+///
+/// 空号计算与插入在**同一条语句**里完成（SQLite 的写锁会把并发写串行化），
+/// 所以两个并发请求不会拿到同一个号；这一点比「先 SELECT 再 INSERT」可靠。
+const NEXT_GAP_ID_SQL: &str = "CASE \
+    WHEN NOT EXISTS (SELECT 1 FROM documents WHERE id = 1) THEN 1 \
+    ELSE (SELECT MIN(t.id + 1) FROM documents t \
+          WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.id = t.id + 1)) \
+    END";
+
+/// 执行「带空号计算」的 INSERT，并对 `documents.id` 唯一约束冲突重试几次。
+///
+/// 同一进程/多个进程的并发写本来就会被 SQLite 写锁串行化（`INSERT ... SELECT` 是单条语句），
+/// 这里的重试只兜底极端情况（例如外部脚本手写了 id、或有旧版本代码同时插入了同一个号）。
+async fn insert_with_gap_retry<F, Fut>(mut run: F) -> Result<i64, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<sqlx::sqlite::SqliteQueryResult, sqlx::Error>>,
+{
+    const ATTEMPTS: usize = 3;
+    let mut last = String::new();
+    for attempt in 0..ATTEMPTS {
+        match run().await {
+            Ok(result) => return Ok(result.last_insert_rowid()),
+            Err(e) => {
+                let msg = e.to_string();
+                let conflict = msg.contains("UNIQUE constraint failed: documents.id");
+                if conflict && attempt + 1 < ATTEMPTS {
+                    // 让出一次调度，然后重新算空号（下一条语句会看到新的行）
+                    last = msg;
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                return Err(msg);
+            }
         }
-        expected += 1;
     }
-    None
+    Err(last)
 }
 
 /// 可搜索字段名 → SQL 列名映射
@@ -1369,34 +1398,35 @@ fn fill_meta_fields(doc: &mut Document, meta: &Value) {
 }
 
 /// 插入新文档记录
-async fn insert_document(db: &Database, doc: Document) -> Result<i64, String> {
+async fn insert_document(db: &Database, doc: &Document) -> Result<i64, String> {
     let now = now_datetime();
-    let result = sqlx::query(
-        "INSERT INTO documents (filename, file_hash, title, authors, year, doi, source, journal, \
+    let sql = format!(
+        "INSERT INTO documents (id, filename, file_hash, title, authors, year, doi, source, journal, \
          keywords, abstract, category, doc_type, language, i18n, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&doc.filename)
-    .bind(&doc.file_hash)
-    .bind(&doc.title)
-    .bind(&doc.authors)
-    .bind(doc.year)
-    .bind(&doc.doi)
-    .bind(&doc.source)
-    .bind(&doc.journal)
-    .bind(&doc.keywords)
-    .bind(&doc.abstract_text)
-    .bind(&doc.category)
-    .bind(&doc.doc_type)
-    .bind(&doc.language)
-    .bind(&doc.i18n)
-    .bind(&now)
-    .bind(&now)
-    .execute(db.pool())
+         SELECT {}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",
+        NEXT_GAP_ID_SQL
+    );
+    insert_with_gap_retry(|| {
+        sqlx::query(&sql)
+            .bind(&doc.filename)
+            .bind(&doc.file_hash)
+            .bind(&doc.title)
+            .bind(&doc.authors)
+            .bind(doc.year)
+            .bind(&doc.doi)
+            .bind(&doc.source)
+            .bind(&doc.journal)
+            .bind(&doc.keywords)
+            .bind(&doc.abstract_text)
+            .bind(&doc.category)
+            .bind(&doc.doc_type)
+            .bind(&doc.language)
+            .bind(&doc.i18n)
+            .bind(&now)
+            .bind(&now)
+            .execute(db.pool())
+    })
     .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(result.last_insert_rowid())
 }
 
 async fn upload_document(
@@ -1744,46 +1774,12 @@ async fn upload_document(
     };
     fill_meta_fields(&mut doc, &meta);
 
-    // 复用最小可用 ID
-    let doc_id = match next_available_id(&db).await {
-        Some(id) => {
-            doc.id = id;
-            // 用指定 ID 插入
-            let now = now_datetime();
-            let result = sqlx::query(
-                "INSERT INTO documents (id, filename, file_hash, title, authors, year, doi, source, journal, \
-                 keywords, abstract, category, doc_type, language, i18n, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(id)
-            .bind(&doc.filename)
-            .bind(&doc.file_hash)
-            .bind(&doc.title)
-            .bind(&doc.authors)
-            .bind(doc.year)
-            .bind(&doc.doi)
-            .bind(&doc.source)
-            .bind(&doc.journal)
-            .bind(&doc.keywords)
-            .bind(&doc.abstract_text)
-            .bind(&doc.category)
-            .bind(&doc.doc_type)
-            .bind(&doc.language)
-            .bind(&doc.i18n)
-            .bind(&now)
-            .bind(&now)
-            .execute(db.pool())
-            .await;
-
-            match result {
-                Ok(_) => id,
-                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
-            }
+    // 复用最小可用 ID：空号在 INSERT 语句内计算（见 `NEXT_GAP_ID_SQL`），并发安全
+    let doc_id = match insert_document(&db, &doc).await {
+        Ok(id) => id,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response()
         }
-        None => match insert_document(&db, doc.clone()).await {
-            Ok(id) => id,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
-        },
     };
 
     // 保存 PDF 文件：临时文件已被流式写好，这里只是搬位置（同盘 rename，零拷贝）
@@ -1890,7 +1886,7 @@ async fn register_document_by_path(
     };
     fill_meta_fields(&mut doc, &meta);
 
-    let doc_id = match insert_document(&db, doc).await {
+    let doc_id = match insert_document(&db, &doc).await {
         Ok(id) => id,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
     };
@@ -2274,37 +2270,34 @@ async fn insert_bibtex_document(db: &Database, rec: &bibtex::BibRecord) -> Resul
         }
     };
 
-    // 复用最小可用 ID（与上传/登记路径一致）：有空洞就补进去，否则交给 SQLite 分配 max(id)+1。
-    // 显式写 `id` 列并绑定 NULL 时，SQLite 对 `INTEGER PRIMARY KEY` 会自动分配 rowid，
-    // 所以一个 INSERT 就能覆盖两种情况，不用维护两份列清单。
-    let gap_id = next_available_id(db).await;
-    let result = sqlx::query(
+    // 复用最小可用 ID（与上传/登记路径一致）：空号在 INSERT 语句内计算，并发安全
+    let sql = format!(
         "INSERT INTO documents (id, filename, title, authors, year, doi, source, journal, keywords, abstract, \
          doc_type, language, pdf_health, pdf_health_message, fs_synced_at, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'missing', ?, ?, ?, ?)",
-    )
-    .bind(gap_id)
-    .bind(&filename)
-    .bind(non_empty_str(&rec.title))
-    .bind(&authors)
-    .bind(rec.year)
-    .bind(&doi)
-    .bind(&source)
-    .bind(non_empty_str(&rec.journal))
-    .bind(&keywords)
-    .bind(non_empty_str(&rec.abstract_text))
-    .bind(&doc_type)
-    .bind(non_empty_str(&rec.language))
-    .bind("未上传 PDF（条目来自 BibTeX 导入）")
-    // 导入时就知道没有 PDF：直接记下同步时间，三个 size 保持 NULL = 全部 absent
-    .bind(&now)
-    .bind(&now)
-    .bind(&now)
-    .execute(db.pool())
+         SELECT {}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'missing', ?, ?, ?, ?",
+        NEXT_GAP_ID_SQL
+    );
+    insert_with_gap_retry(|| {
+        sqlx::query(&sql)
+            .bind(&filename)
+            .bind(non_empty_str(&rec.title))
+            .bind(&authors)
+            .bind(rec.year)
+            .bind(&doi)
+            .bind(&source)
+            .bind(non_empty_str(&rec.journal))
+            .bind(&keywords)
+            .bind(non_empty_str(&rec.abstract_text))
+            .bind(&doc_type)
+            .bind(non_empty_str(&rec.language))
+            .bind("未上传 PDF（条目来自 BibTeX 导入）")
+            // 导入时就知道没有 PDF：直接记下同步时间，三个 size 保持 NULL = 全部 absent
+            .bind(&now)
+            .bind(&now)
+            .bind(&now)
+            .execute(db.pool())
+    })
     .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(result.last_insert_rowid())
 }
 
 /// 空串落库为 `NULL`（列表/筛选用不上空字符串）
@@ -4608,5 +4601,80 @@ mod tests {
         assert_eq!(insert_bibtex_document(&db, &rec).await.unwrap(), 3);
         // 1–4 已满：下一条按 max(id)+1 追加
         assert_eq!(insert_bibtex_document(&db, &rec).await.unwrap(), 5);
+    }
+
+    fn test_doc(filename: &str) -> Document {
+        Document {
+            id: 0,
+            filename: filename.to_string(),
+            file_hash: None,
+            title: Some("测试".to_string()),
+            authors: None,
+            year: None,
+            doi: None,
+            source: None,
+            journal: None,
+            keywords: None,
+            abstract_text: None,
+            category: None,
+            doc_type: None,
+            language: None,
+            i18n: None,
+            mineru_task_id: None,
+            fs_synced_at: None,
+            qdrant_collection: None,
+            vector_db_id: None,
+            created_at: None,
+            updated_at: None,
+            pdf_size: None,
+            md_size: None,
+            zip_size: None,
+            pdf_health: None,
+            pdf_health_message: None,
+        }
+    }
+
+    /// 上传/登记路径（`insert_document`）同样补空号。
+    #[tokio::test]
+    async fn upload_insert_reuses_gap_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("upload_gap.db");
+        let url = format!("sqlite:{}", path.to_string_lossy().replace('\\', "/"));
+        let db = Database::new(&url).await.unwrap();
+        db.init().await.unwrap();
+        for id in [1i64, 2, 4] {
+            sqlx::query("INSERT INTO documents (id, filename) VALUES (?, ?)")
+                .bind(id)
+                .bind(format!("{}.pdf", id))
+                .execute(db.pool())
+                .await
+                .unwrap();
+        }
+        assert_eq!(insert_document(&db, &test_doc("a.pdf")).await.unwrap(), 3);
+        assert_eq!(insert_document(&db, &test_doc("b.pdf")).await.unwrap(), 5);
+    }
+
+    /// 并发插入不会拿到同一个空号（空号计算与插入在同一条语句里）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_inserts_get_distinct_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("concurrent.db");
+        let url = format!("sqlite:{}", path.to_string_lossy().replace('\\', "/"));
+        let db = std::sync::Arc::new(Database::new(&url).await.unwrap());
+        db.init().await.unwrap();
+
+        let mut handles = Vec::new();
+        for i in 0..12 {
+            let db = db.clone();
+            handles.push(tokio::spawn(async move {
+                insert_document(&db, &test_doc(&format!("{}.pdf", i))).await
+            }));
+        }
+        let mut ids = Vec::new();
+        for handle in handles {
+            ids.push(handle.await.expect("任务 panic").expect("插入失败"));
+        }
+        ids.sort_unstable();
+        assert_eq!(ids, (1..=12).collect::<Vec<i64>>());
     }
 }
