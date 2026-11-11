@@ -79,18 +79,32 @@
           </div>
           <div class="file-actions">
             <button
-              v-if="item.status === 'error' && item.existingId"
+              v-if="item.errorKind === 'duplicate-doi' && item.existingHasPdf"
+              class="btn btn-sm btn-primary"
+              @click="overwriteItem(item)"
+            >
+              覆盖已有 PDF
+            </button>
+            <button
+              v-if="item.errorKind === 'duplicate-doi' && item.existingHasPdf"
+              class="btn btn-sm btn-outline"
+              @click="keepExisting(item)"
+            >
+              保留原 PDF
+            </button>
+            <button
+              v-if="item.existingId && (item.status === 'error' || item.status === 'done')"
               class="btn btn-sm btn-primary"
               @click="viewExisting(item)"
             >
               查看已有文献
             </button>
             <button
-              v-if="item.status === 'error' && item.errorKind === 'duplicate'"
+              v-if="item.status === 'error' && (item.errorKind === 'duplicate' || item.errorKind === 'duplicate-doi')"
               class="btn btn-sm btn-outline"
               @click="forceItem(item)"
             >
-              强制上传
+              强制上传（新建一条）
             </button>
             <button
               v-if="item.status === 'error'"
@@ -129,6 +143,7 @@
           >
             {{ statusText(item) }}
           </span>
+          <span v-if="item.note" class="file-hint file-note">{{ item.note }}</span>
           <span v-if="item.errorHint" class="file-hint">{{ item.errorHint }}</span>
         </div>
       </div>
@@ -149,7 +164,7 @@ import type { UploadFailureKind } from '@/utils/uploadError'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 
-const { showSuccess, showError } = useToast()
+const { showSuccess, showError, showInfo } = useToast()
 const { requireToken } = useRequireToken()
 
 interface QueueItem {
@@ -172,6 +187,12 @@ interface QueueItem {
   existingId?: number
   /** 该文件单独走强制上传（内容重复时的手动确认） */
   force?: boolean
+  /** 该文件单独走「覆盖已有 PDF」：DOI 相同且已有条目已有 PDF，用户点了「覆盖已有 PDF」 */
+  overwrite?: boolean
+  /** DOI 重复时，已有条目里是否已经有 PDF（true → 由用户决定覆盖还是保留） */
+  existingHasPdf?: boolean
+  /** 成功后的附加说明：补入已有条目 / 覆盖了已有 PDF / 未改动 */
+  note?: string
 }
 
 const isDragover = ref(false)
@@ -333,9 +354,11 @@ async function uploadItem(item: QueueItem) {
   item.errorDetail = undefined
   item.errorKind = undefined
   item.existingId = undefined
+  item.existingHasPdf = undefined
+  item.note = undefined
 
   try {
-    await uploadPdf(item.file, item.force ?? forceUpload.value, (p) => {
+    const res = await uploadPdf(item.file, item.force ?? forceUpload.value, (p) => {
       item.phase = p.phase
       item.progress = p.percent
       item.loaded = p.loaded
@@ -351,11 +374,31 @@ async function uploadItem(item: QueueItem) {
         lastProgressTime.value = now
         lastProgressBytes.value = p.loaded
       }
+    }, {
+      // 用户确认覆盖时，服务端用本次文件替换已有条目的 PDF；否则命中重复就返回 409 由界面询问
+      onDuplicate: item.overwrite ? 'replace' : undefined,
     })
     item.phase = undefined
     item.progress = 100
     item.loaded = item.file.size
     item.status = 'done'
+
+    // 服务端去重结果：attached（DOI 相同 + 已有条目缺 PDF，已自动补入）/ replaced（覆盖）/ skipped
+    const targetId = res?.existing_id ?? res?.id
+    const idText = targetId ? ` #${targetId}` : ''
+    if (res?.status === 'attached') {
+      item.existingId = targetId
+      item.note = `已补入已有条目${idText}（DOI 相同，该条目原先缺 PDF）`
+      showSuccess(`PDF 已补入已有条目${idText}`)
+    } else if (res?.status === 'replaced') {
+      item.existingId = targetId
+      item.note = `已覆盖已有条目${idText} 的 PDF`
+      showSuccess(`已覆盖${idText} 的 PDF`)
+    } else if (res?.status === 'skipped') {
+      item.existingId = targetId
+      item.note = `未改动：库里已有相同条目${idText}`
+      showInfo(`库里已有相同条目${idText}，未做改动`)
+    }
   } catch (e) {
     // 失败不把进度清零：停在哪一格就显示哪一格，避免「传了 80% 突然回到 0」的错觉
     const failure = describeUploadError(e)
@@ -374,6 +417,21 @@ async function forceItem(item: QueueItem) {
   if (!requireToken()) return
   item.force = true
   await uploadItem(item)
+}
+
+/** DOI 相同、已有条目已有 PDF：用户确认用本次文件覆盖它 */
+async function overwriteItem(item: QueueItem) {
+  if (!requireToken()) return
+  item.overwrite = true
+  await uploadItem(item)
+}
+
+/** DOI 相同、已有条目已有 PDF：用户选择保留原 PDF，本次上传作废 */
+function keepExisting(item: QueueItem) {
+  showInfo(
+    `已保留原有 PDF，未覆盖${item.existingId ? ` #${item.existingId}` : ''}`
+  )
+  removeItem(item)
 }
 
 async function retryItem(item: QueueItem) {
@@ -668,6 +726,10 @@ async function startUpload() {
 .file-status.status-error {
   color: #c62828;
   font-weight: 500;
+}
+
+.file-hint.file-note {
+  color: var(--success, #2e7d32);
 }
 
 .file-hint {

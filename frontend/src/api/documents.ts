@@ -114,6 +114,32 @@ export async function checkHashExists(hash: string) {
 /** 上传阶段：hashing（本地算校验值）→ uploading（传输字节）→ processing（服务端查重/抽元数据/落盘） */
 export type UploadPhase = 'hashing' | 'uploading' | 'processing'
 
+/** 上传接口的返回：新建时就是一个文档对象，去重命中时额外带 status 等字段 */
+export interface UploadResult extends Partial<Document> {
+  id: number
+  /** attached = 补进已有条目（DOI 相同且该条目缺 PDF）；replaced = 覆盖了已有条目的 PDF；skipped = 未改动 */
+  status?: 'attached' | 'replaced' | 'skipped'
+  attached?: boolean
+  replaced?: boolean
+  skipped?: boolean
+  /** 命中的重复类型 */
+  reason?: 'hash' | 'doi'
+  /** 命中的已有文档 ID（与 id 相同） */
+  existing_id?: number
+  doc?: Document
+}
+
+export interface UploadOptions {
+  /**
+   * 命中重复（同 DOI）时的处置：
+   * - `error`（默认）：409 返回已有条目信息，由界面询问用户是否覆盖；
+   * - `replace`：直接用本次文件覆盖已有条目的 PDF。
+   */
+  onDuplicate?: 'error' | 'skip' | 'replace'
+  /** 显式 DOI（服务端可自行从 PDF 抽取，一般不用传） */
+  doi?: string
+}
+
 export interface UploadProgress {
   phase: UploadPhase
   /** 已上传字节（hashing 阶段为 0） */
@@ -127,13 +153,19 @@ export interface UploadProgress {
 /**
  * 上传 PDF（上传前先本地算 hash 查重，force 可跳过）
  *
+ * 服务端还会按 DOI 去重：DOI 相同且已有条目**缺 PDF** 时直接把文件补进那个条目
+ * （200 `status: attached`，不新建记录）；已有条目**已有 PDF** 时返回 409
+ * （`error: duplicate, kind: doi, has_pdf: true`），界面询问后再带
+ * `onDuplicate: 'replace'` 重传即可覆盖。
+ *
  * `onProgress` 报告的是**真实**的上传字节进度（axios `onUploadProgress`），
  * 其中 `phase === 'processing'` 表示字节已全部发出、正等服务端处理。
  */
 export async function uploadPdf(
   file: File,
   force = false,
-  onProgress?: (progress: UploadProgress) => void
+  onProgress?: (progress: UploadProgress) => void,
+  options: UploadOptions = {}
 ) {
   // 非强制模式：先算 hash、先查重，命中则直接拒绝，不上传
   if (!force) {
@@ -164,11 +196,14 @@ export async function uploadPdf(
   }
 
   const fd = new FormData()
+  // 字段顺序敏感：`on_duplicate` / `doi` 必须在 `file` 之前（后端边读边落盘）
+  if (options.onDuplicate) fd.append('on_duplicate', options.onDuplicate)
+  if (options.doi) fd.append('doi', options.doi)
   fd.append('file', file)
   fd.append('force', String(force))
 
   onProgress?.({ phase: 'uploading', loaded: 0, total: file.size, percent: 0 })
-  return apiUpload<Document>('/assist/api/documents/upload/', fd, {
+  return apiUpload<UploadResult>('/assist/api/documents/upload/', fd, {
     // 大文件上传可能远超 axios 默认的 30s，这里不设超时（由浏览器/后端决定）
     timeout: 0,
     onUploadProgress: (event) => {

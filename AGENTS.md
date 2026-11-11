@@ -418,8 +418,13 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
   `分类号` `万方数据` `MASTER THESIS` …）既不能当题名也不能当作者，能剥掉前缀的就剥掉（`strip_cover_prefix` / `strip_row_labels`）。
 - 年份：年份候选来源依次是引用块、首页日期行（取最大）、全文（截到「参考文献」之前）四位数、Info 字典 `CreationDate`；
   比 `CreationDate` 旧 5 年以上时改信 `CreationDate`（正文年份多半来自参考文献），且不允许晚于当前年 + 1。
-- DOI 兼容「10. 19942/j. issn. …」这种被空格拆开的排版，以及从 `/`、`-`、`_` 处断行的情况；先在首页行里找，
-  再在「参考文献之前」的全文里找（避免抓到参考文献的 DOI）。
+- DOI 兼容「10. 19942/j. issn. …」这种被空格拆开的排版，以及从 `/`、`-`、`_`、`.` 处断行的情况：
+  `join_wrapped_doi_lines()` 先把「本行已有 `10.xxxx/` + 行尾是折断点 + 下一行整行都是 DOI 字符集」的
+  折行拼回，`extend_doi_over_space()` 再处理版式抽取把两行合成一行、中间留空格的情形
+  （`doi:10.3969/j. issn.1007-130X.2024.12.001`）。**版面行与纯文本各扫一遍取更长的那个**，
+  并且 `apply_labels` 的 `doi:` 行内标签只接受「后缀 ≥4 位」的完整 DOI、用 `entry().or_insert()`
+  不覆盖已扫出的结果 —— 否则会退化成 `10.3969/j` 这种半截值（DOI 指纹与去重就全对不上）。
+  先在首页行里找，再在「参考文献之前」的全文里找（避免抓到参考文献的 DOI）。
 - 摘要/关键词先扫首页版面，没有再看全文行序（「网络首发」的摘要常在正文第 2 页）；双栏版式下宁可放弃，也不要拼出「关键词+正文」的垃圾。
 
 引擎差异：`config.json` 的 `pdf.engine = "mupdf"` 时拿不到逐行字号，第 3 层退化为第 4 层（行序兜底），
@@ -625,7 +630,13 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
    - **文件事実筛选与文件构成统计**：列取端点 `?pdf_state=｜md_state=｜zip_state=`（`present` / `absent` / `unknown`，逗号多选，非法值 400）与 `search-info` **共用** `documents::state_condition(kind, raw)`（不占绑定参数），所以从监控面板带入的筛选在搜索时不会丢掉；`GET /assist/api/admin/stats` 额外返回 `file_counts`（`pdf_only` / `pdf_and_md` / `md_only` / `none` / `with_zip`，按 `pdf_size`/`md_size`/`zip_size` 聚合，零磁盘 IO），前端「监控面板」的「文件构成」卡片点进去就是带 `?pdf_state=&md_state=` 的文献列表（`md_size` 为 `NULL`/`0` 都算「不存在」）。
    - **全量比对索引**（`GET /documents/doi-hash-index`）：一次返回库内全部文献的 `{count, with_doi, with_hash, generated_at, documents:[{id, doi, doi_key, file_hash, pdf_health}]}`（`doi_key` 已归一化小写，空 DOI/空哈希为 `null`），供 `client-rs` 批量比对；客户端拉一次就完成整库比对，不再按 DOI 逐条请求 `by-doi`。只返回比对必需字段（不带 title/abstract），新增字段时注意保持轻量。
    - **可跳过元数据抽取**：表单字段 `extract_meta`（缺省 `true`）为 `false` 时整段跳过 `extract_pdf_metadata_from_path_async`（`meta` 用空 JSON 对象，`fill_meta_fields` 全部字段保持空）。这一步在 mutool 引擎下要起 3 个子进程、其中 `mutool draw -F text` 会把**整份文档**正文抽一遍，是大文件上传后「等服务端处理」的主要耗时。`client-rs` 批量上传**默认**传 `extract_meta=false`（`--extract-meta` 开启），事后可用 `POST /assist/api/pipeline/extract-pdf-meta/:id`（文档管理页 / 流水线）补上；Web 上传不传该字段，行为不变。
-   - **上传去重**（`POST /documents/upload`，`upload_document`）：先用 `find_doc_by_hash`（只查 `file_hash` 索引，**不抽 PDF 元数据**）比哈希；未命中且请求里**显式**给了 `doi` 表单字段时再用 `find_doc_by_doi` 比 DOI（PDF 里抽到的 DOI 不参与去重，保持既有行为）。命中重复的行为由 `on_duplicate` 控制：`error`（默认，409 `{error:"duplicate", kind:"hash"|"doi", existing_id, existing:{file_hash,pdf_health,…}}`）/ `skip`（200 `{status:"skipped", existing_id, id, doc}`）/ `replace`（同哈希则等价 skip，否则用本次文件覆盖已有文档的 PDF，200 `{status:"replaced", existing_id, doc}`，复用 `persist_pdf_for_doc`，与 `POST /{id}/pdf` 同一套副作用）。`force=true` 跳过全部去重检查。新文档的 `doi` 直接取显式字段（`fill_meta_fields` 只补空）。去重依赖 `database.rs::init` 建的 `idx_documents_file_hash` / `idx_documents_doi`（`CREATE INDEX IF NOT EXISTS`，幂等），新增按列等值查找的功能时同步补索引。
+   - **上传去重**（`POST /documents/upload`，`upload_document`）：先用 `find_doc_by_hash`（只查 `file_hash` 索引，**不抽 PDF 元数据**）比哈希；未命中再比 DOI —— DOI 来源有两个，**显式表单字段优先**，否则在 `extract_meta=true`（默认）时**先从 PDF 抽一次元数据拿 DOI**（本来就默认要抽，只是提到去重之前；抽完的结果缓存进 `meta_cache`，建记录时复用，不重复拆 PDF），`extract_meta=false`（client-rs 批量上传）则不做这层 DOI 去重。
+
+     **DOI 命中的两种处置**（这是 Web 上传的主流程）：
+     - 已有条目**没有 PDF**（`doc_has_pdf_file()`：`pdf_size > 0` 或磁盘上确实有非空文件）→ **自动补入**那个条目，不新建记录，200 `{status:"attached", attached:true, reason:"doi", existing_id, id, doc}`（前端显示「已补入已有条目」）；
+     - 已有条目**已有 PDF** → 409 `{error:"duplicate", kind:"doi", has_pdf:true, existing_id, existing:{…,has_pdf}}`，前端提示「是否覆盖已有条目中的 PDF」：确认后带 `on_duplicate=replace` 重传 → 200 `{status:"replaced"}`（复用 `persist_pdf_for_doc`，与 `POST /{id}/pdf` 同一套副作用）；不确认则放弃。
+
+     `on_duplicate` 其余取值照旧：`error`（默认，409）/ `skip`（200 `{status:"skipped"}`）/ `replace`（同哈希等价 skip，否则覆盖 PDF）。`force=true` 跳过全部去重检查。新文档的 `doi` 取显式字段或 PDF 元数据（`fill_meta_fields` 只补空）。去重依赖 `database.rs::init` 建的 `idx_documents_file_hash` / `idx_documents_doi`（`CREATE INDEX IF NOT EXISTS`，幂等），新增按列等值查找的功能时同步补索引。
    - **BibTeX 批量新建条目**（`POST /assist/api/documents/import-bibtex`，`import_bibtex`）：请求体 `{content, dry_run}`，`content` 为 `.bib` 文件原始文本（≤8 MB，单次最多处理 2000 条）。服务端用 `services/bibtex.rs` 手写解析器（`@article{key,…}` / `@article(key,…)`、花括号嵌套、`"…"` 引号值、`#` 拼接、`@string` 宏、`@comment`/`@preamble` 跳过、LaTeX 重音与转义还原），把条目映射到 `documents` 的 16 个元数据字段（`filename` 用 `<引用键>.bib` 占位，`source` 取 `publisher` 否则 `bibtex`，类型走 Zotero 名）。**只新建库里缺失的条目**：先按文件内 DOI/标题去重，再与全库比对（`doi_key` 归一化 DOI 优先，其次 `normalize_title` + 年份），命中则跳过并回传 `existing_id`；`dry_run=true` 只返回预览统计（不做写库）。新建记录**直接写入 `fs_synced_at`**（三个 size 保持 `NULL` = 三个文件全部「已同步且不存在」），`pdf_health = 'missing'`，因此派生状态为 `uploaded` + 「PDF 缺失」。响应 `{dry_run,total,processed,truncated,missing,created_count,existing_count,duplicate_count,invalid_count,failed_count,created,items,items_truncated,warnings,detail}`，`items[].action ∈ created|create|exists|duplicate|invalid|error`。
    - **手动去重的检测端点**（都只读，`admin` 才能访问，供 `/assist/duplicates` 页使用）：
      - `GET /assist/api/documents/similar-titles` —— 归一化标题 + 编辑距离（`SIMILARITY_THRESHOLD`）贪心聚类，返回 `{groups:[{normalized_title,count,documents}],total_groups,total_documents}`；
@@ -761,7 +772,7 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 | `/assist/detail/:id` | `DetailView.vue` | 文档详情（元信息 + PDF 元信息 / Crossref 记录 / 引用条目三个懒加载折叠区）。**访客可读**（路由 `meta.allowGuest`）：只显示书目信息 + 摘要，隐藏操作按钮/PDF 元信息等并给登录提示 | 全部（含访客） |
 | `/assist/markdown/:id` | `MarkdownView.vue` | Markdown 阅读（浮动设置按钮收纳全部工具；行号默认开、移动端默认关；设置面板的「源码编辑」跳到编辑器并从当前阅读行开始载入） | 全部 |
 | `/assist/markdown/:id/edit` | `MarkdownEditView.vue` | Markdown 编辑（AceEditor）；支持 `?line=a-b` 只载入指定行范围，阅读页「源码编辑」即跳到这里 | admin |
-| `/assist/upload` | `UploadView.vue` | 上传 PDF | admin / view-upload |
+| `/assist/upload` | `UploadView.vue` | 上传 PDF；命中重复时按情况提示（DOI 相同且已有条目缺 PDF → 服务端自动补入并显示「已补入已有条目」；已有 PDF → 队列项上出现「覆盖已有 PDF / 保留原 PDF」；同哈希 → 「强制上传（新建一条）」） | admin / view-upload |
 | `/assist/doc/:id` | `DocManageView.vue` | 文档管理（含「PDF 健康」单篇检查，仅 admin 可见） | 全部 |
 | `/assist/admin` | `AdminView.vue` | 监控面板（统计 + PDF 健康概览 + 维护操作 + 流水线监控） | admin |
 | `/assist/duplicates` | `DuplicatesView.vue` | 去重（两种检测模式：标题相似 / DOI 重复，确认后合并到指定文档） | admin |
@@ -898,7 +909,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
     - **不要再改回读日志文件**（旧的 `ReverseLines` / 字节游标 `since` / 半行处理 / `scanned_bytes` 已随 `get_logs` 一并删除）；历史日志的去处是 `system.json` 的 `log_path` 文件，页面只回显路径。
 
 23. **PDF 引擎是运行时选择，不是编译期开关**：`pdf_meta` / `pdf_health` 的公共入口一律先 `services::pdf_engine::active()` 再分发，mutool 那套实现**必须始终编译**（不要再加 `#[cfg(not(feature = "mupdf"))]`）。新增 PDF 能力时要两套实现都补，否则切引擎后会静默失能；另外 `mupdf` 引擎拿不到 stderr 诊断，依赖诊断的功能（如「损坏但可修复」判定）要在 UI 上提示用户切回 `mutool`。
-24. **BibTeX 导入的条目没有 PDF**：`import_bibtex` 建的记录写入 `fs_synced_at`（三个 size = NULL，即「已同步且确定不存在」）+ `pdf_health = 'missing'`，派生状态自然是 `uploaded` / 「PDF 缺失」；**不要**在 `do_parse_impl` 里把这种记录打成 `error`（worker 里已加「PDF 不存在就跳过」的真实文件守卫，批量解析只能空转一次）。后续上传 PDF 走文档管理页的「替换 PDF」（`POST /documents/:id/pdf`），上传页重新上传会另建一条记录（上传去重只在显式传 `doi` 表单字段时比 DOI），需要时用去重页合并。
+24. **BibTeX 导入的条目没有 PDF**：`import_bibtex` 建的记录写入 `fs_synced_at`（三个 size = NULL，即「已同步且确定不存在」）+ `pdf_health = 'missing'`，派生状态自然是 `uploaded` / 「PDF 缺失」；**不要**在 `do_parse_impl` 里把这种记录打成 `error`（worker 里已加「PDF 不存在就跳过」的真实文件守卫，批量解析只能空转一次）。后续补 PDF 有两条路：文档管理页的「替换 PDF」（`POST /documents/:id/pdf`），或直接在**上传页**传这份 PDF —— 只要 PDF 里的 DOI 能抽出来（`extract_meta` 默认开），就不会另建记录，而是**自动补进这个缺 PDF 的条目**（200 `status:"attached"`）。要强行建新记录用「强制上传」。
 
 25. **`year` 列是 SQLite 动态类型，取出时必须 `CAST(NULLIF(TRIM(year), '') AS INTEGER)`**：老库里存在写成 `''`（TEXT 类型）的年份，sqlx 把 TEXT 解码成 `Option<i64>` 会直接报
     `mismatched types; Rust type Option<i64> (as SQL type INTEGER) is not compatible with SQL type TEXT`，**整条 `fetch_all` 一起失败**。

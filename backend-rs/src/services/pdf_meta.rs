@@ -1830,10 +1830,99 @@ pub(crate) fn clean_title(title: &str) -> String {
 
 // ── DOI ─────────────────────────────────────────────────
 
+/// DOI 允许出现在匹配里的字符
+fn is_doi_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "-._;()/:".contains(c)
+}
+
+/// 该行是否「整行只有 DOI 允许的字符」（排版把 DOI 折断后的续行长这样）
+///
+/// 正文行一定含空格或中文，所以这是很安全的判据。
+fn is_doi_only_line(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && t.chars().all(is_doi_char)
+}
+
+/// 拼回「同一行里被空格拆开的 DOI 续写」
+///
+/// 版式抽取（`mutool draw -F stext`）会把原本折成两行的 DOI 合成一行并在中间留空格：
+/// `doi:10.3969/j. issn.1007-130X.2024.12.001`。
+/// 只在「已匹配到折断点」且「空格后的片段明显像 DOI 续写（含 ≥2 个点，或带 `-` / `/`）」
+/// 时才接续——正文里的 `10.1234/abc. In this paper…` 不会被粘上。
+fn extend_doi_over_space(matched: &str, rest: &str) -> String {
+    let mut doi = matched.to_string();
+    let mut rest = rest;
+    while ends_at_doi_break(&doi) {
+        let trimmed = rest.trim_start();
+        if trimmed.len() == rest.len() {
+            break; // 后面没有空白 ⇒ 已经到头
+        }
+        let token: String = trimmed.chars().take_while(|c| is_doi_char(*c)).collect();
+        if token.is_empty() {
+            break;
+        }
+        let doi_ish =
+            token.matches('.').count() >= 2 || token.contains('-') || token.contains('/');
+        if !doi_ish {
+            break;
+        }
+        doi.push_str(&token);
+        rest = &trimmed[token.len()..];
+    }
+    doi
+}
+
+/// 该行是否以 DOI 里常见的「折断点」结尾（`.` `/` `-` `_`）
+fn ends_at_doi_break(s: &str) -> bool {
+    let t = s.trim_end();
+    t.ends_with('.') || t.ends_with('/') || t.ends_with('-') || t.ends_with('_')
+}
+
+/// 把被排版折成两行的 DOI 拼回来
+///
+/// 典型样本（《计算机工程与科学》）：
+/// ```text
+/// doi:10.3969/j.
+/// issn.1007-130X.2024.12.001
+/// ```
+/// 不拼的话只会抽出 `10.3969/j`（历史上就是这个结果，DOI 指纹因此对不上）。
+///
+/// 只在**两行都像 DOI** 时才接续：本行已有 `10.xxxx/` 开头、行尾是折断点、下一行
+/// 整行都是 DOI 字符集。正文句末的句号 + 下一行数字不会命中（下一行通常含空格/中文）。
+fn join_wrapped_doi_lines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut pending = String::new();
+    for line in text.lines() {
+        let t = line.trim_end();
+        let can_join = !pending.is_empty()
+            && ends_at_doi_break(&pending)
+            && is_doi_only_line(t)
+            && re(&RE_DOI_PLAIN, r"10\.\d{4,9}/").is_match(&pending);
+        if can_join {
+            pending.push_str(t.trim());
+            continue;
+        }
+        if !pending.is_empty() {
+            out.push_str(&pending);
+            out.push('\n');
+            pending.clear();
+        }
+        pending.push_str(t);
+    }
+    if !pending.is_empty() {
+        out.push_str(&pending);
+    }
+    out
+}
+
 /// 从文本里扫 DOI，兼容「10. 19942/j. issn. …」这种被空格拆开的排版
 pub(crate) fn scan_doi(text: &str) -> Option<String> {
+    // 先把折行的 DOI 拼回来（否则 `10.3969/j.` + `issn.1007-…` 只会抽到前半截）
+    let joined = join_wrapped_doi_lines(text);
+    let text = joined.as_str();
     if let Some(m) = re(&RE_DOI_PLAIN, r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+").find(text) {
-        return normalize_doi(m.as_str());
+        let extended = extend_doi_over_space(m.as_str(), &text[m.end()..]);
+        return normalize_doi(&extended);
     }
     let lines: Vec<&str> = text.lines().collect();
     for (i, line) in lines.iter().enumerate() {
@@ -2561,8 +2650,13 @@ fn apply_labels(rows: &[TextLine], map: &mut serde_json::Map<String, Value>) {
         }
         if let Some(caps) = re(&RE_DOI_LABEL, r"^(?:DOI|doi)\s*[:：]\s*(10\.\S+)$").captures(t) {
             if let Some(m) = caps.get(1) {
+                // 只收「像完整 DOI」的值：`doi:10.3969/j.` 这种被折行截断的（后缀不足 4 位）
+                // 一律丢弃，交给 `scan_doi` 的折行拼回逻辑处理；
+                // 另外用 `or_insert` 保护前面扫出来的更可靠结果，不要被行内标签覆盖。
                 if let Some(doi) = normalize_doi(m.as_str()) {
-                    map.insert("doi".to_string(), Value::String(doi));
+                    if re(&RE_DOI_EXACT, r"^10\.\d{4,9}/[-._;()/:A-Za-z0-9]{4,100}$").is_match(&doi) {
+                        map.entry("doi".to_string()).or_insert(Value::String(doi));
+                    }
                 }
             }
         }
@@ -2600,8 +2694,13 @@ pub(crate) fn analyze_metadata(
         .collect::<Vec<_>>()
         .join("\n");
 
-    // 1. DOI
-    if let Some(doi) = scan_doi(&body).or_else(|| scan_doi(plain_meta)) {
+    // 1. DOI（版面行与纯文本各扫一遍，取更长的那个：版面行可能被空格拆断，
+    //    纯文本里则可能整段缺首页，两路互补）
+    if let Some(doi) = [scan_doi(&body), scan_doi(plain_meta)]
+        .into_iter()
+        .flatten()
+        .max_by_key(|d| d.len())
+    {
         map.insert("doi".to_string(), Value::String(doi));
     }
 
@@ -2798,4 +2897,60 @@ fn parse_year_from_date(date_str: &str) -> Option<i64> {
     let re2 = regex::Regex::new(r"(19|20)\d{2}").unwrap();
     re2.find(date_str)
         .and_then(|m| m.as_str().parse::<i64>().ok())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_doi_rejoins_line_wrapped_doi() {
+        // 《计算机工程与科学》实际抽出来的文本：DOI 从「.」处折行
+        let text = "文献标志码:A\n\ndoi:10.3969/j.\nissn.1007-130X.2024.12.001\n\n";
+        assert_eq!(
+            scan_doi(text).as_deref(),
+            Some("10.3969/j.issn.1007-130X.2024.12.001")
+        );
+    }
+
+    #[test]
+    fn scan_doi_single_line() {
+        assert_eq!(
+            scan_doi("DOI: 10.1360/SST-2023-0410.").as_deref(),
+            Some("10.1360/SST-2023-0410")
+        );
+    }
+
+    #[test]
+    fn scan_doi_does_not_join_prose_lines() {
+        // 句末句号 + 下一行带空格 ⇒ 不接续，末尾的「.」按 normalize_doi 去掉
+        let text = "see 10.1234/abc. \nMore text follows here\n";
+        assert_eq!(scan_doi(text).as_deref(), Some("10.1234/abc"));
+    }
+
+    #[test]
+    fn scan_doi_rejoins_space_split_row() {
+        // 版式抽取把折行合成一行并在中间留了空格
+        assert_eq!(
+            scan_doi("doi:10.3969/j. issn.1007-130X.2024.12.001").as_deref(),
+            Some("10.3969/j.issn.1007-130X.2024.12.001")
+        );
+    }
+
+    #[test]
+    fn scan_doi_stops_before_prose_words() {
+        // 句末句号后的英文单词不能被粘进 DOI
+        assert_eq!(
+            scan_doi("see 10.1234/abc. In this paper we study").as_deref(),
+            Some("10.1234/abc")
+        );
+    }
+
+    #[test]
+    fn scan_doi_spaced_form() {
+        // 排版把 DOI 用空格拆开
+        assert_eq!(
+            scan_doi("doi: 10. 19942/j. issn. 1000-1239").as_deref(),
+            Some("10.19942/j.issn.1000-1239")
+        );
+    }
 }

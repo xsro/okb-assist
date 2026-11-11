@@ -1359,6 +1359,23 @@ async fn merge_documents(
 }
 
 /// 从 PDF 元数据填充文档空字段
+/// 从 PDF 启发式元数据里取归一化后的 DOI（没有就是 `None`）
+fn meta_doi(meta: &Value) -> Option<String> {
+    meta.get("doi").and_then(|v| v.as_str()).and_then(normalize_doi)
+}
+
+/// 该记录当前是否真的有 PDF：数据库文件事实（`pdf_size > 0`）**或**磁盘上确实有非空文件。
+///
+/// 上传去重时用它决定「DOI 相同但缺 PDF → 自动补入」还是「已有 PDF → 要求用户确认覆盖」。
+/// 只看 `pdf_size` 会被历史数据（列为空但文件在盘上）骗到，所以两个都查。
+fn doc_has_pdf_file(settings: &Settings, doc: &Document) -> bool {
+    if doc.pdf_size.unwrap_or(0) > 0 {
+        return true;
+    }
+    let path = paths::get_pdf_path(settings, doc.id);
+    std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false)
+}
+
 fn fill_meta_fields(doc: &mut Document, meta: &Value) {
     if doc.title.is_none() {
         if let Some(t) = meta.get("title").and_then(|v| v.as_str()) {
@@ -1593,12 +1610,29 @@ async fn upload_document(
     //    这样免掉拆 PDF 就能拦住 DOI 重复。
     // 命中重复时临时文件由 `TempUpload` 的 Drop 自动删除。
     let mut dup: Option<(Document, &'static str)> = None;
+    // 去重阶段可能已经把元数据抽出来了，后面建记录时直接复用，不重复起 mutool 子进程
+    let mut meta_cache: Option<Value> = None;
     if !force {
         if let Some(existing) = find_doc_by_hash(&db, &file_hash).await {
             dup = Some((existing, "hash"));
-        } else if let Some(doi) = doi_field.clone() {
-            if let Some(existing) = find_doc_by_doi(&db, &doi).await {
-                dup = Some((existing, "doi"));
+        } else {
+            // DOI 去重：显式传入的 DOI 优先（客户端从 Zotero 已知，免拆 PDF）；
+            // 没传且允许抽元数据时，先从 PDF 里抽一次拿 DOI —— Web 上传本来就默认要抽元数据，
+            // 这里只是把这一步提前到去重之前，成本不变。
+            if doi_field.is_none() && extract_meta {
+                let meta = extract_pdf_metadata_from_path_async(
+                    temp_upload.path().to_string_lossy().to_string(),
+                    Some(filename.clone()),
+                    None,
+                )
+                .await;
+                doi_field = meta_doi(&meta);
+                meta_cache = Some(meta);
+            }
+            if let Some(doi) = doi_field.clone() {
+                if let Some(existing) = find_doc_by_doi(&db, &doi).await {
+                    dup = Some((existing, "doi"));
+                }
             }
         }
     }
@@ -1606,6 +1640,52 @@ async fn upload_document(
     if let Some((existing, kind)) = dup {
         let existing_id = existing.id;
         let same_file = existing.file_hash.as_deref() == Some(file_hash.as_str());
+        let existing_has_pdf = doc_has_pdf_file(&settings, &existing);
+
+        // DOI 命中且已有条目**正好缺 PDF**：把这次上传的文件补进那个条目，不新建记录。
+        // 这种情况没必要再问用户（原有条目就是「只有书目、没有正文」的半成品），
+        // 直接补上并回 `status: attached`。
+        if kind == "doi" && !existing_has_pdf && !same_file {
+            tracing::info!(
+                "上传命中 DOI 重复（{} → 文档 {}），该条目没有 PDF，直接把本次文件补进去",
+                doi_field.clone().unwrap_or_default(),
+                existing_id
+            );
+            if let Err(e) = persist_pdf_for_doc(
+                &db,
+                &settings,
+                existing_id,
+                temp_upload,
+                &file_hash,
+                doi_field.clone(),
+            )
+            .await
+            {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e})))
+                    .into_response();
+            }
+            return match fetch_doc(&db, existing_id).await {
+                Ok(Some(doc)) => (
+                    StatusCode::OK,
+                    Json(json!({
+                        "status": "attached",
+                        "attached": true,
+                        "reason": kind,
+                        "existing_id": existing_id,
+                        "same_file": false,
+                        "id": existing_id,
+                        "doc": doc_to_out(&doc, &settings, &db).await,
+                    })),
+                )
+                    .into_response(),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"detail": "文档更新失败"})),
+                )
+                    .into_response(),
+            };
+        }
+
         match on_duplicate.as_str() {
             // 跳过：直接把已存在文档返回给调用方（200，不新建）
             "skip" => {
@@ -1699,11 +1779,13 @@ async fn upload_document(
                         "existing_id": existing_id,
                         "same_file": same_file,
                         "file_hash": file_hash,
+                        "has_pdf": existing_has_pdf,
                         "existing": {
                             "id": existing_id,
                             "filename": existing.filename,
                             "doi": existing.doi,
                             "file_hash": existing.file_hash,
+                            "has_pdf": existing_has_pdf,
                             "pdf_health": existing.pdf_health,
                             "pdf_health_message": existing.pdf_health_message,
                         },
@@ -1714,16 +1796,19 @@ async fn upload_document(
         }
     }
 
-    // PDF 元数据（后台线程读临时文件，不占用请求内存）；`extract_meta=false` 时整段跳过
-    let meta = if extract_meta {
-        extract_pdf_metadata_from_path_async(
-            temp_upload.path().to_string_lossy().to_string(),
-            Some(filename.clone()),
-            None,
-        )
-        .await
-    } else {
-        serde_json::Value::Object(serde_json::Map::new())
+    // PDF 元数据（后台线程读临时文件，不占用请求内存）；`extract_meta=false` 时整段跳过。
+    // 去重阶段若已抽过（为了拿 DOI）就直接复用，避免同一份 PDF 拆两遍。
+    let meta = match meta_cache {
+        Some(m) => m,
+        None if extract_meta => {
+            extract_pdf_metadata_from_path_async(
+                temp_upload.path().to_string_lossy().to_string(),
+                Some(filename.clone()),
+                None,
+            )
+            .await
+        }
+        None => serde_json::Value::Object(serde_json::Map::new()),
     };
 
     let mut doc = Document {

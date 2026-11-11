@@ -7,7 +7,8 @@
  */
 
 export type UploadFailureKind =
-  | 'duplicate' // 内容重复
+  | 'duplicate' // 内容重复（同 hash）
+  | 'duplicate-doi' // DOI 相同，且已有条目里已经有 PDF（需要用户确认是否覆盖）
   | 'auth' // 未登录 / 登录失效
   | 'permission' // 角色不够
   | 'too-large' // 超过大小上限
@@ -29,6 +30,10 @@ export interface UploadFailure {
   detail?: string
   /** 重复文件时后端返回的已有文档 ID */
   existingId?: number
+  /** 命中的重复类型：hash = 内容完全相同；doi = DOI 相同（内容不同） */
+  duplicateKind?: 'hash' | 'doi'
+  /** DOI 重复时，已有条目里是否已经有 PDF（true → 可以覆盖，也可以保留原样） */
+  existingHasPdf?: boolean
 }
 
 interface AxiosLikeError {
@@ -58,10 +63,39 @@ export function describeUploadError(err: unknown): UploadFailure {
   const data = (e.response?.data ?? {}) as Record<string, unknown>
   const detail = pickDetail(e.response?.data) || (typeof e.message === 'string' ? e.message : '')
 
-  // 1) 内容重复（本地查重伪造的 409，或服务端 file_hash 冲突）
+  // 1) 重复：本地查重伪造的 409（hash）、服务端 hash 冲突、服务端 DOI 冲突
   if (data.error === 'duplicate' || (status === 409 && /已存在|重复|duplicate/i.test(detail))) {
     const rawId = data.existing_id
     const existingId = typeof rawId === 'number' ? rawId : undefined
+    const duplicateKind: 'hash' | 'doi' = data.kind === 'doi' ? 'doi' : 'hash'
+    const existingObj = (data.existing ?? {}) as Record<string, unknown>
+    const existingHasPdf = data.has_pdf === true || existingObj.has_pdf === true
+    const idText = existingId ? `#${existingId}` : ''
+
+    // DOI 相同但内容不同：已有条目里**已经有 PDF** → 让用户决定要不要覆盖
+    if (duplicateKind === 'doi' && existingHasPdf) {
+      return {
+        kind: 'duplicate-doi',
+        message: `文献库里已有 DOI 相同的条目${idText}，它里面已经有 PDF`,
+        hint: '确认这份 PDF 更合适就点「覆盖已有 PDF」；否则点「保留原 PDF」放弃本次上传',
+        detail,
+        existingId,
+        duplicateKind,
+        existingHasPdf
+      }
+    }
+    // DOI 相同但那条没有 PDF：正常流程下服务端会自动补入，这里是兜底（例如并发/权限问题）
+    if (duplicateKind === 'doi') {
+      return {
+        kind: 'duplicate-doi',
+        message: `文献库里已有 DOI 相同的条目${idText}（该条目缺 PDF）`,
+        hint: '点「重试」会再次尝试把这份 PDF 补进去；也可以打开已有条目手动上传',
+        detail,
+        existingId,
+        duplicateKind,
+        existingHasPdf: false
+      }
+    }
     return {
       kind: 'duplicate',
       message: '文献库里已有这份 PDF（内容完全相同）',
@@ -69,7 +103,9 @@ export function describeUploadError(err: unknown): UploadFailure {
         ? '点「查看已有文献」打开它；若确实需要第二份记录，可用「强制上传」'
         : '若确实需要第二份记录，可用「强制上传」',
       detail,
-      existingId
+      existingId,
+      duplicateKind,
+      existingHasPdf
     }
   }
 
