@@ -2274,11 +2274,16 @@ async fn insert_bibtex_document(db: &Database, rec: &bibtex::BibRecord) -> Resul
         }
     };
 
+    // 复用最小可用 ID（与上传/登记路径一致）：有空洞就补进去，否则交给 SQLite 分配 max(id)+1。
+    // 显式写 `id` 列并绑定 NULL 时，SQLite 对 `INTEGER PRIMARY KEY` 会自动分配 rowid，
+    // 所以一个 INSERT 就能覆盖两种情况，不用维护两份列清单。
+    let gap_id = next_available_id(db).await;
     let result = sqlx::query(
-        "INSERT INTO documents (filename, title, authors, year, doi, source, journal, keywords, abstract, \
+        "INSERT INTO documents (id, filename, title, authors, year, doi, source, journal, keywords, abstract, \
          doc_type, language, pdf_health, pdf_health_message, fs_synced_at, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'missing', ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'missing', ?, ?, ?, ?)",
     )
+    .bind(gap_id)
     .bind(&filename)
     .bind(non_empty_str(&rec.title))
     .bind(&authors)
@@ -4564,5 +4569,44 @@ mod tests {
         let replaced: UpdateDocumentBody =
             serde_json::from_value(json!({"i18n": {"en": {"title": "T"}}})).unwrap();
         assert!(matches!(replaced.i18n, Some(Some(_))));
+    }
+
+    /// BibTeX 新建条目要复用前面的空号（与上传/登记路径一致），没有空号时才追加。
+    #[tokio::test]
+    async fn bibtex_insert_reuses_gap_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gap.db");
+        let url = format!("sqlite:{}", path.to_string_lossy().replace('\\', "/"));
+        let db = Database::new(&url).await.unwrap();
+        db.init().await.unwrap();
+
+        // 造出 1、2、4（3 是空洞）
+        for id in [1i64, 2, 4] {
+            sqlx::query("INSERT INTO documents (id, filename, fs_synced_at) VALUES (?, ?, 'x')")
+                .bind(id)
+                .bind(format!("{}.pdf", id))
+                .execute(db.pool())
+                .await
+                .unwrap();
+        }
+
+        let rec = bibtex::BibRecord {
+            key: "li2020".to_string(),
+            title: "测试条目".to_string(),
+            authors: vec!["张三".to_string()],
+            year: Some(2020),
+            doi: "10.1000/test".to_string(),
+            journal: "测试期刊".to_string(),
+            publisher: String::new(),
+            keywords: vec![],
+            abstract_text: String::new(),
+            doc_type: "journalArticle".to_string(),
+            language: "zh".to_string(),
+        };
+
+        // 第一次补空洞 3
+        assert_eq!(insert_bibtex_document(&db, &rec).await.unwrap(), 3);
+        // 1–4 已满：下一条按 max(id)+1 追加
+        assert_eq!(insert_bibtex_document(&db, &rec).await.unwrap(), 5);
     }
 }
