@@ -684,29 +684,13 @@ async fn list_documents(
         (file_state::FileKind::Md, params.md_state.as_deref()),
         (file_state::FileKind::Zip, params.zip_state.as_deref()),
     ] {
-        let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else { continue };
-        let mut ors: Vec<String> = Vec::new();
-        for st in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            match file_state::state_condition(kind, st) {
-                Some(cond) => ors.push(cond),
-                None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({
-                            "detail": format!(
-                                "{}_state 取值非法：{}（仅支持 present / absent / unknown）",
-                                kind.key(), st
-                            )
-                        })),
-                    )
-                        .into_response();
-                }
+        match state_condition(kind, raw) {
+            Ok(Some(cond)) => conditions.push(cond),
+            Ok(None) => {}
+            Err(detail) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({ "detail": detail })))
+                    .into_response()
             }
-        }
-        if ors.len() == 1 {
-            conditions.push(ors.remove(0));
-        } else if !ors.is_empty() {
-            conditions.push(format!("({})", ors.join(" OR ")));
         }
     }
 
@@ -2595,6 +2579,43 @@ pub struct SearchInfoQuery {
     ///
     /// 与 `q` 的高级语法叠加（AND），供文献列表页从监控面板带入 `?pdf_health=warning,error,missing`。
     pub pdf_health: Option<String>,
+    /// 文件事实筛选：`present` / `absent` / `unknown`（逗号多选）
+    ///
+    /// 供文献列表页从监控面板带入 `?pdf_state=present&md_state=absent`，与 `q` 叠加（AND）。
+    pub pdf_state: Option<String>,
+    pub md_state: Option<String>,
+    pub zip_state: Option<String>,
+}
+
+/// 文件事实状态参数（`present` / `absent` / `unknown`，逗号多选）→ 一个 SQL 条件片段。
+///
+/// 不占绑定参数（`file_state::state_condition` 产出的是字面量 SQL）；
+/// 返回 `Err(非法取值)` 时端点应回 400（与列表端点共用同一套校验）。
+fn state_condition(
+    kind: file_state::FileKind,
+    raw: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let mut ors: Vec<String> = Vec::new();
+    for st in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match file_state::state_condition(kind, st) {
+            Some(cond) => ors.push(cond),
+            None => {
+                return Err(format!(
+                    "{}_state 取值非法：{}（仅支持 present / absent / unknown）",
+                    kind.key(),
+                    st
+                ))
+            }
+        }
+    }
+    Ok(match ors.len() {
+        0 => None,
+        1 => ors.pop(),
+        _ => Some(format!("({})", ors.join(" OR "))),
+    })
 }
 
 /// 解析 `pdf_health` 逗号多选参数，生成 SQL 条件与绑定值。
@@ -2657,7 +2678,24 @@ async fn search_info(
         None => None,
     };
 
-    if q.trim().is_empty() && health_cond.is_none() {
+    // 文件事实筛选（与 `q` / `pdf_health` 叠加，三种状态都不占绑定参数）
+    let mut state_conds: Vec<String> = Vec::new();
+    for (kind, raw) in [
+        (file_state::FileKind::Pdf, params.pdf_state.as_deref()),
+        (file_state::FileKind::Md, params.md_state.as_deref()),
+        (file_state::FileKind::Zip, params.zip_state.as_deref()),
+    ] {
+        match state_condition(kind, raw) {
+            Ok(Some(cond)) => state_conds.push(cond),
+            Ok(None) => {}
+            Err(detail) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({ "detail": detail })))
+                    .into_response()
+            }
+        }
+    }
+
+    if q.trim().is_empty() && health_cond.is_none() && state_conds.is_empty() {
         return Json(json!({"items": [], "query": q, "total": 0, "page": page, "page_size": page_size, "total_pages": 0})).into_response();
     }
 
@@ -2669,6 +2707,10 @@ async fn search_info(
     if let Some((cond, extra)) = health_cond {
         where_clause = format!("({}) AND {}", where_clause, cond);
         binds.extend(extra);
+    }
+    // 文件事实筛选（`?pdf_state=` / `?md_state=` / `?zip_state=`）同样叠加
+    for cond in &state_conds {
+        where_clause = format!("({}) AND {}", where_clause, cond);
     }
 
     // 计数

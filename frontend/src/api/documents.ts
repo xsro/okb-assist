@@ -284,12 +284,28 @@ export async function grepSearch(
  */
 export function searchInfo(
   query: string,
-  options: { page?: number; page_size?: number; pdf_health?: string } = {}
+  options: {
+    page?: number
+    page_size?: number
+    pdf_health?: string
+    /** present / absent / unknown（逗号多选） */
+    pdf_state?: string
+    md_state?: string
+    zip_state?: string
+  } = {}
 ) {
-  const { page = 1, page_size = 20, pdf_health } = options
+  const { page = 1, page_size = 20, pdf_health, pdf_state, md_state, zip_state } = options
   return apiGet<SearchResultList>(
     '/assist/api/documents/search-info/',
-    { q: query, page, page_size, ...(pdf_health ? { pdf_health } : {}) }
+    {
+      q: query,
+      page,
+      page_size,
+      ...(pdf_health ? { pdf_health } : {}),
+      ...(pdf_state ? { pdf_state } : {}),
+      ...(md_state ? { md_state } : {}),
+      ...(zip_state ? { zip_state } : {})
+    }
   )
 }
 

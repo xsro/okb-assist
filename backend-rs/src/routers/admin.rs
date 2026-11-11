@@ -442,6 +442,22 @@ async fn stats(
     .unwrap_or(0);
     let error_count = status_counts.get("error").and_then(|v| v.as_i64()).unwrap_or(0);
 
+    // 文件构成（按文件事实列聚合，零磁盘 IO）：回答「多少篇只有 PDF 没有 Markdown」这类问题。
+    // 三态语义同 `services::file_state`：size 为 NULL/0 = 确定不存在，>0 = 存在。
+    let (pdf_only, pdf_and_md, md_only, no_files, with_zip): (i64, i64, i64, i64, i64) =
+        sqlx::query_as(
+            "SELECT \
+               COALESCE(SUM(CASE WHEN COALESCE(pdf_size,0) > 0 AND COALESCE(md_size,0) = 0 THEN 1 ELSE 0 END), 0), \
+               COALESCE(SUM(CASE WHEN COALESCE(pdf_size,0) > 0 AND COALESCE(md_size,0) > 0 THEN 1 ELSE 0 END), 0), \
+               COALESCE(SUM(CASE WHEN COALESCE(pdf_size,0) = 0 AND COALESCE(md_size,0) > 0 THEN 1 ELSE 0 END), 0), \
+               COALESCE(SUM(CASE WHEN COALESCE(pdf_size,0) = 0 AND COALESCE(md_size,0) = 0 THEN 1 ELSE 0 END), 0), \
+               COALESCE(SUM(CASE WHEN COALESCE(zip_size,0) > 0 THEN 1 ELSE 0 END), 0) \
+             FROM documents",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap_or((0, 0, 0, 0, 0));
+
     // 从数据库直接汇总文件大小（避免遍历文件系统）
     let total_pdf_size: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(pdf_size), 0) FROM documents")
         .fetch_one(db.pool())
@@ -504,6 +520,15 @@ async fn stats(
         "zip_size": total_zip_size,
         "pdf_health_counts": pdf_health_counts,
         "pdf_health_unchecked": pdf_health_unchecked,
+        // 文件构成：`pdf_only` = 有 PDF 但没 Markdown（待解析/解析失败），
+        // `md_only` = 有 Markdown 但 PDF 丢了，`none` = 两个都没有
+        "file_counts": {
+            "pdf_only": pdf_only,
+            "pdf_and_md": pdf_and_md,
+            "md_only": md_only,
+            "none": no_files,
+            "with_zip": with_zip,
+        },
     }))
 }
 

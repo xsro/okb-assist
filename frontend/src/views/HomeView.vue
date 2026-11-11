@@ -330,6 +330,30 @@ const searchQuery = ref('')
  * 与搜索词叠加（AND），值直接透传给后端的 `pdf_health` 逗号多选参数。
  */
 const healthFilter = ref('')
+/**
+ * 文件事实筛选（`?pdf_state=present&md_state=absent`），来自监控面板的「文件构成」链接。
+ * 取值 `present` / `absent` / `unknown`，与搜索词 / PDF 健康一并叠加（AND）。
+ */
+const stateFilter = ref<{ pdf: string; md: string; zip: string }>({ pdf: '', md: '', zip: '' })
+const STATE_LABELS: Record<string, string> = {
+  present: '存在',
+  absent: '不存在',
+  unknown: '未知',
+}
+const FILE_KIND_LABELS: Record<'pdf' | 'md' | 'zip', string> = {
+  pdf: 'PDF',
+  md: 'Markdown',
+  zip: '资源包',
+}
+/** 非空的文件事实筛选（传给后端的 `pdf_state` / `md_state` / `zip_state`） */
+const stateParams = computed(() => {
+  const out: Record<string, string> = {}
+  for (const kind of ['pdf', 'md', 'zip'] as const) {
+    const v = stateFilter.value[kind]
+    if (v) out[`${kind}_state`] = v
+  }
+  return out
+})
 const healthFilterLabels: Record<string, string> = {
   ok: '正常',
   warning: '警告',
@@ -368,6 +392,10 @@ const SORT_LABELS: Record<string, string> = {
 const activeFilterChips = computed(() => {
   const chips: string[] = []
   if (healthFilter.value) chips.push(`PDF 健康: ${healthFilterText.value}`)
+  for (const kind of ['pdf', 'md', 'zip'] as const) {
+    const v = stateFilter.value[kind]
+    if (v) chips.push(`${FILE_KIND_LABELS[kind]}: ${STATE_LABELS[v] || v}`)
+  }
   if (!searchQuery.value) return chips
   const pq = parseSearchQuery(searchQuery.value)
   const p = parsedQueryToParams(pq)
@@ -433,12 +461,29 @@ function parseHealthQuery(raw: unknown): string {
   return String(value ?? '').trim()
 }
 
-/** 由当前视图状态生成地址栏 query：q / pdf_health 为空、页码为 1 时省略，保持 URL 干净 */
+/** 解析地址栏里的 `pdf_state` / `md_state` / `zip_state`（单值，非法值忽略） */
+function parseStateQuery(raw: unknown): string {
+  const value = Array.isArray(raw) ? raw[0] : raw
+  const v = String(value ?? '').trim().toLowerCase()
+  return v === 'present' || v === 'absent' || v === 'unknown' ? v : ''
+}
+
+/** 从地址栏恢复文件事实筛选 */
+function readStateFilters(): { pdf: string; md: string; zip: string } {
+  return {
+    pdf: parseStateQuery(route.query.pdf_state),
+    md: parseStateQuery(route.query.md_state),
+    zip: parseStateQuery(route.query.zip_state),
+  }
+}
+
+/** 由当前视图状态生成地址栏 query：q / pdf_health / 文件事实筛选为空、页码为 1 时省略，保持 URL 干净 */
 function buildUrlQuery(): Record<string, string> {
   const query = searchQuery.value.trim()
   const next: Record<string, string> = {}
   if (query) next.q = query
   if (healthFilter.value) next.pdf_health = healthFilter.value
+  Object.assign(next, stateParams.value)
   if (page.value > 1) next.page = String(page.value)
   return next
 }
@@ -455,6 +500,7 @@ function syncUrl(mode: 'push' | 'replace') {
   if (currentQ) current.q = currentQ
   const currentHealth = parseHealthQuery(route.query.pdf_health)
   if (currentHealth) current.pdf_health = currentHealth
+  Object.assign(current, stateParams.value)
   const currentPage = parsePageQuery(route.query.page)
   if (currentPage > 1) current.page = String(currentPage)
   if (JSON.stringify(next) === JSON.stringify(current)) return
@@ -463,13 +509,14 @@ function syncUrl(mode: 'push' | 'replace') {
   else router.replace(target)
 }
 
-/** 从 URL 读取初始查询参数（搜索词 + PDF 健康筛选 + 页码） */
+/** 从 URL 读取初始查询参数（搜索词 + PDF 健康筛选 + 文件事实筛选 + 页码） */
 function restoreQueryFromUrl() {
   const q = route.query.q as string | undefined
   if (q) {
     searchQuery.value = q
   }
   healthFilter.value = parseHealthQuery(route.query.pdf_health)
+  stateFilter.value = readStateFilters()
   page.value = parsePageQuery(route.query.page)
 }
 
@@ -483,10 +530,14 @@ async function doLoad(urlMode: 'push' | 'replace' | 'none' = 'replace') {
 
   const query = searchQuery.value.trim()
   const health = healthFilter.value || undefined
+  const states = stateParams.value
 
   if (query === '') {
-    // 无搜索词时按 PDF 健康筛选（有则带上）加载列表
-    await load(listDocuments, health ? { pdf_health: health } : {})
+    // 无搜索词时按 PDF 健康 / 文件事实筛选（有则带上）加载列表
+    await load(listDocuments, {
+      ...(health ? { pdf_health: health } : {}),
+      ...states,
+    })
   } else {
     // 将原始 query string 发送给后端，由后端解析和执行搜索
     await load(
@@ -495,6 +546,9 @@ async function doLoad(urlMode: 'push' | 'replace' | 'none' = 'replace') {
           page: params.page as number | undefined,
           page_size: params.page_size as number | undefined,
           pdf_health: health,
+          pdf_state: states.pdf_state,
+          md_state: states.md_state,
+          zip_state: states.zip_state,
         })
         return { items: res.items, total: res.total }
       },
@@ -526,24 +580,38 @@ function search() {
 function clearSearch() {
   searchQuery.value = ''
   healthFilter.value = ''
+  stateFilter.value = { pdf: '', md: '', zip: '' }
   search()
 }
 
-/** 监控路由变化（浏览器前进/后退、手改地址栏），以 URL 为准恢复搜索词/健康筛选/页码 */
+/** 监控路由变化（浏览器前进/后退、手改地址栏），以 URL 为准恢复搜索词/健康筛选/文件事实筛选/页码 */
 watch(
-  () => [route.query.q, route.query.pdf_health, route.query.page] as const,
+  () =>
+    [
+      route.query.q,
+      route.query.pdf_health,
+      route.query.pdf_state,
+      route.query.md_state,
+      route.query.zip_state,
+      route.query.page,
+    ] as const,
   () => {
     const urlQ = (route.query.q as string | undefined) || ''
     const urlHealth = parseHealthQuery(route.query.pdf_health)
+    const urlStates = readStateFilters()
     const urlPage = parsePageQuery(route.query.page)
     // URL 与视图状态一致：这次变化由本页自己写入，无需重复加载
     if (
       urlQ === searchQuery.value.trim() &&
       urlHealth === healthFilter.value &&
+      urlStates.pdf === stateFilter.value.pdf &&
+      urlStates.md === stateFilter.value.md &&
+      urlStates.zip === stateFilter.value.zip &&
       urlPage === page.value
     ) return
     searchQuery.value = urlQ
     healthFilter.value = urlHealth
+    stateFilter.value = urlStates
     page.value = urlPage
     doLoad('none')
   }

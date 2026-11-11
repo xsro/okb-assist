@@ -42,6 +42,39 @@
       </div>
     </div>
 
+    <!-- 文件构成（按文件事实列聚合，零磁盘 IO） -->
+    <div class="section">
+      <div class="section-header">
+        <h3>文件构成</h3>
+        <button class="btn btn-sm btn-outline" @click="load" :disabled="false">
+          刷新
+        </button>
+      </div>
+
+      <div class="stats-grid">
+        <router-link
+          v-for="card in fileCards"
+          :key="card.key"
+          class="stat-card file-card"
+          :class="`file-${card.key}`"
+          :to="card.to"
+          :title="card.hint"
+        >
+          <span class="stat-value">{{ card.value }}</span>
+          <span class="stat-label">{{ card.label }}</span>
+        </router-link>
+      </div>
+
+      <div class="health-link-row">
+        <router-link class="btn btn-sm btn-outline" :to="pdfOnlyLink">
+          查看「只有 PDF、没有 Markdown」的文献（{{ fileCounts.pdf_only }}）→
+        </router-link>
+        <span class="health-link-hint">
+          点击卡片同样可跳转到文献列表并按文件状态筛选（`pdf` / `md` / `zip` = present / absent）
+        </span>
+      </div>
+    </div>
+
     <!-- PDF 健康 -->
     <div class="section">
       <div class="section-header">
@@ -236,9 +269,8 @@ import { startBatchParse, startBatchExtract } from '@/api/pipeline'
 import { usePipelineStore } from '@/stores/pipeline'
 import { useToast } from '@/composables/useToast'
 import StatusBadge from '@/components/StatusBadge.vue'
-import type { SystemStats } from '@/types/config'
 import type { ActiveTask } from '@/types/pipeline'
-import type { PdfHealthOverview } from '@/api/admin'
+import type { PdfHealthOverview, SystemStats } from '@/api/admin'
 
 const { showToast, showSuccess, showInfo, showError } = useToast()
 const router = useRouter()
@@ -270,6 +302,59 @@ const progressPercent = computed(() => {
   if (!p || p.total === 0) return 0
   return Math.min(100, Math.round((p.processed / p.total) * 100))
 })
+
+/** 文件构成计数（后端 `stats.file_counts`；缺失时全部当 0） */
+const fileCounts = computed(() => {
+  const c = stats.value?.file_counts
+  return {
+    pdf_only: c?.pdf_only ?? 0,
+    pdf_and_md: c?.pdf_and_md ?? 0,
+    md_only: c?.md_only ?? 0,
+    none: c?.none ?? 0,
+    with_zip: c?.with_zip ?? 0
+  }
+})
+
+/** 「只有 PDF、没有 Markdown」的文献列表链接（列表页支持 pdf_state / md_state） */
+const pdfOnlyLink = { path: '/assist', query: { pdf_state: 'present', md_state: 'absent' } }
+
+const fileCards = computed(() => [
+  {
+    key: 'pdf-only',
+    label: '只有 PDF（无 Markdown）',
+    value: fileCounts.value.pdf_only,
+    to: pdfOnlyLink,
+    hint: '有 PDF 但还没解析出 Markdown（待解析 / 解析失败）'
+  },
+  {
+    key: 'pdf-and-md',
+    label: 'PDF + Markdown',
+    value: fileCounts.value.pdf_and_md,
+    to: { path: '/assist', query: { pdf_state: 'present', md_state: 'present' } },
+    hint: '解析完成的文献'
+  },
+  {
+    key: 'md-only',
+    label: '只有 Markdown（缺 PDF）',
+    value: fileCounts.value.md_only,
+    to: { path: '/assist', query: { pdf_state: 'absent', md_state: 'present' } },
+    hint: 'PDF 文件丢了，但解析结果还在'
+  },
+  {
+    key: 'none',
+    label: '无文件',
+    value: fileCounts.value.none,
+    to: { path: '/assist', query: { pdf_state: 'absent', md_state: 'absent' } },
+    hint: 'PDF 与 Markdown 都不存在（如 BibTeX 导入的纯元数据条目）'
+  },
+  {
+    key: 'with-zip',
+    label: '有资源包',
+    value: fileCounts.value.with_zip,
+    to: { path: '/assist', query: { zip_state: 'present' } },
+    hint: '含图片资源包（MinerU 解析产物）'
+  }
+])
 
 
 function formatSize(bytes: number): string {
@@ -466,6 +551,37 @@ onUnmounted(() => {
 
 .table-wrap {
   overflow-x: auto;
+}
+
+/* ── 文件构成 ── */
+.file-card {
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+
+.file-card:hover {
+  border-color: var(--accent, #2f9e44);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.file-card:active {
+  transform: scale(0.99);
+}
+
+/* 「只有 PDF 无 Markdown」是待解析的主体，标黄提醒 */
+.file-card.file-pdf-only .stat-value {
+  color: #9a6400;
+}
+
+.file-card.file-md-only .stat-value {
+  color: var(--danger-text);
+}
+
+.file-card.file-none .stat-value {
+  color: var(--text-secondary);
 }
 
 /* ── PDF 健康 ── */

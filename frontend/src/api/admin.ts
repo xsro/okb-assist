@@ -16,6 +16,19 @@ export interface SystemStats {
   pdf_health_counts?: Record<string, number>
   /** 从未做过健康检查（pdf_health 为空）的文档数 */
   pdf_health_unchecked?: number
+  /** 文件构成（按 pdf_size / md_size 聚合，零磁盘 IO） */
+  file_counts?: {
+    /** 有 PDF 但没有 Markdown（待解析 / 解析失败） */
+    pdf_only: number
+    /** PDF 与 Markdown 都有 */
+    pdf_and_md: number
+    /** 只有 Markdown（PDF 缺失） */
+    md_only: number
+    /** 两者都没有 */
+    none: number
+    /** 有资源包的数量 */
+    with_zip: number
+  }
 }
 
 /** 获取统计信息 */
