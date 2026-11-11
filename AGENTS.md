@@ -349,6 +349,12 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 
 ### PDF 元数据启发式抽取（`services/pdf_meta.rs`）
 
+> ⚠ **注意（实测结论，别把它当批量工具）**：PDF 启发式抽取处理**非英文文献时很耗时、而且常常不可靠**
+> （缺 ToUnicode 的字体、双栏版面、学位论文封面版式都会让题名/作者/年份跑偏，且 `mutool draw -F text`
+> 会把整份正文抽一遍）。因此结果**只能当参考**，落库后需人工在「文档管理 → 编辑元数据」核对；
+> **不适合批量运行**——批量补元数据请用启发式 Markdown 抽取（`?method=heuristic`，只读引用格式/DOI）
+> 或大模型抽取，不要对整库逐篇循环 `POST /pipeline/extract-pdf-meta/:id`。
+
 上传/解析时先用规则从 PDF 里抽题名、作者、年份、DOI、刊名、卷期页、摘要、关键词（不需要 LLM，也不依赖 MinerU），
 抽到的字段按「只补空」落库（`pipeline.rs` 的 `run_extract_pdf_meta` 与 `documents.rs` 的 `fill_meta_fields`），
 **中英文一并写**：`title`/`title_en`/`authors`/`authors_en`/`journal`/`journal_en`/`keywords`/`keywords_en`/`abstract`/`abstract_en`。
