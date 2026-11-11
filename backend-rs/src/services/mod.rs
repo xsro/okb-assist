@@ -6,6 +6,7 @@ pub mod citation;
 pub mod crossref;
 pub mod grep_search;
 pub mod datalab;
+pub mod i18n;
 pub mod doc_type;
 pub mod drive;
 pub mod file_state;

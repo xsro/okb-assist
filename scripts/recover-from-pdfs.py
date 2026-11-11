@@ -676,9 +676,34 @@ def open_db(path: str) -> sqlite3.Connection:
     return conn
 
 
-COLS = ['id', 'title', 'doi', 'year', 'authors', 'journal', 'abstract', 'abstract_en',
-        'keywords', 'keywords_en', 'language', 'file_hash', 'pdf_size', 'md_size', 'zip_size',
+COLS = ['id', 'title', 'doi', 'year', 'authors', 'journal', 'abstract', 'i18n',
+        'keywords', 'language', 'file_hash', 'pdf_size', 'md_size', 'zip_size',
         'fs_synced_at', 'pdf_health', 'pdf_health_message']
+
+
+def i18n_merge(raw, lang: str, **fields) -> str:
+    """把字段补进 `i18n` JSON（只补空）。`raw` 可以是数据库里的 JSON 字符串或 None。"""
+    data: dict = {}
+    if raw:
+        try:
+            data = json.loads(raw) or {}
+        except (TypeError, ValueError):
+            data = {}
+    entry = data.setdefault(lang, {})
+    for key, value in fields.items():
+        if value and not entry.get(key):
+            entry[key] = value
+    return json.dumps(data, ensure_ascii=False)
+
+
+def i18n_has(raw, lang: str, key: str) -> bool:
+    if not raw:
+        return False
+    try:
+        data = json.loads(raw) or {}
+    except (TypeError, ValueError):
+        return False
+    return bool((data.get(lang) or {}).get(key))
 
 
 def load_docs(conn, ids=None) -> list[dict]:
@@ -852,7 +877,7 @@ def step_meta(conn, docs, ctx: Ctx, dry: bool, workers: int, overwrite: bool,
                 if src.get('authors') == 'layout':
                     ok = _md_contains_name(ctx, doc_id, au)
                 if ok:
-                    upd['authors'] = json.dumps(au, ensure_ascii=False)
+                    upd['authors'] = '; '.join(str(x).strip() for x in au if str(x).strip())
                     stat['authors'] += 1
                 else:
                     stat['authors_skipped'] += 1
@@ -863,24 +888,29 @@ def step_meta(conn, docs, ctx: Ctx, dry: bool, workers: int, overwrite: bool,
             if r.get('year') and src.get('year') in ('cite', 'header') and (overwrite or not d['year']):
                 upd['year'] = int(r['year'])
                 stat['year'] += 1
-            # 摘要 / 关键词：与库里的习惯一致 —— 主列存本篇语言的文本，含英文的另存 *_en
+            # 摘要 / 关键词：基础列存 PDF 主要语言；非主语言的英文文本进 i18n.en
             lang = (d['language'] or r.get('language') or '').lower()
             if r.get('abstract') and src.get('abstract') == 'label':
                 has_cjk = bool(CJK_RE.search(r['abstract']))
-                main_key = 'abstract' if (has_cjk or lang == 'en') else 'abstract_en'
-                if overwrite or not d.get(main_key):
-                    upd[main_key] = r['abstract']
-                    stat[main_key] += 1
-                    if lang == 'en' and (overwrite or not d.get('abstract_en')):
-                        upd['abstract_en'] = r['abstract']
+                if has_cjk or lang in ('', 'en'):
+                    if overwrite or not d['abstract']:
+                        upd['abstract'] = r['abstract']
+                        stat['abstract'] += 1
+                elif overwrite or not i18n_has(d['i18n'], 'en', 'abstract'):
+                    upd['i18n'] = i18n_merge(upd.get('i18n') or d['i18n'], 'en',
+                                             abstract=r['abstract'])
+                    stat['i18n.abstract'] += 1
             if r.get('keywords') and src.get('keywords') == 'label' and 2 <= len(r['keywords']) <= 20:
                 has_cjk = bool(CJK_RE.search(''.join(r['keywords'])))
-                main_key = 'keywords' if (has_cjk or lang == 'en') else 'keywords_en'
-                if overwrite or not d.get(main_key):
-                    upd[main_key] = json.dumps(r['keywords'], ensure_ascii=False)
-                    stat[main_key] += 1
-                    if lang == 'en' and (overwrite or not d.get('keywords_en')):
-                        upd['keywords_en'] = upd[main_key]
+                keywords_text = '; '.join(str(x).strip() for x in r['keywords'] if str(x).strip())
+                if has_cjk or lang in ('', 'en'):
+                    if overwrite or not d['keywords']:
+                        upd['keywords'] = keywords_text
+                        stat['keywords'] += 1
+                elif overwrite or not i18n_has(d['i18n'], 'en', 'keywords'):
+                    upd['i18n'] = i18n_merge(upd.get('i18n') or d['i18n'], 'en',
+                                             keywords=keywords_text)
+                    stat['i18n.keywords'] += 1
             if r.get('language') and not d['language']:
                 upd['language'] = r['language']
             if upd:

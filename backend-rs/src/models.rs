@@ -101,11 +101,10 @@ pub struct Document {
     pub category: Option<String>,
     pub doc_type: Option<String>,
     pub language: Option<String>,
-    pub title_en: Option<String>,
-    pub authors_en: Option<String>,
-    pub keywords_en: Option<String>,
-    pub abstract_en: Option<String>,
-    pub journal_en: Option<String>,
+    /// 翻译元数据（JSON）：`{"en":{"title":…,"authors":…,"journal":…,"keywords":…,"abstract":…}}`。
+    /// 基础列（title/authors/journal/keywords/abstract）存 PDF 主要语言，本列只存翻译。
+    /// **读写一律走 `services::i18n`**，不要在这里手工 `serde_json` 解析。
+    pub i18n: Option<String>,
     pub mineru_task_id: Option<String>,
     /// 文件事实（size）上次从文件系统同步的时间；`None` = 从未同步过（状态未知）
     pub fs_synced_at: Option<String>,

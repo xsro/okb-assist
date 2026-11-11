@@ -8,6 +8,21 @@ export type DocStatus =
 
 export type IndexStatus = 'not_indexed' | 'indexing' | 'indexed' | 'error'
 
+/**
+ * 单语言的翻译元数据（键名与基础列同名）。
+ *
+ * 基础列（title/authors/journal/keywords/abstract）存 **PDF 主要语言**，
+ * 这里只存翻译（如中文文献的英文译名）；`authors` / `keywords` 为 `; ` 分隔纯文本。
+ * 英文文献不存 `en` 镜像。
+ */
+export interface I18nFields {
+  title?: string | null
+  authors?: string | null
+  journal?: string | null
+  keywords?: string | null
+  abstract?: string | null
+}
+
 export interface Document {
   id: number
   title: string
@@ -18,12 +33,8 @@ export interface Document {
   doi: string | null
   abstract: string | null
   keywords: string | null
-  /** 双语 / 来源字段：后端会返回，页面按需展示（非必有） */
-  title_en?: string | null
-  authors_en?: string | null
-  journal_en?: string | null
-  keywords_en?: string | null
-  abstract_en?: string | null
+  /** 翻译元数据：语言码 → 字段；无翻译时后端返回 `{}` */
+  i18n?: Record<string, I18nFields>
   language?: string | null
   source?: string | null
   category?: string | null
@@ -79,11 +90,8 @@ export interface Document {
 export interface PublicDocument {
   id: number
   title?: string | null
-  title_en?: string | null
   authors?: string | null
-  authors_en?: string | null
   journal?: string | null
-  journal_en?: string | null
   year?: number | null
   doc_type?: string | null
   doi?: string | null
@@ -91,9 +99,9 @@ export interface PublicDocument {
   category?: string | null
   language?: string | null
   keywords?: string | null
-  keywords_en?: string | null
   abstract?: string | null
-  abstract_en?: string | null
+  /** 翻译元数据（与 `Document.i18n` 同结构） */
+  i18n?: Record<string, I18nFields>
 }
 
 export interface SearchResult {

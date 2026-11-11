@@ -23,6 +23,7 @@ use crate::database::Database;
 use crate::models::{Document, DocStatus, DocumentVectorIndex};
 use crate::paths;
 use crate::services::crossref::CrossrefClient;
+use crate::services::i18n::{self, list_to_db, parse_str_list};
 use crate::services::image_cache;
 use crate::services::mineru::{plan_chunks, plan_page_ranges, MinerUClient};
 use crate::services::pdf_meta::{extract_pdf_metadata_from_path_async, looks_like_placeholder, normalize_doi};
@@ -34,8 +35,7 @@ use crate::utils::{absolute_path, now_iso};
 /// `year` 必须 CAST：老库里有写成 `''`（TEXT）的年份，按 `Option<i64>` 解码 TEXT 会报
 /// `mismatched types`，整条查询取不到任何行。
 const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, CAST(NULLIF(TRIM(year), '') AS INTEGER) AS year, doi, source, journal, \
-    keywords, abstract, category, doc_type, language, title_en, authors_en, \
-    keywords_en, abstract_en, journal_en, mineru_task_id, fs_synced_at, \
+    keywords, abstract, category, doc_type, language, i18n, mineru_task_id, fs_synced_at, \
     qdrant_collection, vector_db_id, created_at, updated_at, \
     pdf_size, md_size, zip_size, pdf_health, pdf_health_message";
 
@@ -797,29 +797,57 @@ struct MetaRecord {
     category: String,
     doc_type: String,
     language: String,
+    /// `i18n` 里除 `en` 之外的语言（目前不会产生，但手工编辑/未来语言不能被抽取覆盖）
+    i18n_other: i18n::I18nMap,
 }
 
 impl MetaRecord {
     /// 从数据库记录构造快照
+    ///
+    /// 基础列是 PDF 主要语言，翻译在 `i18n`（英文文献没有翻译）。快照仍是扁平的
+    /// `*_en` 形式：模型的输入/输出契约保持与提示词一致（自定义提示词不用改）。
     fn from_doc(doc: &Document) -> Self {
+        let mut translations = i18n::parse(doc.i18n.as_deref());
+        let en = translations.remove("en").unwrap_or_default();
         Self {
             title: trim_opt(&doc.title),
-            title_en: trim_opt(&doc.title_en),
+            title_en: en.title.unwrap_or_default(),
             authors: parse_str_list(doc.authors.as_deref()),
-            authors_en: parse_str_list(doc.authors_en.as_deref()),
+            authors_en: parse_str_list(en.authors.as_deref()),
             year: doc.year,
             doi: trim_opt(&doc.doi),
             source: trim_opt(&doc.source),
             journal: trim_opt(&doc.journal),
-            journal_en: trim_opt(&doc.journal_en),
+            journal_en: en.journal.unwrap_or_default(),
             keywords: parse_str_list(doc.keywords.as_deref()),
-            keywords_en: parse_str_list(doc.keywords_en.as_deref()),
+            keywords_en: parse_str_list(en.keywords.as_deref()),
             abstract_text: trim_opt(&doc.abstract_text),
-            abstract_en: trim_opt(&doc.abstract_en),
+            abstract_en: en.abstract_text.unwrap_or_default(),
             category: trim_opt(&doc.category),
             doc_type: trim_opt(&doc.doc_type),
             language: trim_opt(&doc.language),
+            i18n_other: translations,
         }
+    }
+
+    /// 落库用：把快照里的 `*_en` 转成 `i18n` JSON。
+    ///
+    /// 基础语言为英文（译名即本体）或无法判定时返回 `None`；与基础列相同的值不存。
+    fn i18n_db(&self) -> Option<String> {
+        let base = i18n::base_language(Some(&self.language), Some(&self.title))?;
+        if base == "en" {
+            return None;
+        }
+        let fields = i18n::I18nFields {
+            title: translation_value(&self.title_en, &self.title),
+            authors: translation_value(&list_to_db(&self.authors_en), &self.authors.join("; ")),
+            journal: translation_value(&self.journal_en, &self.journal),
+            keywords: translation_value(&list_to_db(&self.keywords_en), &self.keywords.join("; ")),
+            abstract_text: translation_value(&self.abstract_en, &self.abstract_text),
+        };
+        let mut map = self.i18n_other.clone();
+        i18n::merge_missing(&mut map, &i18n::single_lang_map("en", fields));
+        i18n::to_db(&map)
     }
 
     /// 转为 JSON（送模型作为「已有元数据」，同时用于日志）
@@ -1007,38 +1035,14 @@ fn display_year(v: Option<i64>) -> String {
     v.map(|y| y.to_string()).unwrap_or_else(|| "（空）".to_string())
 }
 
-/// 作者/关键词列 → 数组：优先按 JSON 数组解析（历史数据），其次按分隔符切分
-fn parse_str_list(raw: Option<&str>) -> Vec<String> {
-    let raw = raw.unwrap_or("").trim();
-    if raw.is_empty() {
-        return Vec::new();
+/// 翻译值：空值、与基础列完全相同的值都不存（避免英文文献的镜像重复）。
+fn translation_value(value: &str, base: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value == base.trim() {
+        None
+    } else {
+        Some(value.to_string())
     }
-    if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(raw) {
-        return items
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
-            .filter(|s| !s.is_empty())
-            .collect();
-    }
-    raw.split([';', ',', '、', '，'])
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-/// 数组 → 数据库列：用 `; ` 分隔的**纯文本**（空数组写空串，与 `NULLIF(x, '')` 语义一致）。
-///
-/// 历史格式是 JSON 数组字符串（`["A","B"]`），读取侧 `parse_str_list` 仍兼容；
-/// 写入侧统一纯文本：详情页可直接显示，`citation::from_document` 也能按分隔符正确拆开
-/// （旧格式下它会把 `["A":` 这类碎片当成人名）。老数据的 JSON → 纯文本迁移在
-/// `database.rs::migrate_list_columns_to_text`。
-pub(crate) fn list_to_db(items: &[String]) -> String {
-    items
-        .iter()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 /// 从模型输出取文本字段：字段缺失 → `None`（模型没表态）；
@@ -1239,33 +1243,27 @@ async fn do_extract_impl(
     }
 
     let authors = list_to_db(&merged.authors);
-    let authors_en = list_to_db(&merged.authors_en);
     let keywords = list_to_db(&merged.keywords);
-    let keywords_en = list_to_db(&merged.keywords_en);
+    let i18n_db = merged.i18n_db();
 
     let _ = sqlx::query(
         "UPDATE documents SET \
-            title = ?, title_en = ?, authors = ?, authors_en = ?, year = ?, doi = ?, \
-            source = ?, journal = ?, journal_en = ?, keywords = ?, keywords_en = ?, \
-            abstract = ?, abstract_en = ?, category = ?, doc_type = ?, language = ?, \
+            title = ?, authors = ?, year = ?, doi = ?, source = ?, journal = ?, \
+            keywords = ?, abstract = ?, category = ?, doc_type = ?, language = ?, i18n = ?, \
             updated_at = ? WHERE id = ?",
     )
     .bind(&merged.title)
-    .bind(&merged.title_en)
     .bind(&authors)
-    .bind(&authors_en)
     .bind(merged.year)
     .bind(&merged.doi)
     .bind(&merged.source)
     .bind(&merged.journal)
-    .bind(&merged.journal_en)
     .bind(&keywords)
-    .bind(&keywords_en)
     .bind(&merged.abstract_text)
-    .bind(&merged.abstract_en)
     .bind(&merged.category)
     .bind(&merged.doc_type)
     .bind(&merged.language)
+    .bind(&i18n_db)
     .bind(now_iso())
     .bind(doc_id)
     .execute(db.pool())
@@ -1423,6 +1421,15 @@ async fn set_index_error(db: &Database, doc_id: i64, vector_db_id: &str, msg: &s
     .await;
 }
 
+/// Crossref 等「单语言权威源」的路由：返回 `(基础语言, 目标语言)`。
+/// 目标语言为 `Some(lang)` 表示文本字段应写入 `i18n[lang]`（不碰基础列）。
+fn crossref_route(parsed: &Value, doc: &Document) -> (Option<String>, Option<String>) {
+    let base = i18n::base_language(doc.language.as_deref(), doc.title.as_deref());
+    let source = i18n::source_language(parsed).unwrap_or_else(|| "en".to_string());
+    let target = i18n::route_target_lang(base.as_deref(), &source);
+    (base, target)
+}
+
 async fn run_crossref(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
     let doc = match fetch_doc(&db, doc_id).await {
         Some(d) => d,
@@ -1459,11 +1466,49 @@ async fn run_crossref(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
     }
 
     let parsed = &result["parsed"];
+    let (base_lang, route) = crossref_route(parsed, &doc);
+
+    // 基础语言与 Crossref 不同（典型：中文文献 + 英文 Crossref）：文本字段整体写翻译，
+    // 不覆盖中文基础列；年份/DOI/来源/类型这些与语言无关的字段仍只补空。
+    if let Some(lang) = route {
+        let mut map = i18n::parse(doc.i18n.as_deref());
+        let incoming = i18n::single_lang_map(&lang, i18n::fields_from_flat(parsed));
+        let before = map.clone();
+        i18n::merge_missing(&mut map, &incoming);
+        let i18n_db = i18n::to_db(&map);
+        let _ = sqlx::query(
+            "UPDATE documents SET \
+                year = COALESCE(year, ?), \
+                doi = COALESCE(NULLIF(doi, ''), ?), \
+                source = COALESCE(NULLIF(source, ''), ?), \
+                doc_type = COALESCE(NULLIF(doc_type, ''), ?), \
+                language = COALESCE(NULLIF(language, ''), ?), \
+                i18n = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(value_i64(parsed, "year"))
+        .bind(
+            value_str(parsed, "doi")
+                .and_then(|d| normalize_doi(&d))
+                .unwrap_or_default(),
+        )
+        .bind(value_str(parsed, "source").unwrap_or_default())
+        .bind(normalize_doc_type(
+            &value_str(parsed, "doc_type").unwrap_or_default(),
+        ))
+        .bind(base_lang.unwrap_or_default())
+        .bind(&i18n_db)
+        .bind(now_iso())
+        .bind(doc_id)
+        .execute(db.pool())
+        .await;
+        if map != before {
+            info!("文档 {} 的 Crossref 英文元数据写入 i18n.{}", doc_id, lang);
+        }
+        return;
+    }
+
     let authors_text = list_to_db(&value_str_list(parsed, "authors"));
     let keywords_text = list_to_db(&value_str_list(parsed, "keywords"));
-    let authors_en_text = list_to_db(&value_str_list(parsed, "authors_en"));
-    let keywords_en_text = list_to_db(&value_str_list(parsed, "keywords_en"));
-
     let doi_norm = value_str(parsed, "doi").and_then(|d| normalize_doi(&d));
 
     let _ = sqlx::query(
@@ -1478,11 +1523,6 @@ async fn run_crossref(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
             abstract = COALESCE(NULLIF(abstract, ''), ?), \
             doc_type = COALESCE(NULLIF(doc_type, ''), ?), \
             language = COALESCE(NULLIF(language, ''), ?), \
-            title_en = COALESCE(NULLIF(title_en, ''), ?), \
-            authors_en = COALESCE(NULLIF(authors_en, ''), ?), \
-            journal_en = COALESCE(NULLIF(journal_en, ''), ?), \
-            keywords_en = COALESCE(NULLIF(keywords_en, ''), ?), \
-            abstract_en = COALESCE(NULLIF(abstract_en, ''), ?), \
             updated_at = ? WHERE id = ?",
     )
     .bind(value_str(parsed, "title").unwrap_or_default())
@@ -1496,11 +1536,6 @@ async fn run_crossref(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
     // 双保险：crossref 侧已经归一到标准名，这里再归一一次（老记录 / 手改过的映射不会再漏）
     .bind(normalize_doc_type(&value_str(parsed, "doc_type").unwrap_or_default()))
     .bind(value_str(parsed, "language").unwrap_or_default())
-    .bind(value_str(parsed, "title_en").unwrap_or_default())
-    .bind(&authors_en_text)
-    .bind(value_str(parsed, "journal_en").unwrap_or_default())
-    .bind(&keywords_en_text)
-    .bind(value_str(parsed, "abstract_en").unwrap_or_default())
     .bind(now_iso())
     .bind(doc_id)
     .execute(db.pool())
@@ -1539,12 +1574,39 @@ pub(crate) async fn run_crossref_override(db: Arc<Database>, settings: Arc<Setti
     }
 
     let parsed = &result["parsed"];
+    let (base_lang, route) = crossref_route(parsed, &doc);
+
+    // 语言不同：文本字段覆盖 i18n，基础列（中文）一律不动
+    if let Some(lang) = route {
+        let mut map = i18n::parse(doc.i18n.as_deref());
+        let incoming = i18n::single_lang_map(&lang, i18n::fields_from_flat(parsed));
+        i18n::merge_prefer(&mut map, &incoming);
+        let i18n_db = i18n::to_db(&map);
+        let _ = sqlx::query(
+            "UPDATE documents SET \
+                year = COALESCE(?, year), \
+                doi = COALESCE(?, doi), \
+                source = COALESCE(?, source), \
+                doc_type = COALESCE(?, doc_type), \
+                language = COALESCE(language, ?), \
+                i18n = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(value_i64(parsed, "year"))
+        .bind(value_str(parsed, "doi").and_then(|d| normalize_doi(&d)))
+        .bind(value_str(parsed, "source"))
+        .bind(value_str(parsed, "doc_type").map(|t| normalize_doc_type(&t)))
+        .bind(base_lang.unwrap_or_default())
+        .bind(&i18n_db)
+        .bind(now_iso())
+        .bind(doc_id)
+        .execute(db.pool())
+        .await;
+        info!("文档 {} 的 Crossref 英文元数据覆盖写入 i18n.{}", doc_id, lang);
+        return;
+    }
 
     let authors_text = value_list_text(parsed, "authors");
     let keywords_text = value_list_text(parsed, "keywords");
-    let authors_en_text = value_list_text(parsed, "authors_en");
-    let keywords_en_text = value_list_text(parsed, "keywords_en");
-
     let doi_norm = value_str(parsed, "doi").and_then(|d| normalize_doi(&d));
 
     // 覆盖式更新：Crossref 非空值覆盖已有字段，空值保留原字段
@@ -1560,11 +1622,6 @@ pub(crate) async fn run_crossref_override(db: Arc<Database>, settings: Arc<Setti
             abstract = COALESCE(?, abstract), \
             doc_type = COALESCE(?, doc_type), \
             language = COALESCE(?, language), \
-            title_en = COALESCE(?, title_en), \
-            authors_en = COALESCE(?, authors_en), \
-            journal_en = COALESCE(?, journal_en), \
-            keywords_en = COALESCE(?, keywords_en), \
-            abstract_en = COALESCE(?, abstract_en), \
             updated_at = ? WHERE id = ?",
     )
     .bind(value_str(parsed, "title"))
@@ -1577,11 +1634,6 @@ pub(crate) async fn run_crossref_override(db: Arc<Database>, settings: Arc<Setti
     .bind(value_str(parsed, "abstract"))
     .bind(value_str(parsed, "doc_type").map(|t| normalize_doc_type(&t)))
     .bind(value_str(parsed, "language"))
-    .bind(value_str(parsed, "title_en"))
-    .bind(authors_en_text)
-    .bind(value_str(parsed, "journal_en"))
-    .bind(keywords_en_text)
-    .bind(value_str(parsed, "abstract_en"))
     .bind(now_iso())
     .bind(doc_id)
     .execute(db.pool())
@@ -1589,7 +1641,7 @@ pub(crate) async fn run_crossref_override(db: Arc<Database>, settings: Arc<Setti
 }
 
 async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
-    let doc = match fetch_doc(&db, doc_id).await {
+    let mut doc = match fetch_doc(&db, doc_id).await {
         Some(d) => d,
         None => return,
     };
@@ -1605,10 +1657,7 @@ async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id
 
     // 如果当前标题是占位符（如 "Entire document"），先清空以便后续更新
     if doc.title.as_deref().map_or(false, |t| looks_like_placeholder(t)) {
-        let _ = sqlx::query("UPDATE documents SET title = '' WHERE id = ?")
-            .bind(doc_id)
-            .execute(db.pool())
-            .await;
+        doc.title = None;
     }
 
     let pdf_path = paths::get_pdf_path(&settings, doc_id);
@@ -1632,41 +1681,22 @@ async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id
         value_str(&meta, "pages"),
     );
 
-    let authors_text = list_to_db(&value_str_list(&meta, "authors"));
-    let authors_en_text = list_to_db(&value_str_list(&meta, "authors_en"));
-    let keywords_text = list_to_db(&value_str_list(&meta, "keywords"));
-    let keywords_en_text = list_to_db(&value_str_list(&meta, "keywords_en"));
-    let doi_norm = value_str(&meta, "doi").and_then(|d| normalize_doi(&d));
+    // 基础列只补空；`*_en` 按基础语言路由进 `i18n`（统一在 services::i18n）
+    i18n::fill_doc_missing(&mut doc, &meta);
 
-    // 只补空（NULLIF 保证空串不覆盖已有值）：中英文题名/作者/刊名/关键词/摘要一并落库
     let _ = sqlx::query(
         "UPDATE documents SET \
-            title = COALESCE(NULLIF(title, ''), ?), \
-            title_en = COALESCE(NULLIF(title_en, ''), ?), \
-            authors = COALESCE(NULLIF(authors, ''), ?), \
-            authors_en = COALESCE(NULLIF(authors_en, ''), ?), \
-            year = COALESCE(year, ?), \
-            doi = COALESCE(NULLIF(doi, ''), ?), \
-            journal = COALESCE(NULLIF(journal, ''), ?), \
-            journal_en = COALESCE(NULLIF(journal_en, ''), ?), \
-            keywords = COALESCE(NULLIF(keywords, ''), ?), \
-            keywords_en = COALESCE(NULLIF(keywords_en, ''), ?), \
-            abstract = COALESCE(NULLIF(abstract, ''), ?), \
-            abstract_en = COALESCE(NULLIF(abstract_en, ''), ?), \
-            updated_at = ? WHERE id = ?",
+            title = ?, authors = ?, year = ?, doi = ?, journal = ?, keywords = ?, \
+            abstract = ?, i18n = ?, updated_at = ? WHERE id = ?",
     )
-    .bind(value_str(&meta, "title").unwrap_or_default())
-    .bind(value_str(&meta, "title_en").unwrap_or_default())
-    .bind(&authors_text)
-    .bind(&authors_en_text)
-    .bind(value_i64(&meta, "year"))
-    .bind(doi_norm.unwrap_or_default())
-    .bind(value_str(&meta, "journal").unwrap_or_default())
-    .bind(value_str(&meta, "journal_en").unwrap_or_default())
-    .bind(&keywords_text)
-    .bind(&keywords_en_text)
-    .bind(value_str(&meta, "abstract").unwrap_or_default())
-    .bind(value_str(&meta, "abstract_en").unwrap_or_default())
+    .bind(&doc.title)
+    .bind(&doc.authors)
+    .bind(doc.year)
+    .bind(&doc.doi)
+    .bind(&doc.journal)
+    .bind(&doc.keywords)
+    .bind(&doc.abstract_text)
+    .bind(&doc.i18n)
     .bind(now_iso())
     .bind(doc_id)
     .execute(db.pool())

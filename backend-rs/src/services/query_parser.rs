@@ -20,13 +20,16 @@ use serde::Serialize;
 
 // ── 字段定义 ────────────────────────────────────────────
 
-/// 可搜索的文本字段（用于 LIKE 查询）
+/// 可搜索的文本字段（用于 LIKE 查询）。
+///
+/// 翻译元数据统一存在 `i18n` JSON 里，用 `json_extract` 参与自由文本检索
+/// （基础列存 PDF 主要语言，`i18n.en.*` 存英文译名）。
 const TEXT_FIELDS: &[&str] = &[
-    "title", "title_en",
-    "authors", "authors_en",
-    "journal", "journal_en",
-    "keywords", "keywords_en",
-    "abstract", "abstract_en",
+    "title", "json_extract(i18n, '$.en.title')",
+    "authors", "json_extract(i18n, '$.en.authors')",
+    "journal", "json_extract(i18n, '$.en.journal')",
+    "keywords", "json_extract(i18n, '$.en.keywords')",
+    "abstract", "json_extract(i18n, '$.en.abstract')",
     "doi", "source", "filename", "category",
 ];
 

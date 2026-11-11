@@ -44,10 +44,12 @@
         <tr v-if="meta.source"><th>来源</th><td>{{ meta.source }}</td></tr>
         <tr v-if="meta.category"><th>分类</th><td>{{ meta.category }}</td></tr>
         <tr v-if="meta.language"><th>语言</th><td>{{ meta.language }}</td></tr>
-        <tr v-if="meta.title_en"><th>英文标题</th><td>{{ meta.title_en }}</td></tr>
-        <tr v-if="meta.authors_en"><th>英文作者</th><td>{{ meta.authors_en }}</td></tr>
-        <tr v-if="meta.journal_en"><th>英文期刊</th><td>{{ meta.journal_en }}</td></tr>
-        <tr v-if="meta.keywords_en"><th>英文关键词</th><td>{{ meta.keywords_en }}</td></tr>
+        <template v-for="t in translations" :key="`table-${t.lang}`">
+          <tr v-if="t.title"><th>{{ t.label }}标题</th><td>{{ t.title }}</td></tr>
+          <tr v-if="t.authors"><th>{{ t.label }}作者</th><td>{{ t.authors }}</td></tr>
+          <tr v-if="t.journal"><th>{{ t.label }}期刊</th><td>{{ t.journal }}</td></tr>
+          <tr v-if="t.keywords"><th>{{ t.label }}关键词</th><td>{{ t.keywords }}</td></tr>
+        </template>
         <!-- 以下为文件/库内部信息：仅登录用户可见 -->
         <template v-if="!isGuest">
         <tr><th>文件名</th><td>{{ doc?.filename }}</td></tr>
@@ -132,22 +134,24 @@
           <span class="info-label">语言</span>
           <span class="info-value">{{ meta.language }}</span>
         </div>
-        <div v-if="meta.title_en" class="info-row">
-          <span class="info-label">英文标题</span>
-          <span class="info-value">{{ meta.title_en }}</span>
-        </div>
-        <div v-if="meta.authors_en" class="info-row">
-          <span class="info-label">英文作者</span>
-          <span class="info-value">{{ meta.authors_en }}</span>
-        </div>
-        <div v-if="meta.journal_en" class="info-row">
-          <span class="info-label">英文期刊</span>
-          <span class="info-value">{{ meta.journal_en }}</span>
-        </div>
-        <div v-if="meta.keywords_en" class="info-row">
-          <span class="info-label">英文关键词</span>
-          <span class="info-value">{{ meta.keywords_en }}</span>
-        </div>
+        <template v-for="t in translations" :key="`mobile-${t.lang}`">
+          <div v-if="t.title" class="info-row">
+            <span class="info-label">{{ t.label }}标题</span>
+            <span class="info-value">{{ t.title }}</span>
+          </div>
+          <div v-if="t.authors" class="info-row">
+            <span class="info-label">{{ t.label }}作者</span>
+            <span class="info-value">{{ t.authors }}</span>
+          </div>
+          <div v-if="t.journal" class="info-row">
+            <span class="info-label">{{ t.label }}期刊</span>
+            <span class="info-value">{{ t.journal }}</span>
+          </div>
+          <div v-if="t.keywords" class="info-row">
+            <span class="info-label">{{ t.label }}关键词</span>
+            <span class="info-value">{{ t.keywords }}</span>
+          </div>
+        </template>
         <!-- 以下为文件/库内部信息：仅登录用户可见 -->
         <template v-if="!isGuest">
         <div class="info-row">
@@ -213,13 +217,15 @@
       <DocumentCitationPanel :doc-id="doc.id" />
     </div>
 
-    <!-- 摘要 -->
-    <div v-if="meta.abstract" class="section">
-      <h3>摘要</h3>
-      <p class="abstract-text">{{ meta.abstract }}</p>
-      <template v-if="meta.abstract_en">
-        <h3>英文摘要</h3>
-        <p class="abstract-text">{{ meta.abstract_en }}</p>
+    <!-- 摘要（基础列 = PDF 主要语言；其他语言来自 i18n） -->
+    <div v-if="meta.abstract || translatedAbstracts.length" class="section">
+      <template v-if="meta.abstract">
+        <h3>摘要</h3>
+        <p class="abstract-text">{{ meta.abstract }}</p>
+      </template>
+      <template v-for="t in translatedAbstracts" :key="`abstract-${t.lang}`">
+        <h3>{{ t.label }}摘要</h3>
+        <p class="abstract-text">{{ t.abstract }}</p>
       </template>
     </div>
 
@@ -268,26 +274,64 @@ const isGuest = computed(() => !tokenStore.isAuthenticated)
  * 页面展示用的书目字段（登录 / 访客两种数据源统一）：
  * 访客没有 `doc`，只能读 `publicDoc`，所以模板里这些行一律走 `meta`。
  */
+const LANG_LABELS: Record<string, string> = {
+  en: '英文',
+  zh: '中文',
+  ja: '日文',
+  ko: '韩文',
+  fr: '法文',
+  de: '德文',
+  ru: '俄文',
+  es: '西班牙文',
+  pt: '葡萄牙文',
+  ar: '阿拉伯文'
+}
+
+function langLabel(lang: string): string {
+  return LANG_LABELS[lang.toLowerCase()] || lang.toUpperCase()
+}
+
+/** 翻译元数据（语言码 → 字段）；无翻译时是空对象 */
+const i18nMap = computed(() => {
+  const raw = doc.value?.i18n ?? publicDoc.value?.i18n ?? {}
+  return raw && typeof raw === 'object' ? raw : {}
+})
+
+/** 各语言的翻译（按语言码排序，后端已规整为空值省略） */
+const translations = computed(() =>
+  Object.entries(i18nMap.value)
+    .map(([lang, f]) => ({
+      lang,
+      label: langLabel(lang),
+      title: f?.title || '',
+      authors: f?.authors || '',
+      journal: f?.journal || '',
+      keywords: f?.keywords || '',
+      abstract: f?.abstract || ''
+    }))
+    .filter((t) => t.title || t.authors || t.journal || t.keywords || t.abstract)
+)
+
+/** 有摘要的翻译（摘要区单独渲染） */
+const translatedAbstracts = computed(() => translations.value.filter((t) => t.abstract))
+
 const meta = computed(() => {
   const d = doc.value
   const p = publicDoc.value
+  const firstTranslation = translations.value[0]
   return {
-    title: d?.title || p?.title || '',
-    title_en: d?.title_en || p?.title_en || '',
+    title: d?.title || p?.title || firstTranslation?.title || '',
     authors: d?.authors || p?.authors || '',
-    authors_en: d?.authors_en || p?.authors_en || '',
     journal: d?.journal || p?.journal || '',
-    journal_en: d?.journal_en || p?.journal_en || '',
     year: d?.year ?? p?.year ?? null,
     doc_type: d?.doc_type || p?.doc_type || '',
     doi: d?.doi || p?.doi || '',
     keywords: d?.keywords || p?.keywords || '',
-    keywords_en: d?.keywords_en || p?.keywords_en || '',
     source: d?.source || p?.source || '',
     category: d?.category || p?.category || '',
     language: d?.language || p?.language || '',
-    abstract: d?.abstract || p?.abstract || '',
-    abstract_en: d?.abstract_en || p?.abstract_en || ''
+    // 基础摘要为空时回退到第一个翻译（避免只抽到英文摘要时看起来是空的）
+    abstract: d?.abstract || p?.abstract || firstTranslation?.abstract || ''
   }
 })
 

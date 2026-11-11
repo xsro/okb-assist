@@ -357,7 +357,7 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 
 ### `get_document_abstract` — 文献摘要
 
-获取文献摘要信息，中英文摘要同时返回（如果存在）。
+获取文献摘要信息，基础摘要（PDF 主要语言）与 `i18n` 翻译（如英文摘要）同时返回（如果存在）。
 
 **参数：** `id`（int，必填）
 
@@ -368,7 +368,11 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
   "id": 42,
   "title": "Attention Is All You Need",
   "abstract": "中文摘要...",
-  "abstract_en": "English abstract...",
+  "i18n": {
+    "en": {
+      "abstract": "English abstract..."
+    }
+  },
   "language": "zh"
 }
 ```

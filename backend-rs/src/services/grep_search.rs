@@ -422,8 +422,10 @@ pub async fn metadata_candidate_ids(
     let like = format!("%{}%", query);
     match sqlx::query_as::<_, (i64,)>(
         "SELECT id FROM documents WHERE 
-         title LIKE ?1 OR abstract LIKE ?1 OR abstract_en LIKE ?1 
-         OR keywords LIKE ?1 OR keywords_en LIKE ?1 OR authors LIKE ?1"
+         title LIKE ?1 OR abstract LIKE ?1 
+         OR json_extract(i18n, '$.en.abstract') LIKE ?1
+         OR keywords LIKE ?1 OR json_extract(i18n, '$.en.keywords') LIKE ?1
+         OR authors LIKE ?1 OR json_extract(i18n, '$.en.authors') LIKE ?1"
     )
         .bind(&like)
         .fetch_all(db)

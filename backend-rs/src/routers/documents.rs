@@ -25,7 +25,8 @@ use crate::services::bibtex;
 use crate::services::file_state;
 use crate::services::citation::{self, CitationRecord};
 use crate::auth;
-use crate::routers::pipeline::{list_to_db, run_crossref_override};
+use crate::routers::pipeline::run_crossref_override;
+use crate::services::i18n::{self, list_to_db};
 
 use axum::http::{HeaderMap, HeaderValue};
 use tokio::io::{AsyncSeekExt, AsyncReadExt};
@@ -402,16 +403,9 @@ pub struct DocumentOut {
     pub doc_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title_en: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub authors_en: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keywords_en: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub abstract_en: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub journal_en: Option<String>,
+    /// 翻译元数据（JSON 对象：语言码 → 字段）。基础列存 PDF 主要语言，本字段只存翻译；
+    /// 无翻译时恒定为 `{}`（不跳过，方便前端直接用）。
+    pub i18n: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mineru_task_id: Option<String>,
     /// 文件事实是否已同步过（false = 状态未知）
@@ -461,8 +455,7 @@ pub struct RuntimeTaskOut {
 }
 
 const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, CAST(NULLIF(year, '') AS INTEGER) AS year, doi, source, journal, \
-    keywords, abstract, category, doc_type, language, title_en, authors_en, \
-    keywords_en, abstract_en, journal_en, mineru_task_id, fs_synced_at, \
+    keywords, abstract, category, doc_type, language, i18n, mineru_task_id, fs_synced_at, \
     qdrant_collection, vector_db_id, created_at, updated_at, \
     pdf_size, md_size, zip_size, pdf_health, pdf_health_message";
 
@@ -538,11 +531,7 @@ async fn doc_to_out(doc: &Document, settings: &Settings, db: &Database) -> Docum
         category: doc.category.clone(),
         doc_type: doc.doc_type.clone(),
         language: doc.language.clone(),
-        title_en: doc.title_en.clone(),
-        authors_en: doc.authors_en.clone(),
-        keywords_en: doc.keywords_en.clone(),
-        abstract_en: doc.abstract_en.clone(),
-        journal_en: doc.journal_en.clone(),
+        i18n: i18n::value_from_db(doc.i18n.as_deref()),
         mineru_task_id: doc.mineru_task_id.clone(),
         synced: doc
             .fs_synced_at
@@ -605,11 +594,6 @@ const SEARCHABLE_COLUMNS: &[(&str, &str)] = &[
     ("category", "category"),
     ("doc_type", "doc_type"),
     ("language", "language"),
-    ("title_en", "title_en"),
-    ("authors_en", "authors_en"),
-    ("keywords_en", "keywords_en"),
-    ("abstract_en", "abstract_en"),
-    ("journal_en", "journal_en"),
 ];
 
 /// 可排序字段名 → SQL 列名映射
@@ -900,7 +884,7 @@ async fn get_document(
 
 /// 访客可见的文献公开信息（`GET /assist/api/documents/public/:id`）。
 ///
-/// 字段刻意收窄：只含书目元数据与摘要（含双语字段），**不含**文件名、文件哈希、
+/// 字段刻意收窄：只含书目元数据与摘要（含翻译），**不含**文件名、文件哈希、
 /// 文件大小、PDF 健康、已索引库、运行时任务/错误与时间戳。
 #[derive(Debug, Serialize)]
 pub struct PublicDocumentOut {
@@ -908,15 +892,9 @@ pub struct PublicDocumentOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub title_en: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub authors: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub authors_en: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub journal: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub journal_en: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub year: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -931,12 +909,10 @@ pub struct PublicDocumentOut {
     pub language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keywords: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keywords_en: Option<String>,
     #[serde(rename = "abstract", skip_serializing_if = "Option::is_none")]
     pub abstract_text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub abstract_en: Option<String>,
+    /// 翻译（与 `DocumentOut.i18n` 同结构）
+    pub i18n: Value,
 }
 
 impl PublicDocumentOut {
@@ -945,11 +921,8 @@ impl PublicDocumentOut {
         Self {
             id: doc.id,
             title: doc.title.clone(),
-            title_en: doc.title_en.clone(),
             authors: doc.authors.clone(),
-            authors_en: doc.authors_en.clone(),
             journal: doc.journal.clone(),
-            journal_en: doc.journal_en.clone(),
             year: doc.year,
             doc_type: doc.doc_type.clone(),
             doi: doc.doi.clone(),
@@ -957,9 +930,8 @@ impl PublicDocumentOut {
             category: doc.category.clone(),
             language: doc.language.clone(),
             keywords: doc.keywords.clone(),
-            keywords_en: doc.keywords_en.clone(),
             abstract_text: doc.abstract_text.clone(),
-            abstract_en: doc.abstract_en.clone(),
+            i18n: i18n::value_from_db(doc.i18n.as_deref()),
         }
     }
 }
@@ -1014,16 +986,12 @@ pub struct UpdateDocumentBody {
     pub doc_type: Option<String>,
     #[serde(default)]
     pub language: Option<String>,
-    #[serde(default)]
-    pub title_en: Option<String>,
-    #[serde(default)]
-    pub authors_en: Option<String>,
-    #[serde(default)]
-    pub keywords_en: Option<String>,
-    #[serde(default)]
-    pub abstract_en: Option<String>,
-    #[serde(default)]
-    pub journal_en: Option<String>,
+    /// 翻译元数据：`{"en":{"title":…,"authors":…,"journal":…,"keywords":…,"abstract":…}}`。
+    /// 键缺省 = 不修改；`null` = 清空；对象 = 整体替换（服务端会校验并规整）。
+    /// 用 `Option<Option<Value>>` 才能区分「没说」与「显式清空」；
+    /// `Option` 的默认反序列化会把 `null` 也当成 `None`，所以这里用自定义函数。
+    #[serde(default, deserialize_with = "de_optional_i18n")]
+    pub i18n: Option<Option<Value>>,
 }
 
 /// 空串 / 纯空白 → `NULL`（元数据里 `""` 与 `NULL` 语义相同，统一成 `NULL` 便于比较与展示）
@@ -1034,6 +1002,19 @@ fn blank_to_none(raw: String) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+/// `i18n` 的宽松反序列化：键缺省 → `None`（不修改）；`null` → `Some(None)`（清空）；
+/// 其他 JSON 值 → `Some(Some(value))`（由 `i18n::from_value` 校验）。
+fn de_optional_i18n<'de, D>(deserializer: D) -> Result<Option<Option<Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Value::deserialize(deserializer)?;
+    Ok(match raw {
+        Value::Null => Some(None),
+        other => Some(Some(other)),
+    })
 }
 
 /// `year` 的宽松反序列化：`null` / `""` / 纯空白 → 清空；数字或数字字符串 → 写入。
@@ -1076,7 +1057,7 @@ async fn update_document(
     }
 
     // 先读当前记录，再在内存里按「键缺省 = 不改、空串 = 清空」合并，最后整行写回：
-    // 这样既能清空字段，也不需要对 16 个字段拼动态 SQL。
+    // 这样既能清空字段，也不需要对 12 个元数据字段拼动态 SQL。
     let mut doc = match fetch_doc(&db, id).await {
         Ok(Some(d)) => d,
         Ok(None) => {
@@ -1103,11 +1084,20 @@ async fn update_document(
     merge_text!(abstract_text);
     merge_text!(category);
     merge_text!(language);
-    merge_text!(title_en);
-    merge_text!(authors_en);
-    merge_text!(keywords_en);
-    merge_text!(abstract_en);
-    merge_text!(journal_en);
+
+    // 翻译：键缺省 = 不修改；`null` = 清空；对象 = 校验后整体替换
+    if let Some(raw) = body.i18n {
+        match raw {
+            None => doc.i18n = None,
+            Some(value) => match i18n::from_value(&value) {
+                Ok(map) => doc.i18n = i18n::to_db(&map),
+                Err(detail) => {
+                    return (StatusCode::BAD_REQUEST, Json(json!({"detail": detail})))
+                        .into_response()
+                }
+            },
+        }
+    }
 
     // 年份：`Some(None)` = 显式清空，`Some(Some(y))` = 写入，`None` = 不修改
     if let Some(year) = body.year {
@@ -1141,11 +1131,15 @@ async fn update_document(
         };
     }
 
+    // 统一规整：基础语言为 en 时不留 en 镜像；与基础列完全相同的翻译值也丢掉
+    let mut translations = i18n::parse(doc.i18n.as_deref());
+    i18n::drop_translations_equal_to_base(&mut translations, &doc);
+    doc.i18n = i18n::to_db(&translations);
+
     let result = sqlx::query(
         "UPDATE documents SET title = ?, authors = ?, year = ?, doi = ?, source = ?, \
          journal = ?, keywords = ?, abstract = ?, category = ?, doc_type = ?, language = ?, \
-         title_en = ?, authors_en = ?, keywords_en = ?, abstract_en = ?, journal_en = ?, \
-         updated_at = datetime('now') WHERE id = ?",
+         i18n = ?, updated_at = datetime('now') WHERE id = ?",
     )
     .bind(&doc.title)
     .bind(&doc.authors)
@@ -1158,11 +1152,7 @@ async fn update_document(
     .bind(&doc.category)
     .bind(&doc.doc_type)
     .bind(&doc.language)
-    .bind(&doc.title_en)
-    .bind(&doc.authors_en)
-    .bind(&doc.keywords_en)
-    .bind(&doc.abstract_en)
-    .bind(&doc.journal_en)
+    .bind(&doc.i18n)
     .bind(id)
     .execute(db.pool())
     .await;
@@ -1238,11 +1228,13 @@ fn merge_metadata_into(target: &mut Document, source: &Document) {
     fill(&mut target.category, &source.category);
     fill(&mut target.doc_type, &source.doc_type);
     fill(&mut target.language, &source.language);
-    fill(&mut target.title_en, &source.title_en);
-    fill(&mut target.authors_en, &source.authors_en);
-    fill(&mut target.keywords_en, &source.keywords_en);
-    fill(&mut target.abstract_en, &source.abstract_en);
-    fill(&mut target.journal_en, &source.journal_en);
+    // 翻译：按语言、按字段只补空
+    let source_i18n = i18n::parse(source.i18n.as_deref());
+    if !source_i18n.is_empty() {
+        let mut target_i18n = i18n::parse(target.i18n.as_deref());
+        i18n::merge_missing(&mut target_i18n, &source_i18n);
+        target.i18n = i18n::to_db(&target_i18n);
+    }
 }
 
 /// 将重复文献合并进目标文献：填充目标空字段，删除源文献（文件 + 向量 + 记录）。
@@ -1291,8 +1283,7 @@ async fn merge_documents(
     let update = sqlx::query(
         "UPDATE documents SET title = ?, authors = ?, year = ?, doi = ?, source = ?, \
          journal = ?, keywords = ?, abstract = ?, category = ?, doc_type = ?, language = ?, \
-         title_en = ?, authors_en = ?, keywords_en = ?, abstract_en = ?, journal_en = ?, \
-         updated_at = datetime('now') WHERE id = ?",
+         i18n = ?, updated_at = datetime('now') WHERE id = ?",
     )
     .bind(&target.title)
     .bind(&target.authors)
@@ -1305,11 +1296,7 @@ async fn merge_documents(
     .bind(&target.category)
     .bind(&target.doc_type)
     .bind(&target.language)
-    .bind(&target.title_en)
-    .bind(&target.authors_en)
-    .bind(&target.keywords_en)
-    .bind(&target.abstract_en)
-    .bind(&target.journal_en)
+    .bind(&target.i18n)
     .bind(target.id)
     .execute(db.pool())
     .await;
@@ -1377,87 +1364,8 @@ fn doc_has_pdf_file(settings: &Settings, doc: &Document) -> bool {
 }
 
 fn fill_meta_fields(doc: &mut Document, meta: &Value) {
-    if doc.title.is_none() {
-        if let Some(t) = meta.get("title").and_then(|v| v.as_str()) {
-            doc.title = Some(t.to_string());
-        }
-    }
-    if doc.authors.is_none() {
-        if let Some(a) = meta.get("authors").and_then(|v| v.as_array()) {
-            let authors: Vec<String> = a.iter().filter_map(|x| x.as_str().map(String::from)).collect();
-            if !authors.is_empty() {
-                // 列表列统一存 `; ` 分隔纯文本（历史数据是 JSON 数组字符串）
-                doc.authors = Some(list_to_db(&authors));
-            }
-        }
-    }
-    if doc.year.is_none() {
-        if let Some(y) = meta.get("year").and_then(|v| v.as_i64()) {
-            doc.year = Some(y);
-        }
-    }
-    if doc.doi.is_none() {
-        if let Some(d) = meta.get("doi").and_then(|v| v.as_str()) {
-            doc.doi = normalize_doi(d);
-        }
-    }
-    if doc.keywords.is_none() {
-        if let Some(k) = meta.get("keywords").and_then(|v| v.as_array()) {
-            let kws: Vec<String> = k.iter().filter_map(|x| x.as_str().map(String::from)).collect();
-            if !kws.is_empty() {
-                doc.keywords = Some(list_to_db(&kws));
-            }
-        }
-    }
-    if doc.abstract_text.is_none() {
-        if let Some(a) = meta.get("abstract").and_then(|v| v.as_str()) {
-            doc.abstract_text = Some(a.to_string());
-        }
-    }
-    if doc.journal.is_none() {
-        if let Some(j) = meta.get("journal").and_then(|v| v.as_str()) {
-            if !j.trim().is_empty() {
-                doc.journal = Some(j.to_string());
-            }
-        }
-    }
-    if doc.journal_en.is_none() {
-        if let Some(j) = meta.get("journal_en").and_then(|v| v.as_str()) {
-            if !j.trim().is_empty() {
-                doc.journal_en = Some(j.to_string());
-            }
-        }
-    }
-    if doc.title_en.is_none() {
-        if let Some(t) = meta.get("title_en").and_then(|v| v.as_str()) {
-            if !t.trim().is_empty() {
-                doc.title_en = Some(t.to_string());
-            }
-        }
-    }
-    if doc.authors_en.is_none() {
-        if let Some(a) = meta.get("authors_en").and_then(|v| v.as_array()) {
-            let authors: Vec<String> = a.iter().filter_map(|x| x.as_str().map(String::from)).collect();
-            if !authors.is_empty() {
-                doc.authors_en = Some(list_to_db(&authors));
-            }
-        }
-    }
-    if doc.keywords_en.is_none() {
-        if let Some(k) = meta.get("keywords_en").and_then(|v| v.as_array()) {
-            let kws: Vec<String> = k.iter().filter_map(|x| x.as_str().map(String::from)).collect();
-            if !kws.is_empty() {
-                doc.keywords_en = Some(list_to_db(&kws));
-            }
-        }
-    }
-    if doc.abstract_en.is_none() {
-        if let Some(a) = meta.get("abstract_en").and_then(|v| v.as_str()) {
-            if !a.trim().is_empty() {
-                doc.abstract_en = Some(a.to_string());
-            }
-        }
-    }
+    // 基础列只补空；`*_en` 等翻译按「基础列语言」路由进 `i18n`（统一在 services::i18n）
+    i18n::fill_doc_missing(doc, meta);
 }
 
 /// 插入新文档记录
@@ -1465,9 +1373,8 @@ async fn insert_document(db: &Database, doc: Document) -> Result<i64, String> {
     let now = now_datetime();
     let result = sqlx::query(
         "INSERT INTO documents (filename, file_hash, title, authors, year, doi, source, journal, \
-         keywords, abstract, category, doc_type, language, title_en, authors_en, keywords_en, \
-         abstract_en, journal_en, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         keywords, abstract, category, doc_type, language, i18n, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&doc.filename)
     .bind(&doc.file_hash)
@@ -1482,11 +1389,7 @@ async fn insert_document(db: &Database, doc: Document) -> Result<i64, String> {
     .bind(&doc.category)
     .bind(&doc.doc_type)
     .bind(&doc.language)
-    .bind(&doc.title_en)
-    .bind(&doc.authors_en)
-    .bind(&doc.keywords_en)
-    .bind(&doc.abstract_en)
-    .bind(&doc.journal_en)
+    .bind(&doc.i18n)
     .bind(&now)
     .bind(&now)
     .execute(db.pool())
@@ -1826,11 +1729,7 @@ async fn upload_document(
         category: None,
         doc_type: None,
         language: None,
-        title_en: None,
-        authors_en: None,
-        keywords_en: None,
-        abstract_en: None,
-        journal_en: None,
+        i18n: None,
         mineru_task_id: None,
         fs_synced_at: None,
         qdrant_collection: None,
@@ -1853,9 +1752,8 @@ async fn upload_document(
             let now = now_datetime();
             let result = sqlx::query(
                 "INSERT INTO documents (id, filename, file_hash, title, authors, year, doi, source, journal, \
-                 keywords, abstract, category, doc_type, language, title_en, authors_en, keywords_en, \
-                 abstract_en, journal_en, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 keywords, abstract, category, doc_type, language, i18n, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(id)
             .bind(&doc.filename)
@@ -1871,11 +1769,7 @@ async fn upload_document(
             .bind(&doc.category)
             .bind(&doc.doc_type)
             .bind(&doc.language)
-            .bind(&doc.title_en)
-            .bind(&doc.authors_en)
-            .bind(&doc.keywords_en)
-            .bind(&doc.abstract_en)
-            .bind(&doc.journal_en)
+            .bind(&doc.i18n)
             .bind(&now)
             .bind(&now)
             .execute(db.pool())
@@ -1981,11 +1875,7 @@ async fn register_document_by_path(
         category: None,
         doc_type: None,
         language: None,
-        title_en: None,
-        authors_en: None,
-        keywords_en: None,
-        abstract_en: None,
-        journal_en: None,
+        i18n: None,
         mineru_task_id: None,
         fs_synced_at: None,
         qdrant_collection: None,
@@ -4655,5 +4545,24 @@ mod doi_tests {
         assert_eq!(doi_key(""), None);
         assert_eq!(doi_key("   "), None);
         assert_eq!(doi_key("."), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `i18n` 的三种语义：键缺省 = 不修改；`null` = 清空；对象 = 整体替换。
+    #[test]
+    fn update_body_i18n_semantics() {
+        let absent: UpdateDocumentBody = serde_json::from_value(json!({"title": "x"})).unwrap();
+        assert!(absent.i18n.is_none());
+
+        let cleared: UpdateDocumentBody = serde_json::from_value(json!({"i18n": null})).unwrap();
+        assert_eq!(cleared.i18n, Some(None));
+
+        let replaced: UpdateDocumentBody =
+            serde_json::from_value(json!({"i18n": {"en": {"title": "T"}}})).unwrap();
+        assert!(matches!(replaced.i18n, Some(Some(_))));
     }
 }

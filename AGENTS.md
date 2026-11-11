@@ -391,8 +391,10 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 > 或大模型抽取，不要对整库逐篇循环 `POST /pipeline/extract-pdf-meta/:id`。
 
 上传/解析时先用规则从 PDF 里抽题名、作者、年份、DOI、刊名、卷期页、摘要、关键词（不需要 LLM，也不依赖 MinerU），
-抽到的字段按「只补空」落库（`pipeline.rs` 的 `run_extract_pdf_meta` 与 `documents.rs` 的 `fill_meta_fields`），
-**中英文一并写**：`title`/`title_en`/`authors`/`authors_en`/`journal`/`journal_en`/`keywords`/`keywords_en`/`abstract`/`abstract_en`。
+抽到的字段按「只补空」落库（`pipeline.rs` 的 `run_extract_pdf_meta` 与 `services::i18n::fill_doc_missing`）。
+**语义：基础列存 PDF 主要语言，翻译统一进 `i18n` JSON**（英文文献没有翻译）：
+`title`/`authors`/`journal`/`keywords`/`abstract` 是主语言，英文译名写
+`i18n = {"en":{"title":…,"authors":…,"journal":…,"keywords":…,"abstract":…}}`（见下方「双语元数据（i18n）」）。
 
 抽取按可靠性从高到低分层，先到先得、后面的只补空：
 
@@ -429,6 +431,35 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 
 引擎差异：`config.json` 的 `pdf.engine = "mupdf"` 时拿不到逐行字号，第 3 层退化为第 4 层（行序兜底），
 要用版面级抽取请把引擎切回 `mutool`（默认）。
+
+### 双语元数据（`i18n`）
+
+`documents` 只有一个 `i18n TEXT` 列（JSON），**不再有 `title_en` / `authors_en` / `journal_en` /
+`keywords_en` / `abstract_en` 任一列**。语义：
+
+- **基础列 = PDF 主要语言**（`title`/`authors`/`journal`/`keywords`/`abstract`）；
+- **`i18n` 只存翻译**：`{"en":{"title":…,"authors":…,"journal":…,"keywords":…,"abstract":…}}`，
+  键是归一化语言码（`en-US` → `en`），列表字段是 `; ` 分隔纯文本；
+- **英文文献不存 `en` 镜像**（`i18n = NULL`）；语言无法判定时也不拆，全部写基础列；
+- 空字段省略、空语言省略、整体为空 → `NULL`；API/前端恒下发对象（空为 `{}`）。
+
+**唯一转换入口是 `backend-rs/src/services/i18n.rs`**（与 `services::doc_type` 同样的定位），新增读写路径必须走它：
+
+| 场景 | 入口 |
+|---|---|
+| 扁平元数据（模型 / Crossref / PDF 启发式）→ 只补空写入文档 | `i18n::fill_doc_missing(doc, meta)` |
+| 模型输出的 `*_en` → `i18n` 列 | `MetaRecord::i18n_db()`（内部走 `i18n::to_db` / `single_lang_map`） |
+| 单语言权威源（Crossref）按语言路由 | `i18n::base_language` + `i18n::route_target_lang`（基础语言非 en 时文本字段只写 `i18n.en`，不覆盖中文基础列） |
+| 手工编辑 `PUT /documents/:id` | 请求体 `i18n`（对象整体替换、`null` 清空）；校验走 `i18n::from_value` |
+| 去重合并 | `i18n::merge_missing`（目标优先） |
+| 搜索 | `json_extract(i18n, '$.en.title')` 等表达式（`query_parser::TEXT_FIELDS`、`grep_search`、MCP `append_search_info_filters`）；字段搜索不再有 `title_en:` 这类别名 |
+
+- 存量迁移：`database.rs::migrate_i18n()` 在 `init()` 里把五个旧列搬进 `i18n`（与基础列相同的镜像值丢弃、
+  已有 `i18n` 只补空），原值先备份到 `documents_i18n_legacy`，然后 `DROP COLUMN`；幂等。
+- 模型契约**不变**：提示词/模型输出仍是扁平 `title_en` 等键（`MetaRecord::to_json()` 负责把 `i18n` 还原成该形状，
+  自定义提示词模板继续可用）；前端/接口/搜索/MCP 输出里**没有** `*_en` 别名。
+- 前端：`types/document.ts` 的 `I18nFields` / `i18n`；详情页按语言渲染「英文标题/英文摘要…」，
+  文档管理页编辑 `i18n.en`，保存时与基础字段一起提交。
 
 ### 文档类型（`doc_type`）词表与归一化
 
@@ -471,7 +502,7 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 实现在 `backend-rs/src/routers/pipeline.rs` 的 `do_extract_impl` + `backend-rs/src/services/llm.rs` 的 `extract_metadata` / `build_extract_prompt`。
 
 - **提示词可配置**：`config.json` 的 `llm_extract.prompt` 为空时用内置 `DEFAULT_EXTRACT_PROMPT`；否则整体替换。占位符：`{content}`（按 `max_input_chars` 截断的 Markdown 正文）、`{metadata}`（数据库里已有元数据的 JSON）。自定义模板漏写 `{content}` 时自动在末尾补正文。
-- **输入包含原元数据**：`MetaRecord::from_doc` 把数据库中的 16 个字段拍成 JSON 一起送入模型，由模型逐字段校对。
+- **输入包含原元数据**：`MetaRecord::from_doc` 把数据库中的 12 个元数据字段（含 `i18n` 里的英文翻译）拍成 16 个扁平键（含 `*_en`）的 JSON 一起送入模型，由模型逐字段校对。
 - **输出是纠错结果而非只填空**：`MetaRecord::apply` 按 `overwrite` 合并 ——
   - `overwrite = true`（默认）：模型返回的字段以模型为准；返回 `""` / `[]` / `null` 表示“请清空”（对应“原值明显不对且正文里也没有”的情况）；模型未返回的字段保持原值。
   - `overwrite = false`：只补空字段。
@@ -623,10 +654,10 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
    - `GET /assist/api/documents/:id/pdf-info` —— PDF 元信息报告：`{pdf: {file_size, pdf_version, page_count, encrypted, info, heuristics}}`。`info` 为 PDF Info 字典原始键值（mupdf feature 下只有标准字段；否则由 `mutool show trailer.Info` 解析，含自定义键如 `/doi`），`heuristics` 复用 `pdf_meta` 的启发式抽取结果。页数取 `trailer/Root/Pages/Count`，回退 `mutool pages` 计数；加密判断取 trailer 的 `/Encrypt`。
    - `GET /assist/api/documents/:id/crossref` —— 读取 `crossref_path` 模板对应的已保存 Crossref 记录，返回 `{exists, path, raw, parsed, modified_at}`（`raw` 为 Crossref API 完整应答，`parsed` 与元数据补全同源）。
    - `GET /assist/api/documents/:id/citation?format=bibtex|gbt7714&source=auto|crossref|document` —— 生成引用条目，返回 `{format, source, key, content}`。默认 `source=auto`：有 Crossref 记录就用它，否则退化为数据库元数据（`source=document`，卷期页会缺失）；`source=crossref` 且无记录时返回 404。引用键为「第一作者姓 + 年份 + 标题首个实词」。
-   - **访客公开详情**（`GET /assist/api/documents/public/:id`）：仅当 `system.json` 的 `public_detail_enabled = true` 时由 `token_middleware` 放行（匿名主体注入 `ViewOnly`）；返回 `PublicDocumentOut`（`documents.rs`）—— 只有书目元数据 + 摘要（含双语），**不含**文件名/哈希/文件大小/PDF 健康/索引库/运行时任务/时间戳，也不做实时 stat。前端 `DetailView.vue` 用 `isGuest = !tokenStore.isAuthenticated` 区分：访客不渲染操作按钮与三个折叠区（改为「登录后可查看」占位卡），顶部给登录横幅；访问其它路由仍会被守卫跳登录页。
+   - **访客公开详情**（`GET /assist/api/documents/public/:id`）：仅当 `system.json` 的 `public_detail_enabled = true` 时由 `token_middleware` 放行（匿名主体注入 `ViewOnly`）；返回 `PublicDocumentOut`（`documents.rs`）—— 只有书目元数据 + 摘要（含 `i18n` 翻译），**不含**文件名/哈希/文件大小/PDF 健康/索引库/运行时任务/时间戳，也不做实时 stat。前端 `DetailView.vue` 用 `isGuest = !tokenStore.isAuthenticated` 区分：访客不渲染操作按钮与三个折叠区（改为「登录后可查看」占位卡），顶部给登录横幅；访问其它路由仍会被守卫跳登录页。
    - **DOI 比对统一归一化**：`doi_key()`（`normalize_doi` 去 `https://doi.org/` 等前缀与尾部标点 + 转小写）用于 `GET /documents/by-doi/:doi`（先精确匹配，未命中再 `LIKE` 粗筛 + `doi_key` 校验，兼容历史数据里带前缀/大小写不一致的值）与 `POST /documents/diff-dois`；写入口也归一化 —— `PUT /documents/:id`（`update_document`）与 `pipeline` 的 `MetaRecord::apply`。新增 DOI 写/比对照旧走这几个入口，别再直接字符串相等比较。
-   - **元数据编辑语义**（`PUT /documents/:id`，`update_document`）：请求体的 16 个元数据字段遵循「**键缺省 = 不修改**、**空串 / 纯空白 = 清空为 `NULL`**、其他值 = 去首尾空白后写入」；`year` 接受数字 / 数字字符串 / `null` / `""`（后两者清空；`<input type="number">` 清空后的 `""` 不再引发 422）；摘要键 `abstract` 与 `abstract_text` **都接受**（`DocumentOut` 下发的是 `abstract`，历史上前端只发 `abstract` 而结构体只认 `abstract_text`，导致摘要永远存不进去）；`doc_type` 与抽取路径共用 `services::doc_type::normalize`（`pipeline::normalize_doc_type` 是它的薄封装）；客户端填了同义词（`article` / `book_section` …）时会打一条 `info` 日志说明归一到哪个标准值；**响应回传更新后的完整 `DocumentOut`**（不要再回 `{status:"ok"}`，前端会把它当文档赋回去）。前端 `DocManageView.vue` 的表单覆盖全部 16 个字段并只提交这 16 个字段的白名单（不再回传整份 `DocumentOut`），`DetailView.vue` 展示 `source` / `category` / `language`。
-   - **列表列的存储格式**：`authors` / `authors_en` / `keywords` / `keywords_en` 四列统一存 **`; ` 分隔纯文本**（写入一律走 `pipeline::list_to_db`，空数组 → 空串；**不要再写 JSON 数组字符串**）。历史数据里的 `["A","B"]` 由 `database.rs::migrate_list_columns` 在启动时一次性转换（幂等，解析失败的行原样保留）。读取侧一律用 `parse_str_list`（先试 JSON、再按 `; , 、 ，` 拆），**不要再 `serde_json::from_str` 猜格式**——它遇到纯文本会直接落到 `[]`（向量库 payload 的 `authors`/`keywords` 就是这么丢的）。向量库 payload 仍下发字符串数组（`parse_str_list` 产出，`vector_db.rs` 按数组写入）。
+   - **元数据编辑语义**（`PUT /documents/:id`，`update_document`）：请求体的 12 个元数据字段（11 个基础字段 + `i18n`）遵循「**键缺省 = 不修改**、**空串 / 纯空白 = 清空为 `NULL`**、其他值 = 去首尾空白后写入」；`i18n` 为对象整体替换、`null` 清空（保存时统一规整：英文文献清 en 镜像、与基础列相同的翻译值丢弃）；`year` 接受数字 / 数字字符串 / `null` / `""`（后两者清空；`<input type="number">` 清空后的 `""` 不再引发 422）；摘要键 `abstract` 与 `abstract_text` **都接受**（`DocumentOut` 下发的是 `abstract`，历史上前端只发 `abstract` 而结构体只认 `abstract_text`，导致摘要永远存不进去）；`doc_type` 与抽取路径共用 `services::doc_type::normalize`（`pipeline::normalize_doc_type` 是它的薄封装）；客户端填了同义词（`article` / `book_section` …）时会打一条 `info` 日志说明归一到哪个标准值；**响应回传更新后的完整 `DocumentOut`**（不要再回 `{status:"ok"}`，前端会把它当文档赋回去）。前端 `DocManageView.vue` 的表单覆盖全部字段（基础信息 + `i18n.en`）并只提交这些字段的白名单（不再回传整份 `DocumentOut`），`DetailView.vue` 展示 `source` / `category` / `language`。
+   - **列表列的存储格式**：`authors` / `keywords` 两列以及 `i18n.<lang>.authors` / `i18n.<lang>.keywords` 统一存 **`; ` 分隔纯文本**（写入一律走 `services::i18n::list_to_db`，空数组 → 空串；**不要再写 JSON 数组字符串**）。历史数据里的 `["A","B"]` 由 `database.rs::migrate_list_columns` 在启动时一次性转换（幂等，解析失败的行原样保留）。读取侧一律用 `services::i18n::parse_str_list`（先试 JSON、再按 `; , 、 ，` 拆），**不要再 `serde_json::from_str` 猜格式**——它遇到纯文本会直接落到 `[]`（向量库 payload 的 `authors`/`keywords` 就是这么丢的）。向量库 payload 仍下发字符串数组（`parse_str_list` 产出，`vector_db.rs` 按数组写入）。
    - **文件事実筛选与文件构成统计**：列取端点 `?pdf_state=｜md_state=｜zip_state=`（`present` / `absent` / `unknown`，逗号多选，非法值 400）与 `search-info` **共用** `documents::state_condition(kind, raw)`（不占绑定参数），所以从监控面板带入的筛选在搜索时不会丢掉；`GET /assist/api/admin/stats` 额外返回 `file_counts`（`pdf_only` / `pdf_and_md` / `md_only` / `none` / `with_zip`，按 `pdf_size`/`md_size`/`zip_size` 聚合，零磁盘 IO），前端「监控面板」的「文件构成」卡片点进去就是带 `?pdf_state=&md_state=` 的文献列表（`md_size` 为 `NULL`/`0` 都算「不存在」）。
    - **全量比对索引**（`GET /documents/doi-hash-index`）：一次返回库内全部文献的 `{count, with_doi, with_hash, generated_at, documents:[{id, doi, doi_key, file_hash, pdf_health}]}`（`doi_key` 已归一化小写，空 DOI/空哈希为 `null`），供 `client-rs` 批量比对；客户端拉一次就完成整库比对，不再按 DOI 逐条请求 `by-doi`。只返回比对必需字段（不带 title/abstract），新增字段时注意保持轻量。
    - **可跳过元数据抽取**：表单字段 `extract_meta`（缺省 `true`）为 `false` 时整段跳过 `extract_pdf_metadata_from_path_async`（`meta` 用空 JSON 对象，`fill_meta_fields` 全部字段保持空）。这一步在 mutool 引擎下要起 3 个子进程、其中 `mutool draw -F text` 会把**整份文档**正文抽一遍，是大文件上传后「等服务端处理」的主要耗时。`client-rs` 批量上传**默认**传 `extract_meta=false`（`--extract-meta` 开启），事后可用 `POST /assist/api/pipeline/extract-pdf-meta/:id`（文档管理页 / 流水线）补上；Web 上传不传该字段，行为不变。
@@ -637,7 +668,7 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
      - 已有条目**已有 PDF** → 409 `{error:"duplicate", kind:"doi", has_pdf:true, existing_id, existing:{…,has_pdf}}`，前端提示「是否覆盖已有条目中的 PDF」：确认后带 `on_duplicate=replace` 重传 → 200 `{status:"replaced"}`（复用 `persist_pdf_for_doc`，与 `POST /{id}/pdf` 同一套副作用）；不确认则放弃。
 
      `on_duplicate` 其余取值照旧：`error`（默认，409）/ `skip`（200 `{status:"skipped"}`）/ `replace`（同哈希等价 skip，否则覆盖 PDF）。`force=true` 跳过全部去重检查。新文档的 `doi` 取显式字段或 PDF 元数据（`fill_meta_fields` 只补空）。去重依赖 `database.rs::init` 建的 `idx_documents_file_hash` / `idx_documents_doi`（`CREATE INDEX IF NOT EXISTS`，幂等），新增按列等值查找的功能时同步补索引。
-   - **BibTeX 批量新建条目**（`POST /assist/api/documents/import-bibtex`，`import_bibtex`）：请求体 `{content, dry_run}`，`content` 为 `.bib` 文件原始文本（≤8 MB，单次最多处理 2000 条）。服务端用 `services/bibtex.rs` 手写解析器（`@article{key,…}` / `@article(key,…)`、花括号嵌套、`"…"` 引号值、`#` 拼接、`@string` 宏、`@comment`/`@preamble` 跳过、LaTeX 重音与转义还原），把条目映射到 `documents` 的 16 个元数据字段（`filename` 用 `<引用键>.bib` 占位，`source` 取 `publisher` 否则 `bibtex`，类型走 Zotero 名）。**只新建库里缺失的条目**：先按文件内 DOI/标题去重，再与全库比对（`doi_key` 归一化 DOI 优先，其次 `normalize_title` + 年份），命中则跳过并回传 `existing_id`；`dry_run=true` 只返回预览统计（不做写库）。新建记录**直接写入 `fs_synced_at`**（三个 size 保持 `NULL` = 三个文件全部「已同步且不存在」），`pdf_health = 'missing'`，因此派生状态为 `uploaded` + 「PDF 缺失」。响应 `{dry_run,total,processed,truncated,missing,created_count,existing_count,duplicate_count,invalid_count,failed_count,created,items,items_truncated,warnings,detail}`，`items[].action ∈ created|create|exists|duplicate|invalid|error`。
+   - **BibTeX 批量新建条目**（`POST /assist/api/documents/import-bibtex`，`import_bibtex`）：请求体 `{content, dry_run}`，`content` 为 `.bib` 文件原始文本（≤8 MB，单次最多处理 2000 条）。服务端用 `services/bibtex.rs` 手写解析器（`@article{key,…}` / `@article(key,…)`、花括号嵌套、`"…"` 引号值、`#` 拼接、`@string` 宏、`@comment`/`@preamble` 跳过、LaTeX 重音与转义还原），把条目映射到 `documents` 的 11 个基础元数据字段（**不写 `i18n`**，语言未知时不拆；`filename` 用 `<引用键>.bib` 占位，`source` 取 `publisher` 否则 `bibtex`，类型走 Zotero 名）。**只新建库里缺失的条目**：先按文件内 DOI/标题去重，再与全库比对（`doi_key` 归一化 DOI 优先，其次 `normalize_title` + 年份），命中则跳过并回传 `existing_id`；`dry_run=true` 只返回预览统计（不做写库）。新建记录**直接写入 `fs_synced_at`**（三个 size 保持 `NULL` = 三个文件全部「已同步且不存在」），`pdf_health = 'missing'`，因此派生状态为 `uploaded` + 「PDF 缺失」。响应 `{dry_run,total,processed,truncated,missing,created_count,existing_count,duplicate_count,invalid_count,failed_count,created,items,items_truncated,warnings,detail}`，`items[].action ∈ created|create|exists|duplicate|invalid|error`。
    - **手动去重的检测端点**（都只读，`admin` 才能访问，供 `/assist/duplicates` 页使用）：
      - `GET /assist/api/documents/similar-titles` —— 归一化标题 + 编辑距离（`SIMILARITY_THRESHOLD`）贪心聚类，返回 `{groups:[{normalized_title,count,documents}],total_groups,total_documents}`；
      - `GET /assist/api/documents/similar-dois` —— 按 `doi_key()`（`normalize_doi` 去 `https://doi.org/` 等前缀与尾部标点 + 转小写）分组，只返回组内 ≥2 篇的组，返回 `{groups:[{doi_key,doi,count,documents}],total_groups,total_documents}`（`doi` 是组内第一个非空原值，仅用于展示；无 DOI 的文档不参与）。
@@ -883,7 +914,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 11. **Rust 异步**：后台任务用 `tokio::spawn`，不要在 `async` 块中使用 `std::thread::sleep` 或阻塞 I/O。
 12. **SQLx 编译时检查**：`sqlx` 默认在 `debug` 模式下会校验 SQL 查询，如果迁移了数据库结构需运行 `cargo sqlx prepare`（需安装 `sqlx-cli`）。
     **给 `documents` 加列的完整清单**（漏一处就会在运行时 `FromRow` 缺列报错/静默取空）：
-   - `database.rs::init()` 的 `CREATE TABLE` + 同一个函数里的**轻量迁移数组**（`CREATE TABLE IF NOT EXISTS` 不会改已有库，新列必须在迁移数组里逐个 `ALTER TABLE`）；`documents` 现有列：16 个元数据字段 + `mineru_task_id` / `fs_synced_at` / `qdrant_collection` / `vector_db_id` / `created_at` / `updated_at` / `pdf_size` / `md_size` / `zip_size` / `pdf_health` / `pdf_health_message`（**没有** `status` / `status_message` / `progress`）；
+   - `database.rs::init()` 的 `CREATE TABLE` + 同一个函数里的**轻量迁移数组**（`CREATE TABLE IF NOT EXISTS` 不会改已有库，新列必须在迁移数组里逐个 `ALTER TABLE`）；`documents` 现有列：12 个元数据字段（含 `i18n`）+ `mineru_task_id` / `fs_synced_at` / `qdrant_collection` / `vector_db_id` / `created_at` / `updated_at` / `pdf_size` / `md_size` / `zip_size` / `pdf_health` / `pdf_health_message`（**没有** `status` / `status_message` / `progress`，**也不再有任何 `*_en` 列**）；
    - `models.rs::Document` 字段；
    - 三份 `DOC_COLUMNS`：`routers/documents.rs`、`routers/pipeline.rs`、`mcp_server.rs`（列顺序需与 `Document` 字段顺序一致）；
    - `documents.rs::DocumentOut` + `doc_to_out()`（**不返回 `status` / `status_message`**：只给数据库记录 + `has_*` / `synced` / `fs_synced_at` / `pdf_health*` / `qdrant_collection` / `vector_db_id`，以及非数据库的 `runtime_task`、`last_error`；展示状态由前端 `utils/docStatus.ts::deriveDocStatus()` 推导）；
@@ -927,7 +958,15 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
     - 存量数据由 `database.rs::migrate_doc_types()` 在启动时归一（幂等）。
     - 注意 `list_doc_types` / MCP `library_stats` 的 `type_counts` 是**按原值分组**的：一旦有脏值回流，这里会立刻多条一次性碎片，请拿它当回归哨兵。
 
-27. **MinerU 分片先本地切页，退路的页码范围参数位置别写错**：分片优先用
+27. **双语元数据只认 `i18n` 单列，不要再加 `*_en` 列**：基础列存 PDF 主要语言，翻译在
+    `i18n` JSON（`{"en":{…}}`），列表字段是 `; ` 分隔纯文本。所有扁平 ↔ i18n 的转换必须走
+    `services::i18n`（`fill_doc_missing` / `to_db` / `parse` / `merge_missing` / `route_target_lang`），
+    不要在 `documents.rs` / `pipeline.rs` 里手写 `serde_json` 映射（历史教训同 `doc_type`）。
+    注意：英文文献不存 `en` 镜像；语言未知时全部写基础列；`migrate_i18n()` 先备份到
+    `documents_i18n_legacy` 再删旧列，回滚只能恢复 DB 文件。存量 `*_en` 列已由启动迁移删除，
+    新增代码 **不要** 再引用它们（`DOC_COLUMNS` 三份、`DocumentOut`、`PublicDocumentOut`、MCP 输出）。
+
+28. **MinerU 分片先本地切页，退路的页码范围参数位置别写错**：分片优先用
     `mutool clean -ggg -D <in> <out> <pages>` 本地切（模块 `services/pdf_split.rs`；
     `-D` 顺带去掉「空用户口令」加密，产物必须校验非空——mutool 对写空的产物也返回 0），
     只有切页不可用时才退回「整份 + 页码范围」。退路里官方 V4 的 `page_ranges` **必须放在

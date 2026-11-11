@@ -94,11 +94,7 @@ impl Database {
                 category TEXT,
                 doc_type TEXT,
                 language TEXT,
-                title_en TEXT,
-                authors_en TEXT,
-                keywords_en TEXT,
-                abstract_en TEXT,
-                journal_en TEXT,
+                i18n TEXT,
                 mineru_task_id TEXT,
                 fs_synced_at TEXT,
                 qdrant_collection TEXT,
@@ -151,11 +147,27 @@ impl Database {
                 "fs_synced_at",
                 "ALTER TABLE documents ADD COLUMN fs_synced_at TEXT",
             ),
+            (
+                "i18n",
+                "ALTER TABLE documents ADD COLUMN i18n TEXT",
+            ),
         ] {
             if !Self::has_column(&self.pool, "documents", column).await? {
                 sqlx::query(ddl).execute(&self.pool).await?;
                 tracing::info!("数据库迁移：documents 表补列 {}", column);
             }
+        }
+
+        // ── 双语字段迁移（`*_en` 五列 → 单列 `i18n` JSON）──────────────
+        // 基础列存 PDF 主要语言，`i18n` 只存翻译。旧库里的 `*_en` 列在这里搬进
+        // `i18n.en`（英文文献的镜像值跳过），随后删除五列。幂等：列已不存在就跳过。
+        // 注意必须在 `migrate_list_columns` **之前**执行（后者已不再引用 `*_en` 列）。
+        let migrated_i18n = Self::migrate_i18n(&self.pool).await?;
+        if migrated_i18n > 0 {
+            tracing::info!(
+                "数据库迁移：{} 行的英文元数据迁入 i18n 字段",
+                migrated_i18n
+            );
         }
 
         // ── 状态列移除 ─────────────────────────────
@@ -274,10 +286,12 @@ impl Database {
         Ok(converted)
     }
 
-    /// 把 `authors` / `authors_en` / `keywords` / `keywords_en` 里的历史 JSON 数组字符串
-    /// （如 `["A","B"]`）改写为 `; ` 分隔的纯文本，返回改写行数。幂等：已经是纯文本的行不动。
+    /// 把 `authors` / `keywords` 里的历史 JSON 数组字符串（如 `["A","B"]`）改写为 `; ` 分隔的
+    /// 纯文本，返回改写行数。幂等：已经是纯文本的行不动。
+    ///
+    /// `authors_en` / `keywords_en` 已随 i18n 迁移并入 `i18n` 并删除，不再出现在这里。
     async fn migrate_list_columns(pool: &SqlitePool) -> anyhow::Result<usize> {
-        const COLUMNS: [&str; 4] = ["authors", "authors_en", "keywords", "keywords_en"];
+        const COLUMNS: [&str; 2] = ["authors", "keywords"];
         let where_clause = COLUMNS
             .iter()
             .map(|c| format!("{} LIKE '[%'", c))
@@ -288,12 +302,12 @@ impl Database {
             COLUMNS.join(", "),
             where_clause
         );
-        let rows: Vec<(i64, Option<String>, Option<String>, Option<String>, Option<String>)> =
+        let rows: Vec<(i64, Option<String>, Option<String>)> =
             sqlx::query_as(&sql).fetch_all(pool).await?;
 
         let mut converted = 0usize;
-        for (id, authors, authors_en, keywords, keywords_en) in rows {
-            let mut new_values: [Option<String>; 4] = [authors, authors_en, keywords, keywords_en];
+        for (id, authors, keywords) in rows {
+            let mut new_values: [Option<String>; 2] = [authors, keywords];
             let mut changed = false;
             for value in new_values.iter_mut() {
                 let Some(raw) = value.as_deref() else { continue };
@@ -319,21 +333,130 @@ impl Database {
             if !changed {
                 continue;
             }
-            let [a, ae, k, ke] = new_values;
-            sqlx::query(
-                "UPDATE documents SET authors = ?, authors_en = ?, keywords = ?, keywords_en = ? \
-                 WHERE id = ?",
-            )
-            .bind(a)
-            .bind(ae)
-            .bind(k)
-            .bind(ke)
-            .bind(id)
-            .execute(pool)
-            .await?;
+            let [a, k] = new_values;
+            sqlx::query("UPDATE documents SET authors = ?, keywords = ? WHERE id = ?")
+                .bind(a)
+                .bind(k)
+                .bind(id)
+                .execute(pool)
+                .await?;
             converted += 1;
         }
         Ok(converted)
+    }
+
+    /// 把五个 `*_en` 列搬进 `i18n` JSON 并删除旧列，返回迁移行数。
+    ///
+    /// 规则（与 `services::i18n` 一致）：
+    /// - 基础列为英文（或无法判定语言）时，`*_en` 是镜像，直接丢弃；
+    /// - 基础列非英文时，非空且**不与基础列相同**的值写入 `i18n.en.*`；
+    /// - 已有合法 `i18n` 的行只补空，不覆盖。
+    ///
+    /// 幂等：五列都不存在时立即返回。删除列前把原值备份到 `documents_i18n_legacy`。
+    async fn migrate_i18n(pool: &SqlitePool) -> anyhow::Result<usize> {
+        const LEGACY_COLUMNS: [&str; 5] = [
+            "title_en",
+            "authors_en",
+            "keywords_en",
+            "abstract_en",
+            "journal_en",
+        ];
+        let mut present = Vec::new();
+        for column in LEGACY_COLUMNS {
+            if Self::has_column(pool, "documents", column).await? {
+                present.push(column);
+            }
+        }
+        if present.is_empty() {
+            return Ok(0);
+        }
+
+        // 删列不可逆：先留一份只读备份（与 `documents_status_legacy` 同样的做法）
+        if !Self::has_column(pool, "documents_i18n_legacy", "title_en").await? {
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS documents_i18n_legacy AS \
+                 SELECT id, title_en, authors_en, keywords_en, abstract_en, journal_en, \
+                        datetime('now') AS archived_at FROM documents",
+            )
+            .execute(pool)
+            .await?;
+            tracing::info!("数据库迁移：documents 旧双语字段已备份到 documents_i18n_legacy");
+        }
+
+        let rows: Vec<(
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT id, language, title, authors, journal, keywords, abstract, title_en, \
+             authors_en, keywords_en, abstract_en, journal_en, i18n FROM documents",
+        )
+        .fetch_all(pool)
+        .await?;
+
+        let mut migrated = 0usize;
+        for (
+            id,
+            language,
+            title,
+            authors,
+            journal,
+            keywords,
+            abstract_text,
+            title_en,
+            authors_en,
+            keywords_en,
+            abstract_en,
+            journal_en,
+            i18n,
+        ) in rows
+        {
+            let mut map = crate::services::i18n::parse(i18n.as_deref());
+            let before = map.clone();
+
+            // 只有「基础列非英文且语言可判定」时才把 `*_en` 当翻译保存
+            let base = crate::services::i18n::base_language(language.as_deref(), title.as_deref());
+            if base.as_deref().map_or(false, |b| b != "en") {
+                let fields = crate::services::i18n::I18nFields {
+                    title: non_duplicate(title_en.as_deref(), title.as_deref()),
+                    authors: non_duplicate(authors_en.as_deref(), authors.as_deref()),
+                    journal: non_duplicate(journal_en.as_deref(), journal.as_deref()),
+                    keywords: non_duplicate(keywords_en.as_deref(), keywords.as_deref()),
+                    abstract_text: non_duplicate(abstract_en.as_deref(), abstract_text.as_deref()),
+                };
+                let incoming = crate::services::i18n::single_lang_map("en", fields);
+                crate::services::i18n::merge_missing(&mut map, &incoming);
+            }
+            if map == before {
+                continue;
+            }
+            sqlx::query("UPDATE documents SET i18n = ? WHERE id = ?")
+                .bind(crate::services::i18n::to_db(&map))
+                .bind(id)
+                .execute(pool)
+                .await?;
+            migrated += 1;
+        }
+
+        // 备份完成后删除旧列（SQLite ≥ 3.35，代码库已在用 DROP COLUMN）
+        for column in present {
+            sqlx::query(&format!("ALTER TABLE documents DROP COLUMN {}", column))
+                .execute(pool)
+                .await?;
+            tracing::info!("数据库迁移：documents 表删除列 {}", column);
+        }
+
+        Ok(migrated)
     }
 
     /// 判断某张表是否已有某列（用于轻量迁移）
@@ -343,5 +466,128 @@ impl Database {
                 .fetch_all(pool)
                 .await?;
         Ok(rows.iter().any(|(name,)| name == column))
+    }
+}
+/// 迁移用：`*_en` 的值若与对应基础列相同（英文文献的镜像）则视为重复，不写入 `i18n`。
+fn non_duplicate(value: Option<&str>, base: Option<&str>) -> Option<String> {
+    let value = value.unwrap_or("").trim();
+    if value.is_empty() || base.map(str::trim) == Some(value) {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 旧库（`*_en` 五列）→ 新库（单列 `i18n` JSON）的迁移回归测试。
+    #[tokio::test]
+    async fn migrates_en_columns_into_i18n() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("migrate.db");
+        let opts = SqliteConnectOptions::new().filename(&path).create_if_missing(true);
+        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+        let db = Database { pool };
+
+        // 旧表结构（含 *_en 五列）
+        sqlx::query(
+            "CREATE TABLE documents (
+                id INTEGER PRIMARY KEY, filename TEXT NOT NULL, file_hash TEXT,
+                title TEXT, authors TEXT, year INTEGER, doi TEXT, source TEXT, journal TEXT,
+                keywords TEXT, abstract TEXT, category TEXT, doc_type TEXT, language TEXT,
+                title_en TEXT, authors_en TEXT, keywords_en TEXT, abstract_en TEXT, journal_en TEXT,
+                mineru_task_id TEXT, fs_synced_at TEXT, qdrant_collection TEXT, vector_db_id TEXT,
+                pdf_size INTEGER, md_size INTEGER, zip_size INTEGER, pdf_health TEXT,
+                pdf_health_message TEXT,
+                created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        // 中文文献（英文译名应进 i18n.en）
+        sqlx::query(
+            "INSERT INTO documents (id, filename, title, language, title_en, authors, authors_en,
+                keywords, keywords_en, abstract, abstract_en, journal, journal_en)
+             VALUES (1, 'zh.pdf', '中文题名', 'zh', 'Chinese Title', '张三', 'Zhang San',
+                '关键词', 'keywords', '中文摘要', 'English abstract', '中文期刊', 'Chinese Journal')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        // 英文文献（*_en 是与基础列相同的镜像 → 丢弃）
+        sqlx::query(
+            "INSERT INTO documents (id, filename, title, language, title_en, abstract, abstract_en)
+             VALUES (2, 'en.pdf', 'Attention', 'en', 'Attention', 'Same abstract', 'Same abstract')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        // 语言未知但标题是 ASCII（按 en 处理 → 丢弃 *_en）
+        sqlx::query(
+            "INSERT INTO documents (id, filename, title, title_en) VALUES (3, 'x.pdf', 'Foo', 'Foo EN')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        db.init().await.unwrap();
+
+        // 旧列已删除、新列存在
+        let cols: Vec<(String,)> = sqlx::query_as("SELECT name FROM pragma_table_info('documents')")
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+        let names: Vec<String> = cols.into_iter().map(|(n,)| n).collect();
+        assert!(names.iter().any(|n| n == "i18n"));
+        for old in ["title_en", "authors_en", "keywords_en", "abstract_en", "journal_en"] {
+            assert!(!names.iter().any(|n| n == old), "旧列未删除：{}", old);
+        }
+
+        // 中文文献：五个字段都进 i18n.en，基础列保持中文
+        let raw: Option<String> = sqlx::query_scalar("SELECT i18n FROM documents WHERE id = 1")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let map = crate::services::i18n::parse(raw.as_deref());
+        let en = map.get("en").expect("缺少 i18n.en");
+        assert_eq!(en.title.as_deref(), Some("Chinese Title"));
+        assert_eq!(en.authors.as_deref(), Some("Zhang San"));
+        assert_eq!(en.journal.as_deref(), Some("Chinese Journal"));
+        assert_eq!(en.keywords.as_deref(), Some("keywords"));
+        assert_eq!(en.abstract_text.as_deref(), Some("English abstract"));
+        // 搜索路径依赖 SQLite JSON1：`json_extract` 必须可用
+        let extracted: Option<String> = sqlx::query_scalar(
+            "SELECT json_extract(i18n, '$.en.title') FROM documents WHERE id = 1",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(extracted.as_deref(), Some("Chinese Title"));
+
+        let base_title: Option<String> = sqlx::query_scalar("SELECT title FROM documents WHERE id = 1")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(base_title.as_deref(), Some("中文题名"));
+
+        // 英文 / 语言未知：不存 en 镜像
+        for id in [2i64, 3i64] {
+            let raw: Option<String> = sqlx::query_scalar("SELECT i18n FROM documents WHERE id = ?")
+                .bind(id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+            assert!(raw.is_none(), "id={} 不应有 i18n", id);
+        }
+
+        // 备份表保留原值
+        let legacy: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM documents_i18n_legacy")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(legacy, 3);
     }
 }

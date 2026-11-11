@@ -122,6 +122,13 @@ def main() -> None:
             status, msg = common.check_health(ctx, path)
         title = meta.get('title')
         authors = meta.get('authors') or []
+        # 基础列 = PDF 主要语言；英文文献的摘要直接进基础列，中文文献的英文摘要进 i18n.en
+        raw_abstract = meta.get('abstract')
+        lang = (meta.get('language') or '').lower()
+        has_cjk = bool(raw_abstract and common.CJK_RE.search(raw_abstract))
+        abstract_text = raw_abstract if (raw_abstract and (has_cjk or lang in ('', 'en'))) else None
+        i18n = (json.dumps({'en': {'abstract': raw_abstract}}, ensure_ascii=False)
+                if raw_abstract and not has_cjk and lang not in ('', 'en') else None)
         row = {
             'id': doc_id,
             'filename': safe_filename(title, doc_id),
@@ -134,10 +141,8 @@ def main() -> None:
             'journal': meta.get('journal'),
             'keywords': (json.dumps(meta['keywords'], ensure_ascii=False)
                          if meta.get('keywords') and 2 <= len(meta['keywords']) <= 20 else None),
-            'abstract': meta.get('abstract') if (meta.get('abstract') and
-                                                 common.CJK_RE.search(meta['abstract'])) else None,
-            'abstract_en': meta.get('abstract') if (meta.get('abstract') and
-                                                    not common.CJK_RE.search(meta['abstract'])) else None,
+            'abstract': abstract_text,
+            'i18n': i18n,
             'category': None,
             'doc_type': None,
             'language': meta.get('language'),
@@ -155,12 +160,6 @@ def main() -> None:
             'updated_at': time.strftime('%Y-%m-%d %H:%M:%S',
                                         time.localtime(os.path.getmtime(path))),
         }
-        # 英文文献的 *_en 镜像（与库内既有习惯一致）
-        if row['language'] == 'en':
-            row['title_en'] = row['title']
-            row['authors_en'] = row['authors']
-            row['journal_en'] = row['journal']
-            row['keywords_en'] = row['keywords']
         print(f"  {doc_id}: {str(title)[:60]} | {row['year']} | {row['doi']} | "
               f"{len(authors)} 作者 | {status}")
         if args.dry_run:

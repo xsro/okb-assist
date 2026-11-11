@@ -24,8 +24,7 @@ use crate::services::grep_search::{grep_search as do_grep, parse_doc_ids};
 // `year` 必须 CAST：老库里有写成 `''`（TEXT）的年份，按 `Option<i64>` 解码 TEXT 会报
 // `mismatched types`，整条查询取不到任何行（与 documents.rs 的 DOC_COLUMNS 保持一致）。
 const DOC_COLUMNS: &str = "id, filename, file_hash, title, authors, CAST(NULLIF(TRIM(year), '') AS INTEGER) AS year, doi, source, journal, \
-     keywords, abstract, category, doc_type, language, title_en, authors_en, \
-     keywords_en, abstract_en, journal_en, mineru_task_id, fs_synced_at, \
+     keywords, abstract, category, doc_type, language, i18n, mineru_task_id, fs_synced_at, \
      qdrant_collection, vector_db_id, created_at, updated_at, \
      pdf_size, md_size, zip_size, pdf_health, pdf_health_message";
 
@@ -466,6 +465,7 @@ impl McpServer {
             "category": doc.category,
             "doc_type": doc.doc_type,
             "language": doc.language,
+            "i18n": crate::services::i18n::value_from_db(doc.i18n.as_deref()),
             "status": state.status.as_str(),
             "status_message": state.message,
             "synced": state.synced,
@@ -721,14 +721,12 @@ impl McpServer {
                 let mut v = json!({
                     "id": doc.id,
                     "title": doc.title.clone().unwrap_or_default(),
-                    "title_en": doc.title_en,
                     "authors": doc.authors.clone().unwrap_or_default(),
-                    "authors_en": doc.authors_en,
                     "year": doc.year,
                     "doi": doc.doi.clone().unwrap_or_default(),
                     "journal": doc.journal.clone().unwrap_or_default(),
-                    "journal_en": doc.journal_en,
                     "keywords": doc.keywords.clone().unwrap_or_default(),
+                    "i18n": crate::services::i18n::value_from_db(doc.i18n.as_deref()),
                     "abstract": doc.abstract_text.as_deref().unwrap_or("").chars().take(300).collect::<String>(),
                     "doc_type": doc.doc_type.clone().unwrap_or_default(),
                     "language": doc.language.clone().unwrap_or_default(),
@@ -927,10 +925,8 @@ impl McpServer {
             "id": doc_id,
             "title": doc.title.clone().unwrap_or_else(|| doc.filename.clone()),
             "abstract": doc.abstract_text,
+            "i18n": crate::services::i18n::value_from_db(doc.i18n.as_deref()),
         });
-        if let Some(ae) = &doc.abstract_en {
-            result["abstract_en"] = json!(ae);
-        }
         if let Some(lang) = &doc.language {
             if lang != "en" {
                 result["language"] = json!(lang);
@@ -1594,9 +1590,20 @@ fn append_search_info_filters<'a>(
 ) {
     qb.push("(");
     let fields = [
-        "title", "title_en", "authors", "authors_en", "journal", "journal_en",
-        "keywords", "keywords_en", "abstract", "abstract_en", "doi", "category",
-        "source", "filename",
+        "title",
+        "json_extract(i18n, '$.en.title')",
+        "authors",
+        "json_extract(i18n, '$.en.authors')",
+        "journal",
+        "json_extract(i18n, '$.en.journal')",
+        "keywords",
+        "json_extract(i18n, '$.en.keywords')",
+        "abstract",
+        "json_extract(i18n, '$.en.abstract')",
+        "doi",
+        "category",
+        "source",
+        "filename",
     ];
     for (i, f) in fields.iter().enumerate() {
         if i > 0 {

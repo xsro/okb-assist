@@ -240,26 +240,30 @@
         <textarea v-model="form.abstract" rows="4"></textarea>
       </div>
 
-      <h4 class="form-subtitle">英文</h4>
+      <h4 class="form-subtitle">英文翻译（i18n.en）</h4>
+      <p class="form-hint">
+        基础信息按 PDF 主要语言填写；这里存该文献的英文译名（中文文献常用）。
+        英文文献无需填写（保存时会自动清空 en 镜像）。
+      </p>
       <div class="form-group">
         <label>英文标题</label>
-        <input v-model="form.title_en" type="text" />
+        <input v-model="enForm.title" type="text" />
       </div>
       <div class="form-group">
         <label>英文作者</label>
-        <input v-model="form.authors_en" type="text" />
+        <input v-model="enForm.authors" type="text" placeholder="多位作者用 ; 分隔" />
       </div>
       <div class="form-group">
         <label>英文期刊</label>
-        <input v-model="form.journal_en" type="text" />
+        <input v-model="enForm.journal" type="text" />
       </div>
       <div class="form-group">
         <label>英文关键词</label>
-        <input v-model="form.keywords_en" type="text" />
+        <input v-model="enForm.keywords" type="text" placeholder="多个关键词用 ; 分隔" />
       </div>
       <div class="form-group">
         <label>英文摘要</label>
-        <textarea v-model="form.abstract_en" rows="3"></textarea>
+        <textarea v-model="enForm.abstract" rows="3"></textarea>
       </div>
 
       <h4 class="form-subtitle">书目</h4>
@@ -340,7 +344,7 @@ import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import { useTokenStore } from '@/stores/token'
 import { checkDocumentPdfHealth } from '@/api/admin'
-import type { Document } from '@/types/document'
+import type { Document, I18nFields } from '@/types/document'
 import { deriveDocStatus } from '@/utils/docStatus'
 import {
   DOC_TYPE_OPTIONS,
@@ -362,6 +366,8 @@ const doc = ref<Document | null>(null)
 /** 状态由前端推导（后端只给文件事实与运行时字段） */
 const derivedStatus = computed(() => (doc.value ? deriveDocStatus(doc.value) : null))
 const form = ref<Partial<Document>>({})
+/** 英文翻译（`i18n.en`）的编辑缓冲：与基础字段一起提交，其他语言原样保留 */
+const enForm = ref<I18nFields>({})
 const saving = ref(false)
 /** 文档类型候选：先取前端静态词表，挂载后用后端 `/documents/doc-types` 的 `standard` 覆盖 */
 const docTypeOptions = ref<DocTypeOption[]>([...DOC_TYPE_OPTIONS])
@@ -468,6 +474,7 @@ async function load() {
   try {
     doc.value = await getDocument(id)
     form.value = { ...doc.value }
+    enForm.value = { ...(doc.value.i18n?.en || {}) }
     healthResult.value = null
     await loadIndexes()
   } catch (err) {
@@ -569,6 +576,7 @@ async function saveMetadata() {
     if (updated && typeof updated.id === 'number') {
       doc.value = updated
       form.value = { ...updated }
+      enForm.value = { ...(updated.i18n?.en || {}) }
       await loadIndexes()
     } else {
       // 兼容旧后端（只回 {status:"ok"}）：重新拉一次，保证页面状态与数据库一致
@@ -598,18 +606,39 @@ function buildMetadataPayload(): Partial<Document> {
     journal: text(f.journal),
     keywords: text(f.keywords),
     abstract: text(f.abstract),
-    title_en: text(f.title_en),
-    authors_en: text(f.authors_en),
-    journal_en: text(f.journal_en),
-    keywords_en: text(f.keywords_en),
-    abstract_en: text(f.abstract_en),
+    i18n: buildI18nPayload(),
     year: yearPayload(f.year),
     doc_type: text(f.doc_type),
     doi: text(f.doi),
     source: text(f.source),
     category: text(f.category),
     language: text(f.language)
+  } as Partial<Document>
+}
+
+/**
+ * 组装 `i18n`：英文来自编辑缓冲，其他语言原样保留；
+ * 空字段 / 空对象不提交（后端也会再规整一次）。
+ */
+function buildI18nPayload(): Record<string, I18nFields> | null {
+  const others = { ...(form.value.i18n || {}) }
+  delete others.en
+
+  const en: I18nFields = {}
+  const pick = (key: keyof I18nFields) => {
+    const value = String(enForm.value[key] ?? '').trim()
+    if (value) en[key] = value
   }
+  pick('title')
+  pick('authors')
+  pick('journal')
+  pick('keywords')
+  pick('abstract')
+
+  const result: Record<string, I18nFields> = Object.keys(en).length
+    ? { ...others, en }
+    : others
+  return Object.keys(result).length ? result : null
 }
 
 /** 年份：`<input type="number">` 清空后是空串，必须转成 null（否则后端反序列化整次请求 422） */
