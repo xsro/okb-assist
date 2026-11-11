@@ -41,6 +41,9 @@
           </td>
         </tr>
         <tr><th>关键词</th><td>{{ meta.keywords || '-' }}</td></tr>
+        <tr v-if="meta.source"><th>来源</th><td>{{ meta.source }}</td></tr>
+        <tr v-if="meta.category"><th>分类</th><td>{{ meta.category }}</td></tr>
+        <tr v-if="meta.language"><th>语言</th><td>{{ meta.language }}</td></tr>
         <tr v-if="meta.title_en"><th>英文标题</th><td>{{ meta.title_en }}</td></tr>
         <tr v-if="meta.authors_en"><th>英文作者</th><td>{{ meta.authors_en }}</td></tr>
         <tr v-if="meta.journal_en"><th>英文期刊</th><td>{{ meta.journal_en }}</td></tr>
@@ -116,6 +119,18 @@
         <div class="info-row">
           <span class="info-label">关键词</span>
           <span class="info-value">{{ meta.keywords || '-' }}</span>
+        </div>
+        <div v-if="meta.source" class="info-row">
+          <span class="info-label">来源</span>
+          <span class="info-value">{{ meta.source }}</span>
+        </div>
+        <div v-if="meta.category" class="info-row">
+          <span class="info-label">分类</span>
+          <span class="info-value">{{ meta.category }}</span>
+        </div>
+        <div v-if="meta.language" class="info-row">
+          <span class="info-label">语言</span>
+          <span class="info-value">{{ meta.language }}</span>
         </div>
         <div v-if="meta.title_en" class="info-row">
           <span class="info-label">英文标题</span>
@@ -267,6 +282,9 @@ const meta = computed(() => {
     doi: d?.doi || p?.doi || '',
     keywords: d?.keywords || p?.keywords || '',
     keywords_en: d?.keywords_en || p?.keywords_en || '',
+    source: d?.source || p?.source || '',
+    category: d?.category || p?.category || '',
+    language: d?.language || p?.language || '',
     abstract: d?.abstract || p?.abstract || '',
     abstract_en: d?.abstract_en || p?.abstract_en || ''
   }

@@ -46,8 +46,8 @@ const QDRANT_USER_ID: i64 = 0;
 const CHUNK_SIZE: usize = 1000;
 const MIN_CHUNK_SIZE: usize = 100;
 
-/// Zotero 标准类型映射
-fn normalize_doc_type(raw: &str) -> String {
+/// Zotero 标准类型映射（`documents::update_document` 手工编辑也复用这一套）
+pub(crate) fn normalize_doc_type(raw: &str) -> String {
     let raw = raw.trim();
     if raw.is_empty() {
         return String::new();
@@ -642,12 +642,29 @@ fn value_i64(v: &Value, key: &str) -> Option<i64> {
     v.get(key).and_then(|x| x.as_i64())
 }
 
-/// 从 Value 中取字符串数组字段（转为 JSON 字符串）
-fn value_list_json(v: &Value, key: &str) -> Option<String> {
+/// 从 Value 中取字符串数组字段（拆成去空白的字符串列表）
+fn value_str_list(v: &Value, key: &str) -> Vec<String> {
     v.get(key)
         .and_then(|x| x.as_array())
-        .filter(|a| !a.is_empty())
-        .map(|a| serde_json::to_string(a).unwrap_or_else(|_| "[]".to_string()))
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 从 Value 中取字符串数组字段（转为 `; ` 分隔的文本，空数组 → `None`）
+fn value_list_text(v: &Value, key: &str) -> Option<String> {
+    let list = value_str_list(v, key);
+    if list.is_empty() {
+        None
+    } else {
+        Some(list_to_db(&list))
+    }
 }
 
 // ── 元数据抽取：解析 / 合并 / 落库 ──
@@ -884,7 +901,7 @@ fn display_year(v: Option<i64>) -> String {
     v.map(|y| y.to_string()).unwrap_or_else(|| "（空）".to_string())
 }
 
-/// 作者/关键词列 → 数组：优先按 JSON 数组解析，其次按分隔符切分
+/// 作者/关键词列 → 数组：优先按 JSON 数组解析（历史数据），其次按分隔符切分
 fn parse_str_list(raw: Option<&str>) -> Vec<String> {
     let raw = raw.unwrap_or("").trim();
     if raw.is_empty() {
@@ -903,13 +920,19 @@ fn parse_str_list(raw: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-/// 数组 → 数据库列（空数组写空串，与 `NULLIF(x, '')` 语义一致）
-fn list_to_db(items: &[String]) -> String {
-    if items.is_empty() {
-        String::new()
-    } else {
-        serde_json::to_string(items).unwrap_or_default()
-    }
+/// 数组 → 数据库列：用 `; ` 分隔的**纯文本**（空数组写空串，与 `NULLIF(x, '')` 语义一致）。
+///
+/// 历史格式是 JSON 数组字符串（`["A","B"]`），读取侧 `parse_str_list` 仍兼容；
+/// 写入侧统一纯文本：详情页可直接显示，`citation::from_document` 也能按分隔符正确拆开
+/// （旧格式下它会把 `["A":` 这类碎片当成人名）。老数据的 JSON → 纯文本迁移在
+/// `database.rs::migrate_list_columns_to_text`。
+pub(crate) fn list_to_db(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// 从模型输出取文本字段：字段缺失 → `None`（模型没表态）；
@@ -1218,10 +1241,12 @@ async fn do_index_impl(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64, 
 
     let metadata = json!({
         "title": doc.title.clone().unwrap_or_default(),
-        "authors": doc.authors.as_deref().and_then(|a| serde_json::from_str::<Value>(a).ok()).unwrap_or_else(|| json!([])),
+        // 列里存的是 `; ` 分隔纯文本（历史数据可能是 JSON 数组字符串），
+        // 向量库 payload 统一用数组：`parse_str_list` 两种格式都能拆
+        "authors": parse_str_list(doc.authors.as_deref()),
         "year": doc.year,
         "type": doc.doc_type.clone().unwrap_or_default(),
-        "keywords": doc.keywords.as_deref().and_then(|k| serde_json::from_str::<Value>(k).ok()).unwrap_or_else(|| json!([])),
+        "keywords": parse_str_list(doc.keywords.as_deref()),
     });
 
     let chunks = chunk_text_by_markdown(&markdown_content, CHUNK_SIZE, MIN_CHUNK_SIZE);
@@ -1328,14 +1353,10 @@ async fn run_crossref(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
     }
 
     let parsed = &result["parsed"];
-    let authors = parsed.get("authors").and_then(|a| a.as_array()).cloned().unwrap_or_default();
-    let authors_json = serde_json::to_string(&authors).unwrap_or_else(|_| "[]".to_string());
-    let keywords = parsed.get("keywords").and_then(|a| a.as_array()).cloned();
-    let keywords_json = keywords.as_ref().map(|a| serde_json::to_string(a).unwrap_or_else(|_| "[]".to_string()));
-    let authors_en = parsed.get("authors_en").and_then(|a| a.as_array()).cloned();
-    let authors_en_json = authors_en.as_ref().map(|a| serde_json::to_string(a).unwrap_or_else(|_| "[]".to_string()));
-    let keywords_en = parsed.get("keywords_en").and_then(|a| a.as_array()).cloned();
-    let keywords_en_json = keywords_en.as_ref().map(|a| serde_json::to_string(a).unwrap_or_else(|_| "[]".to_string()));
+    let authors_text = list_to_db(&value_str_list(parsed, "authors"));
+    let keywords_text = list_to_db(&value_str_list(parsed, "keywords"));
+    let authors_en_text = list_to_db(&value_str_list(parsed, "authors_en"));
+    let keywords_en_text = list_to_db(&value_str_list(parsed, "keywords_en"));
 
     let doi_norm = value_str(parsed, "doi").and_then(|d| normalize_doi(&d));
 
@@ -1359,19 +1380,19 @@ async fn run_crossref(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
             updated_at = ? WHERE id = ?",
     )
     .bind(value_str(parsed, "title").unwrap_or_default())
-    .bind(&authors_json)
+    .bind(&authors_text)
     .bind(value_i64(parsed, "year"))
     .bind(doi_norm.unwrap_or_default())
     .bind(value_str(parsed, "source").unwrap_or_default())
     .bind(value_str(parsed, "journal").unwrap_or_default())
-    .bind(keywords_json.unwrap_or_default())
+    .bind(&keywords_text)
     .bind(value_str(parsed, "abstract").unwrap_or_default())
     .bind(value_str(parsed, "doc_type").unwrap_or_default())
     .bind(value_str(parsed, "language").unwrap_or_default())
     .bind(value_str(parsed, "title_en").unwrap_or_default())
-    .bind(authors_en_json.unwrap_or_default())
+    .bind(&authors_en_text)
     .bind(value_str(parsed, "journal_en").unwrap_or_default())
-    .bind(keywords_en_json.unwrap_or_default())
+    .bind(&keywords_en_text)
     .bind(value_str(parsed, "abstract_en").unwrap_or_default())
     .bind(now_iso())
     .bind(doc_id)
@@ -1412,15 +1433,10 @@ pub(crate) async fn run_crossref_override(db: Arc<Database>, settings: Arc<Setti
 
     let parsed = &result["parsed"];
 
-    let authors = parsed.get("authors").and_then(|a| a.as_array()).cloned().unwrap_or_default();
-    let authors_json = if authors.is_empty() {
-        None
-    } else {
-        Some(serde_json::to_string(&authors).unwrap_or_else(|_| "[]".to_string()))
-    };
-    let keywords_json = value_list_json(parsed, "keywords");
-    let authors_en_json = value_list_json(parsed, "authors_en");
-    let keywords_en_json = value_list_json(parsed, "keywords_en");
+    let authors_text = value_list_text(parsed, "authors");
+    let keywords_text = value_list_text(parsed, "keywords");
+    let authors_en_text = value_list_text(parsed, "authors_en");
+    let keywords_en_text = value_list_text(parsed, "keywords_en");
 
     let doi_norm = value_str(parsed, "doi").and_then(|d| normalize_doi(&d));
 
@@ -1445,19 +1461,19 @@ pub(crate) async fn run_crossref_override(db: Arc<Database>, settings: Arc<Setti
             updated_at = ? WHERE id = ?",
     )
     .bind(value_str(parsed, "title"))
-    .bind(authors_json)
+    .bind(authors_text)
     .bind(value_i64(parsed, "year"))
     .bind(doi_norm)
     .bind(value_str(parsed, "source"))
     .bind(value_str(parsed, "journal"))
-    .bind(keywords_json)
+    .bind(keywords_text)
     .bind(value_str(parsed, "abstract"))
     .bind(value_str(parsed, "doc_type"))
     .bind(value_str(parsed, "language"))
     .bind(value_str(parsed, "title_en"))
-    .bind(authors_en_json)
+    .bind(authors_en_text)
     .bind(value_str(parsed, "journal_en"))
-    .bind(keywords_en_json)
+    .bind(keywords_en_text)
     .bind(value_str(parsed, "abstract_en"))
     .bind(now_iso())
     .bind(doc_id)
@@ -1509,14 +1525,10 @@ async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id
         value_str(&meta, "pages"),
     );
 
-    let authors = meta.get("authors").and_then(|a| a.as_array()).cloned().unwrap_or_default();
-    let authors_json = serde_json::to_string(&authors).unwrap_or_else(|_| "[]".to_string());
-    let keywords = meta.get("keywords").and_then(|a| a.as_array()).cloned();
-    let keywords_json = keywords.as_ref().map(|a| serde_json::to_string(a).unwrap_or_else(|_| "[]".to_string()));
-    let keywords_en = meta.get("keywords_en").and_then(|a| a.as_array()).cloned();
-    let keywords_en_json = keywords_en.as_ref().map(|a| serde_json::to_string(a).unwrap_or_else(|_| "[]".to_string()));
-    let authors_en = meta.get("authors_en").and_then(|a| a.as_array()).cloned().unwrap_or_default();
-    let authors_en_json = serde_json::to_string(&authors_en).unwrap_or_else(|_| "[]".to_string());
+    let authors_text = list_to_db(&value_str_list(&meta, "authors"));
+    let authors_en_text = list_to_db(&value_str_list(&meta, "authors_en"));
+    let keywords_text = list_to_db(&value_str_list(&meta, "keywords"));
+    let keywords_en_text = list_to_db(&value_str_list(&meta, "keywords_en"));
     let doi_norm = value_str(&meta, "doi").and_then(|d| normalize_doi(&d));
 
     // 只补空（NULLIF 保证空串不覆盖已有值）：中英文题名/作者/刊名/关键词/摘要一并落库
@@ -1538,14 +1550,14 @@ async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id
     )
     .bind(value_str(&meta, "title").unwrap_or_default())
     .bind(value_str(&meta, "title_en").unwrap_or_default())
-    .bind(&authors_json)
-    .bind(&authors_en_json)
+    .bind(&authors_text)
+    .bind(&authors_en_text)
     .bind(value_i64(&meta, "year"))
     .bind(doi_norm.unwrap_or_default())
     .bind(value_str(&meta, "journal").unwrap_or_default())
     .bind(value_str(&meta, "journal_en").unwrap_or_default())
-    .bind(keywords_json.unwrap_or_default())
-    .bind(keywords_en_json.unwrap_or_default())
+    .bind(&keywords_text)
+    .bind(&keywords_en_text)
     .bind(value_str(&meta, "abstract").unwrap_or_default())
     .bind(value_str(&meta, "abstract_en").unwrap_or_default())
     .bind(now_iso())
@@ -2637,11 +2649,17 @@ mod meta_tests {
 
     #[test]
     fn list_columns_round_trip() {
+        // 历史 JSON 数组格式仍能读（迁移后理论上不再出现）
         assert_eq!(parse_str_list(Some("[\"A\", \"B\"]")), vec!["A", "B"]);
         assert_eq!(parse_str_list(Some("A; B，C")), vec!["A", "B", "C"]);
         assert!(parse_str_list(Some("")).is_empty());
-        assert_eq!(list_to_db(&["A".to_string()]), "[\"A\"]");
+        // 写入统一为 `; ` 分隔纯文本
+        assert_eq!(list_to_db(&["A".to_string()]), "A");
+        assert_eq!(list_to_db(&["A".to_string(), "B".to_string()]), "A; B");
         assert_eq!(list_to_db(&[]), "");
+        // 写读互逆
+        let items = vec!["Wei Li".to_string(), "San Zhang".to_string()];
+        assert_eq!(parse_str_list(Some(&list_to_db(&items))), items);
     }
 
     #[test]

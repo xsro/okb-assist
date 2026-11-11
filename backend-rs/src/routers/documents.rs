@@ -25,7 +25,7 @@ use crate::services::bibtex;
 use crate::services::file_state;
 use crate::services::citation::{self, CitationRecord};
 use crate::auth;
-use crate::routers::pipeline::run_crossref_override;
+use crate::routers::pipeline::{list_to_db, run_crossref_override};
 
 use axum::http::{HeaderMap, HeaderValue};
 use tokio::io::{AsyncSeekExt, AsyncReadExt};
@@ -995,14 +995,23 @@ async fn get_public_document(
     }
 }
 
+/// 元数据更新请求体。
+///
+/// 语义（与旧的 `COALESCE` 实现不同，现在可以真正清空字段）：
+/// - **键缺省** = 不修改该字段；
+/// - **空串 / 纯空白** = 清空为 `NULL`；
+/// - 其他值 = 写入（自动去首尾空白，DOI / `doc_type` 额外归一化）。
 #[derive(Debug, Deserialize)]
 pub struct UpdateDocumentBody {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
     pub authors: Option<String>,
-    #[serde(default)]
-    pub year: Option<i64>,
+    /// 年份：键缺省 = 不修改；`null` / 空串 = 清空；数字（或数字字符串）= 写入。
+    /// 用 `Option<Option<i64>>` 才能把「没说」和「显式清空」区分开，
+    /// 也因此能把前端 `<input type="number">` 清空后拿到的 `""` 当成清空而不是 422。
+    #[serde(default, deserialize_with = "de_optional_year")]
+    pub year: Option<Option<i64>>,
     #[serde(default)]
     pub doi: Option<String>,
     #[serde(default)]
@@ -1011,7 +1020,9 @@ pub struct UpdateDocumentBody {
     pub journal: Option<String>,
     #[serde(default)]
     pub keywords: Option<String>,
-    #[serde(default)]
+    /// 摘要：`DocumentOut` 下发的键是 `abstract`，这里两种写法都接受
+    /// （历史上前端只发 `abstract`，结构体却只认 `abstract_text`，导致摘要永远存不进去）。
+    #[serde(default, alias = "abstract")]
     pub abstract_text: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
@@ -1031,54 +1042,139 @@ pub struct UpdateDocumentBody {
     pub journal_en: Option<String>,
 }
 
+/// 空串 / 纯空白 → `NULL`（元数据里 `""` 与 `NULL` 语义相同，统一成 `NULL` 便于比较与展示）
+fn blank_to_none(raw: String) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// `year` 的宽松反序列化：`null` / `""` / 纯空白 → 清空；数字或数字字符串 → 写入。
+/// 键缺省时由 `#[serde(default)]` 得到 `None`（= 不修改），不会走到这里。
+fn de_optional_year<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Value::deserialize(deserializer)?;
+    Ok(match raw {
+        Value::Null => Some(None),
+        Value::Number(n) => match n.as_i64() {
+            Some(y) => Some(Some(y)),
+            None => return Err(de::Error::custom("year 需为整数或 null")),
+        },
+        Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                Some(None)
+            } else {
+                match t.parse::<i64>() {
+                    Ok(y) => Some(Some(y)),
+                    Err(_) => return Err(de::Error::custom(format!("year 不是整数：{s}"))),
+                }
+            }
+        }
+        _ => return Err(de::Error::custom("year 需为整数或 null")),
+    })
+}
+
 async fn update_document(
     axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
     Path(id): Path<i64>,
     Json(body): Json<UpdateDocumentBody>,
 ) -> Response {
     if let Err(resp) = auth::assert_role(&role, &["admin"]) {
         return resp;
     }
-    // DOI 写入前统一归一化（去 `https://doi.org/` 等前缀、去尾部标点），
-    // 这样按 DOI 比对时才不会被 Zotero/Crossref 的写法差异影响；空串仍表示「清空」。
-    let doi = match body.doi.as_deref() {
-        None => None,
-        Some(raw) => Some(normalize_doi(raw).unwrap_or_default()),
+
+    // 先读当前记录，再在内存里按「键缺省 = 不改、空串 = 清空」合并，最后整行写回：
+    // 这样既能清空字段，也不需要对 16 个字段拼动态 SQL。
+    let mut doc = match fetch_doc(&db, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"detail": "Document not found"}))).into_response()
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response()
+        }
     };
+
+    macro_rules! merge_text {
+        ($field:ident) => {
+            if let Some(raw) = body.$field {
+                doc.$field = blank_to_none(raw);
+            }
+        };
+    }
+
+    merge_text!(title);
+    merge_text!(authors);
+    merge_text!(source);
+    merge_text!(journal);
+    merge_text!(keywords);
+    merge_text!(abstract_text);
+    merge_text!(category);
+    merge_text!(language);
+    merge_text!(title_en);
+    merge_text!(authors_en);
+    merge_text!(keywords_en);
+    merge_text!(abstract_en);
+    merge_text!(journal_en);
+
+    // 年份：`Some(None)` = 显式清空，`Some(Some(y))` = 写入，`None` = 不修改
+    if let Some(year) = body.year {
+        doc.year = year;
+    }
+
+    // DOI 写入前统一归一化（去 `https://doi.org/` 等前缀、去尾部标点），
+    // 这样按 DOI 比对时才不会被 Zotero/Crossref 的写法差异影响；空串表示「清空」。
+    if let Some(raw) = body.doi.as_deref() {
+        doc.doi = normalize_doi(raw).and_then(|d| blank_to_none(d));
+    }
+
+    // 类型与抽取路径走同一套 Zotero 标准映射，避免手工填的值和模型填的值互不相认
+    if let Some(raw) = body.doc_type {
+        doc.doc_type = match blank_to_none(raw) {
+            None => None,
+            Some(raw) => Some(crate::routers::pipeline::normalize_doc_type(&raw)),
+        };
+    }
+
     let result = sqlx::query(
-        "UPDATE documents SET title = COALESCE(?, title), authors = COALESCE(?, authors), \
-         year = COALESCE(?, year), doi = COALESCE(?, doi), source = COALESCE(?, source), \
-         journal = COALESCE(?, journal), keywords = COALESCE(?, keywords), \
-         abstract = COALESCE(?, abstract), category = COALESCE(?, category), \
-         doc_type = COALESCE(?, doc_type), language = COALESCE(?, language), \
-         title_en = COALESCE(?, title_en), authors_en = COALESCE(?, authors_en), \
-         keywords_en = COALESCE(?, keywords_en), abstract_en = COALESCE(?, abstract_en), \
-         journal_en = COALESCE(?, journal_en), updated_at = datetime('now') \
-         WHERE id = ?",
+        "UPDATE documents SET title = ?, authors = ?, year = ?, doi = ?, source = ?, \
+         journal = ?, keywords = ?, abstract = ?, category = ?, doc_type = ?, language = ?, \
+         title_en = ?, authors_en = ?, keywords_en = ?, abstract_en = ?, journal_en = ?, \
+         updated_at = datetime('now') WHERE id = ?",
     )
-    .bind(&body.title)
-    .bind(&body.authors)
-    .bind(body.year)
-    .bind(&doi)
-    .bind(&body.source)
-    .bind(&body.journal)
-    .bind(&body.keywords)
-    .bind(&body.abstract_text)
-    .bind(&body.category)
-    .bind(&body.doc_type)
-    .bind(&body.language)
-    .bind(&body.title_en)
-    .bind(&body.authors_en)
-    .bind(&body.keywords_en)
-    .bind(&body.abstract_en)
-    .bind(&body.journal_en)
+    .bind(&doc.title)
+    .bind(&doc.authors)
+    .bind(doc.year)
+    .bind(&doc.doi)
+    .bind(&doc.source)
+    .bind(&doc.journal)
+    .bind(&doc.keywords)
+    .bind(&doc.abstract_text)
+    .bind(&doc.category)
+    .bind(&doc.doc_type)
+    .bind(&doc.language)
+    .bind(&doc.title_en)
+    .bind(&doc.authors_en)
+    .bind(&doc.keywords_en)
+    .bind(&doc.abstract_en)
+    .bind(&doc.journal_en)
     .bind(id)
     .execute(db.pool())
     .await;
 
     match result {
-        Ok(r) if r.rows_affected() > 0 => (StatusCode::OK, Json(json!({"status": "ok"}))).into_response(),
+        // 回传更新后的完整文档：前端此前把 `{status:"ok"}` 当成 Document 赋回，导致保存后页面字段全空
+        Ok(r) if r.rows_affected() > 0 => {
+            (StatusCode::OK, Json(json!(doc_to_out(&doc, &settings, &db).await))).into_response()
+        }
         Ok(_) => (StatusCode::NOT_FOUND, Json(json!({"detail": "Document not found"}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))).into_response(),
     }
@@ -1276,7 +1372,8 @@ fn fill_meta_fields(doc: &mut Document, meta: &Value) {
         if let Some(a) = meta.get("authors").and_then(|v| v.as_array()) {
             let authors: Vec<String> = a.iter().filter_map(|x| x.as_str().map(String::from)).collect();
             if !authors.is_empty() {
-                doc.authors = Some(serde_json::to_string(&authors).unwrap_or_default());
+                // 列表列统一存 `; ` 分隔纯文本（历史数据是 JSON 数组字符串）
+                doc.authors = Some(list_to_db(&authors));
             }
         }
     }
@@ -1294,7 +1391,7 @@ fn fill_meta_fields(doc: &mut Document, meta: &Value) {
         if let Some(k) = meta.get("keywords").and_then(|v| v.as_array()) {
             let kws: Vec<String> = k.iter().filter_map(|x| x.as_str().map(String::from)).collect();
             if !kws.is_empty() {
-                doc.keywords = Some(serde_json::to_string(&kws).unwrap_or_default());
+                doc.keywords = Some(list_to_db(&kws));
             }
         }
     }
@@ -1328,7 +1425,7 @@ fn fill_meta_fields(doc: &mut Document, meta: &Value) {
         if let Some(a) = meta.get("authors_en").and_then(|v| v.as_array()) {
             let authors: Vec<String> = a.iter().filter_map(|x| x.as_str().map(String::from)).collect();
             if !authors.is_empty() {
-                doc.authors_en = Some(serde_json::to_string(&authors).unwrap_or_default());
+                doc.authors_en = Some(list_to_db(&authors));
             }
         }
     }
@@ -1336,7 +1433,7 @@ fn fill_meta_fields(doc: &mut Document, meta: &Value) {
         if let Some(k) = meta.get("keywords_en").and_then(|v| v.as_array()) {
             let kws: Vec<String> = k.iter().filter_map(|x| x.as_str().map(String::from)).collect();
             if !kws.is_empty() {
-                doc.keywords_en = Some(serde_json::to_string(&kws).unwrap_or_default());
+                doc.keywords_en = Some(list_to_db(&kws));
             }
         }
     }
@@ -2176,15 +2273,16 @@ fn match_existing_bibtex_doc(
 /// 插入「仅元数据」的文档（来自 BibTeX）：没有 PDF，`pdf_health` 直接标 `missing`。
 async fn insert_bibtex_document(db: &Database, rec: &bibtex::BibRecord) -> Result<i64, String> {
     let now = now_datetime();
+    // `authors` / `keywords` 列统一存 `; ` 分隔纯文本（不用 JSON 数组字符串）
     let authors = if rec.authors.is_empty() {
         None
     } else {
-        serde_json::to_string(&rec.authors).ok()
+        Some(list_to_db(&rec.authors))
     };
     let keywords = if rec.keywords.is_empty() {
         None
     } else {
-        serde_json::to_string(&rec.keywords).ok()
+        Some(list_to_db(&rec.keywords))
     };
     // `source` 列沿用 Crossref 的语义（出版社），没有出版社时标出来源
     let source = if rec.publisher.trim().is_empty() {

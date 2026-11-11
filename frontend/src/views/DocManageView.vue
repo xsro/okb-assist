@@ -213,44 +213,92 @@
       </div>
     </div>
 
-    <!-- 元数据编辑 -->
+    <!-- 元数据编辑：覆盖 documents 的全部 16 个元数据列（文件事实列不在此处） -->
     <div class="section">
       <h3>编辑元数据</h3>
+      <p class="form-hint">留空即清空该字段；DOI 会自动去掉 <code>https://doi.org/</code> 等前缀，文档类型会映射到 Zotero 标准类型名。</p>
+
+      <h4 class="form-subtitle">中文</h4>
       <div class="form-group">
         <label>标题</label>
         <input v-model="form.title" type="text" />
       </div>
       <div class="form-group">
         <label>作者</label>
-        <input v-model="form.authors" type="text" />
+        <input v-model="form.authors" type="text" placeholder="多位作者用 ; 或 , 分隔" />
       </div>
       <div class="form-group">
         <label>期刊</label>
         <input v-model="form.journal" type="text" />
       </div>
+      <div class="form-group">
+        <label>关键词</label>
+        <input v-model="form.keywords" type="text" placeholder="多个关键词用 ; 分隔" />
+      </div>
+      <div class="form-group">
+        <label>摘要</label>
+        <textarea v-model="form.abstract" rows="4"></textarea>
+      </div>
+
+      <h4 class="form-subtitle">英文</h4>
+      <div class="form-group">
+        <label>英文标题</label>
+        <input v-model="form.title_en" type="text" />
+      </div>
+      <div class="form-group">
+        <label>英文作者</label>
+        <input v-model="form.authors_en" type="text" />
+      </div>
+      <div class="form-group">
+        <label>英文期刊</label>
+        <input v-model="form.journal_en" type="text" />
+      </div>
+      <div class="form-group">
+        <label>英文关键词</label>
+        <input v-model="form.keywords_en" type="text" />
+      </div>
+      <div class="form-group">
+        <label>英文摘要</label>
+        <textarea v-model="form.abstract_en" rows="3"></textarea>
+      </div>
+
+      <h4 class="form-subtitle">书目</h4>
       <div class="form-row">
         <div class="form-group">
           <label>年份</label>
-          <input v-model.number="form.year" type="number" />
+          <input v-model.number="form.year" type="number" min="1000" max="2200" placeholder="留空 = 清空" />
         </div>
         <div class="form-group">
           <label>文档类型</label>
-          <input v-model="form.doc_type" type="text" />
+          <input v-model="form.doc_type" type="text" list="doc-type-options" placeholder="journalArticle" />
+          <datalist id="doc-type-options">
+            <option v-for="t in DOC_TYPE_OPTIONS" :key="t" :value="t" />
+          </datalist>
         </div>
         <div class="form-group">
           <label>DOI</label>
           <input v-model="form.doi" type="text" />
         </div>
       </div>
-      <div class="form-group">
-        <label>关键词</label>
-        <input v-model="form.keywords" type="text" />
+      <div class="form-row">
+        <div class="form-group">
+          <label>来源（出版者 / 学位授予单位）</label>
+          <input v-model="form.source" type="text" />
+        </div>
+        <div class="form-group">
+          <label>分类</label>
+          <input v-model="form.category" type="text" />
+        </div>
+        <div class="form-group">
+          <label>语言</label>
+          <input v-model="form.language" type="text" list="language-options" placeholder="zh / en" />
+          <datalist id="language-options">
+            <option v-for="l in LANGUAGE_OPTIONS" :key="l" :value="l" />
+          </datalist>
+        </div>
       </div>
-      <div class="form-group">
-        <label>摘要</label>
-        <textarea v-model="form.abstract" rows="4"></textarea>
-      </div>
-      <button class="btn" @click="saveMetadata">保存</button>
+
+      <button class="btn" @click="saveMetadata" :disabled="saving">{{ saving ? '保存中…' : '保存' }}</button>
     </div>
 
   </div>
@@ -292,6 +340,24 @@ const doc = ref<Document | null>(null)
 /** 状态由前端推导（后端只给文件事实与运行时字段） */
 const derivedStatus = computed(() => (doc.value ? deriveDocStatus(doc.value) : null))
 const form = ref<Partial<Document>>({})
+const saving = ref(false)
+/** 文档类型下拉候选（与后端 `pipeline::normalize_doc_type` 的输出保持一致） */
+const DOC_TYPE_OPTIONS = [
+  'journalArticle',
+  'conferencePaper',
+  'thesis',
+  'book',
+  'bookSection',
+  'preprint',
+  'report',
+  'webpage',
+  'document',
+  'presentation',
+  'manuscript',
+  'patent',
+  'review'
+]
+const LANGUAGE_OPTIONS = ['zh', 'en', 'ja', 'ko', 'fr', 'de', 'ru']
 const replacePdfInput = ref<HTMLInputElement>()
 const replaceMarkdownInput = ref<HTMLInputElement>()
 const replaceAssetInput = ref<HTMLInputElement>()
@@ -481,12 +547,64 @@ async function removeDocument() {
 
 async function saveMetadata() {
   const id = parseInt(route.params.id as string)
+  if (saving.value) return
+  saving.value = true
   try {
-    doc.value = await updateDocument(id, form.value)
+    // 后端返回更新后的完整文档，直接赋回即可（旧实现把 {status:"ok"} 当成 Document，保存后整页字段变空）
+    const updated = await updateDocument(id, buildMetadataPayload())
+    if (updated && typeof updated.id === 'number') {
+      doc.value = updated
+      form.value = { ...updated }
+      await loadIndexes()
+    } else {
+      // 兼容旧后端（只回 {status:"ok"}）：重新拉一次，保证页面状态与数据库一致
+      await load()
+    }
     showSuccess('元数据已保存')
   } catch (err) {
     showError(getErrorMessage(err))
+  } finally {
+    saving.value = false
   }
+}
+
+/**
+ * 只提交 16 个元数据字段（白名单）。
+ *
+ * 不再把整份 `DocumentOut`（含 id / 文件事实 / 健康状态等）发回后端：
+ * 那些是非元数据列，混在里面只会让人误以为能改。
+ * 空串/空值 = 清空该字段（后端把空串写为 NULL）。
+ */
+function buildMetadataPayload(): Partial<Document> {
+  const f = form.value
+  const text = (v: unknown) => (v === null || v === undefined ? '' : String(v))
+  return {
+    title: text(f.title),
+    authors: text(f.authors),
+    journal: text(f.journal),
+    keywords: text(f.keywords),
+    abstract: text(f.abstract),
+    title_en: text(f.title_en),
+    authors_en: text(f.authors_en),
+    journal_en: text(f.journal_en),
+    keywords_en: text(f.keywords_en),
+    abstract_en: text(f.abstract_en),
+    year: yearPayload(f.year),
+    doc_type: text(f.doc_type),
+    doi: text(f.doi),
+    source: text(f.source),
+    category: text(f.category),
+    language: text(f.language)
+  }
+}
+
+/** 年份：`<input type="number">` 清空后是空串，必须转成 null（否则后端反序列化整次请求 422） */
+function yearPayload(v: unknown): number | null {
+  if (v === null || v === undefined) return null
+  const s = String(v).trim()
+  if (s === '') return null
+  const n = Number(s)
+  return Number.isFinite(n) ? Math.trunc(n) : null
 }
 
 function selectReplacePdf() {
@@ -894,6 +1012,29 @@ function formatFile(size: number | null): string {
 
 .form-row .form-group {
   flex: 1;
+}
+
+.form-hint {
+  margin: 0 0 12px;
+  color: var(--text-muted, #6b7280);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.form-hint code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--bg-subtle, #f3f4f6);
+}
+
+/* 元数据分组小标题（中文 / 英文 / 书目） */
+.form-subtitle {
+  margin: 16px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted, #6b7280);
+  border-bottom: 1px solid var(--border, #e5e7eb);
+  padding-bottom: 4px;
 }
 
 @media (max-width: 768px) {

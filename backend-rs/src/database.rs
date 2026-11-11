@@ -216,7 +216,81 @@ impl Database {
             sqlx::query(ddl).execute(&self.pool).await?;
         }
 
+        // ── 作者/关键词列格式迁移（JSON 数组字符串 → `; ` 分隔纯文本）─────────
+        // 历史：抽取路径与 BibTeX 导入写成 `["A","B"]`，手工编辑 / Crossref 写纯文本，
+        // 两种格式混存；`citation::from_document` 按分隔符拆时会把 JSON 碎片当人名。
+        // 这里一次性统一为纯文本（幂等，解析失败的行原样保留）。
+        let converted = Self::migrate_list_columns(&self.pool).await?;
+        if converted > 0 {
+            tracing::info!(
+                "数据库迁移：{} 行的作者/关键词列由 JSON 数组改为 `; ` 分隔文本",
+                converted
+            );
+        }
+
         Ok(())
+    }
+
+    /// 把 `authors` / `authors_en` / `keywords` / `keywords_en` 里的历史 JSON 数组字符串
+    /// （如 `["A","B"]`）改写为 `; ` 分隔的纯文本，返回改写行数。幂等：已经是纯文本的行不动。
+    async fn migrate_list_columns(pool: &SqlitePool) -> anyhow::Result<usize> {
+        const COLUMNS: [&str; 4] = ["authors", "authors_en", "keywords", "keywords_en"];
+        let where_clause = COLUMNS
+            .iter()
+            .map(|c| format!("{} LIKE '[%'", c))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let sql = format!(
+            "SELECT id, {} FROM documents WHERE {}",
+            COLUMNS.join(", "),
+            where_clause
+        );
+        let rows: Vec<(i64, Option<String>, Option<String>, Option<String>, Option<String>)> =
+            sqlx::query_as(&sql).fetch_all(pool).await?;
+
+        let mut converted = 0usize;
+        for (id, authors, authors_en, keywords, keywords_en) in rows {
+            let mut new_values: [Option<String>; 4] = [authors, authors_en, keywords, keywords_en];
+            let mut changed = false;
+            for value in new_values.iter_mut() {
+                let Some(raw) = value.as_deref() else { continue };
+                if !raw.trim_start().starts_with('[') {
+                    continue;
+                }
+                // 能解析成 JSON 数组才改；否则（如 `[1,2]` 或残缺 JSON）原样保留
+                let Ok(serde_json::Value::Array(items)) =
+                    serde_json::from_str::<serde_json::Value>(raw.trim())
+                else {
+                    continue;
+                };
+                let list: Vec<String> = items
+                    .iter()
+                    .filter_map(|x| x.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect();
+                *value = if list.is_empty() { None } else { Some(list.join("; ")) };
+                changed = true;
+            }
+            if !changed {
+                continue;
+            }
+            let [a, ae, k, ke] = new_values;
+            sqlx::query(
+                "UPDATE documents SET authors = ?, authors_en = ?, keywords = ?, keywords_en = ? \
+                 WHERE id = ?",
+            )
+            .bind(a)
+            .bind(ae)
+            .bind(k)
+            .bind(ke)
+            .bind(id)
+            .execute(pool)
+            .await?;
+            converted += 1;
+        }
+        Ok(converted)
     }
 
     /// 判断某张表是否已有某列（用于轻量迁移）
