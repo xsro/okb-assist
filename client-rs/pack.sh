@@ -8,7 +8,7 @@ cat >target/release2/run.sh << EOF
 cd \$(dirname \$0)
 mkdir -p ~/.okb/
 cp client.json ~/.okb/client.json
-cargo run -- zotero 我的文库.csv  --dup-doi-action health-hash  --upload-interval 3
+./okb-client zotero 我的文库.csv  --dup-doi-action health-hash  --upload-interval 3
 EOF
 
 cd target
