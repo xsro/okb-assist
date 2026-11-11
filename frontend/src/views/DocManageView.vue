@@ -218,7 +218,10 @@
       <h3>编辑元数据</h3>
       <p class="form-hint">留空即清空该字段；DOI 会自动去掉 <code>https://doi.org/</code> 等前缀，文档类型会映射到 Zotero 标准类型名。</p>
 
-      <h4 class="form-subtitle">中文</h4>
+      <h4 class="form-subtitle">
+        主要语言（基础字段）
+        <span v-if="baseLang()" class="subtitle-tag">{{ langLabel(baseLang()) }}（{{ baseLang() }}）</span>
+      </h4>
       <div class="form-group">
         <label>标题</label>
         <input v-model="form.title" type="text" />
@@ -240,31 +243,65 @@
         <textarea v-model="form.abstract" rows="4"></textarea>
       </div>
 
-      <h4 class="form-subtitle">英文翻译（i18n.en）</h4>
-      <p class="form-hint">
-        基础信息按 PDF 主要语言填写；这里存该文献的英文译名（中文文献常用）。
-        英文文献无需填写（保存时会自动清空 en 镜像）。
-      </p>
-      <div class="form-group">
-        <label>英文标题</label>
-        <input v-model="enForm.title" type="text" />
-      </div>
-      <div class="form-group">
-        <label>英文作者</label>
-        <input v-model="enForm.authors" type="text" placeholder="多位作者用 ; 分隔" />
-      </div>
-      <div class="form-group">
-        <label>英文期刊</label>
-        <input v-model="enForm.journal" type="text" />
-      </div>
-      <div class="form-group">
-        <label>英文关键词</label>
-        <input v-model="enForm.keywords" type="text" placeholder="多个关键词用 ; 分隔" />
-      </div>
-      <div class="form-group">
-        <label>英文摘要</label>
-        <textarea v-model="enForm.abstract" rows="3"></textarea>
-      </div>
+      <!-- 翻译（i18n）：默认收起，可给任意语言（en / ja / fr …）补译名 -->
+      <CollapsiblePanel
+        class="i18n-panel"
+        title="翻译（i18n，多语言）"
+        :badge="i18nBadge"
+        hint="基础字段按 PDF 主要语言；这里存其他语言的译名"
+      >
+        <p class="form-hint">
+          上方基础字段存 PDF 的主要语言文本，翻译存这里（语言码 → 标题/作者/期刊/关键词/摘要）。
+          保存时会去空白、合并重复语言、忽略空语言；与基础字段完全相同的译名会自动丢弃。
+        </p>
+
+        <div v-if="!i18nLangs.length" class="i18n-empty">
+          还没有翻译。点下方「添加语言」＝可给英文、日文、法文等其他语言补译名。
+        </div>
+
+        <div v-for="(row, idx) in i18nLangs" :key="row.uid" class="i18n-lang">
+          <div class="i18n-lang-head">
+            <label>语言码</label>
+            <input
+              v-model="row.lang"
+              type="text"
+              list="language-options"
+              class="i18n-lang-input"
+              placeholder="en / ja / fr"
+            />
+            <span class="i18n-lang-label">{{ row.lang ? langLabel(row.lang) : '（未填写）' }}</span>
+            <span
+              v-if="normalizeLangKey(row.lang) && normalizeLangKey(row.lang) === baseLang()"
+              class="i18n-lang-warn"
+            >
+              基础语言，保存后不会存为翻译
+            </span>
+            <button class="btn btn-sm btn-outline-danger" @click="removeLang(idx)">删除该语言</button>
+          </div>
+          <div class="form-group">
+            <label>{{ langLabel(row.lang) || '' }}标题</label>
+            <input v-model="row.fields.title" type="text" />
+          </div>
+          <div class="form-group">
+            <label>{{ langLabel(row.lang) || '' }}作者</label>
+            <input v-model="row.fields.authors" type="text" placeholder="多位作者用 ; 分隔" />
+          </div>
+          <div class="form-group">
+            <label>{{ langLabel(row.lang) || '' }}期刊</label>
+            <input v-model="row.fields.journal" type="text" />
+          </div>
+          <div class="form-group">
+            <label>{{ langLabel(row.lang) || '' }}关键词</label>
+            <input v-model="row.fields.keywords" type="text" placeholder="多个关键词用 ; 分隔" />
+          </div>
+          <div class="form-group">
+            <label>{{ langLabel(row.lang) || '' }}摘要</label>
+            <textarea v-model="row.fields.abstract" rows="3"></textarea>
+          </div>
+        </div>
+
+        <button class="btn btn-sm btn-outline" @click="addLang()">＋ 添加语言</button>
+      </CollapsiblePanel>
 
       <h4 class="form-subtitle">书目</h4>
       <div class="form-row">
@@ -343,7 +380,9 @@ import {
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
 import { useTokenStore } from '@/stores/token'
+import CollapsiblePanel from '@/components/CollapsiblePanel.vue'
 import { checkDocumentPdfHealth } from '@/api/admin'
+import { langLabel, normalizeLangKey } from '@/utils/lang'
 import type { Document, I18nFields } from '@/types/document'
 import { deriveDocStatus } from '@/utils/docStatus'
 import {
@@ -366,8 +405,48 @@ const doc = ref<Document | null>(null)
 /** 状态由前端推导（后端只给文件事实与运行时字段） */
 const derivedStatus = computed(() => (doc.value ? deriveDocStatus(doc.value) : null))
 const form = ref<Partial<Document>>({})
-/** 英文翻译（`i18n.en`）的编辑缓冲：与基础字段一起提交，其他语言原样保留 */
-const enForm = ref<I18nFields>({})
+/**
+ * 翻译（`i18n`）的编辑缓冲：一种语言一行，与基础字段一起提交。
+ * 只放已存在的语言，用户可自由增删/改语言码（en / ja / fr …）。
+ */
+interface I18nLangRow {
+  uid: number
+  lang: string
+  fields: I18nFields
+}
+const i18nLangs = ref<I18nLangRow[]>([])
+let langUid = 0
+
+/** 折叠面板标题右侧的标签：有几种语言 / 未填写 */
+const i18nBadge = computed(() =>
+  i18nLangs.value.length ? `${i18nLangs.value.length} 种语言` : '未填写'
+)
+
+function rowFromLang(lang: string, fields: I18nFields): I18nLangRow {
+  return { uid: ++langUid, lang, fields: { ...fields } }
+}
+
+/** 把后端的 `i18n` 铺平成编辑行（按语言码排序，与后端 BTreeMap 一致） */
+function loadI18nRows(map: Record<string, I18nFields> | undefined | null) {
+  const rows: I18nLangRow[] = []
+  for (const [lang, fields] of Object.entries(map || {})) {
+    rows.push(rowFromLang(lang, fields || {}))
+  }
+  rows.sort((a, b) => a.lang.localeCompare(b.lang))
+  i18nLangs.value = rows
+}
+
+/** 新增一种语言：默认挑一个还没被占用的常见语言码 */
+function addLang() {
+  const used = new Set(i18nLangs.value.map((r) => normalizeLangKey(r.lang)))
+  const candidates = ['en', 'ja', 'fr', 'de', 'ko', 'ru', 'es', 'it', 'pt', 'ar']
+  const lang = candidates.find((c) => !used.has(c)) || ''
+  i18nLangs.value = [...i18nLangs.value, rowFromLang(lang, {})]
+}
+
+function removeLang(index: number) {
+  i18nLangs.value = i18nLangs.value.filter((_, i) => i !== index)
+}
 const saving = ref(false)
 /** 文档类型候选：先取前端静态词表，挂载后用后端 `/documents/doc-types` 的 `standard` 覆盖 */
 const docTypeOptions = ref<DocTypeOption[]>([...DOC_TYPE_OPTIONS])
@@ -474,7 +553,7 @@ async function load() {
   try {
     doc.value = await getDocument(id)
     form.value = { ...doc.value }
-    enForm.value = { ...(doc.value.i18n?.en || {}) }
+    loadI18nRows(doc.value.i18n)
     healthResult.value = null
     await loadIndexes()
   } catch (err) {
@@ -576,7 +655,7 @@ async function saveMetadata() {
     if (updated && typeof updated.id === 'number') {
       doc.value = updated
       form.value = { ...updated }
-      enForm.value = { ...(updated.i18n?.en || {}) }
+      loadI18nRows(updated.i18n)
       await loadIndexes()
     } else {
       // 兼容旧后端（只回 {status:"ok"}）：重新拉一次，保证页面状态与数据库一致
@@ -617,28 +696,64 @@ function buildMetadataPayload(): Partial<Document> {
 }
 
 /**
- * 组装 `i18n`：英文来自编辑缓冲，其他语言原样保留；
- * 空字段 / 空对象不提交（后端也会再规整一次）。
+ * 组装 `i18n`：全部来自编辑行（一种语言一行）。
+ *
+ * - 语言码归一（`en-US` → `en`），非法/空语言码整行忽略；
+ * - 空字段省略，空语言忽略；
+ * - 同一语言码出现多行时合并；
+ * - 与基础列完全相同的值不提交（后端 `drop_translations_equal_to_base` 也会再丢一次）。
  */
 function buildI18nPayload(): Record<string, I18nFields> | null {
-  const others = { ...(form.value.i18n || {}) }
-  delete others.en
+  const result: Record<string, I18nFields> = {}
+  const base = baseFields()
 
-  const en: I18nFields = {}
-  const pick = (key: keyof I18nFields) => {
-    const value = String(enForm.value[key] ?? '').trim()
-    if (value) en[key] = value
+  for (const row of i18nLangs.value) {
+    const lang = normalizeLangKey(row.lang)
+    if (!lang) continue
+    const fields: I18nFields = {}
+    for (const key of I18N_FIELD_KEYS) {
+      const value = String(row.fields?.[key] ?? '').trim()
+      if (!value) continue
+      // 与基础列同一段文字（英文文献的 en 镜像、重复填写）不入库
+      if (base[key] && base[key] === value) continue
+      fields[key] = value
+    }
+    if (!Object.keys(fields).length) continue
+    result[lang] = { ...(result[lang] || {}), ...fields }
   }
-  pick('title')
-  pick('authors')
-  pick('journal')
-  pick('keywords')
-  pick('abstract')
 
-  const result: Record<string, I18nFields> = Object.keys(en).length
-    ? { ...others, en }
-    : others
   return Object.keys(result).length ? result : null
+}
+
+const I18N_FIELD_KEYS: (keyof I18nFields)[] = [
+  'title',
+  'authors',
+  'journal',
+  'keywords',
+  'abstract'
+]
+
+/** 基础列的值（用于判断译文是否与基础字段完全相同） */
+function baseFields(): I18nFields {
+  const f = form.value
+  const text = (v: unknown) => (v === null || v === undefined ? '' : String(v).trim())
+  return {
+    title: text(f.title),
+    authors: text(f.authors),
+    journal: text(f.journal),
+    keywords: text(f.keywords),
+    abstract: text(f.abstract)
+  }
+}
+
+/**
+ * 推测基础列语言（与后端 `i18n::base_language` 同口径）：
+ * 优先用「语言」列，缺失时按标题是否含汉字推断。
+ */
+function baseLang(): string {
+  const declared = normalizeLangKey(form.value.language)
+  if (declared) return declared
+  return /[\u4e00-\u9fff]/.test(String(form.value.title ?? '')) ? 'zh' : ''
 }
 
 /** 年份：`<input type="number">` 清空后是空串，必须转成 null（否则后端反序列化整次请求 422） */
@@ -1097,7 +1212,7 @@ function formatFile(size: number | null): string {
   background: var(--bg-subtle, #f3f4f6);
 }
 
-/* 元数据分组小标题（中文 / 英文 / 书目） */
+/* 元数据分组小标题（主要语言 / 书目） */
 .form-subtitle {
   margin: 16px 0 8px;
   font-size: 13px;
@@ -1105,6 +1220,83 @@ function formatFile(size: number | null): string {
   color: var(--text-muted, #6b7280);
   border-bottom: 1px solid var(--border, #e5e7eb);
   padding-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.form-subtitle .subtitle-tag {
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--primary-light, #ccfbf1);
+  color: var(--primary-dark, #0f766e);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* 翻译折叠面板（多语言编辑） */
+.i18n-panel {
+  margin: 16px 0 8px;
+}
+
+.i18n-panel .form-hint {
+  margin-bottom: 10px;
+}
+
+.i18n-empty {
+  margin: 4px 0 12px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border, #e5e7eb);
+  border-radius: 6px;
+  color: var(--text-muted, #6b7280);
+  font-size: 12px;
+}
+
+.i18n-lang {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 6px;
+  background: var(--bg-subtle, #f9fafb);
+}
+
+.i18n-lang-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.i18n-lang-head label {
+  width: auto;
+  font-size: 13px;
+  color: var(--text-muted, #6b7280);
+}
+
+.i18n-lang-input {
+  width: 110px;
+  padding: 6px 8px;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 4px;
+  background: var(--bg-card, #fff);
+  color: var(--text-primary, #111827);
+  font-size: 13px;
+}
+
+.i18n-lang-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary-dark, #0f766e);
+}
+
+.i18n-lang-warn {
+  font-size: 12px;
+  color: var(--warning-text, #b45309);
+}
+
+.i18n-lang .form-group {
+  margin-bottom: 10px;
 }
 
 @media (max-width: 768px) {

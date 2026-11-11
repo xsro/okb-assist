@@ -9,16 +9,17 @@
         :class="mode === 'title' ? 'btn-primary' : 'btn-outline'"
         @click="mode = 'title'"
       >
-        标题相似（{{ detected ? titleGroups.length + ' 组' : '未检测' }}）
+        标题相似（{{ titleDetected ? titleGroups.length + ' 组' : '未检测' }}）
       </button>
       <button
         class="btn btn-sm"
         :class="mode === 'doi' ? 'btn-primary' : 'btn-outline'"
         @click="mode = 'doi'"
       >
-        DOI 重复（{{ detected ? doiGroups.length + ' 组' : '未检测' }}）
+        DOI 重复（{{ doiDetected ? doiGroups.length + ' 组' : '未检测' }}）
       </button>
-      <button class="btn btn-sm" :disabled="loading || merging" @click="load">
+      <!-- 只检测当前标签页对应的那一种 -->
+      <button class="btn btn-sm" :disabled="loadingMode !== null || merging" @click="load">
         {{ loading ? '检测中…' : detected ? '重新检测' : '开始检测' }}
       </button>
     </div>
@@ -26,9 +27,11 @@
     <p class="hint">
       <template v-if="mode === 'title'">
         按「归一化标题 + 编辑距离相似度」分组。默认全部打勾（全部保留），取消勾选表示该条将被合并删除。
+        「开始检测」只检测标题相似，不动 DOI 重复的结果。
       </template>
       <template v-else>
         按「归一化 DOI」分组（忽略 <code>https://doi.org/</code> 前缀、大小写与尾部标点）。默认全部打勾（全部保留），取消勾选表示该条将被合并删除。
+        「开始检测」只检测 DOI 重复，不动标题相似的结果。
       </template>
     </p>
 
@@ -138,7 +141,10 @@
       <template v-if="loading">检测中…</template>
       <template v-else-if="!detected">
         <p>尚未检测。</p>
-        <p class="empty-tip">点击上方「开始检测」后才查询重复文献（标题相似与 DOI 重复会同时检测）。</p>
+        <p class="empty-tip">
+          点击上方「开始检测」只查询当前标签页的重复文献（
+          {{ mode === 'title' ? '标题相似' : 'DOI 重复' }}），另一种检测需切到对应标签页单独执行。
+        </p>
         <button class="btn btn-sm" :disabled="loading" @click="load">开始检测</button>
       </template>
       <template v-else>
@@ -161,9 +167,15 @@ const { requireToken } = useRequireToken()
 const mode = ref<'title' | 'doi'>('title')
 const titleGroups = ref<SimilarTitleGroup['groups']>([])
 const doiGroups = ref<SimilarDoiGroup['groups']>([])
-const loading = ref(false)
-/** 是否已主动检测过（进入页面不自动检测，由用户点「开始检测」触发） */
-const detected = ref(false)
+/** 正在检测的模式（null = 空闲）；按模式区分，切换标签页不会串状态 */
+const loadingMode = ref<'title' | 'doi' | null>(null)
+const loading = computed(() => loadingMode.value === mode.value)
+/** 各模式是否已主动检测过（进入页面不自动检测，由用户点「开始检测」触发） */
+const titleDetected = ref(false)
+const doiDetected = ref(false)
+const detected = computed(() =>
+  mode.value === 'title' ? titleDetected.value : doiDetected.value
+)
 const merging = ref(false)
 const progressDone = ref(0)
 const progressTotal = ref(0)
@@ -195,14 +207,18 @@ const currentGroups = computed<GroupView[]>(() =>
  */
 const keepMap = ref<Record<string, number[]>>({})
 
-/** 把两份检测结果里的所有组重置为「全部保留」 */
-function resetSelection() {
-  const next: Record<string, number[]> = {}
-  for (const g of titleGroups.value) {
-    next[`title:${g.normalized_title}`] = g.documents.map((d) => d.id)
+/** 把指定模式（或两种）检测结果的组重置为「全部保留」，另一模式的选择不受影响 */
+function resetSelection(scope: 'title' | 'doi' | 'all' = 'all') {
+  const next: Record<string, number[]> = { ...keepMap.value }
+  if (scope !== 'doi') {
+    for (const g of titleGroups.value) {
+      next[`title:${g.normalized_title}`] = g.documents.map((d) => d.id)
+    }
   }
-  for (const g of doiGroups.value) {
-    next[`doi:${g.doi_key}`] = g.documents.map((d) => d.id)
+  if (scope !== 'title') {
+    for (const g of doiGroups.value) {
+      next[`doi:${g.doi_key}`] = g.documents.map((d) => d.id)
+    }
   }
   keepMap.value = next
 }
@@ -240,7 +256,8 @@ function keepFirstEverywhere() {
     const first = g.group.documents[0]
     if (first) next[g.group.key] = [first.id]
   }
-  keepMap.value = next
+  // 只覆盖当前标签页的组，另一模式的选择保留
+  keepMap.value = { ...keepMap.value, ...next }
   showInfo('已把每组的第一篇设为保留项，确认无误后点「一键去重」')
 }
 
@@ -270,25 +287,30 @@ function isOnlyKept(plan: GroupPlan, id: number): boolean {
   return plan.kept.length === 1 && plan.kept[0]?.id === id
 }
 
+/**
+ * 检测按钮只跑当前标签页对应的那一种检测：
+ * 两个端点都是 admin 级只读查询，互不影响，另一种结果原样保留。
+ */
 async function load() {
   if (!requireToken()) return
-  loading.value = true
-  // 两个检测都是 admin 级只读查询，一次都拉回来，切换 tab 不再等
-  const [titles, dois] = await Promise.allSettled([getSimilarTitles(), getSimilarDois()])
-  if (titles.status === 'fulfilled') {
-    titleGroups.value = titles.value.groups
-  } else {
-    showError('标题相似检测失败')
+  if (loadingMode.value !== null) return
+  const target = mode.value
+  loadingMode.value = target
+  try {
+    if (target === 'title') {
+      titleGroups.value = (await getSimilarTitles()).groups
+      titleDetected.value = true
+    } else {
+      doiGroups.value = (await getSimilarDois()).groups
+      doiDetected.value = true
+    }
+    // 重新检测后该模式恢复「全部保留」，避免沿用已失效的选择
+    resetSelection(target)
+  } catch {
+    showError(target === 'title' ? '标题相似检测失败' : 'DOI 重复检测失败')
+  } finally {
+    loadingMode.value = null
   }
-  if (dois.status === 'fulfilled') {
-    doiGroups.value = dois.value.groups
-  } else {
-    showError('DOI 重复检测失败')
-  }
-  // 重新检测后一律恢复「全部保留」，避免沿用已失效的选择
-  resetSelection()
-  detected.value = true
-  loading.value = false
 }
 
 /** 执行一次合并（保留 1 篇，其余删除） */

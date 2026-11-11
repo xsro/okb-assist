@@ -249,6 +249,7 @@ import { useTokenStore } from '@/stores/token'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { deriveDocStatus } from '@/utils/docStatus'
 import { docTypeLabelWithValue } from '@/utils/docType'
+import { langLabel } from '@/utils/lang'
 import DocumentPdfInfoPanel from '@/components/detail/DocumentPdfInfoPanel.vue'
 import DocumentCrossrefPanel from '@/components/detail/DocumentCrossrefPanel.vue'
 import DocumentCitationPanel from '@/components/detail/DocumentCitationPanel.vue'
@@ -269,27 +270,6 @@ const notFound = ref(false)
 
 /** 未登录即访客：隐藏操作按钮、PDF 元信息等，只展示书目信息与摘要 */
 const isGuest = computed(() => !tokenStore.isAuthenticated)
-
-/**
- * 页面展示用的书目字段（登录 / 访客两种数据源统一）：
- * 访客没有 `doc`，只能读 `publicDoc`，所以模板里这些行一律走 `meta`。
- */
-const LANG_LABELS: Record<string, string> = {
-  en: '英文',
-  zh: '中文',
-  ja: '日文',
-  ko: '韩文',
-  fr: '法文',
-  de: '德文',
-  ru: '俄文',
-  es: '西班牙文',
-  pt: '葡萄牙文',
-  ar: '阿拉伯文'
-}
-
-function langLabel(lang: string): string {
-  return LANG_LABELS[lang.toLowerCase()] || lang.toUpperCase()
-}
 
 /** 翻译元数据（语言码 → 字段）；无翻译时是空对象 */
 const i18nMap = computed(() => {
@@ -315,6 +295,10 @@ const translations = computed(() =>
 /** 有摘要的翻译（摘要区单独渲染） */
 const translatedAbstracts = computed(() => translations.value.filter((t) => t.abstract))
 
+/**
+ * 页面展示用的书目字段（登录 / 访客两种数据源统一）：
+ * 访客没有 `doc`，只能读 `publicDoc`，所以模板里这些行一律走 `meta`。
+ */
 const meta = computed(() => {
   const d = doc.value
   const p = publicDoc.value
