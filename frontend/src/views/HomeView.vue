@@ -16,7 +16,7 @@
             v-model="searchQuery"
             type="text"
             class="search-input"
-            placeholder='搜索文献（例：transformer title:attention year:>2020）'
+            placeholder='WoS 风格检索式：TS=transformer AND PY=2020-2023'
             autocomplete="off"
             spellcheck="false"
             @keyup.enter="search"
@@ -28,7 +28,7 @@
             <line x1="21" y1="21" x2="16.65" y2="16.65"/>
           </svg>
         </button>
-        <button class="btn btn-builder" @click="openQueryBuilder" title="高级搜索构建器">
+        <button class="btn btn-builder" @click="openQueryBuilder" title="高级搜索（WoS 风格检索式）">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="4" y1="21" x2="4" y2="14"/>
             <line x1="4" y1="10" x2="4" y2="3"/>
@@ -41,6 +41,14 @@
             <line x1="17" y1="16" x2="23" y2="16"/>
           </svg>
         </button>
+      </div>
+
+      <!-- 语法错误提示（后端仍会校验，这里只做即时反馈） -->
+      <div v-if="queryError" class="search-error">
+        ⚠ {{ queryError.message }}
+        <span v-if="queryError.position !== undefined" class="search-error-pos">
+          （第 {{ queryError.position + 1 }} 个字符）
+        </span>
       </div>
 
       <!-- 活跃筛选条件（chips） -->
@@ -227,7 +235,7 @@
       <router-link v-if="tokenStore.role === 'admin' || tokenStore.role === 'view-upload'" :to="{ name: 'upload' }" class="btn">立即上传</router-link>
     </div>
 
-    <!-- 高级搜索构建器（用 ErrorBoundary 局部包裹：构建器渲染出错时只降级这一块，不再整页白屏） -->
+    <!-- 高级搜索面板（用 ErrorBoundary 局部包裹：面板渲染出错时只降级这一块，不再整页白屏） -->
     <ErrorBoundary compact>
       <QueryBuilder
         ref="queryBuilderRef"
@@ -254,10 +262,10 @@ import ErrorBoundary from '@/components/ErrorBoundary.vue'
 import { docTypeLabel } from '@/utils/docType'
 import type { Document } from '@/types/document'
 import {
-  parseSearchQuery,
-  parsedQueryToParams,
-  SEARCH_FIELD_DEFS
-} from '@/utils/searchParser'
+  parseWosQuery,
+  highlightWosQuery,
+  conditionChipText
+} from '@/utils/wosQuery'
 
 const router = useRouter()
 const route = useRoute()
@@ -391,7 +399,15 @@ const SORT_LABELS: Record<string, string> = {
   id: 'ID',
 }
 
-// 活跃筛选条件 chips
+/** 检索式解析结果（高亮 / chips / 错误提示共用） */
+const parsedWosQuery = computed(() => parseWosQuery(searchQuery.value))
+
+/** 语法错误提示（后端仍会再校验一次，这里只做即时反馈） */
+const queryError = computed(() =>
+  searchQuery.value.trim() && !parsedWosQuery.value.ok ? parsedWosQuery.value.error : undefined
+)
+
+// 活跃筛选条件 chips（检索式里的每个条件一条，WoS 语法解析）
 const activeFilterChips = computed(() => {
   const chips: string[] = []
   if (healthFilter.value) chips.push(`PDF 健康: ${healthFilterText.value}`)
@@ -399,57 +415,17 @@ const activeFilterChips = computed(() => {
     const v = stateFilter.value[kind]
     if (v) chips.push(`${FILE_KIND_LABELS[kind]}: ${STATE_LABELS[v] || v}`)
   }
-  if (!searchQuery.value) return chips
-  const pq = parseSearchQuery(searchQuery.value)
-  const p = parsedQueryToParams(pq)
-  const stateLabel = (k: 'md_state' | 'pdf_state' | 'zip_state', name: string) => {
-    const v = p[k]
-    if (!v) return
-    chips.push(`${name}: ${v}`)
+  const parsed = parsedWosQuery.value
+  for (const cond of parsed.conditions) {
+    chips.push(conditionChipText(cond))
   }
-  stateLabel('md_state', 'Markdown')
-  stateLabel('pdf_state', 'PDF')
-  stateLabel('zip_state', '资源包')
-  if (p.pdf_health) chips.push(`PDF 健康: ${p.pdf_health}`)
-  if (p.doc_type_filter) chips.push(`类型: ${p.doc_type_filter}`)
-  if (p.year) chips.push(`年份: ${p.year}`)
-  if (p.year_min !== undefined && p.year_max !== undefined && p.year_min === p.year_max) {
-    // 已在 year 字段处理
-  } else {
-    if (p.year_min !== undefined) chips.push(`年份 ≥ ${p.year_min}`)
-    if (p.year_max !== undefined) chips.push(`年份 ≤ ${p.year_max}`)
-  }
-  if (p.journal) chips.push(`期刊: ${p.journal}`)
-  if (p.authors) chips.push(`作者: ${p.authors}`)
-  if (p.id !== undefined) {
-    chips.push(`ID: ${p.id}`)
-  } else {
-    if (p.id_min !== undefined) chips.push(`ID ≥ ${p.id_min}`)
-    if (p.id_max !== undefined) chips.push(`ID ≤ ${p.id_max}`)
-  }
-  if (p.sort_by) chips.push(`排序: ${SORT_LABELS[p.sort_by] || p.sort_by}`)
-  if (p.sort_order) chips.push(`方向: ${p.sort_order === 'asc' ? '升序' : '降序'}`)
+  if (parsed.sortBy) chips.push(`排序: ${SORT_LABELS[parsed.sortBy] || parsed.sortBy}`)
+  if (parsed.sortOrder) chips.push(`方向: ${parsed.sortOrder === 'asc' ? '升序' : '降序'}`)
   return chips
 })
 
-// 语法高亮：给 field: 前缀上色
-const highlightedQuery = computed(() => {
-  const q = searchQuery.value
-  if (!q) return ''
-  // 给 field:value 的 field: 部分着色
-  let result = q
-  for (const def of SEARCH_FIELD_DEFS) {
-    const re = new RegExp(`(\\b${def.prefix}:)`, 'gi')
-    result = result.replace(re, `<span class="hl-field">$1</span>`)
-  }
-  // 给否定前缀着色
-  result = result.replace(/(\b-\w+:)/g, '<span class="hl-negate">$1</span>')
-  // 给 OR 着色
-  result = result.replace(/\bOR\b/g, '<span class="hl-or">OR</span>')
-  // 给引号着色
-  result = result.replace(/("[^"]*")/g, '<span class="hl-quote">$1</span>')
-  return result
-})
+// 语法高亮：WoS 标签 / 布尔运算符 / 引号 / 括号 / 通配符
+const highlightedQuery = computed(() => highlightWosQuery(searchQuery.value))
 
 /** 解析地址栏里的 page 参数（缺失或非法一律当作第 1 页） */
 function parsePageQuery(raw: unknown): number {
@@ -870,6 +846,14 @@ function formatDate(iso: string): string {
   color: #1976d2;
   font-weight: 600;
 }
+.search-highlight :deep(.hl-op) {
+  color: #e65100;
+  font-weight: 700;
+}
+.search-highlight :deep(.hl-paren) {
+  color: #6a1b9a;
+  font-weight: 700;
+}
 .search-highlight :deep(.hl-negate) {
   color: #d32f2f;
   font-weight: 600;
@@ -880,6 +864,10 @@ function formatDate(iso: string): string {
 }
 .search-highlight :deep(.hl-quote) {
   color: #2e7d32;
+}
+.search-highlight :deep(.hl-wildcard) {
+  color: #b8860b;
+  font-weight: 700;
 }
 
 .btn-search {
@@ -931,6 +919,20 @@ function formatDate(iso: string): string {
 }
 
 
+
+/* 语法错误提示 */
+.search-error {
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(244, 67, 54, 0.08);
+  border: 1px solid rgba(244, 67, 54, 0.35);
+  color: #c62828;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.search-error-pos {
+  color: var(--text-muted);
+}
 
 /* 活跃筛选 chips */
 .active-filters {

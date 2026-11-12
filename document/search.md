@@ -1,208 +1,170 @@
-# 高级搜索功能
+# 高级搜索（Web of Science 风格检索式）
 
-OKB-Assist 提供 GitHub 风格的搜索语法，支持多字段筛选、范围查询、逻辑组合等高级特性。所有搜索通过前端解析后映射为后端 SQL 查询，无需额外的搜索服务。
+OKB-Assist 的搜索框与「高级搜索」面板使用 **Web of Science 风格的检索式**：`标签=值` + 布尔运算符 + 括号分组。
+检索式由后端 `backend-rs/src/services/query_parser.rs` 编译成 SQL（无额外搜索服务），
+前端 `frontend/src/utils/wosQuery.ts` 只做实时校验、语法高亮与筛选 chips。
+
+旧的 GitHub 风格写法（`field:value`、`-field:value`）**仍然完全兼容**，`TAG=value` 与 `tag:value` 等价。
 
 ## 快速入门
 
-在首页顶部搜索框中直接输入查询语句：
+```
+TS=transformer AND PY=2020-2023
+AU=Vaswani* AND (TI=attention OR AB=transformer)
+DO=10.1093/nar/gkab123
+PDF=present AND HEALTH=ok
+```
+
+## 字段标签
+
+标签大小写不敏感；**值含空格时必须用引号包起来**：`SO="IEEE TRANSACTIONS ON AUTOMATIC CONTROL"`。
+
+| WoS 标签 | 旧写法（等价） | 含义 | 示例 |
+|---|---|---|---|
+| `TS=` | — | **主题**：标题 + 作者关键词 + 摘要（中英双语列） | `TS=(transformer OR "deep learning")` |
+| `TI=` | `title:` | 标题 | `TI=attention`、`TI="attention is all you need"` |
+| `AU=` | `author:` / `authors:` | 作者 | `AU=Vaswani*` |
+| `SO=` | `journal:` | 期刊 / 会议名 | `SO="IEEE TRANSACTIONS ON …"` |
+| `AB=` | `abstract:` | 摘要 | `AB=pre-training` |
+| `AK=` | `keyword:` / `keywords:` | 作者关键词 | `AK=reinforcement` |
+| `DO=` | `doi:` | DOI | `DO=10.1000/xyz123` |
+| `DT=` | `type:` / `doc_type:` | 文献类型（Zotero 标准名，同义词自动归一） | `DT=journalArticle`、`DT=article` |
+| `PY=` | `year:` | 出版年份（支持范围与比较，见下） | `PY=2023`、`PY=2020-2023`、`PY>2020` |
+| `LA=` | `lang:` / `language:` | 语言 | `LA=en` |
+| `SRC=` | `source:` | 来源 | `SRC=arxiv` |
+| `FN=` | `filename:` | PDF 文件名 | `FN=paper.pdf` |
+| `CAT=` | `category:` | 分类 | `CAT=AI` |
+| `ALL=` | — | **全部元数据列**（不写标签时的默认行为） | `ALL=transformer` |
+| `ID=` | `id:` | 文献 ID（支持范围与比较） | `ID=1-30`、`ID>100` |
+| `PDF=` | `pdf:` | PDF 文件三态 | `PDF=present` |
+| `MD=` | `md:` | Markdown 文件三态 | `MD=absent` |
+| `ZIP=` | `zip:` | 资源包三态 | `ZIP=present` |
+| `HEALTH=` | `health:` | PDF 健康 | `HEALTH=warning,error` |
+| `filesize_pdf=` | 同左 | PDF 大小（支持单位与范围） | `filesize_pdf>1MB` |
+| `filesize_md=` | 同左 | Markdown 大小 | `filesize_md>10KB` |
+| `filesize_zip=` | 同左 | 资源包大小 | `filesize_zip=100KB-2MB` |
+| `SORT=` | `sort:` | 排序字段（不参与筛选） | `SORT=PY` |
+| `ORDER=` | `order:` | 排序方向 `asc` / `desc` | `ORDER=desc` |
+
+> **不要用 `status:`** —— 文献状态由「文件事实 + 运行时」推导，库里没有这一列。
+> 想看「已解析」用 `MD=present`，想看「待解析」用 `PDF=present AND MD=absent`。
+
+## 布尔运算与括号
+
+| 写法 | 含义 |
+|---|---|
+| `A AND B` / `A B` | 同时满足（**相邻条件默认就是 AND**） |
+| `A OR B` | 满足其一 |
+| `NOT A` / `-A` | 排除（`-PY:2020` 与 `NOT PY=2020` 等价） |
+| `( … )` | 分组，可任意嵌套；`AND` 优先级高于 `OR` |
+| `TAG=( … )` | 分组内裸值套用该标签：`TS=(transformer OR attention)`、`PY=(2020 OR 2021)` |
+| `NEAR/n` / `SAME` | 暂未实现词距判定，**按 AND 处理** |
 
 ```
-transformer attention
+(TI=attention OR TI=transformer) AND PY>=2019 AND NOT DT=review
+TS=(transformer OR "deep learning") AND AU=Vaswani*
 ```
 
-搜索 `transformer` 和 `attention` 两个关键词（匹配标题、作者、文件名）。常规文本搜索行为不变。
+## 通配符与匹配方式
 
-## 语法参考
+| 符号 | 含义 | 例 |
+|---|---|---|
+| `*` | 任意个字符 | `AU=Vaswani*` → 以 Vaswani 开头的作者 |
+| `?` | 单个字符 | `TI=trans?ormer` |
+| `$` | 0 或 1 个字符（近似为 `*`） | `TI=colour$` |
 
-### 字段限定搜索
+- **不含通配符**时按「包含」匹配（两侧自动补 `%`）：`TI=attention` = 标题含 attention；
+- **含通配符**时按原样匹配（`ATT*` 是前缀匹配，不再自动补后侧 `%`）；
+- `%`、`_`、`\` 会被转义（SQL 侧 `ESCAPE '\'`），所以搜索 `50%` 这类字面值也能精确命中；
+- 短语用引号：`TI="attention is all you need"`（作为一个整体匹配）；
+- 所有文本检索都是 SQL `LIKE` 模糊匹配，不是全文索引。
 
-使用 `field:value` 语法在指定字段中搜索：
+## 数值、范围与大小
 
-| 语法 | 说明 | 示例 |
-|------|------|------|
-| `title:关键词` | 按标题搜索 | `title:attention` |
-| `author:姓名` | 按作者搜索 | `author:vaswani` |
-| `authors:姓名` | 同 author | `authors:sun` |
-| `keyword:术语` | 按关键词搜索 | `keyword:transformer` |
-| `keywords:术语` | 同 keyword | `keywords:reinforcement` |
-| `abstract:文本` | 按摘要搜索 | `abstract:pre-training` |
-| `journal:刊名` | 按期刊搜索（模糊匹配） | `journal:Nature` |
-| `doi:DOI` | 按 DOI 搜索 | `doi:10.1000/xyz123` |
-| `source:来源` | 按来源搜索 | `source:arxiv` |
-| `filename:文件名` | 按 PDF 文件名搜索 | `filename:paper.pdf` |
-| `category:分类` | 按分类搜索 | `category:AI` |
-| `type:类型` | 按文献类型筛选（Zotero 标准类型名；`article` / `journal` / `conference` 等同义词会自动归一） | `type:journalArticle` |
-| `doc_type:类型` | 同 type | `doc_type:book` |
-| `lang:语言` | 按语言筛选 | `lang:en` |
-| `language:语言` | 同 lang | `language:zh` |
-| `md:三态` | 按 Markdown 文件筛选（`present` 有 / `absent` 确定没有 / `unknown` 未同步） | `md:present` |
-| `pdf:三态` | 按 PDF 文件筛选（同上） | `pdf:absent` |
-| `zip:三态` | 按资源包筛选（同上） | `zip:present` |
-| `health:健康` | 按 PDF 健康筛选（`ok`/`warning`/`error`/`missing`/`unchecked`） | `health:error` |
-| `filesize_pdf:大小` | 按 PDF 大小筛选（支持 `>`/`>=`/`<`/`<=`/范围，单位字节） | `filesize_pdf:>1048576` |
-| `filesize_md:大小` | 按 Markdown 大小筛选 | `filesize_md:>0` |
-| `filesize_zip:大小` | 按资源包大小筛选 | `filesize_zip:>1024` |
-| `id:ID` | 按文献 ID 筛选（支持范围，见下方） | `id:1`、`id:1-30` |
-| `sort:字段` | 排序字段 | `sort:year` |
-| `order:方向` | 排序方向（asc 升序 / desc 降序） | `order:desc` |
+| 语法 | 含义 |
+|---|---|
+| `PY=2023` | 精确 2023 |
+| `PY=2020-2023` | 2020 ~ 2023（含两端） |
+| `PY>2020` / `PY>=2020` | 大于 / 大于等于（`>` 自动换算为 `>=2021`） |
+| `PY<2020` / `PY<=2020` | 小于 / 小于等于（`<` 自动换算为 `<=2019`） |
+| `ID=1-30` | 文献 ID 区间 |
+| `filesize_pdf>1MB` | 文件大小支持 `B` / `KB` / `MB` / `GB`，如 `filesize_md=10KB-2MB` |
 
-**排序字段可选值**：`title`、`authors`、`year`、`id`、`doc_type`、`journal`、`doi`、`category`、`created_at`（登记时间）、`updated_at`（更新时间）、`pdf_size`、`md_size`、`zip_size`（后三者按文件大小）
-
-**文件事实三态说明**（文献状态不再可筛选，改为按「文件是否存在」筛）：
+## 文件事实三态与 PDF 健康
 
 | 查询值 | 含义 | 后端条件 |
-|--------|------|---------|
+|---|---|---|
 | `present` | 文件存在 | `size > 0` |
 | `absent` | 已同步且确定没有该文件 | `fs_synced_at` 非空且 `size` 为空/0 |
 | `unknown` | 还没从磁盘同步过（状态未知） | `fs_synced_at IS NULL` |
 
-> 文献状态（已上传/解析中/解析完成/出错）现在由文件事实 + 运行时推导，**不再有 `status:` 筛选语法**；
-> 想看「已解析」就用 `md:present`，想看「待解析」用 `md:absent pdf:present`。
+`HEALTH=` 取 `ok` / `warning` / `error` / `missing` / `unchecked`；`unchecked` 匹配 `pdf_health IS NULL`。
+两者都支持逗号多选（= OR）：`PDF=present,absent`、`HEALTH=warning,error`。
 
-### 年份范围查询
-
-`year:` 支持多种数值语法：
-
-| 语法 | 含义 | 示例 |
-|------|------|------|
-| `year:2023` | 精确匹配 2023 年 | `year:2023` |
-| `year:>2020` | 年份大于 2020 | `year:>2020` |
-| `year:>=2020` | 年份大于等于 2020 | `year:>=2020` |
-| `year:<2020` | 年份小于 2020 | `year:<2020` |
-| `year:<=2020` | 年份小于等于 2020 | `year:<=2020` |
-| `year:2020-2023` | 年份在 2020 到 2023 之间（含） | `year:2020-2023` |
-
-### 文献 ID 筛选
-
-`id:` 用于按文献 ID（主键）筛选，语法与 `year:` 一致：
-
-| 语法 | 含义 | 示例 |
-|------|------|------|
-| `id:1` | 精确筛选 ID 为 1 的文献 | `id:1` |
-| `id:1-30` | ID 在 1 到 30 之间（含） | `id:1-30` |
-| `id:>30` | ID 大于 30 | `id:>30` |
-| `id:>=30` | ID 大于等于 30 | `id:>=30` |
-| `id:<30` | ID 小于 30 | `id:<30` |
-| `id:<=30` | ID 小于等于 30 | `id:<=30` |
-
-常用于快速定位或对比一组已知 ID 的文献，例如：
+## 排序
 
 ```
-id:1-30 md:present sort:id order:asc
+SORT=PY ORDER=desc
+sort:year order:asc        ← 旧写法
 ```
 
-含义：查看 ID 1~30 中已解析完成的文献，并按 ID 升序排列。
+排序字段可选：`title`、`authors`、`year`、`id`、`journal`、`doc_type`、`category`、`created_at`、
+`updated_at`、`pdf_size`、`md_size`、`zip_size`；也可写标签（`SORT=TI` → `title`、`SORT=AU` → `authors`、`SORT=PY` → `year`）。
 
-### 精确短语
-
-用双引号 `"` 包裹的文本会保留空格作为一个整体搜索：
-
-```
-title:"attention is all you need"
-"deep reinforcement learning"
-```
-
-### 否定条件
-
-用 `-` 前缀排除匹配项：
+## 常见场景
 
 ```
-transformer -year:2020          ← 排除 2020 年的 transformer 论文
-author:vaswani -title:attention ← 排除标题含 attention 的 vaswani 论文
+# 2020 年以后的 transformer / 深度学习论文
+TS=(transformer OR "deep learning") AND PY=2020-2023
+
+# 某作者近年的文章，按年份升序
+AU=lecun AND PY=2019-2024 SORT=PY ORDER=asc
+
+# 2022 年以后 Nature 上的 transformer，排除综述
+SO=Nature AND TS=transformer AND PY>2021 NOT DT=review
+
+# 已解析完成、PDF 健康有问题的文献
+MD=present AND HEALTH=warning,error
+
+# 某本专著的章节（题名里带 chapter 的）
+DT=bookSection AND TI=chapter
+
+# 指定 ID 区间按 ID 升序
+ID=1-30 AND MD=present SORT=ID ORDER=asc
 ```
 
-### 逻辑或
+## 界面行为
 
-用 `OR`（大写）连接两个条件，满足其一即返回：
-
-```
-year:2023 OR year:2024
-title:transformer OR title:attention
-```
-
-### 组合查询
-
-空格分隔多个条件 = AND 逻辑：
-
-```
-transformer title:attention year:>2018 md:present
-```
-
-含义：搜索 `transformer` 关键词，标题含 `attention`，2018 年后，已解析完成的文档。
-
-## 输入提示
-
-- 点击搜索框（内容为空时）会弹出**语法帮助面板**，列出所有支持的高级语法
-- 输入时 `field:` 前缀会**自动高亮**为蓝色，`-` 否定前缀为红色，`OR` 为橙色，引号短语为绿色
-- 输入后搜索框下方会显示**活跃筛选条件 chips**（含 `ID: 1`、`ID ≥ 1`、`ID ≤ 30` 等），点击 × 或「清除全部」可一键重置
-
-## 与旧界面控件的关系
-
-| 旧控件 | 新方案 |
-|--------|--------|
-| 搜索范围面板（复选框） | 已移除，由 `field:` 语法完全替代 |
-| 类型筛选下拉 | 已移除，由 `type:` 语法替代 |
-| 排序下拉 | 已移除，由 `sort:` 语法替代 |
-| 升降序切换 | 已移除，由 `order:` 语法替代 |
+- 搜索框输入时实时高亮：**标签**蓝色、`AND/OR/NOT` 橙色、括号紫色、引号短语绿色、通配符金色；
+- 检索式有语法错误时，搜索框下方给出**红色提示与出错字符位置**（后端也会再校验一次，非法检索式返回 400 `code: "query_error"`）；
+- 搜索框下方按条件显示 **chips**（每条一个，取反的标「不含」），点 × 或「清除全部」重置；
+- 搜索栏右侧的「高级搜索」按钮打开面板：检索式编辑器 + 字段标签 / 运算符一键插入 + 示例 + 语法说明（第二个 tab 是列管理）。
 
 ## 技术实现
 
-### 解析流程
-
 ```
-用户输入 → HomeView 直接把原始查询串发给后端 /assist/api/documents/search-info/
+用户输入 → HomeView 原样发给 /assist/api/documents/search-info/?q=…
         ↓
-backend-rs/src/services/query_parser.rs（分词 → 字段识别 → 范围解析 → OR/否定）
+services/query_parser.rs：分词（lex）→ 递归下降（parse_or → parse_and → parse_not → primary）
         ↓
-build_where_clause() / build_search_sql()（SQL WHERE 构建）→ 结果列表
+AST → emit()：Text / Range / Enum / Raw(state) / Health → WHERE 片段 + 绑定值
+        ↓
+documents.rs::search_info：叠加 ?pdf_health= / ?pdf_state= 等参数 → SQL
 ```
-
-> 前端 `searchParser.ts` 负责语法高亮与筛选 chips 展示（如 `id ≥ 1`、`ID ≤ 30`），实际查询执行由后端解析器完成。
-
-### 前端文件
 
 | 文件 | 职责 |
-|------|------|
-| `frontend/src/utils/searchParser.ts` | 查询语法解析器（用于高亮、chips、构建器回填）|
-| `frontend/src/views/HomeView.vue` | 搜索 UI（输入框、高亮、chips、发起请求）|
-| `frontend/src/components/QueryBuilder.vue` | 高级搜索构建器（含 ID 范围表单）|
-
-### 后端文件
-
-| 文件 | 职责 |
-|------|------|
-| `backend-rs/src/services/query_parser.rs` | 查询语法解析（`resolve_field`、`parse_range`）+ SQL WHERE 构建 |
-| `backend-rs/src/routers/documents.rs` | `search_info()` 端点、`list_documents()` 的 `ListQuery`（`id`/`id_min`/`id_max`）|
+|---|---|
+| `backend-rs/src/services/query_parser.rs` | 检索式词法 / 语法分析、AST → SQL（`compile()`）、语法错误（带字符位置） |
+| `backend-rs/src/services/file_state.rs` | `state_condition()`（文件事实三态）、`health_condition()`（PDF 健康，检索式与列表端点共用） |
+| `backend-rs/src/routers/documents.rs` | `search_info()` 端点（400 `query_error`）、`list_documents()` 的筛选参数 |
+| `frontend/src/utils/wosQuery.ts` | 字段标签表（`WOS_FIELDS`）、解析 / 校验（`parseWosQuery`）、高亮（`highlightWosQuery`）、示例 |
+| `frontend/src/components/QueryBuilder.vue` | 高级搜索面板（检索式编辑器 + 标签/运算符插入 + 实时校验 + 语法说明；另一 tab 为列管理） |
+| `frontend/src/views/HomeView.vue` | 搜索框、高亮层、错误提示、条件 chips、地址栏同步 |
 
 ### 注意事项
 
-- `year:>` 和 `year:<` 使用不包含边界（即 `>2020` → `year >= 2021`），`year:>=` 和 `year:<=` 包含边界；`id:` 各运算符同理
-- 所有文本字段搜索均为 SQL `LIKE %keyword%` 模糊匹配，不是全文索引
-
-## 常见搜索场景
-
-```bash
-# 查看指定 ID 区间的文献
-  id:1-30
-
-# 查找 2022 年以后 Nature 上的 transformer 论文
-  transformer journal:Nature year:>2021
-
-# 查找某个作者近年的文章（按年份升序排列）
-  author:lecun year:2019-2024 sort:year order:asc
-
-# 查找所有解析完成的书籍
-  type:book md:present
-
-# 查找摘要中包含 pre-training 的 2023 年文章（按标题排序）
-  abstract:pre-training year:2023 type:journalArticle sort:title
-
-# 排除某些年份
-  transformer -year:2021 -year:2022
-
-# 按更新时间降序排列（最新在前）
-  sort:updated_at order:desc
-
-# 按类型分组查看
-  sort:doc_type order:asc
-```
+- **两份解析器要保持同步**：新增字段标签先改后端 `resolve_tag()`，再补前端 `WOS_FIELDS`；
+  前端校验刻意比后端宽松，真正的裁决是后端 400。
+- 未知 `TAG=` 会直接报错（400）；未知的旧写法 `tag:value` 仍按自由文本处理（避免 `https://…` 被误判）。
+- 字段值里的 `:` / `=` 不影响解析（`DO=10.1000/xyz` 正常）；只有值**以空格结尾**时才需要引号。
+- 布尔值都是大写无歧义的关键字；小写 `and` / `or` / `not` 同样识别。

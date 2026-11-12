@@ -314,7 +314,9 @@ export async function grepSearch(
 
 /** 元数据搜索（高级搜索）
  *
- * 支持 field:value、year:>2020、OR 等语法，解析在后端完成。
+ * `query` 是 **WoS 风格检索式**（`TAG=值` + `AND/OR/NOT` + 括号 + 通配符），也兼容旧写法
+ * `field:value`；解析与 SQL 编译全在后端 `services/query_parser.rs`，语法错误返回 400
+ * `{code:"query_error", detail, position}`。
  * 返回格式与 listDocuments 兼容，可直接用于 usePagination。
  */
 export function searchInfo(

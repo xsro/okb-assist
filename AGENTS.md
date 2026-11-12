@@ -74,7 +74,7 @@ cargo build --release
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`drive.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/drive.rs` | 用户网盘：路径安全、角色阈值、配额统计、目录列举、Content-Type 推断 |
 | `backend-rs/src/services/pdf_engine.rs` | PDF 解析引擎运行时选择（`mutool` 命令行 / 内置 `mupdf`，含能力兜底） |
-| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`doc_type.rs`（**文档类型唯一词表**：归一化 / 标准列表 / Crossref 映射，见下方「文档类型词表」）、`file_state.rs`（文件事实 → 文献状态推导 + 运行时状态注册表）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存）、`pdf_split.rs`（mutool 按页切分 PDF，供 MinerU 分片解析） |
+| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`doc_type.rs`（**文档类型唯一词表**：归一化 / 标准列表 / Crossref 映射，见下方「文档类型词表」）、`file_state.rs`（文件事实 → 文献状态推导 + 运行时状态注册表 + 三态/PDF 健康 SQL 条件）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`（**检索式唯一解析器**：WoS 风格词法/语法分析 → AST → SQL，见易错点 29）、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存）、`pdf_split.rs`（mutool 按页切分 PDF，供 MinerU 分片解析） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
@@ -89,7 +89,7 @@ cargo build --release
 | `frontend/src/stores/` | Pinia 存储：`pipeline.ts`、`toast.ts`、`token.ts`、`error.ts` |
 | `frontend/src/composables/` | 组合式函数：`useToast.ts`、`useRequireToken.ts`、`useResponsive.ts`、`usePagination.ts`、`useDebounce.ts` |
 | `frontend/src/types/` | TypeScript 类型定义：`document.ts`、`config.ts`、`pipeline.ts` |
-| `frontend/src/utils/` | 工具：`mathRenderer.ts`（KaTeX/MathJax 公式渲染）、`searchParser.ts`（搜索语法解析） |
+| `frontend/src/utils/` | 工具：`mathRenderer.ts`（KaTeX/MathJax 公式渲染）、`wosQuery.ts`（WoS 检索式：字段标签表 / 解析校验 / 高亮，检索式真相在后端） |
 | `frontend/src/api/` | API 客户端：`client.ts`、`documents.ts`、`pipeline.ts`、`chat.ts`、`admin.ts`、`config.ts` |
 | `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 8 构建，输出到 `frontend/dist/`，包管理器 `pnpm`） |
 | `frontend/dist/` | 前端构建产物（`index.html`、`assets/`），由后端 serving |
@@ -452,7 +452,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 | 单语言权威源（Crossref）按语言路由 | `i18n::base_language` + `i18n::route_target_lang`（基础语言非 en 时文本字段只写 `i18n.en`，不覆盖中文基础列） |
 | 手工编辑 `PUT /documents/:id` | 请求体 `i18n`（对象整体替换、`null` 清空）；校验走 `i18n::from_value` |
 | 去重合并 | `i18n::merge_missing`（目标优先） |
-| 搜索 | `json_extract(i18n, '$.en.title')` 等表达式（`query_parser::TEXT_FIELDS`、`grep_search`、MCP `append_search_info_filters`）；字段搜索不再有 `title_en:` 这类别名 |
+| 搜索 | `json_extract(i18n, '$.en.title')` 等表达式（`query_parser` 的文本列常量 `C_ALL` / `C_TOPIC`、`grep_search`、MCP `append_search_info_filters`）；字段搜索不再有 `title_en:` 这类别名 |
 
 - 存量迁移：`database.rs::migrate_i18n()` 在 `init()` 里把五个旧列搬进 `i18n`（与基础列相同的镜像值丢弃、
   已有 `i18n` 只补空），原值先备份到 `documents_i18n_legacy`，然后 `DROP COLUMN`；幂等。
@@ -788,7 +788,7 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 | `detail/DocumentPdfInfoPanel.vue` | 详情页「PDF 元信息」折叠面板（页数/Info 字典/启发式抽取） |
 | `detail/DocumentCrossrefPanel.vue` | 详情页「Crossref 记录」折叠面板（摘要 + 原始 JSON，可触发抓取） |
 | `detail/DocumentCitationPanel.vue` | 详情页「引用条目」折叠面板（BibTeX / GB/T 7714，可复制/下载） |
-| `QueryBuilder.vue` | 高级搜索构建器 + 列管理（双选项卡面板） |
+| `QueryBuilder.vue` | 高级搜索面板：**WoS 风格检索式编辑器**（字段标签 / 运算符一键插入、实时语法校验、示例、语法说明）+ 列管理（双选项卡） |
 | `AceEditor.vue` | Markdown 编辑器（ace-builds 1.44.0），编辑+自适应分屏预览+KaTeX（桌面左右 / 移动上下，可拖拽比例）；`showToolbar` / `showPreviewControls` / `readOnly` 可裁剪为纯源码编辑器 |
 | `McpConfigPanel.vue` | MCP 配置面板 |
 | `McpSkillPanel.vue` | MCP Skill 面板 |
@@ -982,6 +982,24 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
     判断依据：`/api/v4/extract-results/batch/{id}` 的 `extract_progress.total_pages` 仍是全文页数
     （切片成功时是这片页数）。本地 V1 是 `files[].page_range`（单数），Datalab 是 multipart 字段
     `page_range`，轻量 API 不支持页码参数（但支持本地切页）。
+
+29. **检索式只有一套解析器：`services/query_parser.rs`（WoS 风格，兼容旧 `field:value`）**：`compile()` 直接返回
+    `where_clause` + `binds` + `sort_by/order`，`routers/documents.rs::search_info` 是**唯一调用方**。
+    - 语法：`TAG=值`（旧写法 `tag:值` 等价）、`AND/OR/NOT`（`-条件` 是 `NOT` 的旧拼法）、括号任意嵌套、
+      `TAG=(a OR b)` 把标签压进组内裸值、通配符 `*`→`%` `?`→`_` `$`→`%`；
+    - **文本值必须过 `like_pattern()`**：`%`/`_`/`\` 转义，SQL 里配 `ESCAPE '\'`，不要把用户值直接拼进 LIKE；
+      `binds` 的顺序必须与 SQL 里 `?` 的出现顺序一致（`emit()` 里成对写）；
+    - **字段标签唯一真相是 `resolve_tag()`**：新增字段先改它，再补前端 `utils/wosQuery.ts` 的 `WOS_FIELDS`
+      （面板按钮、高亮、chips 都从那里取，不要在模板里手写标签）；
+    - **文件事实 / PDF 健康不走本模块自造的 SQL**：`services::file_state::{state_condition, health_condition}`
+      是唯一实现（列表端点 `?pdf_state=` / `?pdf_health=` 与检索式 `PDF=` / `HEALTH=` 共用）；
+    - 语法错误一律回 400 `{code:"query_error", detail, position}`（`position` 是字符下标，前端据此高亮），
+      **不要**把无法解析的检索式静默降级成空结果；
+    - `status:` 已彻底删除（`documents` 没有 status 列），别再把它加回标签表；
+      `NEAR/n` / `SAME` 目前按 AND 处理（没做词距判定）。
+
+    前端 `HomeView.vue` 只做三件事：把原始检索式发给 `search-info`、用 `parseWosQuery()` 渲染 chips 与
+    错误提示、用 `highlightWosQuery()` 给背景层上色。**前端校验比后端宽松是有意的**，别在前端实现第二套 SQL 语义。
 
 ## 入口与关键文件速查
 
