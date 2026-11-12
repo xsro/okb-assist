@@ -8,6 +8,7 @@
 # 用法：
 #   scripts/okb-after-mount.sh                # 完整流程（已挂载/已运行的部分会自动跳过）
 #   scripts/okb-after-mount.sh --skip-mount   # 盘已挂载，只做启动与维护
+#   scripts/okb-after-mount.sh --only-mount   # 只挂载外置盘（校验目录可见后退出），其余全部跳过
 #   scripts/okb-after-mount.sh --no-start     # 不启动后端，只做挂载与检查
 #   scripts/okb-after-mount.sh --skip-health  # 跳过 PDF 健康检查（耗时较长）
 #   scripts/okb-after-mount.sh -h             # 帮助
@@ -27,12 +28,13 @@ set -Eeuo pipefail
 
 # ────────────────────────── 参数 ──────────────────────────
 SKIP_MOUNT=0
+ONLY_MOUNT=0
 NO_START=0
 SKIP_HASH=0
 SKIP_HEALTH=0
 
 usage() {
-  sed -n '2,30p' "$0" | sed -e 's/^# \{0,1\}//' -e '/^$/d' | sed -e 's/^$/./'
+  awk 'NR > 1 { if ($0 ~ /^set -Eeuo/) exit; print }' "$0" | sed -e 's/^# \{0,1\}//' -e '/^$/d'
   exit 0
 }
 
@@ -40,6 +42,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage ;;
     --skip-mount) SKIP_MOUNT=1 ;;
+    --only-mount) ONLY_MOUNT=1 ;;
     --no-start) NO_START=1 ;;
     --skip-hash) SKIP_HASH=1 ;;
     --skip-health) SKIP_HEALTH=1 ;;
@@ -47,6 +50,11 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+if [ "$ONLY_MOUNT" -eq 1 ] && [ "$SKIP_MOUNT" -eq 1 ]; then
+  echo "--only-mount 与 --skip-mount 不能同时使用" >&2
+  exit 2
+fi
 
 # ────────────────────────── 输出 ──────────────────────────
 if [ -t 1 ]; then
@@ -157,11 +165,15 @@ info "PDF         : $OKB_PDF_DIR"
 info "网盘        : $OKB_DRIVE"
 info "后端        : $BASE_URL"
 
-[ -f "$OKB_DB" ] || die "数据库不存在: $OKB_DB"
-integrity="$(sqlite3 "$OKB_DB" 'PRAGMA integrity_check;' 2>&1 | head -1)"
-[ "$integrity" = "ok" ] || die "数据库完整性检查失败: $integrity（先别启动后端，检查文件）"
-DOCS="$(num 'select count(*) from documents')"
-ok "数据库完整性 ok，共 $DOCS 篇文献"
+if [ "$ONLY_MOUNT" -eq 1 ]; then
+  info "模式        : --only-mount（只挂载，不碰数据库与后端）"
+else
+  [ -f "$OKB_DB" ] || die "数据库不存在: $OKB_DB"
+  integrity="$(sqlite3 "$OKB_DB" 'PRAGMA integrity_check;' 2>&1 | head -1)"
+  [ "$integrity" = "ok" ] || die "数据库完整性检查失败: $integrity（先别启动后端，检查文件）"
+  DOCS="$(num 'select count(*) from documents')"
+  ok "数据库完整性 ok，共 $DOCS 篇文献"
+fi
 
 # ────────────────────────── 1. 挂载外置盘 ──────────────────────────
 if [ "$SKIP_MOUNT" -eq 1 ]; then
@@ -198,6 +210,23 @@ else
       ok "挂载成功"
     fi
   fi
+fi
+
+# ────────────────── 1.5 只挂载模式：校验后直接退出 ──────────────────
+if [ "$ONLY_MOUNT" -eq 1 ]; then
+  step "挂载结果"
+  if [ -n "$MOUNT_POINT" ]; then
+    mountpoint -q "$MOUNT_POINT" 2>/dev/null \
+      || die "挂载点未生效: $MOUNT_POINT"
+    ok "已挂载: $MOUNT_POINT（$(findmnt -no SOURCE,FSTYPE -T "$MOUNT_POINT" 2>/dev/null)）"
+  else
+    warn "没能从 pdf_path 推出挂载点；用 OKB_MOUNT_POINT=/media/<用户>/<卷标> 重跑可校验"
+  fi
+  [ -d "$OKB_PDF_DIR" ] && ok "PDF 目录可见: $OKB_PDF_DIR" || warn "PDF 目录不可见: $OKB_PDF_DIR"
+  [ -d "$OKB_DRIVE" ] && ok "网盘目录可见: $OKB_DRIVE" || warn "网盘目录不可见: $OKB_DRIVE"
+  info "后端启动 / 同步文件事实 / 补哈希 / PDF 健康检查均已跳过"
+  info "需要时再跑：scripts/okb-after-mount.sh --skip-mount"
+  exit 0
 fi
 
 # ────────────────────────── 2. 文件与目录检查 ──────────────────────────
