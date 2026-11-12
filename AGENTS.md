@@ -783,6 +783,7 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 | `ErrorBoundary.vue` | 错误边界（catch 渲染异常）；默认整块降级，`compact` 模式为页内局部降级（小巧卡片、不渲染全局浮动徽章与错误面板），用于包裹「高级搜索构建器」这类小功能，避免一个字段抛错就把整页卸载 |
 | `SkeletonLoading.vue` | 骨架屏 |
 | `MarkdownViewer.vue` | Markdown 渲染（marked + KaTeX + DOMPurify） |
+| `InlinePdfViewer.vue` | 页内 PDF 预览浮层（详情页「查看 PDF（网页内）」）：经**需 Token** 的 `GET /documents/:id/pdf/` 拉成 Blob（`timeout: 0`，不走免 token 的 `/assist/file/`）→ `URL.createObjectURL` 挂 `<iframe>`，带下载进度条、保存 / 新窗口打开、Esc 与遮罩关闭；关闭 / 切文档 / 卸载时 `revokeObjectURL` + `AbortController.abort()`（取消不报错），并用自增 `requestId` 丢弃过期响应 |
 | `CollapsiblePanel.vue` | 通用折叠面板（默认收起，首次展开才触发 `open` 事件，供懒加载使用） |
 | `detail/DocumentPdfInfoPanel.vue` | 详情页「PDF 元信息」折叠面板（页数/Info 字典/启发式抽取） |
 | `detail/DocumentCrossrefPanel.vue` | 详情页「Crossref 记录」折叠面板（摘要 + 原始 JSON，可触发抓取） |

@@ -57,7 +57,8 @@ import { fetchPdfBlob } from '@/api/documents'
  * 实现要点：
  * - 用 axios（自动带 `X-Token`）以 `responseType: 'blob'` 拉 `/assist/api/documents/:id/pdf/`；
  * - 把 Blob 包成 `application/pdf` 后 `URL.createObjectURL` 挂给 `<iframe>`，浏览器原生 PDF 查看器渲染；
- * - 关闭 / 切换文档 / 卸载时统一 `revokeObjectURL`，避免大文件长期占内存；
+ * - 关闭 / 切换文档 / 卸载时统一 `revokeObjectURL`（避免大文件长期占内存）并 `abort()` 下载
+ *   （否则关掉面板后 XHR 仍会在后台把整份 PDF 拉完）；
  * - 请求用自增序号做「最后一次生效」保护，快速开关时丢弃已过期的响应。
  */
 const props = defineProps<{
@@ -94,6 +95,22 @@ const saveName = computed(() => {
 })
 /** 请求代号：只有最新的请求能把结果写进状态 */
 let requestId = 0
+/** 当前下载的中止器：同一时刻只允许一个下载在跑 */
+let controller: AbortController | null = null
+
+/** 判断是否为「我们主动取消」（关闭面板 / 换文档），取消不该弹错误提示 */
+function isCanceled(e: unknown): boolean {
+  const err = e as { code?: string; name?: string }
+  return err.code === 'ERR_CANCELED' || err.name === 'CanceledError' || err.name === 'AbortError'
+}
+
+/** 中止当前下载并释放中止器 */
+function abortDownload() {
+  if (controller) {
+    controller.abort()
+    controller = null
+  }
+}
 
 function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return '0 B'
@@ -111,6 +128,7 @@ function revoke() {
 }
 
 async function load() {
+  abortDownload()
   revoke()
   error.value = ''
   loaded.value = 0
@@ -120,12 +138,17 @@ async function load() {
     return
   }
   const myId = ++requestId
+  const ctrl = new AbortController()
+  controller = ctrl
   loading.value = true
   try {
-    const blob = await fetchPdfBlob(props.docId, (info) => {
-      if (myId !== requestId) return
-      loaded.value = info.loaded
-      total.value = info.total
+    const blob = await fetchPdfBlob(props.docId, {
+      signal: ctrl.signal,
+      onProgress: (info) => {
+        if (myId !== requestId) return
+        loaded.value = info.loaded
+        total.value = info.total
+      }
     })
     if (myId !== requestId) return
     const pdfBlob =
@@ -139,19 +162,21 @@ async function load() {
     total.value = pdfBlob.size
     url.value = URL.createObjectURL(pdfBlob)
   } catch (e) {
-    if (myId !== requestId) return
+    if (myId !== requestId || isCanceled(e)) return
     const status = (e as { response?: { status?: number } }).response?.status
     if (status === 404) error.value = 'PDF 文件不存在，请先上传'
     else if (status === 401 || status === 403) error.value = '没有权限查看该 PDF，请重新登录'
     else error.value = '无法加载 PDF'
   } finally {
     if (myId === requestId) loading.value = false
+    if (controller === ctrl) controller = null
   }
 }
 
 function teardown() {
   requestId++
   loading.value = false
+  abortDownload()
   document.removeEventListener('keydown', onKeydown)
   revoke()
 }

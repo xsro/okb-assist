@@ -363,6 +363,7 @@ export function getFileAlias(id: number) {
  * 全程不经过免 token 的 `/assist/file/` 别名端口，凭证不落到地址栏/历史记录里。
  *
  * `onProgress` 拿到实时下载量；服务端未回 `Content-Length` 时 `total` 为 0、`percent` 为 0。
+ * `signal` 用于取消（面板关闭 / 切换文档时中止下载，避免在后台把整个 PDF 拉完）。
  */
 export interface PdfDownloadProgress {
   loaded: number
@@ -371,12 +372,20 @@ export interface PdfDownloadProgress {
   percent: number
 }
 
-export async function fetchPdfBlob(
-  id: number,
+export interface FetchPdfBlobOptions {
+  /** 实时下载进度 */
   onProgress?: (info: PdfDownloadProgress) => void
-): Promise<Blob> {
+  /** 取消下载；取消后 Promise 以 axios 的 `CanceledError`（`code: 'ERR_CANCELED'`）reject */
+  signal?: AbortSignal
+}
+
+export async function fetchPdfBlob(id: number, options: FetchPdfBlobOptions = {}): Promise<Blob> {
+  const { onProgress, signal } = options
   const res = await client.get<Blob>(`/assist/api/documents/${id}/pdf/`, {
     responseType: 'blob',
+    // 大文件下载可能远超 axios 默认的 30s，这里不设超时（与上传 / 网盘下载一致）
+    timeout: 0,
+    signal,
     onDownloadProgress: (ev: { loaded: number; total?: number }) => {
       if (!onProgress) return
       const loaded = ev.loaded || 0
