@@ -172,6 +172,43 @@ pub fn state_condition(kind: FileKind, state: &str) -> Option<String> {
     }
 }
 
+/// `pdf_health` 筛选条件的两种形态（字面量 / 带绑定值）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum HealthCondition {
+    /// 纯字面量 SQL（如 `pdf_health IS NULL`），不占绑定参数
+    Sql(String),
+    /// 需要绑定值的 `IN (…)`，`include_null` = 同时命中未检查（NULL）
+    Values { values: Vec<String>, include_null: bool },
+}
+
+/// 解析 `pdf_health` 的逗号多选值（`ok` / `warning` / `error` / `missing` / `unchecked`）。
+///
+/// 返回 `Ok(None)` 表示没有要求（空串 / 全是空白）；
+/// 返回 `Err(detail)` 时端点应回 400。**列表端点与检索式共用这一份**，别再各写一套。
+pub fn health_condition(raw: &str) -> Result<Option<HealthCondition>, String> {
+    let mut values: Vec<String> = Vec::new();
+    let mut include_null = false;
+    for item in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        match item.to_ascii_lowercase().as_str() {
+            "ok" | "warning" | "error" | "missing" => values.push(item.to_ascii_lowercase()),
+            "unchecked" | "none" | "null" => include_null = true,
+            _ => {
+                return Err(format!(
+                    "取值非法：{}（仅支持 ok / warning / error / missing / unchecked）",
+                    item
+                ))
+            }
+        }
+    }
+    if !values.is_empty() {
+        return Ok(Some(HealthCondition::Values { values, include_null }));
+    }
+    if include_null {
+        return Ok(Some(HealthCondition::Sql("pdf_health IS NULL".to_string())));
+    }
+    Ok(None)
+}
+
 /// `has_*` 布尔条件：`true` = 文件存在；`false` = 不存在（**含未同步**）。
 pub fn has_condition(kind: FileKind, want: bool) -> String {
     if want {

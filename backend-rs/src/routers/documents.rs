@@ -2620,43 +2620,30 @@ fn state_condition(
 
 /// 解析 `pdf_health` 逗号多选参数，生成 SQL 条件与绑定值。
 ///
-/// 返回 `Err(非法取值)` 时端点应回 400（与列表端点 `list_documents` 的校验保持一致）。
+/// 单一定义在 `file_state::health_condition`（列表端点、检索式 `HEALTH=` 共用）；
+/// 这里只把枚举形式折成 `(条件, 绑定值)`。
 fn pdf_health_condition(raw: &str) -> Result<Option<(String, Vec<String>)>, String> {
-    let mut values: Vec<String> = Vec::new();
-    let mut include_unchecked = false;
-    for item in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        match item.to_ascii_lowercase().as_str() {
-            "ok" | "warning" | "error" | "missing" => values.push(item.to_ascii_lowercase()),
-            "unchecked" | "none" | "null" => include_unchecked = true,
-            _ => {
-                return Err(format!(
-                    "pdf_health 取值非法：{}（仅支持 ok / warning / error / missing / unchecked）",
-                    item
-                ))
-            }
+    match file_state::health_condition(raw)? {
+        None => Ok(None),
+        Some(file_state::HealthCondition::Sql(literal)) => Ok(Some((literal, Vec::new()))),
+        Some(file_state::HealthCondition::Values { values, include_null }) => {
+            let placeholders = values.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let cond = format!("pdf_health IN ({})", placeholders);
+            let cond = if include_null {
+                format!("({} OR pdf_health IS NULL)", cond)
+            } else {
+                format!("({})", cond)
+            };
+            Ok(Some((cond, values)))
         }
     }
-
-    if !values.is_empty() {
-        let placeholders = values.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let cond = format!("pdf_health IN ({})", placeholders);
-        let cond = if include_unchecked {
-            format!("({} OR pdf_health IS NULL)", cond)
-        } else {
-            format!("({})", cond)
-        };
-        return Ok(Some((cond, values)));
-    }
-    if include_unchecked {
-        return Ok(Some(("pdf_health IS NULL".to_string(), Vec::new())));
-    }
-    Ok(None)
 }
 
 /// 高级搜索端点。
 ///
-/// 接收前端发来的 query string（如 `transformer title:attention year:>2020`），
-/// 在后端解析并构建 SQL 查询，支持字段过滤、范围、OR、排除等高级语法。
+/// 接收前端发来的 WoS 风格检索式（如 `TS=(transformer OR attention) AND PY=>=2020`），
+/// 由 `services::query_parser::compile` 编译成 WHERE 片段 + 绑定值（含布尔运算与括号）。
+/// 语法错误回 400（`code: query_error`），带出错位置的字符下标。
 async fn search_info(
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
@@ -2699,11 +2686,25 @@ async fn search_info(
         return Json(json!({"items": [], "query": q, "total": 0, "page": page, "page_size": page_size, "total_pages": 0})).into_response();
     }
 
-    // 解析查询字符串
-    let pq = crate::services::query_parser::parse_query(&q);
+    // 解析检索式（WoS 风格，旧 `field:value` 语法同样支持）
+    let compiled = match crate::services::query_parser::compile(&q) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "code": "query_error",
+                    "detail": e.message,
+                    "position": e.position,
+                })),
+            )
+                .into_response()
+        }
+    };
 
     // 生成 WHERE 子句和绑定值
-    let (mut where_clause, mut binds) = crate::services::query_parser::build_where_clause(&pq, true);
+    let mut where_clause = compiled.where_clause.clone();
+    let mut binds = compiled.binds.clone();
     if let Some((cond, extra)) = health_cond {
         where_clause = format!("({}) AND {}", where_clause, cond);
         binds.extend(extra);
@@ -2713,16 +2714,25 @@ async fn search_info(
         where_clause = format!("({}) AND {}", where_clause, cond);
     }
 
-    // 计数
+    // 计数（**不要** `unwrap_or(0)`：检索式语法通过了但 SQL 出错时，静默返回 0 条会让人误以为「没结果」）
     let count_sql = format!("SELECT COUNT(*) FROM documents WHERE {}", where_clause);
     let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
     for b in &binds {
         count_query = count_query.bind(b.clone());
     }
-    let total: i64 = count_query.fetch_one(db.pool()).await.unwrap_or(0);
+    let total: i64 = match count_query.fetch_one(db.pool()).await {
+        Ok(n) => n,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": format!("检索失败：{}", e)})),
+            )
+                .into_response()
+        }
+    };
 
-    // 排序
-    let sort_col = match pq.sort_by.as_deref() {
+    // 排序（`SORT=` / `ORDER=`，旧写法 `sort:` / `order:` 等价）
+    let sort_col = match compiled.sort_by.as_deref() {
         Some("title") => "title",
         Some("authors") => "authors",
         Some("year") => "year",
@@ -2736,7 +2746,7 @@ async fn search_info(
         Some("created_at") => "created_at",
         _ => "updated_at",
     };
-    let sort_dir = match pq.sort_order.as_deref() {
+    let sort_dir = match compiled.sort_order.as_deref() {
         Some("asc") => "ASC",
         _ => "DESC",
     };
@@ -2751,10 +2761,16 @@ async fn search_info(
     }
     doc_query = doc_query.bind(page_size).bind(offset);
 
-    let docs: Vec<Document> = doc_query
-        .fetch_all(db.pool())
-        .await
-        .unwrap_or_default();
+    let docs: Vec<Document> = match doc_query.fetch_all(db.pool()).await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": format!("检索失败：{}", e)})),
+            )
+                .into_response()
+        }
+    };
 
     let mut items: Vec<DocumentOut> = Vec::with_capacity(docs.len());
     for d in &docs {
