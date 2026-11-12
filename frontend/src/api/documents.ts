@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiPut, apiDelete, apiUpload } from './client'
+import client, { apiGet, apiPost, apiPut, apiDelete, apiUpload } from './client'
 import type {
   Document,
   PublicDocument,
@@ -354,6 +354,41 @@ export function getPdfUrl(id: number): string {
 /** 获取免 token 的 PDF 别名 URL */
 export function getFileAlias(id: number) {
   return apiGet<{ url: string; expires_at: string }>(`/assist/api/documents/${id}/file-alias/`)
+}
+
+/**
+ * 通过**需要 Token** 的 API 端点拉取 PDF 二进制（走 `X-Token` 头）。
+ *
+ * 用于「网页内预览」：拿到 Blob 后由前端 `URL.createObjectURL` 临时挂给 `<iframe>`，
+ * 全程不经过免 token 的 `/assist/file/` 别名端口，凭证不落到地址栏/历史记录里。
+ *
+ * `onProgress` 拿到实时下载量；服务端未回 `Content-Length` 时 `total` 为 0、`percent` 为 0。
+ */
+export interface PdfDownloadProgress {
+  loaded: number
+  total: number
+  /** 0–100；`total` 未知时为 0 */
+  percent: number
+}
+
+export async function fetchPdfBlob(
+  id: number,
+  onProgress?: (info: PdfDownloadProgress) => void
+): Promise<Blob> {
+  const res = await client.get<Blob>(`/assist/api/documents/${id}/pdf/`, {
+    responseType: 'blob',
+    onDownloadProgress: (ev: { loaded: number; total?: number }) => {
+      if (!onProgress) return
+      const loaded = ev.loaded || 0
+      const total = ev.total && ev.total > 0 ? ev.total : 0
+      onProgress({
+        loaded,
+        total,
+        percent: total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0
+      })
+    }
+  })
+  return res.data
 }
 
 /** 重算文档哈希 */

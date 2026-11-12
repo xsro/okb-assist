@@ -18,6 +18,12 @@
         <button v-if="tokenStore.canViewPdf" class="btn btn-sm btn-outline" :disabled="openingPdf" @click="openPdf">
           {{ openingPdf ? '准备中...' : '查看 PDF' }}
         </button>
+        <button
+          v-if="tokenStore.canViewPdf"
+          class="btn btn-sm btn-outline"
+          title="通过需要 Token 的 API 获取 PDF，并在本页面内预览"
+          @click="inlinePdfOpen = true"
+        >查看 PDF（网页内）</button>
         <router-link v-if="tokenStore.canViewMarkdown" :to="{ name: 'markdown', params: { id: doc.id } }" class="btn btn-sm btn-outline">全屏阅读</router-link>
       </div>
     </div>
@@ -229,6 +235,14 @@
       </template>
     </div>
 
+    <!-- 页内 PDF 预览：经需 Token 的 API 拉成 Blob 后用 iframe 渲染（不走 /assist/file/） -->
+    <InlinePdfViewer
+      :open="inlinePdfOpen"
+      :doc-id="doc?.id ?? null"
+      :title="meta.title || doc?.filename || ''"
+      :filename="doc?.filename || meta.title || ''"
+      @close="inlinePdfOpen = false"
+    />
   </div>
 
   <div v-else-if="notFound" class="loading">
@@ -251,6 +265,7 @@ import { deriveDocStatus } from '@/utils/docStatus'
 import { docTypeLabelWithValue } from '@/utils/docType'
 import { langLabel } from '@/utils/lang'
 import DocumentPdfInfoPanel from '@/components/detail/DocumentPdfInfoPanel.vue'
+import InlinePdfViewer from '@/components/InlinePdfViewer.vue'
 import DocumentCrossrefPanel from '@/components/detail/DocumentCrossrefPanel.vue'
 import DocumentCitationPanel from '@/components/detail/DocumentCitationPanel.vue'
 import type { Document, PublicDocument } from '@/types/document'
@@ -331,6 +346,8 @@ function goLogin() {
 const derivedStatus = computed(() => (doc.value ? deriveDocStatus(doc.value) : null))
 
 const openingPdf = ref(false)
+/** 页内 PDF 预览（InlinePdfViewer）开关 */
+const inlinePdfOpen = ref(false)
 
 /** 由 DOI 生成 doi.org 跳转地址；无法识别时返回空字符串 */
 const doiUrl = computed(() => {
@@ -419,7 +436,10 @@ async function load() {
   }
 }
 
-watch(() => route.params.id, load)
+watch(() => route.params.id, () => {
+  inlinePdfOpen.value = false
+  load()
+})
 onMounted(() => {
   load()
 })
