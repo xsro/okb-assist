@@ -24,21 +24,44 @@
         <span class="stat-value">{{ stats?.error_count || 0 }}</span>
         <span class="stat-label">错误</span>
       </div>
-      <div class="stat-card">
-        <span class="stat-value">{{ formatSize(stats?.total_size || 0) }}</span>
-        <span class="stat-label">总大小</span>
+    </div>
+
+    <!-- 磁盘占用（按数据库中记录的数据统计） -->
+    <div class="section">
+      <div class="section-header">
+        <h3>磁盘占用</h3>
+        <button class="btn btn-sm btn-outline" @click="load" :disabled="false">
+          刷新
+        </button>
       </div>
-      <div class="stat-card">
-        <span class="stat-value">{{ formatSize(stats?.pdf_size || 0) }}</span>
-        <span class="stat-label">PDF 大小</span>
+
+      <div class="stats-grid">
+        <div
+          v-for="card in sizeCards"
+          :key="card.key"
+          class="stat-card size-card"
+          :class="`size-${card.key}`"
+          :title="card.hint"
+        >
+          <span class="stat-value">{{ formatSize(card.value) }}</span>
+          <span class="stat-label">{{ card.label }}</span>
+        </div>
       </div>
-      <div class="stat-card">
-        <span class="stat-value">{{ formatSize(stats?.md_size || 0) }}</span>
-        <span class="stat-label">Markdown 大小</span>
-      </div>
-      <div class="stat-card">
-        <span class="stat-value">{{ formatSize(stats?.zip_size || 0) }}</span>
-        <span class="stat-label">资源包大小</span>
+
+      <div class="health-link-row">
+        <button
+          class="btn btn-sm btn-outline"
+          title="只为 PDF/Markdown/资源包 大小为空（NULL）的文档补写大小，不动已有数据"
+          @click="syncMissingFileSizes"
+        >补充缺失的大小信息</button>
+        <button
+          class="btn btn-sm btn-outline"
+          title="逐个重新统计所有文档的 PDF/Markdown/资源包 大小（后台执行，进度见下方「活跃任务」）"
+          @click="doSyncFileSizes"
+        >同步全部文件大小</button>
+        <span class="health-link-hint">
+          大小来自数据库中的文件事实列（不实时扫盘）；新增/外部改动的文件用「同步全部文件大小」刷新
+        </span>
       </div>
     </div>
 
@@ -97,6 +120,32 @@
       </div>
 
       <div class="health-link-row">
+        <button
+          class="btn btn-sm btn-outline"
+          title="只检查从未做过健康检查（pdf_health 为空）的文档"
+          @click="checkMissingPdfHealth"
+        >补充缺失的 PDF 健康信息</button>
+        <button
+          class="btn btn-sm btn-outline"
+          title="逐个检查所有文档的 PDF 能否打开（后台执行，进度见下方「活跃任务」）"
+          @click="checkPdfHealthBatch"
+        >检查全部 PDF 健康</button>
+        <button
+          class="btn btn-sm btn-outline"
+          title="只为没有 file_hash 的文档计算哈希（后台执行，进度见下方「活跃任务」）"
+          @click="recalcMissingHashes"
+        >补充缺失的哈希信息</button>
+        <button
+          class="btn btn-sm btn-outline"
+          title="逐个重新计算所有文档的 file_hash（后台执行，进度见下方「活跃任务」）"
+          @click="recalcHashes"
+        >重算全部哈希</button>
+        <span class="health-link-hint">
+          健康检查与哈希计算都在后台逐条执行，进度见下方「活跃任务」
+        </span>
+      </div>
+
+      <div class="health-link-row">
         <router-link class="btn btn-sm btn-outline" to="/assist?pdf_health=warning,error,missing">
           查看异常 PDF 文献（{{ health?.problem_count ?? 0 }}）→
         </router-link>
@@ -120,25 +169,7 @@
           title="只处理已有 Markdown 的文档；只识别 Markdown 里的「引用格式 / 引用本文 / DOI」，没有线索的会跳过（几毫秒一篇）"
           @click="batchExtractHeuristic"
         >批量启发式抽取元数据</button>
-        <button
-          class="btn btn-outline"
-          title="只为 PDF/Markdown/资源包 大小为空（NULL）的文档补写大小，不动已有数据"
-          @click="syncMissingFileSizes"
-        >补充缺失的大小信息</button>
-        <button
-          class="btn btn-outline"
-          title="只检查从未做过健康检查（pdf_health 为空）的文档"
-          @click="checkMissingPdfHealth"
-        >补充缺失的 PDF 健康信息</button>
-        <button
-          class="btn btn-outline"
-          title="只为没有 file_hash 的文档计算哈希"
-          @click="recalcMissingHashes"
-        >补充缺失的哈希信息</button>
         <br>
-        <button class="btn btn-outline" @click="doSyncFileSizes">同步全部文件大小</button>
-        <button class="btn btn-outline" @click="checkPdfHealthBatch">检查全部 PDF 健康</button>
-        <button class="btn btn-outline" @click="recalcHashes">重算全部哈希</button>
         <button class="btn btn-outline" @click="dedup">文献去重</button>
         <button class="btn btn-outline" @click="goDuplicates">手动去重</button>
       </div>
@@ -302,6 +333,34 @@ const progressPercent = computed(() => {
   if (!p || p.total === 0) return 0
   return Math.min(100, Math.round((p.processed / p.total) * 100))
 })
+
+/** 磁盘占用卡片（按数据库中记录的文件事实列累加，零磁盘 IO） */
+const sizeCards = computed(() => [
+  {
+    key: 'total',
+    label: '总大小',
+    value: stats.value?.total_size ?? 0,
+    hint: 'PDF + Markdown + 资源包 的总和'
+  },
+  {
+    key: 'pdf',
+    label: 'PDF 大小',
+    value: stats.value?.pdf_size ?? 0,
+    hint: '所有文档的 PDF 原文件大小'
+  },
+  {
+    key: 'md',
+    label: 'Markdown 大小',
+    value: stats.value?.md_size ?? 0,
+    hint: 'MinerU 解析生成的 Markdown 大小'
+  },
+  {
+    key: 'zip',
+    label: '资源包大小',
+    value: stats.value?.zip_size ?? 0,
+    hint: 'Markdown 引用的图片资源包（images.zip）'
+  }
+])
 
 /** 文件构成计数（后端 `stats.file_counts`；缺失时全部当 0） */
 const fileCounts = computed(() => {
@@ -553,6 +612,20 @@ onUnmounted(() => {
   overflow-x: auto;
 }
 
+/* ── 磁盘占用 ── */
+.size-card .stat-value {
+  font-size: 26px;
+  color: var(--text-primary);
+}
+
+.size-card.size-total .stat-value {
+  color: var(--primary);
+}
+
+.size-card.size-zip .stat-value {
+  color: var(--text-secondary);
+}
+
 /* ── 文件构成 ── */
 .file-card {
   text-decoration: none;
@@ -617,6 +690,11 @@ onUnmounted(() => {
 .health-link-hint {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+/* 多个操作行连用时收紧间距 */
+.health-link-row + .health-link-row {
+  margin-top: 12px;
 }
 
 .tool-tag {
