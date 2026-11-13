@@ -78,7 +78,7 @@
         <router-link
           v-for="card in fileCards"
           :key="card.key"
-          class="stat-card file-card"
+          class="stat-card file-card link-card"
           :class="`file-${card.key}`"
           :to="card.to"
           :title="card.hint"
@@ -89,11 +89,8 @@
       </div>
 
       <div class="health-link-row">
-        <router-link class="btn btn-sm btn-outline" :to="pdfOnlyLink">
-          查看「只有 PDF、没有 Markdown」的文献（{{ fileCounts.pdf_only }}）→
-        </router-link>
         <span class="health-link-hint">
-          点击卡片同样可跳转到文献列表并按文件状态筛选（`pdf` / `md` / `zip` = present / absent）
+          点击卡片跳转到文献列表（高级搜索自动填入 `PDF=` / `MD=` / `ZIP=`，取值 present / absent / unknown）
         </span>
       </div>
     </div>
@@ -108,15 +105,24 @@
       </div>
 
       <div class="stats-grid">
-        <div
+        <router-link
           v-for="card in healthCards"
           :key="card.key"
-          class="stat-card health-card"
+          class="stat-card health-card link-card"
           :class="`health-${card.key}`"
+          :to="card.to"
+          :title="card.hint"
         >
           <span class="stat-value">{{ card.value }}</span>
           <span class="stat-label">{{ card.label }}</span>
-        </div>
+        </router-link>
+      </div>
+
+      <div class="health-link-row">
+        <span class="health-link-hint">
+          点击卡片跳转到文献列表（高级搜索自动填入 `HEALTH=…`）；当前异常（warning / error / missing）共
+          <strong>{{ health?.problem_count ?? 0 }}</strong> 篇
+        </span>
       </div>
 
       <div class="health-link-row">
@@ -142,15 +148,6 @@
         >重算全部哈希</button>
         <span class="health-link-hint">
           健康检查与哈希计算都在后台逐条执行，进度见下方「活跃任务」
-        </span>
-      </div>
-
-      <div class="health-link-row">
-        <router-link class="btn btn-sm btn-outline" to="/assist?pdf_health=warning,error,missing">
-          查看异常 PDF 文献（{{ health?.problem_count ?? 0 }}）→
-        </router-link>
-        <span class="health-link-hint">
-          在文献列表中按「PDF 健康 = warning / error / missing」筛选
         </span>
       </div>
     </div>
@@ -320,11 +317,41 @@ const healthLoading = ref(false)
 const healthCards = computed(() => {
   const counts = health.value?.counts ?? {}
   return [
-    { key: 'ok', label: '检查正常', value: counts.ok ?? 0 },
-    { key: 'warning', label: '有警告', value: counts.warning ?? 0 },
-    { key: 'error', label: '无法解析', value: counts.error ?? 0 },
-    { key: 'missing', label: '文件缺失', value: counts.missing ?? 0 },
-    { key: 'unchecked', label: '未检查', value: health.value?.unchecked ?? 0 }
+    {
+      key: 'ok',
+      label: '检查正常',
+      value: counts.ok ?? 0,
+      to: healthSearchLink('ok'),
+      hint: 'HEALTH=ok：能正常打开，无结构诊断'
+    },
+    {
+      key: 'warning',
+      label: '有警告',
+      value: counts.warning ?? 0,
+      to: healthSearchLink('warning'),
+      hint: 'HEALTH=warning：缺 %%EOF / 加密 / 结构损坏但可自动修复'
+    },
+    {
+      key: 'error',
+      label: '无法解析',
+      value: counts.error ?? 0,
+      to: healthSearchLink('error'),
+      hint: 'HEALTH=error：非 PDF / 结构损坏到读不出页数'
+    },
+    {
+      key: 'missing',
+      label: '文件缺失',
+      value: counts.missing ?? 0,
+      to: healthSearchLink('missing'),
+      hint: 'HEALTH=missing：PDF 文件不存在（记为无）'
+    },
+    {
+      key: 'unchecked',
+      label: '未检查',
+      value: health.value?.unchecked ?? 0,
+      to: healthSearchLink('unchecked'),
+      hint: 'HEALTH=unchecked：从未做过健康检查（pdf_health 为空）'
+    }
   ]
 })
 
@@ -374,44 +401,55 @@ const fileCounts = computed(() => {
   }
 })
 
-/** 「只有 PDF、没有 Markdown」的文献列表链接（列表页支持 pdf_state / md_state） */
-const pdfOnlyLink = { path: '/assist', query: { pdf_state: 'present', md_state: 'absent' } }
+/**
+ * 统计卡片 → 文献列表的高级搜索（WoS 检索式）链接。
+ * 统一走 `?q=…`，由列表页的高级搜索解析（不再用 `?pdf_state=` / `?pdf_health=` 这类专用参数）。
+ */
+function wosSearchLink(query: string) {
+  return { path: '/assist', query: { q: query } }
+}
 
+/** PDF 健康卡片链接：`HEALTH=ok / warning / error / missing / unchecked` */
+function healthSearchLink(health: string) {
+  return wosSearchLink(`HEALTH=${health}`)
+}
+
+/** 文件构成卡片（按文件事实三态组合，各自对应一条检索式） */
 const fileCards = computed(() => [
   {
     key: 'pdf-only',
     label: '只有 PDF（无 Markdown）',
     value: fileCounts.value.pdf_only,
-    to: pdfOnlyLink,
-    hint: '有 PDF 但还没解析出 Markdown（待解析 / 解析失败）'
+    to: wosSearchLink('PDF=present AND MD=absent'),
+    hint: 'PDF=present AND MD=absent：有 PDF 但还没解析出 Markdown（待解析 / 解析失败）'
   },
   {
     key: 'pdf-and-md',
     label: 'PDF + Markdown',
     value: fileCounts.value.pdf_and_md,
-    to: { path: '/assist', query: { pdf_state: 'present', md_state: 'present' } },
-    hint: '解析完成的文献'
+    to: wosSearchLink('PDF=present AND MD=present'),
+    hint: 'PDF=present AND MD=present：解析完成的文献'
   },
   {
     key: 'md-only',
     label: '只有 Markdown（缺 PDF）',
     value: fileCounts.value.md_only,
-    to: { path: '/assist', query: { pdf_state: 'absent', md_state: 'present' } },
-    hint: 'PDF 文件丢了，但解析结果还在'
+    to: wosSearchLink('PDF=absent AND MD=present'),
+    hint: 'PDF=absent AND MD=present：PDF 文件丢了，但解析结果还在'
   },
   {
     key: 'none',
     label: '无文件',
     value: fileCounts.value.none,
-    to: { path: '/assist', query: { pdf_state: 'absent', md_state: 'absent' } },
-    hint: 'PDF 与 Markdown 都不存在（如 BibTeX 导入的纯元数据条目）'
+    to: wosSearchLink('PDF=absent AND MD=absent'),
+    hint: 'PDF=absent AND MD=absent：PDF 与 Markdown 都不存在（如 BibTeX 导入的纯元数据条目）'
   },
   {
     key: 'with-zip',
     label: '有资源包',
     value: fileCounts.value.with_zip,
-    to: { path: '/assist', query: { zip_state: 'present' } },
-    hint: '含图片资源包（MinerU 解析产物）'
+    to: wosSearchLink('ZIP=present'),
+    hint: 'ZIP=present：含图片资源包（MinerU 解析产物）'
   }
 ])
 
@@ -626,23 +664,25 @@ onUnmounted(() => {
   color: var(--text-secondary);
 }
 
-/* ── 文件构成 ── */
-.file-card {
+/* 可点击的统计卡片（文件构成 / PDF 健康共用） */
+.link-card {
   text-decoration: none;
   color: inherit;
   cursor: pointer;
   transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
 }
 
-.file-card:hover {
+.link-card:hover {
   border-color: var(--accent, #2f9e44);
   transform: translateY(-1px);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
 }
 
-.file-card:active {
+.link-card:active {
   transform: scale(0.99);
 }
+
+/* ── 文件构成 ── */
 
 /* 「只有 PDF 无 Markdown」是待解析的主体，标黄提醒 */
 .file-card.file-pdf-only .stat-value {

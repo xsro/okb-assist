@@ -552,8 +552,3 @@ export function highlightWosQuery(input: string): string {
   html = html.replace(/([*?$])/g, '<span class="hl-wildcard">$1</span>')
   return html
 }
-
-/** chips 文本：`标签: 值`（取反加 `-`） */
-export function conditionChipText(c: WosCondition): string {
-  return `${c.negated ? '不含 ' : ''}${c.tag}: ${c.value}`
-}
