@@ -293,7 +293,9 @@ fn create_app(
         .layer(Extension(user_store))
         .layer(Extension(session_store))
         .layer(middleware::from_fn(error_log_middleware))
-        // 请求开始日志放在 token_middleware 外侧：即使被 401 拒绝也能看到调用记录
+        // MCP 的「请求开始」放在 token_middleware 外侧；API 的那一条由
+        // token_middleware 在鉴权结论确定后自己记录（见 `log_api_request_start`），
+        // 否则拿不到「访问者是谁」，只能记到「有人在调」。
         .layer(middleware::from_fn(request_start_log_middleware))
         .layer(middleware::from_fn(token_middleware));
 
@@ -429,30 +431,28 @@ async fn error_log_middleware(req: axum::extract::Request, next: Next) -> Respon
     axum::response::Response::from_parts(parts, axum::body::Body::from(body_bytes))
 }
 
-/// 请求开始日志中间件：每次 API（`/assist/api/*`）与 MCP（`/assist/mcp*`）调用开始时打一条 info 日志。
+/// 请求开始日志中间件（MCP）：每次 `/assist/mcp*` 调用开始时打一条 info 日志。
 ///
 /// 位于 `TraceLayer` 的 span 内部，因此 JSONL 里这条记录会带上 `IpMakeSpan` 采集的
 /// 客户端 IP / User-Agent / Referer 等字段；查询串中的凭证类参数（`token`、`password` 等）
 /// 会被 `sanitize_query` 脱敏，避免令牌落进日志文件。
 ///
-/// 注意：放在 `token_middleware` **外侧**是有意的 —— 未授权（401）、未初始化等
-/// 早期拒绝也会留下「调用开始」记录，便于排查是谁在调、调了什么。
+/// **API（`/assist/api/*`）的「请求开始」不在这里记**：那一条由 [`token_middleware`]
+/// 在鉴权结论确定之后调用 [`log_api_request_start`] 记录，所以能带上访问者
+/// （`user` / `user_id` / `role` / `via` / `auth`）。放在外侧的话鉴权还没跑，
+/// 只能记到「有人在调」，记不到「谁在调」。
+///
+/// MCP 的鉴权发生在处理器内部（`mcp_server::mcp_stream_handler` 里另有带 `user` 的
+/// 「MCP request authorized」日志），因此这里仍保留「调用开始」这一条。
 async fn request_start_log_middleware(req: axum::extract::Request, next: Next) -> Response {
     let path = req.uri().path();
-    let kind = if path.starts_with("/assist/api/") {
-        Some("api")
-    } else if path.starts_with("/assist/mcp") {
-        Some("mcp")
-    } else {
-        None
-    };
 
-    if let Some(kind) = kind {
+    if path.starts_with("/assist/mcp") {
         let method = req.method().clone();
         let client_ip = extract_client_ip(&req);
         let query = sanitize_query(req.uri().query());
         tracing::info!(
-            kind,
+            kind = "mcp",
             client_ip = %client_ip,
             method = %method,
             path = %path,
@@ -462,6 +462,59 @@ async fn request_start_log_middleware(req: axum::extract::Request, next: Next) -
     }
 
     next.run(req).await
+}
+
+/// API 请求的「请求开始」日志（由 [`token_middleware`] 在鉴权结论确定后调用一次）。
+///
+/// - `caller`：鉴权得出的主体；公开端点 / 访客 / 未授权的请求为 `None`（日志里写 `-`）；
+/// - `auth`：鉴权结论（`authorized` / `public` / `guest` / `trusted_subnet` / `image` /
+///   `mcp_only_token` / `unauthorized` / `not_initialized` …），用来区分「谁在调」与「为什么被拒」。
+fn log_api_request_start(
+    req: &axum::extract::Request,
+    caller: Option<&auth::Principal>,
+    auth: &str,
+) {
+    // 未认证请求在日志里的占位值（保持字段齐全，便于 grep / 过滤）
+    const ANON: &str = "-";
+    let (user, user_id, role, via) = match caller {
+        Some(p) => (
+            p.username.as_str(),
+            p.user_id.as_str(),
+            p.role.as_str(),
+            p.via.as_str(),
+        ),
+        None => (ANON, ANON, ANON, ANON),
+    };
+    tracing::info!(
+        kind = "api",
+        client_ip = %extract_client_ip(req),
+        method = %req.method(),
+        path = %req.uri().path(),
+        query = %sanitize_query(req.uri().query()),
+        user = %user,
+        user_id = %user_id,
+        role = %role,
+        via = %via,
+        auth = %auth,
+        "请求开始"
+    );
+}
+
+/// 把访问者身份记录到**当前请求 span**（`IpMakeSpan` 里预留的 Empty 字段）。
+///
+/// 这样该请求内后续产生的任何日志（含 `error_log_middleware` 的 warn/error、
+/// 业务处理器的 info）在 JSONL 的 `span` / `spans` 里都会带上
+/// `user` / `user_id` / `role` / `via`，不需要逐条手动传。
+pub(crate) fn record_span_identity(principal: &auth::Principal) {
+    let span = tracing::Span::current();
+    // 未进入任何 span（单测 / CLI 路径）时 record 是空操作
+    if span.is_disabled() {
+        return;
+    }
+    span.record("user", tracing::field::display(&principal.username));
+    span.record("user_id", tracing::field::display(&principal.user_id));
+    span.record("role", tracing::field::display(principal.role.as_str()));
+    span.record("via", tracing::field::display(principal.via.as_str()));
 }
 
 /// 日志用的 URI 脱敏：路径原样保留，查询串交给 `sanitize_query`。
@@ -536,10 +589,14 @@ const UNINITIALIZED_ALLOWED_PATHS: &[&str] = &[
 /// - `auth::Principal`：用户身份（新代码用它取 `user_id` / `username` / `mcp`）；
 /// - `auth::Role`：供既有 `Extension<Role>` 处理器使用；
 /// - `auth::OwnerKey`：会话历史的归属标识（`u:<user_id>`，免鉴权为 `local`）。
+///
+/// 每条分支都在返回前调用 [`log_api_request_start`] 记一条带访问者的「请求开始」日志
+/// （命中凭证时还会 `record_span_identity`，让该请求的后续日志都带上 user），
+/// 因此这条日志**位置在 token_middleware 内部**、但时间点仍是请求开始。
 async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
 
-    // 仅保护 API 路径
+    // 仅保护 API 路径（MCP 的「请求开始」由 request_start_log_middleware 记）
     if !path.starts_with("/assist/api/") {
         return next.run(req).await;
     }
@@ -550,6 +607,7 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
     // 图片 URL 放行（免 token，但注入 ViewOnly 角色以便后续处理）
     if path.contains("/image/") {
         req.extensions_mut().insert(auth::Role::ViewOnly);
+        log_api_request_start(&req, None, "image");
         return next.run(req).await;
     }
 
@@ -561,14 +619,17 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
 
     let (Some(settings), Some(user_store), Some(sessions)) = (settings, user_store, sessions) else {
         // 状态未注入（理论上不会发生）：退化为放行
+        log_api_request_start(&req, None, "no_state");
         return next.run(req).await;
     };
 
     // 未初始化门禁：只放行 status / bootstrap
     if !auth::is_initialized(&user_store) {
         if UNINITIALIZED_ALLOWED_PATHS.contains(&normalized.as_str()) {
+            log_api_request_start(&req, None, "not_initialized");
             return next.run(req).await;
         }
+        log_api_request_start(&req, None, "not_initialized_denied");
         return (
             http::StatusCode::UNAUTHORIZED,
             axum::Json(serde_json::json!({
@@ -581,6 +642,7 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
 
     // 公开的认证端点
     if PUBLIC_AUTH_PATHS.contains(&normalized.as_str()) {
+        log_api_request_start(&req, None, "public");
         return next.run(req).await;
     }
 
@@ -591,6 +653,7 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
         && path.starts_with(routers::documents::PUBLIC_DETAIL_PREFIX)
     {
         req.extensions_mut().insert(auth::Role::ViewOnly);
+        log_api_request_start(&req, None, "guest");
         return next.run(req).await;
     }
 
@@ -601,9 +664,12 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
         if !subnets.is_empty() && crate::utils::ip_matches_subnets(&client_ip, &subnets) {
             let role = settings.trusted_subnet_role();
             tracing::debug!(client_ip = %client_ip, role = %role.as_str(), "受信任子网免鉴权");
-            req.extensions_mut().insert(auth::Principal::local(role.clone(), true));
+            let principal = auth::Principal::local(role.clone(), true);
+            record_span_identity(&principal);
+            log_api_request_start(&req, Some(&principal), "trusted_subnet");
             req.extensions_mut().insert(auth::OwnerKey::local());
             req.extensions_mut().insert(role);
+            req.extensions_mut().insert(principal);
             return next.run(req).await;
         }
     }
@@ -613,6 +679,7 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
         if let Some(principal) = auth::resolve_principal(&token, &user_store, &sessions) {
             // 作用域严格互斥：MCP 专属令牌不能调 `/assist/api/*`
             if !principal.api {
+                log_api_request_start(&req, Some(&principal), "mcp_only_token");
                 return (
                     http::StatusCode::UNAUTHORIZED,
                     axum::Json(serde_json::json!({
@@ -624,6 +691,8 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
             }
             let owner = principal.owner_key();
             let role = principal.role.clone();
+            record_span_identity(&principal);
+            log_api_request_start(&req, Some(&principal), "authorized");
             req.extensions_mut().insert(owner);
             req.extensions_mut().insert(role);
             req.extensions_mut().insert(principal);
@@ -631,6 +700,7 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
         }
     }
 
+    log_api_request_start(&req, None, "unauthorized");
     (
         http::StatusCode::UNAUTHORIZED,
         axum::Json(serde_json::json!({"detail": "未授权：无效或缺失的 token"})),
@@ -820,6 +890,12 @@ impl<B> MakeSpan<B> for IpMakeSpan {
             x_forwarded_for = %x_forwarded_for,
             x_real_ip = %x_real_ip,
             origin = %origin,
+            // 以下字段由 token_middleware（`record_span_identity`）在鉴权后补填，
+            // 供该请求内的全部后续日志（如 error_log_middleware 的 warn/error）带上访问者。
+            user = tracing::field::Empty,
+            user_id = tracing::field::Empty,
+            role = tracing::field::Empty,
+            via = tracing::field::Empty,
             // 以下字段由 OnResponse 回调填充
             status = tracing::field::Empty,
             resp_content_type = tracing::field::Empty,

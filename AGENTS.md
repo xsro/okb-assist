@@ -945,6 +945,10 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
     - 环层的序列化**不受 `--log-level` 限制**（`EnvFilter` 用 `.with_filter()` 只贴在文件层与 stdout 层上），否则前端把等级切到 debug/trace 会永远是空的。`--log-level` 依旧只决定落盘/终端能看到什么。
     - 前端 `LogViewer.vue` 每 1 秒拉一次增量、`MAX_ENTRIES = 2000` 封顶（页面隐藏时暂停、回前台补一次），关键词过滤是纯客户端 `computed`（不触发请求、不重连），改等级 = 重置游标重新载入。
     - **不要再改回读日志文件**（旧的 `ReverseLines` / 字节游标 `since` / 半行处理 / `scanned_bytes` 已随 `get_logs` 一并删除）；历史日志的去处是 `system.json` 的 `log_path` 文件，页面只回显路径。
+    - **访问者（谁在调）记在两条通道上，新增日志时不要另造字段**：
+      - **API 的「请求开始」由 `token_middleware` 在鉴权结论确定后记**（`main.rs::log_api_request_start`，**不在** `request_start_log_middleware` 里），`fields` 带 `user` / `user_id` / `role` / `via`（`session` / `api_token` / `local_subnet`）/ `auth`（`authorized` / `public` / `guest` / `image` / `trusted_subnet` / `mcp_only_token` / `unauthorized` / `not_initialized` …），未认证写 `-` 占位。这条中间件**每条分支都必须调用它**，否则该路径的访问没有日志。
+      - **请求 span**：`IpMakeSpan` 预留了 `user` / `user_id` / `role` / `via` 的 `Empty` 字段，`record_span_identity()`（鉴权成功后调用）把它们补进去，因此该请求内后续的任何日志（含 `error_log_middleware` 的 warn/error）在 `span` / `spans` 里都有访问者；MCP 在 `mcp_stream_handler` 里自己记（「MCP request authorized」+ span）。
+      - `request_start_log_middleware` 现在只负责 `/assist/mcp*` 的「请求开始」（MCP 鉴权在处理器内部，中间件层拿不到身份）。前端 `LogViewer.vue` 用 `callerOf()` / `callerTitle()` 先读 `fields`、再回退到 `span`，在每条请求前显示 `👤 用户名 · 角色`。
 
 23. **PDF 引擎是运行时选择，不是编译期开关**：`pdf_meta` / `pdf_health` 的公共入口一律先 `services::pdf_engine::active()` 再分发，mutool 那套实现**必须始终编译**（不要再加 `#[cfg(not(feature = "mupdf"))]`）。新增 PDF 能力时要两套实现都补，否则切引擎后会静默失能；另外 `mupdf` 引擎拿不到 stderr 诊断，依赖诊断的功能（如「损坏但可修复」判定）要在 UI 上提示用户切回 `mutool`。
 24. **BibTeX 导入的条目没有 PDF**：`import_bibtex` 建的记录写入 `fs_synced_at`（三个 size = NULL，即「已同步且确定不存在」）+ `pdf_health = 'missing'`，派生状态自然是 `uploaded` / 「PDF 缺失」；**不要**在 `do_parse_impl` 里把这种记录打成 `error`（worker 里已加「PDF 不存在就跳过」的真实文件守卫，批量解析只能空转一次）。后续补 PDF 有两条路：文档管理页的「替换 PDF」（`POST /documents/:id/pdf`），或直接在**上传页**传这份 PDF —— 只要 PDF 里的 DOI 能抽出来（`extract_meta` 默认开），就不会另建记录，而是**自动补进这个缺 PDF 的条目**（200 `status:"attached"`）。要强行建新记录用「强制上传」。

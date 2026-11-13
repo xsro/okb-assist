@@ -111,6 +111,10 @@
               {{ requestPath(entry) }}<template v-if="stringField(entry, 'query')">?{{ stringField(entry, 'query') }}</template>
             </span>
           </span>
+          <!-- 访问者：请求类日志才有（未认证请求服务端写 `-`，不显示） -->
+          <span class="log-user" v-if="callerOf(entry)" :title="callerTitle(entry)">
+            👤 {{ callerOf(entry) }}<template v-if="callerRole(entry)"> · {{ callerRole(entry) }}</template>
+          </span>
           <span class="log-message">{{ entry.fields?.message || entry.message }}</span>
           <span class="log-expand-icon">{{ isExpanded(entry) ? '▼' : '▶' }}</span>
         </div>
@@ -274,6 +278,46 @@ function stringField(entry: LogEntry, name: string): string {
 /** 请求路径：请求开始/错误中间件写 `fields.path`，TraceLayer 的响应日志写 `fields.uri` */
 function requestPath(entry: LogEntry): string {
   return stringField(entry, 'path') || stringField(entry, 'uri')
+}
+
+/** 取请求 span 里的字符串字段（请求开始之后记录的日志，身份只在 span 里） */
+function spanField(entry: LogEntry, name: string): string {
+  const span = entry.span as Record<string, unknown> | undefined
+  const value = span?.[name]
+  return typeof value === 'string' ? value : ''
+}
+
+/**
+ * 访问者字段：先看本条日志的 `fields`（token 中间件记的「请求开始」带 user/role/via），
+ * 没有则回退到请求 span（错误日志等后续日志靠 span 携带身份）。
+ * 服务端用 `-` 占位未认证请求，这里按空串处理（不显示）。
+ */
+function callerField(entry: LogEntry, name: string): string {
+  const value = stringField(entry, name) || spanField(entry, name)
+  return value === '-' ? '' : value
+}
+
+/** 访问者用户名（未知 / 未认证时为空） */
+function callerOf(entry: LogEntry): string {
+  return callerField(entry, 'user')
+}
+
+/** 访问者角色（admin / view-upload / view-only / local） */
+function callerRole(entry: LogEntry): string {
+  return callerField(entry, 'role')
+}
+
+/** hover 提示：用户名 / 角色 / 凭证来源 / 鉴权结论 */
+function callerTitle(entry: LogEntry): string {
+  const lines = [
+    `用户：${callerField(entry, 'user') || '-'}`,
+    `角色：${callerField(entry, 'role') || '-'}`,
+    `凭证：${callerField(entry, 'via') || '-'}`,
+    `鉴权：${stringField(entry, 'auth') || '-'}`
+  ]
+  const userId = callerField(entry, 'user_id')
+  if (userId) lines.push(`用户 ID：${userId}`)
+  return lines.join('\n')
 }
 
 /** 完整请求目标（含查询串），用于 hover 提示 */
@@ -889,6 +933,20 @@ onUnmounted(() => {
   align-items: baseline;
   gap: 6px;
   max-width: 46%;
+}
+
+/* 访问者徽标（请求类日志才有） */
+.log-user {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1.6;
+  padding: 0 6px;
+  border-radius: 3px;
+  background: #2d2d30;
+  color: #c3e88d;
+  border: 1px solid #3a3a3d;
+  white-space: nowrap;
+  cursor: help;
 }
 
 .log-method {

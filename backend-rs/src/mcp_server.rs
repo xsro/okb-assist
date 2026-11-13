@@ -1884,6 +1884,8 @@ pub async fn mcp_stream_handler(
                 .into_response();
         }
 
+        // 把访问者记入当前请求 span，后续所有 MCP 日志（含 JSONL 的 span 字段）都会带上 user
+        crate::record_span_identity(&principal);
         info!(
             client_ip,
             user = %principal.username,
