@@ -767,6 +767,7 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 - **表单**：多列布局在移动端自动堆叠为单列
 - **触摸目标**：最小 44px，按钮支持 `:active` 缩放反馈
 - **横向滚动**：表格、代码块、编辑器工具栏在小屏自动横向滚动
+- **表格类页面的横向溢出坑**：只要表格有 `min-width`（如网盘 620px），**所有 grid / flex 祖先项都要写 `min-width: 0`**（默认 `auto` 会被内容撑开），否则溢出会跑到整个文档上，表现为「整页要左右拖动」。正确做法：`min-width: 0` 归零 + 让 `.table-wrap { overflow-x: auto }` 内部滚动，或 ≤768px 直接改卡片式布局（`DriveView.vue` 两者都做了）
 
 ### 组件一览（`src/components/`）
 
@@ -1002,8 +1003,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
     - `status:` 已彻底删除（`documents` 没有 status 列），别再把它加回标签表；
       `NEAR/n` / `SAME` 目前按 AND 处理（没做词距判定）。
 
-    前端 `HomeView.vue` 只做三件事：把原始检索式发给 `search-info`、用 `parseWosQuery()` 渲染 chips 与
-    错误提示、用 `highlightWosQuery()` 给背景层上色。**前端校验比后端宽松是有意的**，别在前端实现第二套 SQL 语义。
+    前端 `HomeView.vue` 只做三件事：把原始检索式发给 `search-info`、用 `parseWosQuery()` 显示语法错误、用 `highlightWosQuery()` 给背景层上色。**前端校验比后端宽松是有意的**，别在前端实现第二套 SQL 语义。
 
 ## 入口与关键文件速查
 

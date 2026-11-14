@@ -578,6 +578,11 @@ onMounted(async () => {
   gap: 16px;
   align-items: start;
 }
+/* 网格项 / flex 项默认 min-width:auto，会被内部 `.file-table` 的 min-width:620px 撑开，
+   导致整页比视口宽、需要左右拖动。必须显式归零，让滚动发生在 `.table-wrap` 内部。 */
+.drive-layout > * {
+  min-width: 0;
+}
 .scope-panel {
   background: var(--bg-white);
   border: 1px solid var(--border);
@@ -895,6 +900,7 @@ onMounted(async () => {
 @media (max-width: 768px) {
   .drive-layout {
     grid-template-columns: 1fr;
+    gap: 12px;
   }
   .scope-panel {
     position: static;
@@ -907,6 +913,75 @@ onMounted(async () => {
   }
   .scope-item {
     white-space: nowrap;
+  }
+
+  /* 手机端文件列表改「卡片」：取消表格最小宽度，不再需要左右拖动 */
+  .file-panel {
+    padding: 10px 12px 12px;
+  }
+  .table-wrap {
+    overflow: visible;
+  }
+  .file-table {
+    display: block;
+    min-width: 0;
+  }
+  .file-table thead {
+    display: none;
+  }
+  .file-table tbody {
+    display: block;
+  }
+  .file-table tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    padding: 10px 2px;
+    border-bottom: 1px solid var(--border);
+  }
+  .file-table tbody tr:last-child {
+    border-bottom: none;
+  }
+  .file-table th,
+  .file-table td {
+    display: block;
+    padding: 0;
+    border-bottom: none;
+  }
+  /* 第 1 列：文件名（整行，允许换行） */
+  .file-table td:nth-child(1) {
+    flex: 1 1 100%;
+  }
+  /* 第 2/3 列：大小 · 时间（同一行，弱化显示） */
+  .file-table td:nth-child(2),
+  .file-table td:nth-child(3) {
+    flex: 0 0 auto;
+    width: auto;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  /* 第 4 列：操作按钮（整行、自动换行，无左侧间距） */
+  .file-table td.col-actions {
+    flex: 1 1 100%;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 6px;
+    margin-top: 2px;
+    text-align: left;
+  }
+  .file-table td.col-actions > * {
+    margin-left: 0;
+  }
+  /* 「返回上一级」/ 空目录提示这类跨列行 */
+  .file-table td[colspan] {
+    flex: 1 1 100%;
+  }
+  .entry-name {
+    white-space: normal;
+    word-break: break-word;
+    line-height: 1.45;
   }
 }
 </style>

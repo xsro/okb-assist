@@ -2,9 +2,10 @@
  * Web of Science 风格检索式（前端解析侧）。
  *
  * **语法真相在后端**：`backend-rs/src/services/query_parser.rs` 负责把检索式编译成 SQL，
- * 本文件只做三件事，供搜索栏高亮 / 筛选 chips / 高级搜索面板的实时校验使用：
+ * 本文件只做三件事，供搜索栏高亮 / 语法错误提示 / 高级搜索面板的实时校验使用：
  *
- * 1. `parseWosQuery()` —— 解析出「生效了哪些条件」+ 语法错误（含出错位置）；
+ * 1. `parseWosQuery()` —— 解析出「生效了哪些条件」+ 语法错误（含出错位置）；列表页只用其中的错误信息，
+ *    条件列表（`conditions`）由高级搜索面板显示「共 N 个条件」；
  * 2. `highlightWosQuery()` —— 给搜索框的背景层上色；
  * 3. `WOS_FIELDS` / `WOS_OPERATORS` / `WOS_EXAMPLES` —— 面板里的字段标签与示例。
  *

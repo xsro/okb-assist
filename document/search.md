@@ -2,7 +2,7 @@
 
 OKB-Assist 的搜索框与「高级搜索」面板使用 **Web of Science 风格的检索式**：`标签=值` + 布尔运算符 + 括号分组。
 检索式由后端 `backend-rs/src/services/query_parser.rs` 编译成 SQL（无额外搜索服务），
-前端 `frontend/src/utils/wosQuery.ts` 只做实时校验、语法高亮与筛选 chips。
+前端 `frontend/src/utils/wosQuery.ts` 只做实时校验与语法高亮。
 
 旧的 GitHub 风格写法（`field:value`、`-field:value`）**仍然完全兼容**，`TAG=value` 与 `tag:value` 等价。
 
@@ -65,6 +65,26 @@ PDF=present AND HEALTH=ok
 TS=(transformer OR "deep learning") AND AU=Vaswani*
 ```
 
+## 不写标签（自由文本）
+
+不写标签的裸值等于 `ALL=`，**但按空格切开后是多个独立条件，彼此是 AND，而不是一个短语**：
+
+```
+prescribed time control
+≡ ALL=prescribed AND ALL=time AND ALL=control
+≡ (14 列 LIKE '%prescribed%') AND (14 列 LIKE '%time%') AND (14 列 LIKE '%control%')
+```
+
+- 每个词单独在**全部元数据列**上做 `LIKE '%词%'`，任一列命中即算该词命中：
+  `title`、`i18n.en.title`、`authors`、`i18n.en.authors`、`journal`、`i18n.en.journal`、`keywords`、
+  `i18n.en.keywords`、`abstract`、`i18n.en.abstract`、`doi`、`source`、`filename`、`category`；
+- 三个词**不需要相邻、也不需要落在同一列**（`prescribed` 可以在标题里、`time` 在摘要里、`control` 在关键词里，照样命中）；
+- 所以 `prescribed time control` 是「三词各自出现」的宽泛检索，词越常见（`time`、`control`）结果越松；
+- **要按短语查必须加引号**：`"prescribed time control"`（只产生一条 `%prescribed time control%` 的 14 列 OR）；
+- 要缩小范围就显式指定字段：`TI=prescribed AND TI="time control"`、`TS=(prescribed AND "time control")`。
+
+> 一句话：空格的语义是 **AND 分词**，不是「连起来一起匹配」。
+
 ## 通配符与匹配方式
 
 | 符号 | 含义 | 例 |
@@ -76,7 +96,7 @@ TS=(transformer OR "deep learning") AND AU=Vaswani*
 - **不含通配符**时按「包含」匹配（两侧自动补 `%`）：`TI=attention` = 标题含 attention；
 - **含通配符**时按原样匹配（`ATT*` 是前缀匹配，不再自动补后侧 `%`）；
 - `%`、`_`、`\` 会被转义（SQL 侧 `ESCAPE '\'`），所以搜索 `50%` 这类字面值也能精确命中；
-- 短语用引号：`TI="attention is all you need"`（作为一个整体匹配）；
+- 短语用引号：`TI="attention is all you need"`（作为一个整体匹配）；不加引号则按空格拆成多个 AND 条件，见上节「不写标签（自由文本）」；
 - 所有文本检索都是 SQL `LIKE` 模糊匹配，不是全文索引。
 
 ## 数值、范围与大小
@@ -131,13 +151,17 @@ DT=bookSection AND TI=chapter
 
 # 指定 ID 区间按 ID 升序
 ID=1-30 AND MD=present SORT=ID ORDER=asc
+
+# 三词各自出现（宽泛）vs 作为整体短语（严格）
+prescribed time control
+"prescribed time control"
 ```
 
 ## 界面行为
 
 - 搜索框输入时实时高亮：**标签**蓝色、`AND/OR/NOT` 橙色、括号紫色、引号短语绿色、通配符金色；
 - 检索式有语法错误时，搜索框下方给出**红色提示与出错字符位置**（后端也会再校验一次，非法检索式返回 400 `code: "query_error"`）；
-- 搜索框下方按条件显示 **chips**（每条一个，取反的标「不含」），点 × 或「清除全部」重置；
+- 生效了哪些条件直接看检索式本身（高亮 + 语法提示），列表页**不再另外渲染筛选 chips**（解析结果只用于错误提示，面板内才显示「共 N 个条件」）；
 - 搜索栏右侧的「高级搜索」按钮打开面板：检索式编辑器 + 字段标签 / 运算符一键插入 + 示例 + 语法说明（第二个 tab 是列管理）。
 
 ## 技术实现
@@ -159,7 +183,7 @@ documents.rs::search_info：叠加 ?pdf_health= / ?pdf_state= 等参数 → SQL
 | `backend-rs/src/routers/documents.rs` | `search_info()` 端点（400 `query_error`）、`list_documents()` 的筛选参数 |
 | `frontend/src/utils/wosQuery.ts` | 字段标签表（`WOS_FIELDS`）、解析 / 校验（`parseWosQuery`）、高亮（`highlightWosQuery`）、示例 |
 | `frontend/src/components/QueryBuilder.vue` | 高级搜索面板（检索式编辑器 + 标签/运算符插入 + 实时校验 + 语法说明；另一 tab 为列管理） |
-| `frontend/src/views/HomeView.vue` | 搜索框、高亮层、错误提示、条件 chips、地址栏同步 |
+| `frontend/src/views/HomeView.vue` | 搜索框、高亮层、语法错误提示、地址栏（`?q=` / `?page=`）同步 |
 
 ### 注意事项
 

@@ -50,10 +50,6 @@
           （第 {{ queryError.position + 1 }} 个字符）
         </span>
       </div>
-
-      <!-- 排序控制（由 sort:/order: 语法控制） -->
-      <div class="search-controls">
-      </div>
     </div>
 
     <!-- 加载状态 -->
@@ -778,27 +774,6 @@ function formatDate(iso: string): string {
 }
 .search-error-pos {
   color: var(--text-muted);
-}
-
-.search-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.ctrl-select {
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 13px;
-  background: var(--bg-white);
-  color: var(--text);
-  outline: none;
-  cursor: pointer;
-  min-height: 34px;
-}
-.ctrl-select:focus {
-  border-color: var(--primary);
 }
 
 /* 表格内文件大小（紧凑） */
