@@ -462,7 +462,7 @@ for ddl in [
 - [ ] `models.rs` 删三字段与 `doc_status()`；`DOC_COLUMNS` ×3 收尾
 - [ ] `DocumentOut` 去掉并存的旧字段（`derived_status` → `status`）
 - [ ] 文档同步：`AGENTS.md`（易错点 12 的加列清单、`fs_synced_at` 三态、状态机段落、`only_missing` 语义、`/admin/documents/status` 段落）、
-      `document/search.md`（`status:` → `md:` / `health:` / `filesize_*`）、`document/mcp-tools.md`（status 来源）
+      `frontend/public/docs/search.md`（`status:` → `md:` / `health:` / `filesize_*`）、`frontend/public/docs/mcp-tools.md`（status 来源）
 
 ## 九、验收矩阵
 

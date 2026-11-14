@@ -200,7 +200,7 @@ nginx（`dav` 模块）/ `rclone serve webdav` / sftpgo 直接对外提供 `driv
 - [ ] 只读 WebDAV 令牌（`dav_readonly`）
 - [ ] 公有文件夹写入（`write_role` 阈值）+ 公有配额/磁盘水位保护
 - [ ] 前端：账户页 / 网盘页「WebDAV 连接」卡片（URL、用户名、令牌类型、只读说明、「一键复制」）
-- [ ] 文档：`document/drive.md` 增加「WebDAV 同步」章节（Finder / Explorer / rclone / Cyberduck / davfs2 配置）
+- [ ] 文档：`frontend/public/docs/drive.md`（用户文档）增加「WebDAV 同步」章节（Finder / Explorer / rclone / Cyberduck / davfs2 配置）
 - [ ] 日志降噪与访问审计面板
 
 ## 验收矩阵

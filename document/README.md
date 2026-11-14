@@ -1,47 +1,19 @@
-# OKB-Assist 文档
+# OKB-Assist 开发文档
 
 > 本地学术文献库管理系统 —— 上传 PDF → MinerU 解析 → 模型校对元数据 → 向量索引 → 检索 / 问答。
 
-左侧是完整目录，也可以直接搜索（右上角或侧栏顶部）。所有页面就是本仓库 `document/` 下的普通 Markdown 文件，改完刷新即可看到效果。
+**这里只放开发 / 部署 / 设计类文档。** 面向使用者的操作说明（登录与令牌、网盘、搜索语法、MCP）
+已经迁到应用内的「文档」页：`/assist/docs`（内容文件在仓库 `frontend/public/docs/`）。
 
 ## 快速开始
 
 | 步骤 | 操作 |
 | --- | --- |
 | 1 | 启动后端：`cd backend-rs && cargo run`（默认 `0.0.0.0:5001`） |
-| 2 | 浏览器打开 `http://<主机>:5001/document/` |
+| 2 | 浏览器打开 `http://<主机>:5001/document/`（开发文档）/ `http://<主机>:5001/assist/docs`（用户文档） |
 | 3 | 首次访问会跳转到 `/assist/login`，登录后自动回到这里 |
 
-> 该页面由 `system.json` 的 `static_dirs` 挂载：URL 前缀 `/document` → 仓库 `document/` 目录，`try_index` 命中 `index.html`。
-
-## 使用与功能
-
-<div class="doc-grid">
-  <a class="doc-card" href="#/user-management">
-    <span class="doc-card__title">用户管理使用指南</span>
-    <span class="doc-card__desc">登录、注册、个人令牌（API / MCP）、管理员审核与配额</span>
-  </a>
-  <a class="doc-card" href="#/drive">
-    <span class="doc-card__title">用户网盘</span>
-    <span class="doc-card__desc">私有目录 + 公有文件夹，角色阈值授权与配额设计</span>
-  </a>
-  <a class="doc-card" href="#/search">
-    <span class="doc-card__title">高级搜索语法</span>
-    <span class="doc-card__desc">多字段筛选、范围查询、逻辑组合，前端解析映射为 SQL</span>
-  </a>
-  <a class="doc-card" href="#/mcp">
-    <span class="doc-card__title">MCP 连接指南</span>
-    <span class="doc-card__desc">令牌类型、唯一传输端点（Streamable HTTP）、各客户端配置</span>
-  </a>
-  <a class="doc-card" href="#/mcp-tools">
-    <span class="doc-card__title">MCP 工具列表</span>
-    <span class="doc-card__desc">全部只读工具的入参与返回说明</span>
-  </a>
-  <a class="doc-card" href="#/skills/fix-info">
-    <span class="doc-card__title">文献元数据修复</span>
-    <span class="doc-card__desc">标题 / 作者 / 期刊 / DOI 解析错误时的排查与修复流程</span>
-  </a>
-</div>
+> 本页由 `system.json` 的 `static_dirs` 挂载：URL 前缀 `/document` → 仓库 `document/` 目录，`try_index` 命中 `index.html`。
 
 ## 部署与运维
 
@@ -65,6 +37,10 @@
   <a class="doc-card" href="#/datalab.to">
     <span class="doc-card__title">datalab.to</span>
     <span class="doc-card__desc">第三方文档提取服务的用量与价格</span>
+  </a>
+  <a class="doc-card" href="#/skills/fix-info">
+    <span class="doc-card__title">文献元数据修复</span>
+    <span class="doc-card__desc">标题 / 作者 / 期刊 / DOI 解析错误时的排查与修复流程</span>
   </a>
 </div>
 
@@ -102,25 +78,41 @@
   </a>
 </div>
 
-## 目录结构
+## 两套文档的分工
+
+| | 开发文档（本目录） | 用户文档（`frontend/public/docs/`） |
+| --- | --- | --- |
+| 位置 | `document/`（仓库根） | `frontend/public/docs/` |
+| 访问方式 | `/document/`（docsify 站点，`static_dirs` 挂载） | 应用内 `/assist/docs`（需登录），原文可直链 `/assist/docs/<file>.md` |
+| 内容 | 编译部署、MinerU 接入、运维手册、设计与计划 | 登录与令牌、网盘、搜索语法、MCP 连接与工具列表 |
+| 索引/顺序 | `_sidebar.md` + 本页卡片 | `frontend/src/docs/userDocs.ts` 的 `DOC_GROUPS` |
 
 ```text
-document/
-├── index.html        # docsify 入口（本页），/document/ 默认首页
-├── README.md         # 首页（本文件）
-├── _sidebar.md       # 左侧目录
-├── _404.md           # 未找到页面
-├── assets/           # 站内自有样式与脚本（docsify 运行时走 CDN）
-│   ├── css/custom.css
-│   └── js/auth-guard.js
-├── mineru4/          # MinerU 私有部署 / 云端 API / 测试报告
-└── skills/           # 元数据修复等操作手册
+document/                     # 开发文档（docsify）
+├── index.html                # docsify 入口，/document/ 默认首页
+├── README.md                 # 首页（本文件）
+├── _sidebar.md               # 左侧目录
+├── _404.md                   # 未找到页面
+├── assets/                   # 站内自有样式与脚本（docsify 运行时走 CDN）
+├── mineru4/                  # MinerU 私有部署 / 云端 API / 测试报告
+└── skills/                   # 元数据修复等操作手册
+
+frontend/public/docs/         # 用户文档（应用内 /assist/docs）
+├── user-management.md        # 用户与令牌
+├── drive.md                  # 网盘
+├── search.md                 # 高级搜索语法
+├── mcp.md                    # MCP 连接指南
+└── mcp-tools.md              # MCP 工具列表
 ```
 
 ## 撰写约定
 
-- **新增文档后**，在 `_sidebar.md` 与首页对应分组里各补一条链接，否则只能靠搜索找到。
+- **判断归属**：讲「用户怎么操作」→ `frontend/public/docs/`；讲「怎么部署 / 为什么这样设计 / 运维排查」→ `document/`。
+- **开发文档新增后**，在 `_sidebar.md` 与首页对应分组里各补一条链接，否则只能靠搜索找到。
+- **用户文档新增后**，在 `frontend/src/docs/userDocs.ts` 的 `DOC_GROUPS` 里加一条
+  `{ slug, file, title, desc }`，并把 Markdown 放进 `frontend/public/docs/`（`pnpm run build` 会一起复制到 `dist/docs/`）。
+  站内互链写成 `./other.md`（应用会自动转成 `/assist/docs/other` 路由），不要写绝对文件路径。
 - 文件名用小写 + 短横线（如 `db-status-removal-plan.md`），中文标题写在文件内的 `#` 标题里。
 - 页内相对链接写成 `./xxx.md`（`relativePath: true` 已开启）；指向应用页面用 `/assist/...`（已在 `noCompileLinks` 中，走浏览器整页跳转）。
 - 子目录（`mineru4/`、`skills/`）各自带一个 `_sidebar.md`，docsify 会就近取用；子目录侧栏里的文档链接写成相对该目录的路径（如 `parse-api-test.md`）。
-- 本目录是仓库文档的单一来源，`AGENTS.md` 里的路径引用与之保持一致，**不要随意移动文件**。
+- 两处目录都是仓库文档的单一来源，`AGENTS.md` 里的路径引用与之保持一致，**不要随意移动文件**。

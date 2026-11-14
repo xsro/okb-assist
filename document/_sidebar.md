@@ -1,17 +1,13 @@
 - [首页](/)
-- **使用与功能**
-  - [用户管理](user-management.md)
-  - [用户网盘](drive.md)
-  - [高级搜索](search.md)
-  - [MCP 连接指南](mcp.md)
-  - [MCP 工具列表](mcp-tools.md)
-  - [文献元数据修复](skills/fix-info.md)
+- **用户文档**
+  - <a href="/assist/docs" target="_self" data-nosearch>使用文档（应用内）→</a>
 - **部署与运维**
   - [编译与部署](build.md)
   - [U 盘自动挂载](udisks2-automount.md)
   - [Qdrant 向量库](qdrant.md)
   - [Open WebUI](openwebui.md)
   - [datalab.to](datalab.to.md)
+  - [文献元数据修复](skills/fix-info.md)
 - **MinerU 解析**
   - [v4 私有部署](mineru4/README.md)
   - [v1 REST API 调研](mineru4/mineru-api-server-report.md)

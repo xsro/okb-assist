@@ -61,6 +61,7 @@ const allNavItems = [
   { path: '/assist/upload', label: '上传' },
   { path: '/assist/drive', label: '网盘' },
   { path: '/assist/tools', label: '工具' },
+  { path: '/assist/docs', label: '文档' },
   { path: '/assist/admin', label: '监控' },
   { path: '/assist/config', label: '配置' },
   { path: '/assist/duplicates', label: '去重' },

@@ -77,7 +77,7 @@ cd backend-rs
 
 > ⚠️ 从旧版本升级：`config.json` 里旧的 `permissions` 条目会被一次性迁移成 `legacy-xxx` 占位用户
 > （`pending`、无凭据），**旧 token 全部失效**，需管理员为其重置密码或直接删除。
-> 详见 [document/user-management.md](./document/user-management.md)。
+> 详见 [使用文档：用户与令牌](/assist/docs/user-management)（源文件 `frontend/public/docs/user-management.md`）。
 
 ### 用户网盘
 
@@ -89,7 +89,7 @@ cd backend-rs
 - 策略存在 `config.json` 的 `drive` 段（配置页不可改写，走 `/assist/api/admin/drive/*`）。
 
 前端入口：导航「网盘」（`/assist/drive`）；管理员另有「网盘管理」（`/assist/drive/admin`）。
-详细说明见 [document/drive.md](./document/drive.md)。
+详细说明见 [使用文档：用户网盘](/assist/docs/drive)（源文件 `frontend/public/docs/drive.md`）。
 
 ### 工作目录（`cwd`）
 

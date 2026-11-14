@@ -91,10 +91,12 @@ cargo build --release
 | `frontend/src/types/` | TypeScript 类型定义：`document.ts`、`config.ts`、`pipeline.ts` |
 | `frontend/src/utils/` | 工具：`mathRenderer.ts`（KaTeX/MathJax 公式渲染）、`wosQuery.ts`（WoS 检索式：字段标签表 / 解析校验 / 高亮，检索式真相在后端） |
 | `frontend/src/api/` | API 客户端：`client.ts`、`documents.ts`、`pipeline.ts`、`chat.ts`、`admin.ts`、`config.ts` |
+| `frontend/src/docs/` | 用户文档清单与加载器：`userDocs.ts`（`DOC_GROUPS` 分组/顺序/标题、`loadDocContent()` 用 `import.meta.glob('../../public/docs/*.md', { query: '?raw' })` 惰性读原文、`rawDocUrl()`） |
 | `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 8 构建，输出到 `frontend/dist/`，包管理器 `pnpm`） |
 | `frontend/dist/` | 前端构建产物（`index.html`、`assets/`），由后端 serving |
 | `data/` | 运行时数据（`okb_assist.db`、`_uploads/`、`tokens/` 等），由 `system.json` 模板决定路径；实际位置为 `backend-rs/data/`，已被 `backend-rs/.gitignore` 忽略 |
-| `document/` | 参考文档（同时是 **docsify 文档站**，由 `system.json` 的 `static_dirs` 挂到 `/document`）：`index.html`（docsify 入口）、`README.md`（首页/索引）、`_sidebar.md`（左侧目录）、`_404.md`、`assets/`（自有样式与登录守卫）；内容页 `mcp.md`（MCP 连接指南）、`mcp-tools.md`（工具列表）、`user-management.md`（用户/登录/令牌）、`drive.md`（网盘）、`build.md`（部署构建）、`search.md`（搜索语法）、`webdav-plan.md`（网盘 WebDAV 同步方案与 TODO）、`db-status-removal-plan.md`（文献状态去库化）、`datalab.to.md`、`openwebui.md`、`qdrant.md`、`udisks2-automount.md`、`mineru4/`、`skills/` |
+| `document/` | **开发文档**（同时是 **docsify 文档站**，由 `system.json` 的 `static_dirs` 挂到 `/document`）：`index.html`（docsify 入口）、`README.md`（首页/索引）、`_sidebar.md`（左侧目录）、`_404.md`、`assets/`（自有样式与登录守卫）；内容页 `build.md`（部署构建）、`webdav-plan.md`（网盘 WebDAV 同步方案与 TODO）、`db-status-removal-plan.md`（文献状态去库化）、`datalab.to.md`、`openwebui.md`、`qdrant.md`、`udisks2-automount.md`、`mineru4/`、`skills/`。**面向使用者的说明不在这里**（见下一行） |
+| `frontend/public/docs/` | **用户文档（使用文档）** Markdown 原文：`user-management.md`（登录/令牌/用户管理）、`drive.md`（网盘）、`search.md`（高级搜索语法）、`mcp.md`（MCP 连接指南）、`mcp-tools.md`（工具列表）。`pnpm run build` 复制到 `dist/docs/`，可由后端直链 `/assist/docs/<file>.md`（`text/markdown`）；应用内在 `/assist/docs` 页渲染（见「用户文档页」）。导航顺序/标题在 `frontend/src/docs/userDocs.ts` |
 
 ## 配置（JSON 文件，非环境变量）
 
@@ -632,7 +634,8 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
   - `README.md` 首页（卡片式索引）、`_sidebar.md` 左侧目录、`_404.md` 未找到页、子目录各自的 `_sidebar.md`（docsify 会就近取用，新增子目录最好补一个，否则会多一次 404 探测）；
   - docsify 运行时 / 主题 / 插件走 **jsDelivr CDN**（版本已锁定），`assets/css/custom.css`（多巴胺绿主调）与 `assets/js/auth-guard.js` 是站内自有文件；
   - 鉴权靠 `static_dirs` 自己的判定（`okb_static` cookie）：未登录时 `auth-guard.js` 用一次 `README.md` 探针拿到 401 就整页跳 `/assist/login?redirect=<当前地址>`，登录后自动回跳；否则 docsify 会把 401 渲染成「404」；
-  - **新增文档后要在 `_sidebar.md` 与首页 `README.md` 里各补一条链接**（搜索索引也按侧栏链接生成）。
+  - **新增开发文档后要在 `_sidebar.md` 与首页 `README.md` 里各补一条链接**（搜索索引也按侧栏链接生成）。
+    面向使用者的说明不放这里 —— 它们属于 `frontend/public/docs/`（应用内 `/assist/docs`，见「用户文档页」）。
 
 ## 架构与请求流
 
@@ -676,7 +679,7 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、按文件哈希去重、索引重置。
 6. **问答**（`chat.rs`）：`GET /assist/api/chat/models`、`GET /assist/api/chat/tools` 列出模型池与可调用的 MCP 工具，`POST /assist/api/chat` 基于 `llm.models` 做多轮对话，并可在本请求内循环调用 MCP 工具（非流式）。见下方「问答（Chat）」。
 7. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
-8. **MCP 服务**（`mcp_server.rs`）：**只有一个** `POST /assist/mcp/stream` 端点（Streamable HTTP 的最小可用子集：读完请求体 → 返回单个 JSON 响应；**没有 SSE 传输**、没有 `Mcp-Session-Id` 会话、没有事件流）；Bearer 认证接受用户会话/个人令牌（`Principal.mcp`）、受信任子网（需 `trusted_subnet_enabled`，角色取 `trusted_subnet_role`，与 API 中间件一致，**不再硬编码 admin**）。工具集 = 9 个只读工具 + 3 个 Markdown 写工具（`edit_markdown` / `replace_markdown` / `find_replace_markdown`，**仅 admin 可见/可用**，`McpServer::new()` 必须传调用方 `Role`；写路径复用 `documents.rs` 的 `write_atomic` + `sync_doc_file_sizes`，不重写图片路径）。完整工具列表见 `document/mcp-tools.md`。
+8. **MCP 服务**（`mcp_server.rs`）：**只有一个** `POST /assist/mcp/stream` 端点（Streamable HTTP 的最小可用子集：读完请求体 → 返回单个 JSON 响应；**没有 SSE 传输**、没有 `Mcp-Session-Id` 会话、没有事件流）；Bearer 认证接受用户会话/个人令牌（`Principal.mcp`）、受信任子网（需 `trusted_subnet_enabled`，角色取 `trusted_subnet_role`，与 API 中间件一致，**不再硬编码 admin**）。工具集 = 9 个只读工具 + 3 个 Markdown 写工具（`edit_markdown` / `replace_markdown` / `find_replace_markdown`，**仅 admin 可见/可用**，`McpServer::new()` 必须传调用方 `Role`；写路径复用 `documents.rs` 的 `write_atomic` + `sync_doc_file_sizes`，不重写图片路径）。完整工具列表见 `frontend/public/docs/mcp-tools.md`（应用内 `/assist/docs/mcp-tools`）。
 
 ## 后台任务（异步执行）
 
@@ -817,9 +820,31 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 | `/assist/duplicates` | `DuplicatesView.vue` | 去重（两种检测模式：标题相似 / DOI 重复，确认后合并到指定文档） | admin |
 | `/assist/point` | `PointView.vue` | 向量库管理 | admin |
 | `/assist/tools` | `ToolsView.vue` | 工具面板（全文搜索、语义搜索、问答、公式编辑、MCP 配置；支持 `?tab=` 直达，切 tab 同步地址栏） | 全部 |
+| `/assist/docs/:slug?` | `DocsView.vue` | **用户文档阅读页**（见下方「用户文档页」）：左侧目录 + 正文 + 右侧本页目录，内容来自 `frontend/public/docs/*.md` | 全部 |
 | `/assist/mcp-setup` | —（重定向） | 旧路径，重定向到 `/assist/tools?tab=mcp` | 全部 |
 | `/assist/chat` | —（重定向） | 旧路径，重定向到 `/assist/tools?tab=chat`（问答已并入工具页） | 全部 |
 | `/assist/logs` | `LogViewer.vue` | 日志查看 | admin |
+
+### 用户文档页（`views/DocsView.vue` + `docs/userDocs.ts`）
+
+面向使用者的文档从开发文档站（`document/`，docsify）里**分出来**，原文放 `frontend/public/docs/*.md`，
+应用内用 `/assist/docs` 页面渲染（导航「文档」，需登录）：
+
+- **内容来源**：`frontend/src/docs/userDocs.ts` 用 `import.meta.glob('../../public/docs/*.md', { query: '?raw' })`
+  把 Markdown 原文按篇打成独立 chunk（**懒加载**）。`public/` 下的文件不能普通 import，必须走 glob + `?raw`；
+  同一批文件仍会随 `pnpm run build` 复制到 `dist/docs/`，所以原始 Markdown 也能直链（`/assist/docs/mcp.md`，
+  后端按 `text/markdown` 返回）。
+- **导航元数据不在 Markdown 里**：分组 / 顺序 / 标题 / 简介写在 `DOC_GROUPS`，新增文档 = 放一个 `.md` + 加一条
+  `{ slug, file, title, desc }`。`DOC_INDEX` 是扁平清单（决定上一篇 / 下一篇）。
+- **渲染**：复用 `MarkdownViewer`（KaTeX 公式、代码高亮、表格样式由本页 `:deep()` 覆盖）。
+- **标题 id 与右侧目录**：marked 不生成 heading id，所以 `extractHeadings()` 先从源码解析标题（跳过代码块里的 `#`），
+  再在 `MutationObserver` 里按**同一顺序**给 DOM 里的 `h1–h4` 补 id —— 不要改成「用 textContent 重新 slug」，
+  含反引号 / 加粗的标题会算错。`scroll-margin-top: 72px` 用于避开 sticky 顶栏。
+- **站内链接**：点击 `.md` 互链（`./x.md`、`x.md`、`/assist/docs/x.md`）被 `onClick` 拦成路由跳转
+  （`/assist/docs/x`），`#锚点` 走平滑滚动，外链自动补 `target=_blank rel=noopener`。
+- **移动端**：≤768px 隐藏右侧目录，左侧目录收成「目录」按钮切换的折叠面板；正文宽表格在表格自身内横向滚动。
+- **分工约定**：讲「用户怎么操作」→ `frontend/public/docs/`；讲「怎么部署 / 为什么这么设计 / 运维排查」→ `document/`。
+  两边的首页（`document/README.md`）都写了这条规则，移动文件时一起改。
 
 ### AceEditor 编辑器组件（`src/components/AceEditor.vue`）
 基于 `ace-builds@1.44.0` 封装的 Markdown 编辑器，内置完整编辑工具栏：
@@ -1012,7 +1037,8 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 - PDF 引擎选择：`backend-rs/src/services/pdf_engine.rs`（`mutool` / `mupdf`，`config.json` 的 `pdf.engine`）
 - 架构核心：`backend-rs/src/routers/pipeline.rs`、`backend-rs/src/routers/documents.rs`、`backend-rs/src/models.rs`、`backend-rs/src/services/vector_db.rs`、`backend-rs/src/mcp_server.rs`
 - 前端：`frontend/`（Vue 3 + TypeScript + Vite 8）
-- MCP 工具参考：`document/mcp.md`
-- 文档站（docsify）：`document/index.html`、`document/README.md`、`document/_sidebar.md`、`document/assets/css/custom.css`
-- 搜索语法参考：`document/search.md`
+- MCP 工具参考（用户文档）：`frontend/public/docs/mcp.md`
+- 开发文档站（docsify）：`document/index.html`、`document/README.md`、`document/_sidebar.md`、`document/assets/css/custom.css`
+- 用户文档页：`frontend/src/views/DocsView.vue`、`frontend/src/docs/userDocs.ts`、`frontend/public/docs/`
+- 搜索语法参考（用户文档）：`frontend/public/docs/search.md`
 - 启动说明：`README.md`

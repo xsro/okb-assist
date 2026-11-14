@@ -96,7 +96,7 @@
 ```
 
 - 个人令牌的权限必须是 **MCP**（`scope: mcp`），且账号本身已开启 MCP；API 权限的令牌调 MCP 会返回 401；
-- 详情见 `document/mcp.md`。
+- 详情见 [MCP 连接指南](./mcp.md)。
 
 ---
 

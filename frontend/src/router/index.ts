@@ -61,6 +61,13 @@ const routes = [
     meta: { title: '网盘管理', requiresAdmin: true }
   },
   {
+    path: '/assist/docs/:slug?',
+    name: 'docs',
+    component: () => import('@/views/DocsView.vue'),
+    // 使用文档阅读页（`frontend/public/docs/` 下的 Markdown），需登录
+    meta: { title: '使用文档' }
+  },
+  {
     path: '/assist/tools',
     name: 'tools',
     component: () => import('@/views/ToolsView.vue'),

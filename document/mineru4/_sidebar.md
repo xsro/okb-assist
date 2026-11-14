@@ -4,4 +4,5 @@
   - [v1 REST API 调研](mineru-api-server-report.md)
   - [官方云 API](mineru-cloud-api.md)
   - [解析接口测试](parse-api-test.md)
+- <a href="/assist/docs" target="_self" data-nosearch>使用文档 →</a>
 - <a href="/assist/" target="_self" data-nosearch>打开 OKB-Assist →</a>
