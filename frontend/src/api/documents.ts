@@ -158,7 +158,8 @@ export interface UploadProgress {
  * （`error: duplicate, kind: doi, has_pdf: true`），界面询问后再带
  * `onDuplicate: 'replace'` 重传即可覆盖。
  *
- * `onProgress` 报告的是**真实**的上传字节进度（axios `onUploadProgress`），
+ * `onProgress` 报告的是**真实**的上传字节进度（`apiUpload` 已把 axios 的
+ * `onUploadProgress` 归一成 0–100 的百分比，这里按文件大小还原成字节），
  * 其中 `phase === 'processing'` 表示字节已全部发出、正等服务端处理。
  */
 export async function uploadPdf(
@@ -206,16 +207,16 @@ export async function uploadPdf(
   return apiUpload<UploadResult>('/assist/api/documents/upload/', fd, {
     // 大文件上传可能远超 axios 默认的 30s，这里不设超时（由浏览器/后端决定）
     timeout: 0,
-    onUploadProgress: (event) => {
-      const total = event.total && event.total > 0 ? event.total : file.size
-      const loaded = event.loaded ?? 0
+    // 回调拿到的是百分比（见 apiUpload），按文件大小还原已发送字节
+    onUploadProgress: (percent) => {
+      const total = file.size
+      const pct = Math.max(0, Math.min(100, Math.round(percent)))
       // 字节发完（100%）后还在等服务端响应，这一段没有进度可报
-      const sent = total > 0 && loaded >= total
       onProgress?.({
-        phase: sent ? 'processing' : 'uploading',
-        loaded,
+        phase: pct >= 100 ? 'processing' : 'uploading',
+        loaded: Math.round((total * pct) / 100),
         total,
-        percent: total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
+        percent: pct,
       })
     },
   })

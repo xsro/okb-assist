@@ -72,9 +72,8 @@ export function uploadDriveFiles(
   for (const file of files) form.append('file', file, file.name)
   return apiUpload<DriveUploadResponse>('/assist/api/drive/upload', form, {
     timeout: 0,
-    onUploadProgress: (e) => {
-      if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100))
-    }
+    // apiUpload 已把 axios 事件归一成 0–100 百分比，直接转发
+    onUploadProgress: (percent) => onProgress?.(percent)
   })
 }
 

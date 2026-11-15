@@ -63,9 +63,10 @@ struct UploadIntervalArgs {
     #[arg(long)]
     no_progress: bool,
 
-    /// 上传时让服务端做 PDF 元数据启发式抽取（题名/作者/年份/DOI/摘要等）
+    /// 上传时让服务端做完整的 PDF 元数据抽取（`extract_meta=full`：Info 字典 DOI → Crossref，
+    /// 没有 DOI 时再跑启发式抽取题名/作者/年份/摘要等）
     ///
-    /// 默认**不开**：抽取会起几个 mutool 子进程把整份文档正文过一遍，
+    /// 默认**不开**（请求里带 `extract_meta=false`）：抽取会起几个 mutool 子进程把整份文档正文过一遍，
     /// 批量上传大文件时这是「等待服务端处理」的主要耗时。
     /// 不抽也能先把记录建好（列表里显示文件名），之后在文档管理页 / 
     /// `POST /assist/api/pipeline/extract-pdf-meta/:id` 补即可。
@@ -1082,7 +1083,7 @@ fn truncate_body(body: &str, max_chars: usize) -> String {
 
 /// 流式发送一个 PDF（multipart 的 `file` 字段），不把整份文件读进内存。
 ///
-/// `extra_fields` 为附加的表单字段（如 `auto_process=false`）。
+/// `extra_fields` 为附加的表单字段（如 `on_duplicate=replace`）。
 async fn post_pdf(
     url: &str,
     file_path: &Path,
@@ -1155,8 +1156,8 @@ enum UploadOutcome {
 
 /// 上传 PDF 文件到服务器（新建文献，默认不触发自动处理）
 ///
-/// `extract_meta` 为 false 时请求里带 `extract_meta=false`，服务端跳过 PDF 元数据启发式抽取
-/// （客户端批量上传默认跳过：那是上传后最慢的一步，且可事后补）。
+/// `extract_meta` 为 false 时请求里带 `extract_meta=false`（服务端跳过所有抽取），
+/// 为 true 时带 `extract_meta=full`（客户端批量上传默认跳过：那是上传后最慢的一步，且可事后补）。
 ///
 /// 链路或服务端卡顿导致请求失败时会自动重试一次；若重试后服务端返回 409 且
 /// 已有记录的 DOI 与我们上传的一致，说明「上一次请求其实已经落库」，按成功处理。
@@ -1170,10 +1171,10 @@ async fn api_upload(
 ) -> UploadOutcome {
     let url = format!("{}/assist/api/documents/upload", base_url);
     // 显式带 DOI：服务端不必解析 PDF 就能做 DOI 去重（命中时返回 409 `kind=doi`）
-    let mut fields: Vec<(&str, &str)> = vec![
-        ("auto_process", "false"),
-        ("extract_meta", if extract_meta { "true" } else { "false" }),
-    ];
+    let mut fields: Vec<(&str, &str)> = vec![(
+        "extract_meta",
+        if extract_meta { "full" } else { "false" },
+    )];
     if let Some(doi) = doi {
         fields.push(("doi", doi));
     }

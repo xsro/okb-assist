@@ -302,11 +302,15 @@ okb-client sync
 
 ## PDF 元数据抽取（默认跳过）
 
-上传时服务端会先用启发式规则从 PDF 里抽题名 / 作者 / 年份 / DOI / 摘要等（`pdf_meta`）。那一步要起几个 `mutool` 子进程，
-其中 `mutool draw -F text` 会把**整份文档**正文过一遍，大文件/扫描件能慢到几十秒——这正是上传停在「等待服务端处理」的主因。
+上传时服务端可以按三种模式抽元数据（表单字段 `extract_meta`）：
 
-客户端两个子命令**默认跳过**这一步（请求里带 `extract_meta=false`）：记录先建好（列表里显示文件名），不抽元数据。
-想保留旧行为加 `--extract-meta`；已上传的记录可以事后补：
+- `full`：先从 PDF **Info 字典** 拿 DOI → Crossref 查权威元数据；Info 字典里没有 DOI 时退化为启发式抽取（题名 / 作者 / 年份 / 刊名 / 摘要）。启发式那一步要起几个 `mutool` 子进程，
+  其中 `mutool draw -F text` 会把**整份文档**正文过一遍，大文件/扫描件能慢到几十秒——这正是上传停在「等待服务端处理」的主因。
+- `light`：只读 Info 字典拿 DOI + Crossref，**不抽正文**（最便宜的“带元数据”模式）。
+- `false`：完全跳过，记录只有文件名 + 哈希。
+
+客户端两个子命令**默认跳过**（请求里带 `extract_meta=false`）：记录先建好（列表里显示文件名），不抽元数据。
+想开完整抽取加 `--extract-meta`（= `extract_meta=full`）；已上传的记录可以事后补：
 
 ```
 POST /assist/api/pipeline/extract-pdf-meta/:id     # 单篇重新抽取（文档管理页有按钮）

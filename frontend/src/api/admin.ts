@@ -114,6 +114,18 @@ export function syncFileSizes(opts: MaintenanceOptions = {}) {
   )
 }
 
+/**
+ * 按 DOI 补齐 Crossref 元数据（后台任务，进度见「活跃任务」）。
+ *
+ * `onlyMissing` = 只处理「有 DOI 但本地还没有 Crossref 记录」的文档；
+ * 不带则逐个重抓全部带 DOI 的文档（抓到的元数据覆盖式回填）。
+ */
+export function fillCrossref(opts: MaintenanceOptions = {}) {
+  return apiPost<{ detail: string; started: boolean; only_missing?: boolean }>(
+    maintenancePath('/assist/api/admin/fill-crossref', opts)
+  )
+}
+
 /** 获取 MinerU 任务列表 */
 export function getMinerUTasks() {
   return apiGet<{ tasks: unknown[] }>('/assist/api/admin/mineru/tasks')

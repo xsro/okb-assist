@@ -55,6 +55,30 @@ pub async fn extract_pdf_metadata_from_path_async(
     .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
 }
 
+// ── DOI（仅 Info 字典） ──────────────────────────────────
+
+/// 只从 PDF 的 **Info 字典** 里找 DOI，不抽任何正文（`extract_meta=light` 的唯一信息源）。
+///
+/// 期刊/学位论文 PDF 常把 DOI 放在自定义 Info 键里（`/doi`、`/DOI`、`/Subject`、`/Keywords` …），
+/// 这些键在 `mutool show trailer.Info` 的输出、以及 mupdf 的 `/Info` 字典里都能拿到，
+/// 且只需要一次结构读取 —— 比启发式抽取便宜得多（后者 `mutool draw -F text` 会把整份正文过一遍）。
+pub fn doi_from_info_dict(path: &Path) -> Option<String> {
+    let text = match crate::services::pdf_engine::active() {
+        #[cfg(feature = "mupdf")]
+        crate::services::pdf_engine::PdfEngine::Mupdf => info_dict_text_mupdf(path),
+        _ => mutool_show(path, &["trailer.Info"]),
+    }?;
+    scan_doi(&text)
+}
+
+/// `doi_from_info_dict` 的异步版（在阻塞线程池里读文件）
+pub async fn doi_from_info_dict_async(path: String) -> Option<String> {
+    tokio::task::spawn_blocking(move || doi_from_info_dict(Path::new(&path)))
+        .await
+        .ok()
+        .flatten()
+}
+
 /// 从磁盘上的 PDF 提取元数据（按运行时引擎分发）
 pub fn extract_pdf_metadata_from_path(
     path: &Path,
@@ -353,6 +377,46 @@ fn extract_info_dict_from_path(path: &Path) -> Option<InfoDict> {
     let stdout = mutool_show(path, &["trailer.Info"])?;
     let entries = parse_pdf_dict_entries(&stdout);
     info_dict_from_entries(&entries)
+}
+
+/// Info 字典的原始文本（内置 mupdf）：遍历 trailer 的 `/Info` 字典，拼成「键 值」行。
+///
+/// `Document::metadata()` 只认标准键（Title/Author/…），拿不到 `/doi` 这类自定义键，
+/// 所以 DOI 扫描必须直接走 `PdfDocument::trailer()` 遍历字典。
+#[cfg(feature = "mupdf")]
+fn info_dict_text_mupdf(path: &Path) -> Option<String> {
+    use mupdf::pdf::PdfDocument;
+
+    let doc = Document::open(path).ok()?;
+    let pdf = PdfDocument::try_from(doc).ok()?;
+    let info = pdf.trailer().ok()?.get_dict("Info").ok().flatten()?;
+    let info = info.resolve().ok().flatten()?;
+    let len = info.dict_len().ok()?;
+
+    let mut out = String::new();
+    for i in 0..len {
+        let key = match info.get_dict_key(i as i32).ok().flatten() {
+            Some(k) => String::from_utf8_lossy(&k.as_name().unwrap_or_default()).to_string(),
+            None => continue,
+        };
+        let value = info
+            .get_dict_val(i as i32)
+            .ok()
+            .flatten()
+            .and_then(|v| v.resolve().ok().flatten())
+            .and_then(|v| v.as_string().ok())
+            .unwrap_or_default();
+        out.push_str(&key);
+        out.push(' ');
+        out.push_str(&value);
+        out.push('\n');
+    }
+
+    if out.trim().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// 调用 `mutool show <pdf> <path...>` 并返回 stdout
@@ -2954,3 +3018,4 @@ mod tests {
         );
     }
 }
+

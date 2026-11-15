@@ -1544,16 +1544,20 @@ async fn run_crossref(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
 
 /// Crossref 覆盖式更新：以 Crossref 数据为准，覆盖已有字段（仅非空值覆盖）。
 /// 用于上传后自动获取权威元数据。
-pub(crate) async fn run_crossref_override(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {
+pub(crate) async fn run_crossref_override(
+    db: Arc<Database>,
+    settings: Arc<Settings>,
+    doc_id: i64,
+) -> bool {
     let doc = match fetch_doc(&db, doc_id).await {
         Some(d) => d,
-        None => return,
+        None => return false,
     };
 
     // 仅在有 DOI 时查询（DOI 是最可靠的查询方式）
     let doi = match doc.doi.as_deref() {
         Some(d) if normalize_doi(d).is_some() => d,
-        _ => return,
+        _ => return false,
     };
 
     let client = CrossrefClient::new(None, None);
@@ -1561,7 +1565,7 @@ pub(crate) async fn run_crossref_override(db: Arc<Database>, settings: Arc<Setti
 
     let result = match result {
         Some(r) => r,
-        None => return,
+        None => return false,
     };
 
     // 保存原始 Crossref 返回
@@ -1602,7 +1606,7 @@ pub(crate) async fn run_crossref_override(db: Arc<Database>, settings: Arc<Setti
         .execute(db.pool())
         .await;
         info!("文档 {} 的 Crossref 英文元数据覆盖写入 i18n.{}", doc_id, lang);
-        return;
+        return true;
     }
 
     let authors_text = value_list_text(parsed, "authors");
@@ -1638,6 +1642,31 @@ pub(crate) async fn run_crossref_override(db: Arc<Database>, settings: Arc<Setti
     .bind(doc_id)
     .execute(db.pool())
     .await;
+
+    true
+}
+
+/// 上传（`extract_meta=full`）之后的元数据回填：先 Crossref，查不到就退化为 PDF 启发式抽取。
+///
+/// `fallback_heuristic` 由调用方决定：上传时若已经跑过启发式抽取（Info 字典里没 DOI 的那条 path），
+/// 就不必再跑一遍；`light` 模式也不回退（它只要 Crossref 的权威结果）。
+pub(crate) async fn run_crossref_or_heuristic(
+    db: Arc<Database>,
+    settings: Arc<Settings>,
+    doc_id: i64,
+    fallback_heuristic: bool,
+) {
+    if run_crossref_override(db.clone(), settings.clone(), doc_id).await {
+        return;
+    }
+    if !fallback_heuristic {
+        return;
+    }
+    info!(
+        "文档 {} 的 Crossref 没有可用记录，回退为 PDF 启发式抽取元数据",
+        doc_id
+    );
+    run_extract_pdf_meta(db, settings, doc_id).await;
 }
 
 async fn run_extract_pdf_meta(db: Arc<Database>, settings: Arc<Settings>, doc_id: i64) {

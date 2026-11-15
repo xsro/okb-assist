@@ -25,7 +25,7 @@ use crate::services::bibtex;
 use crate::services::file_state;
 use crate::services::citation::{self, CitationRecord};
 use crate::auth;
-use crate::routers::pipeline::run_crossref_override;
+use crate::routers::pipeline::run_crossref_or_heuristic;
 use crate::services::i18n::{self, list_to_db};
 
 use axum::http::{HeaderMap, HeaderValue};
@@ -1429,6 +1429,40 @@ async fn insert_document(db: &Database, doc: &Document) -> Result<i64, String> {
     .await
 }
 
+/// 上传时的元数据抽取模式（表单字段 `extract_meta`）
+///
+/// - `full`（默认）：先读 PDF **Info 字典** 拿 DOI → Crossref 回填；Info 里没有 DOI 时
+///   退化为启发式抽取（`services::pdf_meta`，题名/作者/年份/刊名/摘要/关键词 + 从正文里捞 DOI）。
+/// - `light`：只读 PDF **Info 字典** 拿 DOI → Crossref 回填，不抽正文。
+/// - `false`：完全跳过抽取（记录只有文件名 / 哈希 / 调用方显式传入的 DOI）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtractMode {
+    Full,
+    Light,
+    Off,
+}
+
+impl ExtractMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            ExtractMode::Full => "full",
+            ExtractMode::Light => "light",
+            ExtractMode::Off => "false",
+        }
+    }
+}
+
+/// 解析 `extract_meta` 表单值；`None` = 非法值（调用方返回 400）
+fn parse_extract_mode(raw: &str) -> Option<ExtractMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        // 空值 / 旧版布尔写法一律当作 full，保持既有上传行为不变
+        "" | "full" | "true" => Some(ExtractMode::Full),
+        "light" => Some(ExtractMode::Light),
+        "false" => Some(ExtractMode::Off),
+        _ => None,
+    }
+}
+
 async fn upload_document(
     axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,
@@ -1442,16 +1476,12 @@ async fn upload_document(
     // 流式落盘：整个上传过程不再把 PDF 读进内存，哈希在写入时顺带算好
     let mut uploaded: Option<(TempUpload, u64, String)> = None;
     let mut force = false;
-    let mut auto_process = true;
-    // 调用方可以显式声明 DOI（客户端从 Zotero 已知），这样服务端不用抽 PDF 元数据就能做 DOI 去重；
-    // 只有显式给出时才会做 DOI 去重（PDF 元数据里抽到的 DOI 不参与去重，避免影响既有上传流程）。
+    // 元数据抽取模式（缺省 full，保持 Web 上传的既有行为）
+    let mut extract_meta = ExtractMode::Full;
+    // 调用方可以显式声明 DOI（客户端从 Zotero 已知），这样服务端不用抽 PDF 元数据就能做 DOI 去重。
     let mut doi_field: Option<String> = None;
     // 命中重复时的行为：error（默认，409）| skip（200 + 已存在文档）| replace（用本次上传覆盖已有 PDF）
     let mut on_duplicate = "error".to_string();
-    // 是否做 PDF 元数据启发式抽取（默认 true，保持 Web 上传行为不变）。
-    // 批量上传（client-rs）会传 false：那一步要起几个 mutool 子进程、把整份文档的正文抽一遍，
-    // 是大文件上传后「等服务端处理」的主要耗时；不抽也能先把记录建好，之后再补。
-    let mut extract_meta = true;
     let temp_dir = upload_temp_dir(&settings);
 
     while let Ok(Some(mut field)) = multipart.next_field().await {
@@ -1482,13 +1512,24 @@ async fn upload_document(
                 let val = field.bytes().await.unwrap_or_default();
                 force = std::str::from_utf8(&val).unwrap_or("false") == "true";
             }
-            "auto_process" => {
-                let val = field.bytes().await.unwrap_or_default();
-                auto_process = std::str::from_utf8(&val).unwrap_or("true") != "false";
-            }
             "extract_meta" => {
                 let val = field.bytes().await.unwrap_or_default();
-                extract_meta = std::str::from_utf8(&val).unwrap_or("true") != "false";
+                let raw = String::from_utf8_lossy(&val).trim().to_lowercase();
+                match parse_extract_mode(&raw) {
+                    Some(mode) => extract_meta = mode,
+                    None => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "detail": format!(
+                                    "extract_meta 只支持 full / light / false，收到: {}",
+                                    raw
+                                )
+                            })),
+                        )
+                            .into_response()
+                    }
+                }
             }
             "doi" => {
                 let val = field.bytes().await.unwrap_or_default();
@@ -1536,11 +1577,25 @@ async fn upload_document(
         return (StatusCode::BAD_REQUEST, Json(json!({"detail": "文件为空"}))).into_response();
     }
 
+    // ── DOI 解析（显式字段优先，其次 PDF Info 字典）────────────────────
+    // Info 字典只需一次结构读取（`mutool show trailer.Info` / mupdf 的 `/Info`），
+    // light / full 两种模式都先走这一步；`extract_meta=false` 完全不读 PDF。
+    if doi_field.is_none() && extract_meta != ExtractMode::Off {
+        if let Some(doi) = crate::services::pdf_meta::doi_from_info_dict_async(
+            temp_upload.path().to_string_lossy().to_string(),
+        )
+        .await
+        {
+            tracing::info!("从 PDF Info 字典取到 DOI: {}", doi);
+            doi_field = Some(doi);
+        }
+    }
+
     // ── 去重 ────────────────────────────────────────────────────────────
     // 1. 哈希去重：只查 `file_hash` 索引，完全不碰 PDF 内容（原来的实现先抽元数据再比对，
     //    重复上传时要白白拆一次 PDF）；
-    // 2. DOI 去重：只在调用方**显式**传入 `doi` 时做（PDF 里抽到的 DOI 不参与，保持既有行为），
-    //    这样免掉拆 PDF 就能拦住 DOI 重复。
+    // 2. DOI 去重：用显式字段或 Info 字典里的 DOI；`full` 模式且 Info 字典没有 DOI 时
+    //    退化为启发式抽取（顺带从正文里搜出 DOI）再比对。
     // 命中重复时临时文件由 `TempUpload` 的 Drop 自动删除。
     let mut dup: Option<(Document, &'static str)> = None;
     // 去重阶段可能已经把元数据抽出来了，后面建记录时直接复用，不重复起 mutool 子进程
@@ -1549,10 +1604,8 @@ async fn upload_document(
         if let Some(existing) = find_doc_by_hash(&db, &file_hash).await {
             dup = Some((existing, "hash"));
         } else {
-            // DOI 去重：显式传入的 DOI 优先（客户端从 Zotero 已知，免拆 PDF）；
-            // 没传且允许抽元数据时，先从 PDF 里抽一次拿 DOI —— Web 上传本来就默认要抽元数据，
-            // 这里只是把这一步提前到去重之前，成本不变。
-            if doi_field.is_none() && extract_meta {
+            // Info 字典没有 DOI + full 模式：启发式抽取（题名/作者/年份/DOI…）
+            if doi_field.is_none() && extract_meta == ExtractMode::Full {
                 let meta = extract_pdf_metadata_from_path_async(
                     temp_upload.path().to_string_lossy().to_string(),
                     Some(filename.clone()),
@@ -1729,11 +1782,14 @@ async fn upload_document(
         }
     }
 
-    // PDF 元数据（后台线程读临时文件，不占用请求内存）；`extract_meta=false` 时整段跳过。
-    // 去重阶段若已抽过（为了拿 DOI）就直接复用，避免同一份 PDF 拆两遍。
+    // PDF 元数据（后台线程读临时文件，不占用请求内存）：只有 `full` 模式抽正文；
+    // `light` 只读 Info 字典（DOI 已在上一步拿到）、`false` 完全跳过。
+    // 去重阶段若已抽过（Info 字典没有 DOI 的 full 分支）就直接复用，避免同一份 PDF 拆两遍。
+    // `heuristic_ran` 决定上传完成后 Crossref 查不到时还要不要回退到启发式抽取（已经抽过就不重复）。
+    let heuristic_ran = meta_cache.is_some();
     let meta = match meta_cache {
         Some(m) => m,
-        None if extract_meta => {
+        None if extract_meta == ExtractMode::Full => {
             extract_pdf_metadata_from_path_async(
                 temp_upload.path().to_string_lossy().to_string(),
                 Some(filename.clone()),
@@ -1791,11 +1847,25 @@ async fn upload_document(
     // 写时同步：更新文件大小到数据库
     sync_doc_file_sizes(&db, &settings, doc_id).await;
 
-    // 如果有 DOI 且 auto_process 为 true，自动触发 Crossref 获取权威元数据
-    if auto_process && doc.doi.is_some() {
+    // 有 DOI（显式字段 / Info 字典 / full 模式从正文搜到的）就后台跑 Crossref 回填权威元数据；
+    // `full` 模式下 Crossref 查不到时回退为 PDF 启发式抽取（`light` 不回退）。
+    // `extract_meta=false` 完全不做抽取，也就没有回填。
+    if extract_meta != ExtractMode::Off && doc.doi.is_some() {
+        let fallback_heuristic = extract_meta == ExtractMode::Full && !heuristic_ran;
+        tracing::info!(
+            "文档 {} 上传完成（extract_meta={}），后台按 DOI 获取 Crossref 元数据（回退启发式抽取：{}）",
+            doc_id,
+            extract_meta.as_str(),
+            fallback_heuristic
+        );
         let db = db.clone();
         let settings = settings.clone();
-        tokio::spawn(run_crossref_override(db, settings, doc_id));
+        tokio::spawn(run_crossref_or_heuristic(
+            db,
+            settings,
+            doc_id,
+            fallback_heuristic,
+        ));
     }
 
     // 返回文档信息

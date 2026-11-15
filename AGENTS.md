@@ -663,8 +663,12 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
    - **列表列的存储格式**：`authors` / `keywords` 两列以及 `i18n.<lang>.authors` / `i18n.<lang>.keywords` 统一存 **`; ` 分隔纯文本**（写入一律走 `services::i18n::list_to_db`，空数组 → 空串；**不要再写 JSON 数组字符串**）。历史数据里的 `["A","B"]` 由 `database.rs::migrate_list_columns` 在启动时一次性转换（幂等，解析失败的行原样保留）。读取侧一律用 `services::i18n::parse_str_list`（先试 JSON、再按 `; , 、 ，` 拆），**不要再 `serde_json::from_str` 猜格式**——它遇到纯文本会直接落到 `[]`（向量库 payload 的 `authors`/`keywords` 就是这么丢的）。向量库 payload 仍下发字符串数组（`parse_str_list` 产出，`vector_db.rs` 按数组写入）。
    - **文件事実筛选与文件构成统计**：列取端点 `?pdf_state=｜md_state=｜zip_state=`（`present` / `absent` / `unknown`，逗号多选，非法值 400）与 `search-info` **共用** `documents::state_condition(kind, raw)`（不占绑定参数），所以从监控面板带入的筛选在搜索时不会丢掉；`GET /assist/api/admin/stats` 额外返回 `file_counts`（`pdf_only` / `pdf_and_md` / `md_only` / `none` / `with_zip`，按 `pdf_size`/`md_size`/`zip_size` 聚合，零磁盘 IO），前端「监控面板」的「文件构成」卡片点进去就是带 `?pdf_state=&md_state=` 的文献列表（`md_size` 为 `NULL`/`0` 都算「不存在」）。
    - **全量比对索引**（`GET /documents/doi-hash-index`）：一次返回库内全部文献的 `{count, with_doi, with_hash, generated_at, documents:[{id, doi, doi_key, file_hash, pdf_health}]}`（`doi_key` 已归一化小写，空 DOI/空哈希为 `null`），供 `client-rs` 批量比对；客户端拉一次就完成整库比对，不再按 DOI 逐条请求 `by-doi`。只返回比对必需字段（不带 title/abstract），新增字段时注意保持轻量。
-   - **可跳过元数据抽取**：表单字段 `extract_meta`（缺省 `true`）为 `false` 时整段跳过 `extract_pdf_metadata_from_path_async`（`meta` 用空 JSON 对象，`fill_meta_fields` 全部字段保持空）。这一步在 mutool 引擎下要起 3 个子进程、其中 `mutool draw -F text` 会把**整份文档**正文抽一遍，是大文件上传后「等服务端处理」的主要耗时。`client-rs` 批量上传**默认**传 `extract_meta=false`（`--extract-meta` 开启），事后可用 `POST /assist/api/pipeline/extract-pdf-meta/:id`（文档管理页 / 流水线）补上；Web 上传不传该字段，行为不变。
-   - **上传去重**（`POST /documents/upload`，`upload_document`）：先用 `find_doc_by_hash`（只查 `file_hash` 索引，**不抽 PDF 元数据**）比哈希；未命中再比 DOI —— DOI 来源有两个，**显式表单字段优先**，否则在 `extract_meta=true`（默认）时**先从 PDF 抽一次元数据拿 DOI**（本来就默认要抽，只是提到去重之前；抽完的结果缓存进 `meta_cache`，建记录时复用，不重复拆 PDF），`extract_meta=false`（client-rs 批量上传）则不做这层 DOI 去重。
+   - **元数据抽取模式**（表单字段 `extract_meta`，三态，缺省 `full`）：
+     - `full`（默认，Web 上传不传即此值）：先读 PDF **Info 字典** 拿 DOI（`pdf_meta::doi_from_info_dict_async`，单次 `mutool show trailer.Info` / mupdf 遍历 `/Info`）→ 有 DOI 就 `tokio::spawn(pipeline::run_crossref_or_heuristic)` 走 Crossref 回填权威元数据；Info 字典**没有** DOI 时退化为启发式抽取（`extract_pdf_metadata_from_path_async`，题名/作者/年份/刊名/摘要/关键词 + 从正文里搜 DOI），搜到 DOI 也跑 Crossref。**Crossref 查不到（无记录/断网）时 `run_crossref_or_heuristic` 会回退为「PDF 启发式抽取」（复用 `pipeline::run_extract_pdf_meta`，只补空字段）**—— 但上传阶段已经跑过启发式的（Info 字典没 DOI 的那条路径）不会重复跑；想补 Crossref 记录可事后调 `POST /assist/api/admin/fill-crossref`。
+     - `light`：只做 Info 字典 DOI → Crossref，**不抽正文**（不再起 `mutool draw -F text`，上传后「等服务端处理」基本只剩落盘 + 落库）。
+     - `false`：完全跳过（`meta` 为空对象、不读 PDF、不跑 Crossref），记录只有文件名 / 哈希 / 调用方显式传入的 `doi`。`client-rs` 批量上传**默认**传 `extract_meta=false`（`--extract-meta` 改成传 `full`），事后可用 `POST /assist/api/pipeline/extract-pdf-meta/:id`（文档管理页 / 流水线）补上。
+     - 其他值 → **400**；`true`/空串 按 `full` 处理（兼容旧布尔写法）。**不要再加 `auto_process` 字段**（已删除）：Crossref 回填由「模式 ≠ false 且解析出 DOI」决定。
+   - **上传去重**（`POST /documents/upload`，`upload_document`）：先用 `find_doc_by_hash`（只查 `file_hash` 索引，**不抽 PDF 元数据**）比哈希；未命中再比 DOI —— DOI 来源：**显式表单字段优先**，否则 `extract_meta` ≠ `false` 时读一次 **PDF Info 字典**（`light`/`full` 都走，成本只有一次结构读取）；`full` 模式且 Info 字典没有 DOI 时才退化为启发式抽取拿 DOI（结果缓存进 `meta_cache`，建记录时复用，不重复拆 PDF）；`extract_meta=false` 且没有显式 `doi` 时不做这层 DOI 去重。
 
      **DOI 命中的两种处置**（这是 Web 上传的主流程）：
      - 已有条目**没有 PDF**（`doc_has_pdf_file()`：`pdf_size > 0` 或磁盘上确实有非空文件）→ **自动补入**那个条目，不新建记录，200 `{status:"attached", attached:true, reason:"doi", existing_id, id, doc}`（前端显示「已补入已有条目」）；
@@ -689,6 +693,12 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 - **并发限制**：两级信号量独立控制。**全局** `Semaphore(max_concurrent_tasks)`（`system.json` 默认 `3`）限制 extract（Ollama 元数据抽取）和 index（向量索引）的并发。**MinerU 专用** `Semaphore(max_tasks)`（每个配置独立，默认 `3`）限制 PDF 解析并发。两者互不抢占，避免 MinerU 慢解析阻塞其他文档的抽取/索引。
 - **批量进度 / 暂停状态存于进程内存**：模块级全局变量，**进程重启即丢失**。重启后需手动重新触发。
 - **维护类任务也走后台**：`POST /assist/api/admin/recalculate-hashes`（重算 `file_hash`）、`POST /assist/api/admin/check-pdf-health`（批量 PDF 健康检查）、`POST /assist/api/admin/sync-file-sizes`（同步文件大小）都立即返回、后台执行。三者都支持 `?only_missing=1`（也接受 `true` / `yes` / `on`）：只处理「缺失」的文档 —— `file_hash` 为空 / `pdf_health` 为空 / **`fs_synced_at` 为空（从未同步过文件事实）**，即「补缺」而非全量重做（注意：`size` 列为 `NULL` 现在表示「文件确实不存在」，**不再**是「缺失」），返回体里的 `only_missing` 回显实际模式；管理页「维护操作」里「补充缺失 …」与「… 全部」按钮成对使用同一端点。重算哈希与健康检查都是**逐个串行**（不并发、不占流水线信号量），每条用 `pipeline::track_maintenance_task()` 登记到「活跃任务」表（`task_type = "hash"` / `"pdf-health"`，进度为「第 i/N 条」，文案只存进程内、不写 `documents.status_message`）；进程内各有 `HASH_RECALC_RUNNING` / `PDF_HEALTH_RUNNING` 标记防止重复提交，进程重启即中断。
+
+另有 **Crossref 补齐**端点 `POST /assist/api/admin/fill-crossref`（admin）：按 `documents.doi` 逐个调
+`pipeline::run_crossref_override()`（一次 Crossref 查询 → 写 `crossref_path` 原始记录 → 覆盖式回填元数据），
+`?only_missing=1` 只处理「有 DOI 但本地还没有非空 crossref 记录文件」的文档（上传时 Crossref 没查到 / 当时断网）；
+同样**后台串行 + `track_maintenance_task(task_type = "crossref")` + `CROSSREF_FILL_RUNNING` 防重复**，
+管理页「维护操作」里是「补充缺失的 Crossref 数据 / 重新抓取全部 Crossref」一对按钮。
 
 另有**同步**运维端点 `POST /assist/api/admin/database/checkpoint?mode=truncate`（admin）：执行
 `PRAGMA wal_checkpoint(<mode>)` 把 WAL 合并回主库（`passive` / `full` / `restart` / `truncate`，默认 `truncate`）。
@@ -978,7 +988,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
       - `request_start_log_middleware` 现在只负责 `/assist/mcp*` 的「请求开始」（MCP 鉴权在处理器内部，中间件层拿不到身份）。前端 `LogViewer.vue` 用 `callerOf()` / `callerTitle()` 先读 `fields`、再回退到 `span`，在每条请求前显示 `👤 用户名 · 角色`。
 
 23. **PDF 引擎是运行时选择，不是编译期开关**：`pdf_meta` / `pdf_health` 的公共入口一律先 `services::pdf_engine::active()` 再分发，mutool 那套实现**必须始终编译**（不要再加 `#[cfg(not(feature = "mupdf"))]`）。新增 PDF 能力时要两套实现都补，否则切引擎后会静默失能；另外 `mupdf` 引擎拿不到 stderr 诊断，依赖诊断的功能（如「损坏但可修复」判定）要在 UI 上提示用户切回 `mutool`。
-24. **BibTeX 导入的条目没有 PDF**：`import_bibtex` 建的记录写入 `fs_synced_at`（三个 size = NULL，即「已同步且确定不存在」）+ `pdf_health = 'missing'`，派生状态自然是 `uploaded` / 「PDF 缺失」；**不要**在 `do_parse_impl` 里把这种记录打成 `error`（worker 里已加「PDF 不存在就跳过」的真实文件守卫，批量解析只能空转一次）。后续补 PDF 有两条路：文档管理页的「替换 PDF」（`POST /documents/:id/pdf`），或直接在**上传页**传这份 PDF —— 只要 PDF 里的 DOI 能抽出来（`extract_meta` 默认开），就不会另建记录，而是**自动补进这个缺 PDF 的条目**（200 `status:"attached"`）。要强行建新记录用「强制上传」。
+24. **BibTeX 导入的条目没有 PDF**：`import_bibtex` 建的记录写入 `fs_synced_at`（三个 size = NULL，即「已同步且确定不存在」）+ `pdf_health = 'missing'`，派生状态自然是 `uploaded` / 「PDF 缺失」；**不要**在 `do_parse_impl` 里把这种记录打成 `error`（worker 里已加「PDF 不存在就跳过」的真实文件守卫，批量解析只能空转一次）。后续补 PDF 有两条路：文档管理页的「替换 PDF」（`POST /documents/:id/pdf`），或直接在**上传页**传这份 PDF —— 只要 PDF 的 DOI 能拿到（Info 字典直接有，或 `extract_meta=full` 时启发式从正文搜到），就不会另建记录，而是**自动补进这个缺 PDF 的条目**（200 `status:"attached"`）。要强行建新记录用「强制上传」。
 
 25. **`year` 列是 SQLite 动态类型，取出时必须 `CAST(NULLIF(TRIM(year), '') AS INTEGER)`**：老库里存在写成 `''`（TEXT 类型）的年份，sqlx 把 TEXT 解码成 `Option<i64>` 会直接报
     `mismatched types; Rust type Option<i64> (as SQL type INTEGER) is not compatible with SQL type TEXT`，**整条 `fetch_all` 一起失败**。

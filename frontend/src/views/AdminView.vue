@@ -167,6 +167,17 @@
           @click="batchExtractHeuristic"
         >批量启发式抽取元数据</button>
         <br>
+        <button
+          class="btn btn-outline"
+          title="只抓取「有 DOI 但本地还没有 Crossref 记录文件」的文档（上传时 Crossref 没查到 / 当时网络不通的都在内）；后台逐条执行，进度见下方「活跃任务」"
+          @click="fillMissingCrossref"
+        >补充缺失的 Crossref 数据</button>
+        <button
+          class="btn btn-outline"
+          title="逐个按 DOI 重新抓取所有文档的 Crossref 元数据并覆盖式回填（后台执行，进度见下方「活跃任务」）"
+          @click="fillAllCrossref"
+        >重新抓取全部 Crossref</button>
+        <br>
         <button class="btn btn-outline" @click="dedup">文献去重</button>
         <button class="btn btn-outline" @click="goDuplicates">手动去重</button>
       </div>
@@ -292,6 +303,7 @@ import {
   checkPdfHealth,
   deduplicateDocuments,
   syncFileSizes,
+  fillCrossref,
 } from '@/api/admin'
 import { startBatchParse, startBatchExtract } from '@/api/pipeline'
 import { usePipelineStore } from '@/stores/pipeline'
@@ -561,6 +573,30 @@ async function syncMissingFileSizes() {
     showToast(res.detail, 'success')
   } catch {
     showError('补充文件大小失败')
+  }
+}
+
+/** 只补还没有 Crossref 记录文件的文档（不动已有记录） */
+async function fillMissingCrossref() {
+  if (!confirm('确定只抓取「有 DOI 但还没有 Crossref 记录」的文档？任务在后台逐条执行，进度见下方「活跃任务」。')) return
+  try {
+    const res = await fillCrossref({ onlyMissing: true })
+    if (res.started === false) showInfo(res.detail)
+    else showToast(res.detail, 'success')
+  } catch {
+    showError('Crossref 补齐提交失败')
+  }
+}
+
+/** 逐个重抓全部带 DOI 的文档（覆盖式回填） */
+async function fillAllCrossref() {
+  if (!confirm('确定按 DOI 重新抓取所有文档的 Crossref 元数据？会覆盖式回填非空字段，任务在后台逐条执行，进度见下方「活跃任务」。')) return
+  try {
+    const res = await fillCrossref()
+    if (res.started === false) showInfo(res.detail)
+    else showToast(res.detail, 'success')
+  } catch {
+    showError('Crossref 重抓提交失败')
   }
 }
 

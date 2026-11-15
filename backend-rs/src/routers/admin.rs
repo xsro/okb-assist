@@ -59,6 +59,8 @@ pub fn router() -> axum::Router<()> {
         )
         .route("/assist/api/admin/sync-file-sizes/", post(sync_file_sizes))
         .route("/assist/api/admin/sync-file-sizes", post(sync_file_sizes))
+        .route("/assist/api/admin/fill-crossref/", post(fill_crossref_records))
+        .route("/assist/api/admin/fill-crossref", post(fill_crossref_records))
         .route("/assist/api/admin/file-state/reconcile/", get(file_state_reconcile))
         .route("/assist/api/admin/file-state/reconcile", get(file_state_reconcile))
         .route("/assist/api/admin/dedup/", post(dedup))
@@ -1066,6 +1068,147 @@ async fn check_document_pdf_health(
 /// 非阻塞：请求立即返回，后台遍历文档执行 stat。
 ///
 /// `?only_missing=1` 时只处理 `pdf_size` / `md_size` / `zip_size` 中有 `NULL` 的文档。
+
+// ── 补齐 Crossref 元数据（维护） ────────────────────
+
+/// Crossref 补齐后台任务是否正在执行（进程内标记，防止重复提交；重启即复位）。
+static CROSSREF_FILL_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// 任务结束（包括 panic）时复位运行标记。
+struct CrossrefFillGuard;
+
+impl Drop for CrossrefFillGuard {
+    fn drop(&mut self) {
+        CROSSREF_FILL_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// POST /assist/api/admin/fill-crossref —— 按 DOI 重新抓取 Crossref 元数据并写回。
+///
+/// **非阻塞**：请求立即返回，后台**逐个串行**执行（每条 = 一次 Crossref 查询 →
+/// 写 `crossref_path` 原始记录 → 覆盖式回填元数据），进度见「活跃任务」。
+///
+/// `?only_missing=1` 时只处理「有 DOI 但本地还没有 Crossref 记录文件」的文档
+/// （上传时 Crossref 没查到 / 当时网络不通 / 手删过 `data/markdowns/{id}_crossref.json` 都是这种）。
+async fn fill_crossref_records(
+    Extension(role): Extension<auth::Role>,
+    Extension(db): Extension<Arc<Database>>,
+    Extension(settings): Extension<Arc<Settings>>,
+    Query(q): Query<MaintenanceQuery>,
+) -> Json<Value> {
+    if let Err(_resp) = auth::assert_role(&role, &["admin"]) {
+        return Json(json!({"detail": "权限不足", "started": false}));
+    }
+    if CROSSREF_FILL_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Json(json!({
+            "detail": "Crossref 补齐已在后台执行中，请等待完成",
+            "started": false,
+        }));
+    }
+
+    let only_missing = q.only_missing;
+
+    tokio::spawn(async move {
+        let _guard = CrossrefFillGuard;
+
+        let docs: Vec<(i64, String)> = match sqlx::query_as(
+            "SELECT id, doi FROM documents WHERE doi IS NOT NULL AND TRIM(doi) <> '' ORDER BY id",
+        )
+        .fetch_all(db.pool())
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Crossref 补齐：查询带 DOI 的文档失败: {}", e);
+                return;
+            }
+        };
+
+        // only_missing：跳过已经有非空 Crossref 记录文件的文档
+        let targets: Vec<i64> = docs
+            .into_iter()
+            .filter(|(id, _)| {
+                if !only_missing {
+                    return true;
+                }
+                let path = paths::get_crossref_path(&settings, *id);
+                match std::fs::metadata(&path) {
+                    Ok(m) => m.len() == 0,
+                    Err(_) => true,
+                }
+            })
+            .map(|(id, _)| id)
+            .collect();
+
+        let total = targets.len() as i64;
+        tracing::info!(
+            "开始补齐 Crossref 元数据（{}）：共 {} 条，逐个串行执行",
+            if only_missing { "只补缺失" } else { "全量重捓" },
+            total
+        );
+
+        let mut filled = 0i64;
+        let mut no_result = 0i64;
+        // 用于「先登记下一行、再撤掉上一行」，保证活跃任务里始终有一条进度可见
+        let mut prev_doc_id: Option<i64> = None;
+
+        for (idx, doc_id) in targets.iter().enumerate() {
+            let doc_id = *doc_id;
+            crate::routers::pipeline::track_maintenance_task(
+                doc_id,
+                "crossref",
+                &format!(
+                    "补齐 Crossref：第 {}/{} 条（已写入 {}，无记录 {}）",
+                    idx + 1,
+                    total,
+                    filled,
+                    no_result
+                ),
+                idx as i32,
+                total as i32,
+            );
+            if let Some(prev) = prev_doc_id.take() {
+                crate::routers::pipeline::track_task_end(prev);
+            }
+            prev_doc_id = Some(doc_id);
+
+            if crate::routers::pipeline::run_crossref_override(
+                db.clone(),
+                settings.clone(),
+                doc_id,
+            )
+            .await
+            {
+                filled += 1;
+            } else {
+                no_result += 1;
+            }
+        }
+        if let Some(prev) = prev_doc_id {
+            crate::routers::pipeline::track_task_end(prev);
+        }
+
+        tracing::info!(
+            "Crossref 补齐完成：共 {} 条，写入 {} 条，Crossref 无记录 {} 条",
+            total,
+            filled,
+            no_result
+        );
+    });
+
+    Json(json!({
+        "detail": if only_missing {
+            "缺失 Crossref 数据的补齐任务已提交，后台逐个抓取中（进度见「活跃任务」）"
+        } else {
+            "Crossref 全量重捓任务已提交，后台逐个抓取中（进度见「活跃任务」）"
+        },
+        "started": true,
+        "only_missing": only_missing,
+    }))
+}
 // ── SQLite WAL checkpoint（运维） ───────────────────────────
 
 /// `POST /assist/api/admin/database/checkpoint` 的查询参数。
