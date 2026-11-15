@@ -30,7 +30,9 @@
           :highlight="highlight"
           :placeholder-images="!loadImages"
           :lazy-math="lazyMath"
+          :math-edit="canEdit"
           trusted
+          @edit-line="openFormulaEditor"
         />
         <!-- 底部哨兵元素（用于 IntersectionObserver） -->
         <div ref="sentinelEl" class="mdv-sentinel">
@@ -370,6 +372,32 @@ function openSourceEditor() {
   })
 }
 
+/**
+ * 公式渲染失败点「编辑」：打开编辑器并定位到该公式所在的源码行。
+ * 块级公式可能跨多行，所以用「起始行-结束行」整段传入 focus；
+ * line 只加载公式附近的一段窗口（太大块公式也会被完整包含）以保留上下文。
+ */
+function openFormulaEditor(range: { start: number; end: number }) {
+  toolbarOpen.value = false
+  const lineStart = Math.max(1, range.start)
+  const lineEnd = Math.max(lineStart, range.end)
+  const total = totalLines.value > 0 ? totalLines.value : lineEnd
+  const winStart = Math.max(1, lineStart - 20)
+  const winEnd = Math.min(
+    total,
+    Math.max(lineEnd, winStart + SOURCE_EDIT_WINDOW - 1)
+  )
+  const focus = lineEnd > lineStart ? `${lineStart}-${lineEnd}` : `${lineStart}`
+  router.push({
+    name: 'markdownEdit',
+    params: { id: String(docId.value) },
+    query: {
+      line: winEnd > winStart ? `${winStart}-${winEnd}` : `${winStart}`,
+      focus,
+    },
+  })
+}
+
 // ── 浮动 UI ──
 const tocOpen = ref(false)
 const toolbarOpen = ref(false)
@@ -696,7 +724,14 @@ function scrollToLine(targetLine: number) {
 // ===== 工具栏操作 =====
 
 function goBack() {
-  router.back()
+  if (!Number.isFinite(docId.value) || docId.value <= 0) {
+    void router.push({ name: 'home' })
+    return
+  }
+  void router.push({
+    name: 'detail',
+    params: { id: String(docId.value) },
+  })
 }
 
 function triggerSearch() {

@@ -648,6 +648,21 @@ defineExpose({
     const r = editor.getSelectionRange()
     return { startRow: r.start.row, endRow: r.end.row }
   },
+  /** 选中指定行范围并滚动到该处（0-based，相对编辑器内容；越界自动夹紧） */
+  revealLines(startRow: number, endRow: number) {
+    if (!editor) return
+    // 刚挂载时容器尺寸可能还没量到，先 resize 再滚动，否则 scrollToLine 可能不生效
+    editor.resize()
+    const lastRow = Math.max(0, editor.session.getLength() - 1)
+    const s = Math.min(Math.max(0, startRow), lastRow)
+    const e = Math.min(Math.max(s, endRow), lastRow)
+    editor.selection.setRange({
+      start: { row: s, column: 0 },
+      end: { row: e, column: editor.session.getLine(e).length },
+    } as any)
+    editor.scrollToLine(s, true, false)
+    editor.focus()
+  },
   /** 插入行内公式 $…$ */
   insertInlineMath() {
     if (editor) insertMarkdown('inline-math')

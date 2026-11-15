@@ -30,10 +30,16 @@ const props = withDefaults(defineProps<{
   placeholderImages?: boolean
   /** 公式按需渲染（视口内停留后才渲染 KaTeX），默认开启 */
   lazyMath?: boolean
+  /** 公式渲染失败时是否显示「编辑」按钮（阅读页对 admin 开启） */
+  mathEdit?: boolean
 }>(), {
   // 注意：布尔 prop 缺省时 Vue 会按 Boolean 转换规则变成 false，必须显式给默认值
   lazyMath: true,
+  mathEdit: false,
 })
+
+/** 公式渲染失败时点击「编辑」→ 带上公式所在的行范围（1-based，块级公式可能跨多行） */
+const emit = defineEmits<{ (e: 'edit-line', range: { start: number; end: number }): void }>()
 
 const viewerEl = ref<HTMLElement | null>(null)
 const renderedChunkIds = ref(new Set<number>())
@@ -118,7 +124,8 @@ function renderChunk(content: string, chunkId: number, startLine?: number) {
     const tokenHtml = replacePlaceholders(
       marked.parser([token], parseOpts) as string,
       matchById,
-      trusted
+      trusted,
+      startLine
     )
     const piece = document.createElement('div')
     piece.innerHTML = tokenHtml
@@ -165,15 +172,24 @@ function countTokenLines(raw: string, collapsed: Map<string, number>): number {
  */
 function replacePlaceholders(
   html: string,
-  matchById: Map<string, { id: string; latex: string; displayMode: boolean }>,
-  trusted: boolean
+  matchById: Map<string, { id: string; latex: string; displayMode: boolean; line?: number; lineSpan?: number }>,
+  trusted: boolean,
+  startLine?: number
 ): string {
   let result = html.replace(/@@MATH_(?:BLOCK|INLINE)_\d+@@/g, (whole) => {
     const m = matchById.get(whole)
     if (!m) return whole
     const escapedLatex = escapeHtml(m.latex)
     const raw = m.displayMode ? `$$${escapedLatex}$$` : `$${escapedLatex}$`
-    return `<span class="math-placeholder" data-math-id="${m.id}" data-math-latex="${escapedLatex}" data-math-display="${m.displayMode ? 'true' : 'false'}">`
+    // 起始/结束行（1-based，文件绝对行号）——块级公式可能跨多行，
+    // 只在有 chunk 起始行（阅读页）时才能算成绝对行号；编辑器预览保持未知。
+    let lineAttrs = ''
+    if (startLine !== undefined && m.line !== undefined) {
+      const lineStart = startLine + m.line + 1
+      const lineEnd = lineStart + (m.lineSpan ?? 0)
+      lineAttrs = ` data-math-line="${lineStart}" data-math-line-end="${lineEnd}"`
+    }
+    return `<span class="math-placeholder" data-math-id="${m.id}" data-math-latex="${escapedLatex}" data-math-display="${m.displayMode ? 'true' : 'false'}"${lineAttrs}>`
       + `<span class="math-raw">${raw}</span></span>`
   })
   if (!trusted) {
@@ -351,7 +367,13 @@ function renderMathElement(
     // throwOnError: true —— 让解析失败抛错，由我们自己渲染「错误信息」而不是 KaTeX 的红色源码
     html = katexRender(latex, { throwOnError: true, displayMode, strict: 'ignore' })
   } catch (err) {
-    el.outerHTML = mathErrorHtml(latex, displayMode, err)
+    el.outerHTML = mathErrorHtml(
+      latex,
+      displayMode,
+      err,
+      parseMathLine(el.dataset.mathLine),
+      parseMathLine(el.dataset.mathLineEnd)
+    )
     return
   }
 
@@ -370,17 +392,39 @@ function escapeAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+/** 从 data 属性里读行号（1-based）；无效值返回 undefined */
+function parseMathLine(v?: string | null): number | undefined {
+  if (!v) return undefined
+  const n = parseInt(v, 10)
+  return Number.isFinite(n) && n > 0 ? n : undefined
+}
+
 /**
  * 公式渲染失败的展示：只显示错误信息，不展示 LaTeX 源码
- * （LaTeX 原文只放在 title 里，悬停可查）
+ * （LaTeX 原文只放在 title 里，悬停可查）。
+ * 阅读页（admin）额外提供「编辑」按钮：块级公式可能跨多行，按起始行~结束行整段定位。
  */
-function mathErrorHtml(latex: string, displayMode: boolean, err: unknown): string {
+function mathErrorHtml(
+  latex: string,
+  displayMode: boolean,
+  err: unknown,
+  lineStart?: number,
+  lineEnd?: number
+): string {
   const raw = err instanceof Error ? err.message : String(err || '公式渲染失败')
   const msg = raw.replace(/^KaTeX parse error:\s*/i, '').replace(/\s+/g, ' ').trim() || '公式渲染失败'
   const cls = displayMode ? 'math-error math-error-block' : 'math-error'
+  const end = lineStart ? Math.max(lineStart, lineEnd ?? lineStart) : undefined
+  const editBtn = props.mathEdit && lineStart
+    ? `<button type="button" class="math-error-edit" data-edit-math`
+      + ` data-math-line="${lineStart}" data-math-line-end="${end}"`
+      + ` title="在 Markdown 编辑器中编辑第 ${lineStart}${end !== lineStart ? `-${end}` : ''} 行"`
+      + `>✎ 编辑</button>`
+    : ''
   return `<span class="${cls}" title="LaTeX：${escapeAttr(latex)}">`
     + `<span class="math-error-icon">⚠</span>`
     + `<span class="math-error-text">公式渲染失败：${escapeAttr(msg)}</span>`
+    + editBtn
     + `</span>`
 }
 
@@ -390,7 +434,13 @@ function markAllMathErrors(root: HTMLElement | null, message: string) {
   root.querySelectorAll<HTMLElement>('.math-placeholder[data-math-id]').forEach((el) => {
     cancelMathTimer(el)
     removePendingMath(el)
-    el.outerHTML = mathErrorHtml(el.dataset.mathLatex || '', el.dataset.mathDisplay === 'true', new Error(message))
+    el.outerHTML = mathErrorHtml(
+      el.dataset.mathLatex || '',
+      el.dataset.mathDisplay === 'true',
+      new Error(message),
+      parseMathLine(el.dataset.mathLine),
+      parseMathLine(el.dataset.mathLineEnd)
+    )
   })
 }
 
@@ -531,9 +581,22 @@ function clearHighlight() {
   })
 }
 
-// ===== 图片点击加载 =====
+// ===== 图片点击加载 / 公式错误「编辑」 =====
 function onViewerClick(e: MouseEvent) {
-  const btn = (e.target as HTMLElement).closest('[data-load-img]') as HTMLElement | null
+  const target = e.target as HTMLElement | null
+  if (!target) return
+
+  // 公式渲染失败 → 跳转到编辑器，定位到该公式所在行（块级公式可能跨多行）
+  const editBtn = target.closest('[data-edit-math]') as HTMLElement | null
+  if (editBtn) {
+    const start = parseMathLine(editBtn.dataset.mathLine)
+    if (!start) return
+    const end = Math.max(start, parseMathLine(editBtn.dataset.mathLineEnd) ?? start)
+    emit('edit-line', { start, end })
+    return
+  }
+
+  const btn = target.closest('[data-load-img]') as HTMLElement | null
   if (!btn) return
   const ph = btn.closest('.img-placeholder') as HTMLElement | null
   if (!ph?.dataset.src) return
@@ -693,6 +756,29 @@ onBeforeUnmount(() => {
 .markdown-viewer :deep(.math-error-text) {
   word-break: break-word;
   font-size: 0.9em;
+}
+
+/* 公式渲染失败时的「编辑」按钮（阅读页对 admin 显示） */
+.markdown-viewer :deep(.math-error-edit) {
+  flex: none;
+  margin-left: 4px;
+  padding: 0 8px;
+  border: 1px solid #f3c2c0;
+  border-radius: 4px;
+  background: #fff;
+  color: #b42318;
+  font-family: inherit;
+  font-size: 0.82em;
+  line-height: 1.7;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.markdown-viewer :deep(.math-error-edit:hover) {
+  background: #fde8e7;
+  border-color: #e5928e;
+}
+.markdown-viewer :deep(.math-error-edit:active) {
+  transform: scale(0.97);
 }
 
 /* ===== 图片占位符 ===== */

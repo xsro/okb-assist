@@ -3,7 +3,7 @@
     <!-- 编辑专用工具栏（全局 header 已由路由 meta.bare 隐藏） -->
     <header class="me-bar">
       <div class="me-bar-main">
-        <button class="me-icon-btn" title="返回阅读" @click="goBackToReading">←</button>
+        <button class="me-icon-btn" title="返回详情" @click="goBackToDetail">←</button>
         <span class="me-title">Markdown 编辑</span>
         <span v-if="docId > 0" class="me-doc-id">#{{ docId }}</span>
 
@@ -53,7 +53,7 @@
             title="保存 Ctrl+S"
             @click="save"
           >{{ saving ? '保存中…' : '保存' }}</button>
-          <button class="me-btn" @click="goBackToReading">退出</button>
+          <button class="me-btn" @click="goBackToDetail">退出</button>
         </div>
       </div>
 
@@ -68,7 +68,7 @@
         <p class="me-error-detail">{{ loadError }}</p>
         <div class="me-error-actions">
           <button class="me-btn" @click="retryLoad">重试</button>
-          <button class="me-btn" @click="goBackToReading">返回阅读</button>
+          <button class="me-btn" @click="goBackToDetail">返回详情</button>
           <button class="me-btn me-primary" @click="goHome">文献列表</button>
         </div>
       </div>
@@ -82,6 +82,7 @@
       </div>
       <AceEditor
         v-else
+        ref="editorRef"
         v-model="content"
         mode="markdown"
         theme="monokai"
@@ -103,13 +104,15 @@
  *
  * - 路由 `/assist/markdown/:id/edit?line=1-100` 进入，全屏专注编辑（meta.bare 隐藏全局 header/页脚）
  * - 行范围参数为 1-based：`a-b`（闭区间）、`a`（单行）、`a-`（到文件末尾）、留空（全文）
+ * - 可选 `focus=a-b`（1-based 行范围）：加载后选中并滚动到这段（公式渲染失败点「编辑」时用，
+ *   块级公式可能跨多行，所以是一个行范围，不只是单行）
  * - 读取使用 raw=1 + 行切片，写入用 `PUT .../markdown/lines/`（line_count = 已加载行数），
  *   读-改-写严格无损（与后端 split('\n') / join('\n') 互逆语义配对）
  * - Markdown 文件不存在（404）时显示错误页，不渲染编辑器
  * - 行范围可在页面内随时修改；切换范围会自动同步到 URL query（可分享 / 刷新保持）
  * - 有未保存修改时，切换范围、退出路由、关闭页面都会先确认
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { getMarkdown, saveMarkdownLines } from '@/api/documents'
 import type { MarkdownResponse } from '@/types/document'
@@ -198,6 +201,31 @@ async function loadRange(start0: number, count: number | null) {
   } finally {
     loading.value = false
   }
+  // 编辑器渲染完成后，按 URL 的 focus 选中/滚动到目标行（公式渲染失败的「编辑」入口）
+  await revealFocusFromQuery()
+}
+
+/** 编辑器实例（用于把光标定位到指定行范围） */
+const editorRef = ref<{ revealLines: (startRow: number, endRow: number) => void } | null>(null)
+
+/**
+ * 按 URL 的 `focus=a-b`（1-based）选中并滚动到该行范围。
+ * 只有该范围落在当前加载窗口内才生效（用户手动换了范围时不会乱跳）。
+ */
+async function revealFocusFromQuery() {
+  const q = route.query.focus
+  if (typeof q !== 'string' || !q.trim()) return
+  const parsed = parseRangeText(q)
+  if (!parsed) return
+  const absStart = parsed.start + 1
+  const absEnd = parsed.count === null ? absStart : parsed.start + parsed.count
+  const startRow = absStart - 1 - loadedStart.value
+  const endRow = absEnd - 1 - loadedStart.value
+  if (endRow < 0 || startRow >= loadedLines.value) return
+  const s = Math.max(0, startRow)
+  const e = Math.min(Math.max(s, loadedLines.value - 1), endRow)
+  await nextTick()
+  editorRef.value?.revealLines(s, e)
 }
 
 function applyLoaded(res: MarkdownResponse, requestedCount: number | null) {
@@ -266,7 +294,16 @@ function applyRangeInput() {
     showError('行范围格式无效，示例：1-100、120、120-（到末尾）或留空表示全文')
     return
   }
+  dropFocusQuery()
   void guardedLoad(parsed.start, parsed.count)
+}
+
+/** 用户手动切换行范围时去掉 focus，避免旧的目标行又抢走选区/滚动位置 */
+function dropFocusQuery() {
+  if (typeof route.query.focus !== 'string') return
+  const query = { ...route.query }
+  delete query.focus
+  void router.replace({ query })
 }
 
 /** 上一段 / 下一段（保持相同行数） */
@@ -274,6 +311,7 @@ function shiftRange(dir: -1 | 1) {
   const size = Math.max(1, loadedLines.value)
   const nextStart = loadedStart.value + dir * size
   if (nextStart < 0) return
+  dropFocusQuery()
   void guardedLoad(nextStart, size)
 }
 
@@ -337,15 +375,15 @@ async function save() {
 }
 
 // ── 导航 ──
-function goBackToReading() {
+/** 返回文档详情页（Markdown 阅读页与编辑页的「返回」统一回详情） */
+function goBackToDetail() {
   if (!docId.value) {
     void router.push({ name: 'home' })
     return
   }
   void router.push({
-    name: 'markdown',
+    name: 'detail',
     params: { id: String(docId.value) },
-    query: loadedStart.value > 0 ? { target_line: String(loadedStart.value + 1) } : {},
   })
 }
 
