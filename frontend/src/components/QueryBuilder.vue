@@ -128,44 +128,11 @@
           </div>
         </div>
 
-        <!-- 语法说明 -->
+        <!-- 语法说明：指向使用文档 -->
         <div class="qb-section">
-          <label class="qb-label">语法说明</label>
-          <table class="qb-help">
-            <tbody>
-              <tr>
-                <td class="qb-help-key">TAG=值</td>
-                <td>字段检索；值含空格时加引号：<code>SO="IEEE TRANSACTIONS"</code></td>
-              </tr>
-              <tr>
-                <td class="qb-help-key">AND / OR / NOT</td>
-                <td>布尔运算，<code>AND</code> 优先级高于 <code>OR</code>；相邻条件默认 AND</td>
-              </tr>
-              <tr>
-                <td class="qb-help-key">( )</td>
-                <td>分组改变优先级：<code>TI=(a OR b) AND PY=2023</code></td>
-              </tr>
-              <tr>
-                <td class="qb-help-key">* ? $</td>
-                <td><code>*</code> 任意字符、<code>?</code> 单个字符、<code>$</code> 0/1 个字符；不含通配符时按「包含」匹配</td>
-              </tr>
-              <tr>
-                <td class="qb-help-key">PY=2020-2023</td>
-                <td>数值范围，也可写 <code>PY&gt;2020</code> / <code>PY&gt;=2020</code> / <code>PY&lt;=2023</code></td>
-              </tr>
-              <tr>
-                <td class="qb-help-key">SORT=PY ORDER=desc</td>
-                <td>排序（不参与筛选）；<code>SORT</code> 支持 PY / TI / AU / SO / DT / id / updated_at</td>
-              </tr>
-              <tr>
-                <td class="qb-help-key">-条件</td>
-                <td>旧写法否定：<code>-PY:2020</code> 等价 <code>NOT PY=2020</code></td>
-              </tr>
-            </tbody>
-          </table>
-          <p class="qb-hint">
-            旧语法 <code>field:value</code>（如 <code>year:&gt;2020</code>、<code>type:article</code>）与
-            <code>TAG=value</code> 等价，历史链接与 MCP 调用不受影响；<code>NEAR</code> / <code>SAME</code> 目前按 AND 处理。
+          <p class="qb-hint qb-docs-tip">
+            完整语法说明请见
+            <router-link to="/assist/docs/search">使用文档 → 高级搜索语法</router-link>。
           </p>
         </div>
       </div>
@@ -443,8 +410,7 @@ defineExpose({ show })
   margin: 0;
   line-height: 1.6;
 }
-.qb-hint code,
-.qb-help code {
+.qb-hint code {
   padding: 1px 4px;
   border-radius: 3px;
   background: var(--bg, #f5f5f5);
@@ -566,25 +532,14 @@ defineExpose({ show })
   color: var(--primary, #1976d2);
 }
 
-/* ── 语法说明 ────────────────────────────────────────── */
-.qb-help {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-.qb-help td {
-  padding: 5px 8px;
-  border-bottom: 1px solid var(--border, #f0f0f0);
-  vertical-align: top;
-  color: var(--text-secondary, #666);
-  line-height: 1.6;
-}
-.qb-help-key {
-  white-space: nowrap;
-  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
-  color: var(--text, #333) !important;
+/* ── 语法说明（跳转使用文档） ────────────────────────── */
+.qb-docs-tip a {
+  color: var(--primary, #1976d2);
+  text-decoration: none;
   font-weight: 600;
-  width: 1%;
+}
+.qb-docs-tip a:hover {
+  text-decoration: underline;
 }
 
 /* ── 列管理 ──────────────────────────────────────────── */
@@ -649,9 +604,6 @@ defineExpose({ show })
   }
   .qb-overlay {
     padding: 10px;
-  }
-  .qb-help-key {
-    white-space: normal;
   }
 }
 </style>

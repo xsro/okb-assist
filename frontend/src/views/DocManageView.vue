@@ -218,6 +218,55 @@
       <h3>编辑元数据</h3>
       <p class="form-hint">留空即清空该字段；DOI 会自动去掉 <code>https://doi.org/</code> 等前缀，文档类型会映射到 Zotero 标准类型名。</p>
 
+      <h4 class="form-subtitle">书目</h4>
+      <div class="form-row">
+        <div class="form-group">
+          <label>年份</label>
+          <input v-model.number="form.year" type="number" min="1000" max="2200" placeholder="留空 = 清空" />
+        </div>
+        <div class="form-group">
+          <label>文档类型</label>
+          <select v-model="form.doc_type" class="doc-type-select">
+            <option value="">（未设置）</option>
+            <!-- 历史遗留值不在标准词表里时单独列出来，避免打开编辑页就被悄悄改掉 -->
+            <option v-if="legacyDocType" :value="legacyDocType">
+              {{ legacyDocType }}（历史值，保存后归一为 {{ docTypeLabel(normalizeDocType(legacyDocType)) }}）
+            </option>
+            <option v-for="opt in docTypeOptions" :key="opt.value" :value="opt.value">
+              {{ opt.label }}（{{ opt.value }}）
+            </option>
+          </select>
+          <p class="form-hint">候选来自后端标准词表（Zotero 类型名）；填其他值后端会归一化到最接近的候选。</p>
+        </div>
+        <div class="form-group">
+          <label>DOI</label>
+          <input
+            :value="form.doi ?? ''"
+            type="text"
+            placeholder="10.1234/abcd"
+            @input="onDoiInput"
+          />
+          <p class="form-hint">全角符号（．／：（）。、等）会自动转成半角。</p>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>来源（出版者 / 学位授予单位）</label>
+          <input v-model="form.source" type="text" />
+        </div>
+        <div class="form-group">
+          <label>分类</label>
+          <input v-model="form.category" type="text" />
+        </div>
+        <div class="form-group">
+          <label>语言</label>
+          <input v-model="form.language" type="text" list="language-options" placeholder="zh / en" />
+          <datalist id="language-options">
+            <option v-for="l in LANGUAGE_OPTIONS" :key="l" :value="l" />
+          </datalist>
+        </div>
+      </div>
+
       <h4 class="form-subtitle">
         主要语言（基础字段）
         <span v-if="baseLang()" class="subtitle-tag">{{ langLabel(baseLang()) }}（{{ baseLang() }}）</span>
@@ -303,49 +352,6 @@
         <button class="btn btn-sm btn-outline" @click="addLang()">＋ 添加语言</button>
       </CollapsiblePanel>
 
-      <h4 class="form-subtitle">书目</h4>
-      <div class="form-row">
-        <div class="form-group">
-          <label>年份</label>
-          <input v-model.number="form.year" type="number" min="1000" max="2200" placeholder="留空 = 清空" />
-        </div>
-        <div class="form-group">
-          <label>文档类型</label>
-          <select v-model="form.doc_type" class="doc-type-select">
-            <option value="">（未设置）</option>
-            <!-- 历史遗留值不在标准词表里时单独列出来，避免打开编辑页就被悄悄改掉 -->
-            <option v-if="legacyDocType" :value="legacyDocType">
-              {{ legacyDocType }}（历史值，保存后归一为 {{ docTypeLabel(normalizeDocType(legacyDocType)) }}）
-            </option>
-            <option v-for="opt in docTypeOptions" :key="opt.value" :value="opt.value">
-              {{ opt.label }}（{{ opt.value }}）
-            </option>
-          </select>
-          <p class="form-hint">候选来自后端标准词表（Zotero 类型名）；填其他值后端会归一化到最接近的候选。</p>
-        </div>
-        <div class="form-group">
-          <label>DOI</label>
-          <input v-model="form.doi" type="text" />
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>来源（出版者 / 学位授予单位）</label>
-          <input v-model="form.source" type="text" />
-        </div>
-        <div class="form-group">
-          <label>分类</label>
-          <input v-model="form.category" type="text" />
-        </div>
-        <div class="form-group">
-          <label>语言</label>
-          <input v-model="form.language" type="text" list="language-options" placeholder="zh / en" />
-          <datalist id="language-options">
-            <option v-for="l in LANGUAGE_OPTIONS" :key="l" :value="l" />
-          </datalist>
-        </div>
-      </div>
-
       <button class="btn" @click="saveMetadata" :disabled="saving">{{ saving ? '保存中…' : '保存' }}</button>
     </div>
 
@@ -383,6 +389,7 @@ import { useTokenStore } from '@/stores/token'
 import CollapsiblePanel from '@/components/CollapsiblePanel.vue'
 import { checkDocumentPdfHealth } from '@/api/admin'
 import { langLabel, normalizeLangKey } from '@/utils/lang'
+import { toHalfWidth } from '@/utils/text'
 import type { Document, I18nFields } from '@/types/document'
 import { deriveDocStatus } from '@/utils/docStatus'
 import {
@@ -676,6 +683,25 @@ async function saveMetadata() {
  * 那些是非元数据列，混在里面只会让人误以为能改。
  * 空串/空值 = 清空该字段（后端把空串写为 NULL）。
  */
+/**
+ * DOI 输入：自动把全角字符（中文输入法下的 ．／：（） 等）转成半角。
+ *
+ * 替换是逐字符 1:1 的，长度通常不变，所以转换后把光标放回原位；
+ * 输入法组合中（`isComposing`）不处理，避免打断中文输入。
+ */
+function onDoiInput(e: Event) {
+  const el = e.target as HTMLInputElement
+  if ((e as InputEvent).isComposing) return
+  const raw = el.value
+  const converted = toHalfWidth(raw)
+  form.value.doi = converted
+  if (converted !== raw) {
+    const pos = el.selectionStart ?? converted.length
+    el.value = converted
+    el.setSelectionRange(pos, pos)
+  }
+}
+
 function buildMetadataPayload(): Partial<Document> {
   const f = form.value
   const text = (v: unknown) => (v === null || v === undefined ? '' : String(v))
@@ -688,7 +714,8 @@ function buildMetadataPayload(): Partial<Document> {
     i18n: buildI18nPayload(),
     year: yearPayload(f.year),
     doc_type: text(f.doc_type),
-    doi: text(f.doi),
+    // 兜底：万一不是走输入框（脚本赋值 / 自动填充），保存前再转一次全角
+    doi: toHalfWidth(text(f.doi)),
     source: text(f.source),
     category: text(f.category),
     language: text(f.language)
