@@ -794,7 +794,7 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 | `detail/DocumentCitationPanel.vue` | 详情页「引用条目」折叠面板（BibTeX / GB/T 7714，可复制/下载） |
 | `QueryBuilder.vue` | 高级搜索面板：**WoS 风格检索式编辑器**（字段标签 / 运算符一键插入、实时语法校验、示例、语法说明）+ 列管理（双选项卡） |
 | `AceEditor.vue` | Markdown 编辑器（ace-builds 1.44.0），编辑+自适应分屏预览+KaTeX（桌面左右 / 移动上下，可拖拽比例）；`showToolbar` / `showPreviewControls` / `readOnly` 可裁剪为纯源码编辑器 |
-| `McpConfigPanel.vue` | MCP 配置面板 |
+| `McpConfigPanel.vue` | MCP 配置面板：展示当前账号/MCP 权限 + **「我的 MCP 令牌」管理**（本页直接创建、显示/复制明文、撤销、选用哪一把写入参考配置；没有令牌时提醒先创建；不再要求粘贴令牌、也不再用会话 token 生成配置） |
 | `McpSkillPanel.vue` | MCP Skill 面板 |
 | `config/` | 配置子组件：`BaseUrlSection.vue`、`PdfEngineSection.vue`、`MineruConfigSection.vue`、`LlmConfigSection.vue`、`LlmExtractConfigSection.vue`、`VectorDbConfigSection.vue` |
 | `BibtexImportPanel.vue` | 上传页的「从 BibTeX 批量新建条目」面板（选 `.bib` → 预览可新建/已存在 → 只为缺失条目建记录，逐条结果可跳转已有/新建文档）；`api/documents.ts::importBibtex(content, dryRun)` |
@@ -812,8 +812,8 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 | `/assist/drive/admin` | `DriveAdminView.vue` | 网盘管理：开关/单文件上限/默认配额、公有文件夹与角色阈值、逐用户配额 | admin |
 | `/assist` | `HomeView.vue` | 文献列表（桌面表格/移动卡片 + 列管理 + 高级搜索） | 全部 |
 | `/assist/detail/:id` | `DetailView.vue` | 文档详情（元信息 + PDF 元信息 / Crossref 记录 / 引用条目三个懒加载折叠区）。**访客可读**（路由 `meta.allowGuest`）：只显示书目信息 + 摘要，隐藏操作按钮/PDF 元信息等并给登录提示 | 全部（含访客） |
-| `/assist/markdown/:id` | `MarkdownView.vue` | Markdown 阅读（浮动设置按钮收纳全部工具；行号默认开、移动端默认关；设置面板的「源码编辑」跳到编辑器并从当前阅读行开始载入） | 全部 |
-| `/assist/markdown/:id/edit` | `MarkdownEditView.vue` | Markdown 编辑（AceEditor）；支持 `?line=a-b` 只载入指定行范围，阅读页「源码编辑」即跳到这里 | admin |
+| `/assist/markdown/:id` | `MarkdownView.vue` | Markdown 阅读（浮动设置按钮收纳全部工具；行号默认开、移动端默认关；设置面板的「源码编辑」跳到编辑器并从当前阅读行开始载入；「返回」回文档详情页） | 全部 |
+| `/assist/markdown/:id/edit` | `MarkdownEditView.vue` | Markdown 编辑（AceEditor）；支持 `?line=a-b` 只载入指定行范围（阅读页「源码编辑」即跳到这里），可选 `?focus=a-b` 加载后选中并滚动到这段（公式渲染失败点「编辑」用，公式可能跨多行）；「← / 退出」回文档详情页（不返回阅读页） | admin |
 | `/assist/upload` | `UploadView.vue` | 上传 PDF；命中重复时按情况提示（DOI 相同且已有条目缺 PDF → 服务端自动补入并显示「已补入已有条目」；已有 PDF → 队列项上出现「覆盖已有 PDF / 保留原 PDF」；同哈希 → 「强制上传（新建一条）」） | admin / view-upload |
 | `/assist/doc/:id` | `DocManageView.vue` | 文档管理（含「PDF 健康」单篇检查，仅 admin 可见） | 全部 |
 | `/assist/admin` | `AdminView.vue` | 监控面板（统计 + PDF 健康概览 + 维护操作 + 流水线监控） | admin |
@@ -867,6 +867,7 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 - 按 chunk 增量渲染：`chunk.id` 不变则不重渲染（`renderedChunkIds`）
 - 公式：`extractMathPlaceholders()` 先把 `$..$` / `$$..$$` 换成占位符，再按**视口惰性**用 KaTeX 渲染；MathJax 模式按 chunk 增量 `typesetPromise`
 - **公式渲染出错时只显示错误信息**：KaTeX 用 `throwOnError: true, strict: 'ignore'`，解析失败替换为 `.math-error`（`⚠ 公式渲染失败：<KaTeX 错误信息>`），**不显示 LaTeX 源码**（原文只放在 `title` 里供悬停查看）；KaTeX 整体加载失败时统一转为 `.math-error`（`markAllMathErrors`）。`mathMode: 'none'` 属于用户选择，仍显示原始 LaTeX。
+- **公式错误可直接去编辑**：`mathEdit` 为 true（阅读页对 admin 开启）且已知行号时，错误块里多一个「✎ 编辑」按钮；`MathMatch.line`（0-based，`utils/mathRenderer.ts` 单次扫描时记录）+ `lineSpan` 换算成文件绝对行号写在 `data-math-line` / `data-math-line-end`（块级公式可能跨多行，是**行范围**不是单行），点击 `emit('edit-line', {start, end})` → `MarkdownView` 跳 `markdownEdit`（`line` = 公式前后窗口、`focus` = 公式行范围）→ `AceEditor.revealLines()` 选中并滚动。编辑器预览/聊天/文档页（`content` 模式无 chunk 起始行）不显示该按钮。
 - 支持 `mathMode` / `loadImages` / `showLineNumbers` / `lazyMath` 等开关
 - **行号映射（`data-line`）**：行号为 1-based 且与原始 md 文件严格对应。实现方式是按 `marked` 的 top-level token 顺序累加 `token.raw` 的换行数；**多行块级公式被占位符折叠，必须用 `MathMatch.lineSpan` 把被吃掉的换行数补回**，否则每个跨 N 行的 `$$` 片段都会让后续行号漂移 N-1 行。逐块渲染用 `marked.parser([token])`，保证每个块能带上自己的起始行号
 - `data-line` 的消费方：阅读页行号栏、`?target_line=` 深链、搜索/TOC 跳转、「源码编辑」定位起点行（`currentReadingLine`）
