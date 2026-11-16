@@ -73,6 +73,19 @@ export function getPublicDocument(id: number) {
   return apiGet<PublicDocument>(`/assist/api/documents/public/${id}`)
 }
 
+/**
+ * DOI → 文献 ID（`/assist/doi/{doi}` 短链换页用）。
+ *
+ * 走 `public/` 前缀，未登录访客同样可用（需后端 `public_detail_enabled = true`，
+ * 否则 401 由 axios 拦截器转成跳登录页、登录后回跳本短链继续解析）。
+ * DOI 里必然带 `/`，所以整段做 `encodeURIComponent`，后端用通配符接住并解码。
+ */
+export function resolveDocIdByDoi(doi: string) {
+  return apiGet<{ found: boolean; id?: number }>(
+    `/assist/api/documents/public/by-doi/${encodeURIComponent(doi)}`
+  )
+}
+
 /** 更新文档元数据 */
 export function updateDocument(id: number, data: Partial<Document>) {
   return apiPut<Document>(`/assist/api/documents/${id}/`, data)

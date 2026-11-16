@@ -246,7 +246,8 @@ async fn persist_temp_file(mut temp: TempUpload, target: &str) -> std::io::Resul
     }
 }
 
-/// 访客（未登录）可读的公开详情端点前缀（`system.json` 的 `public_detail_enabled` 控制是否放行）
+/// 访客（未登录）可读的公开端点前缀（`system.json` 的 `public_detail_enabled` 控制是否放行）：
+/// `public/:id` 给书目信息，`public/by-doi/*doi` 只给 DOI 对应的文档 ID。
 pub const PUBLIC_DETAIL_PREFIX: &str = "/assist/api/documents/public/";
 
 pub fn router() -> axum::Router<()> {
@@ -254,6 +255,9 @@ pub fn router() -> axum::Router<()> {
         // 访客公开详情：**必须**注册在 `/assist/api/documents/:id` 之前（静态段优先）
         .route("/assist/api/documents/public/:id/", get(get_public_document))
         .route("/assist/api/documents/public/:id", get(get_public_document))
+        // DOI → 文档 ID（`/assist/doi/{doi}` 短链用）：DOI 必然带 `/`，所以用通配符收整段余量，
+        // 同时兼容前端 `encodeURIComponent` 后的 `%2F`（axum 的 Path 会自动解码）。
+        .route("/assist/api/documents/public/by-doi/*doi", get(resolve_public_doc_id_by_doi))
         .route("/assist/api/documents/", get(list_documents).post(upload_document))
         .route("/assist/api/documents", get(list_documents).post(upload_document))
         .route("/assist/api/documents/upload/", post(upload_document))
@@ -3184,6 +3188,25 @@ async fn by_doi(
             "doi": doi,
             "doi_key": doi_key(&doi),
         })).into_response(),
+    }
+}
+
+/// 按 DOI 解析文档 ID（挂在 `PUBLIC_DETAIL_PREFIX` 下，因此未登录能否解析同样由
+/// `system.json` 的 `public_detail_enabled` 决定）。
+///
+/// 只回 `id`，供前端 `/assist/doi/{doi}` 短链换页使用；书目信息仍走 `public/:id`
+/// （由 `PublicDocumentOut` 统一收窄），这里不碰 `doc_to_out()`。
+async fn resolve_public_doc_id_by_doi(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    Path(doi): Path<String>,
+) -> Response {
+    let Some(key) = doi_key(&doi) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "DOI 不能为空"}))).into_response();
+    };
+
+    match find_doc_by_doi(&db, &doi).await {
+        Some(d) => Json(json!({ "found": true, "id": d.id })).into_response(),
+        None => Json(json!({ "found": false, "doi": doi, "doi_key": key })).into_response(),
     }
 }
 

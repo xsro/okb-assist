@@ -43,6 +43,14 @@ const routes = [
     meta: { title: '文档详情', allowGuest: true }
   },
   {
+    // DOI 短链：/assist/doi/10.1038/s41586-020-2649-2 → 查库拿到 id 后替换成详情页。
+    // `(.*)?` 是因为 DOI 必然带 `/`（整段余量才算一个 DOI），同时兼容 %2F 写法。
+    path: '/assist/doi/:doi(.*)?',
+    name: 'doiResolve',
+    component: () => import('@/views/DoiResolveView.vue'),
+    meta: { title: 'DOI 定位', allowGuest: true }
+  },
+  {
     path: '/assist/upload',
     name: 'upload',
     component: () => import('@/views/UploadView.vue'),
