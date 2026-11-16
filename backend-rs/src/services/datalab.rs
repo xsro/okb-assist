@@ -21,7 +21,10 @@ use tracing::{debug, error, info, warn};
 /// Datalab 文档转换客户端
 pub struct DatalabClient {
     api_key: String,
+    /// 控制面：状态查询 / 提交（带整体超时，避免挂死）
     http: reqwest::Client,
+    /// 数据传输面：multipart 上传整份 PDF 动辄几分钟，不能设整体超时
+    http_stream: reqwest::Client,
 }
 
 impl DatalabClient {
@@ -34,6 +37,7 @@ impl DatalabClient {
                 .connect_timeout(std::time::Duration::from_secs(15))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
+            http_stream: crate::services::fetch::stream_client(),
         }
     }
 
@@ -78,7 +82,7 @@ impl DatalabClient {
         };
 
         let resp = self
-            .http
+            .http_stream
             .post(format!("{}/api/v1/convert", Self::base_url()))
             .header("X-API-Key", &self.api_key)
             .multipart(form)
@@ -223,7 +227,7 @@ impl DatalabClient {
         std::fs::create_dir_all(output_dir)?;
 
         // 保存图片（base64 解码后写入文件）
-        let mut saved_images: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut saved_images: Vec<String> = Vec::new();
 
         if let Some(images) = status["images"].as_object() {
             for (filename, value) in images {
@@ -250,7 +254,7 @@ impl DatalabClient {
                         }
                         if std::fs::write(&img_path, &img_data).is_ok() {
                             debug!("Datalab 图片保存: {:?} ({} 字节)", img_path, img_data.len());
-                            saved_images.push((filename.clone(), img_data));
+                            saved_images.push(filename.clone());
                         } else {
                             warn!("Datalab 图片写入失败: {:?}", img_path);
                         }
@@ -264,7 +268,7 @@ impl DatalabClient {
 
         // 所有图片打包为 images.zip
         if !saved_images.is_empty() {
-            save_images_zip(output_dir, &saved_images);
+            crate::services::mineru::save_images_zip_from_files(output_dir, &saved_images);
         }
 
         // 保存 markdown 文件
@@ -277,27 +281,5 @@ impl DatalabClient {
 
         info!("Datalab Markdown 已保存到: {:?}", md_path);
         Ok(md_path.to_string_lossy().to_string())
-    }
-}
-
-/// 将图片列表打包为 images.zip
-fn save_images_zip(output_dir: &str, images: &[(String, Vec<u8>)]) {
-    let images_zip_path = Path::new(output_dir).join("images.zip");
-    match std::fs::File::create(&images_zip_path) {
-        Ok(zip_file) => {
-            let mut zip_writer = zip::ZipWriter::new(zip_file);
-            let options = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Stored);
-            for (filename, data) in images {
-                if zip_writer.start_file(filename, options).is_ok() {
-                    use std::io::Write;
-                    let _ = zip_writer.write_all(data);
-                }
-            }
-            let _ = zip_writer.finish();
-        }
-        Err(e) => {
-            tracing::warn!("Datalab 无法创建 images.zip: {}", e);
-        }
     }
 }

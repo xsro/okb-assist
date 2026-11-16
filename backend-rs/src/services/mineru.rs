@@ -15,7 +15,7 @@
 //!    流程：上传文件 → 轮询任务 → 下载 Markdown
 
 use std::collections::HashMap;
-use std::io::{Cursor, Read, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -23,6 +23,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::MinerUConfig;
 use crate::services::datalab::DatalabClient;
+use crate::services::fetch::{self, DownloadPolicy};
 
 /// MinerU/Datalab 模式类型
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,7 +64,12 @@ pub struct MinerUClient {
     key: String,
     mineru_type: MineruType,
     tier: String,
+    /// 控制面客户端：提交任务 / 轮询状态（带 120s 整体超时，够用且不会挂死）
     http: reqwest::Client,
+    /// 数据传输客户端：大文件上传 / 解析结果包下载（**不带整体超时**，见 `services/fetch.rs`）
+    http_stream: reqwest::Client,
+    /// 下载兜底策略（重试次数 / 停滞超时）
+    download: DownloadPolicy,
     datalab_client: Option<DatalabClient>,
 }
 
@@ -89,6 +95,11 @@ impl MinerUClient {
                 .connect_timeout(std::time::Duration::from_secs(15))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
+            http_stream: fetch::stream_client(),
+            download: DownloadPolicy::from_config(
+                config.download_timeout,
+                config.download_retries,
+            ),
             datalab_client,
         }
     }
@@ -310,11 +321,41 @@ impl MinerUClient {
             }
         );
 
+        // 分片结果复用键：分片文件的 sha256（同一个原文件重复切出来的字节完全一致）。
+        // 同一个原文件被多个分片引用（页码范围退路）时只哈希一次。
+        let mut file_hashes: HashMap<String, String> = HashMap::new();
+        for chunk in chunks {
+            if file_hashes.contains_key(&chunk.file_path) {
+                continue;
+            }
+            match file_fingerprint(&chunk.file_path).await {
+                Ok((_, hash)) => {
+                    file_hashes.insert(chunk.file_path.clone(), hash);
+                }
+                Err(e) => {
+                    warn!("分片指纹计算失败（{}），本轮不复用旧结果: {}", chunk.file_path, e);
+                }
+            }
+        }
+
         for (idx, chunk) in chunks.iter().enumerate() {
             let chunk_dir = base.join(format!("chunk_{:03}", idx + 1));
+            let chunk_dir_str = chunk_dir.to_string_lossy().to_string();
+            let cache_key = chunk_cache_key(chunk, &file_hashes, &self.mineru_type, &self.tier, &self.base_url);
+
+            // 先看能不能复用上一轮已经拿到的分片结果：
+            // 官方 API 每一次重解析都要重新扣额度，而下载超时 / 进程重启导致的中断与解析结果本身无关。
+            if let Some(md) = reuse_chunk_result(&chunk_dir, &cache_key) {
+                info!("分片解析 [{}/{}]: 复用上次结果 {}", idx + 1, total, md);
+                md_paths.push(md);
+                pages_done += chunk.pages;
+                on_progress(pages_done.min(total_pages), total_pages);
+                cleanup_split_file(chunk);
+                continue;
+            }
+
             let _ = std::fs::remove_dir_all(&chunk_dir);
             std::fs::create_dir_all(&chunk_dir)?;
-            let chunk_dir_str = chunk_dir.to_string_lossy().to_string();
 
             info!(
                 "分片解析 [{}/{}]: {}，task_id 提交中...",
@@ -358,8 +399,10 @@ impl MinerUClient {
                 ));
             }
 
+            // 取结果也加一层重试：任务已经跑完，失败的大多数是结果包下载被网络打断，
+            // 重试会重新查一次 zip_url 并继续下载（不重新解析，不扣额度）。
             let md_path = match self
-                .get_task_result(&task_id, &chunk_dir_str, doc_id)
+                .get_task_result_with_retry(&task_id, &chunk_dir_str, doc_id)
                 .await
             {
                 Ok(p) => p,
@@ -379,6 +422,13 @@ impl MinerUClient {
                 total,
                 md_path
             );
+            // 写入分片缓存标记，下次中断后可直接复用（见 reuse_chunk_result）
+            if let Some(name) = Path::new(&md_path).file_name().and_then(|n| n.to_str()) {
+                let meta = json!({"version": 1, "key": cache_key, "md": name});
+                if let Err(e) = std::fs::write(chunk_dir.join(CHUNK_META_FILE), meta.to_string()) {
+                    warn!("写入分片缓存标记失败（{}）: {}", chunk_dir.display(), e);
+                }
+            }
             md_paths.push(md_path);
             pages_done += chunk.pages;
             on_progress(pages_done.min(total_pages), total_pages);
@@ -389,6 +439,36 @@ impl MinerUClient {
         let merged = merge_chunk_results(&md_paths, output_dir, doc_id)?;
         info!("分片解析完成: {} 片已合并 → {}", total, merged);
         Ok(merged)
+    }
+
+    /// 取任务结果，失败重试（任务已跑完，重试只是重新查 zip_url + 重新下载，不会重新解析）
+    async fn get_task_result_with_retry(
+        &self,
+        task_id: &str,
+        output_dir: &str,
+        doc_id: Option<i64>,
+    ) -> anyhow::Result<String> {
+        // 下载层已经自带重试（`DownloadPolicy`），这里只补「zip_url 过期 / 查询失败」这类情形，
+        // 所以最多再补 2 次，避免重试次数相乘太久。
+        let attempts = 1 + self.download.attempts.saturating_sub(1).min(2);
+        let mut last_err = String::from("未知错误");
+        for attempt in 1..=attempts {
+            match self.get_task_result(task_id, output_dir, doc_id).await {
+                Ok(path) => return Ok(path),
+                Err(e) => {
+                    last_err = e.to_string();
+                    warn!(
+                        "获取解析结果失败 (task_id={}, 第 {}/{} 次): {}",
+                        task_id, attempt, attempts, last_err
+                    );
+                    if attempt < attempts {
+                        let delay = (5 * attempt as u64).min(20);
+                        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    }
+                }
+            }
+        }
+        anyhow::bail!("{}", last_err)
     }
 
     /// 轮询单个分片任务，并把 API 回传的已解析页数换算成全局页数进度
@@ -555,10 +635,11 @@ impl MinerUClient {
         }
 
         let full_url = resolve_url(&self.base_url, url);
+        // 上传走 http_stream：大文件上传可能远超控制面的 120s 整体超时
         let mut req = match method.to_uppercase().as_str() {
-            "PUT" => self.http.put(&full_url),
-            "POST" => self.http.post(&full_url),
-            _ => self.http.put(&full_url),
+            "PUT" => self.http_stream.put(&full_url),
+            "POST" => self.http_stream.post(&full_url),
+            _ => self.http_stream.put(&full_url),
         };
 
         for (k, v) in headers {
@@ -702,7 +783,7 @@ impl MinerUClient {
 
         std::fs::create_dir_all(output_dir)?;
 
-        let mut zip_bytes: Option<Vec<u8>> = None;
+        let mut zip_path: Option<std::path::PathBuf> = None;
         let mut standalone_markdown: Option<String> = None;
 
         for file_entry in &output_files {
@@ -711,26 +792,36 @@ impl MinerUClient {
             if file_id.is_empty() {
                 continue;
             }
-
-            let content = match self.v1_download_file(file_id).await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("下载文件 {} 失败: {}", file_id, e);
-                    continue;
-                }
+            // 只下真正用得上的两种格式，且**流式落盘**（不再整包读进内存）
+            let dest = match format {
+                "markdown" => Path::new(output_dir).join("_standalone.md"),
+                "zip" => Path::new(output_dir).join("result.zip"),
+                _ => continue,
             };
+            if let Err(e) = self.v1_download_file_to(file_id, &dest).await {
+                warn!("下载文件 {} 失败: {}", file_id, e);
+                continue;
+            }
 
             match format {
-                "markdown" => standalone_markdown = Some(String::from_utf8_lossy(&content).to_string()),
-                "zip" => zip_bytes = Some(content),
+                "markdown" => {
+                    standalone_markdown = std::fs::read(&dest)
+                        .ok()
+                        .map(|b| String::from_utf8_lossy(&b).to_string());
+                    let _ = std::fs::remove_file(&dest);
+                }
+                "zip" => zip_path = Some(dest),
                 _ => {}
             }
         }
 
-        let (final_markdown, extracted_images) = if let Some(zip_data) = &zip_bytes {
-            extract_from_zip(zip_data, output_dir)
-        } else {
-            (None, Vec::new())
+        let (final_markdown, extracted_images) = match &zip_path {
+            Some(path) => {
+                let extracted = extract_from_zip_file(path, output_dir);
+                let _ = std::fs::remove_file(path);
+                extracted
+            }
+            None => (None, Vec::new()),
         };
 
         let md = if let Some(ref md_from_zip) = final_markdown {
@@ -742,7 +833,7 @@ impl MinerUClient {
         };
 
         if !extracted_images.is_empty() {
-            save_images_zip(output_dir, &extracted_images);
+            save_images_zip_from_files(output_dir, &extracted_images);
         }
 
         let md_filename = match doc_id {
@@ -754,51 +845,32 @@ impl MinerUClient {
         Ok(md_path.to_string_lossy().to_string())
     }
 
-    /// V1: 下载文件（支持 302 跳转）
-    async fn v1_download_file(&self, file_id: &str) -> anyhow::Result<Vec<u8>> {
+    /// V1: 下载文件到本地（流式落盘 + 重试 + 断点续传）
+    ///
+    /// 跳转交给 reqwest 默认策略处理（最多 10 跳，跨域时会自动去掉 `Authorization`），
+    /// 所以 CDN 直链不会收到 MinerU 的 token。
+    async fn v1_download_file_to(&self, file_id: &str, dest: &Path) -> anyhow::Result<u64> {
         let url = format!("{}/v1/files/{}/content", self.base_url, file_id);
-        let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&self.key)
-            .send()
-            .await
-            .map_err(|e| {
-                error!("V1 下载文件连接失败 (file_id={}): {}", file_id, e);
-                anyhow::anyhow!("MinerU 下载文件连接失败: {}", e)
-            })?;
-
-        if resp.status().is_success() {
-            let bytes = resp.bytes().await.map_err(|e| {
-                error!("V1 读取文件内容失败 (file_id={}): {}", file_id, e);
-                anyhow::anyhow!("读取文件内容失败: {}", e)
-            })?.to_vec();
-            info!("V1 文件下载成功, file_id={}, {} 字节", file_id, bytes.len());
-            return Ok(bytes);
-        }
-
-        if matches!(resp.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
-            if let Some(location) = resp.headers().get("location").and_then(|v| v.to_str().ok()) {
-                info!("V1 文件下载重定向: {} -> {}", url, location);
-                let redirect_resp = self.http.get(location).send().await.map_err(|e| {
-                    error!("V1 下载文件重定向连接失败: {}", e);
-                    anyhow::anyhow!("下载重定向连接失败: {}", e)
-                })?;
-                if redirect_resp.status().is_success() {
-                    let bytes = redirect_resp.bytes().await.map_err(|e| {
-                        error!("V1 读取重定向文件内容失败: {}", e);
-                        anyhow::anyhow!("读取重定向文件内容失败: {}", e)
-                    })?.to_vec();
-                    info!("V1 文件下载成功 (重定向), file_id={}, {} 字节", file_id, bytes.len());
-                    return Ok(bytes);
-                }
-                warn!("V1 文件下载重定向失败: HTTP {}", redirect_resp.status());
-                anyhow::bail!("MinerU file download redirect failed: HTTP {}", redirect_resp.status());
-            }
-        }
-
-        error!("V1 文件下载失败 (file_id={}): HTTP {}", file_id, resp.status());
-        anyhow::bail!("MinerU file download failed: HTTP {}", resp.status());
+        let headers: Vec<(&str, String)> = if self.key.is_empty() {
+            Vec::new()
+        } else {
+            vec![("Authorization", format!("Bearer {}", self.key))]
+        };
+        let size = fetch::download_to_file(
+            &self.http_stream,
+            &url,
+            dest,
+            &headers,
+            self.download,
+            &format!("V1 结果文件 {}", file_id),
+        )
+        .await
+        .map_err(|e| {
+            error!("V1 下载文件失败 (file_id={}): {}", file_id, e);
+            e
+        })?;
+        info!("V1 文件下载成功, file_id={}, {} 字节", file_id, size);
+        Ok(size)
     }
 
     // ════════════════════════════════════════════════════════
@@ -890,8 +962,9 @@ impl MinerUClient {
 
         // Step 2: 上传文件到预签名 URL
         // 阿里云 OSS 预签名 URL 的签名不含 Content-Type，需移除默认 Content-Type header
+        // 用 http_stream：整份 PDF / 大分片上传动辄几分钟，不能被 120s 整体超时刹断
         let put_req = self
-            .http
+            .http_stream
             .put(upload_url)
             .header("Content-Type", "");
         let put_req = match stream_file_body(put_req, file_path, file_size).await {
@@ -1095,26 +1168,28 @@ impl MinerUClient {
     ) -> anyhow::Result<String> {
         info!("正在从 {} 下载解析结果 ZIP", zip_url.chars().take(80).collect::<String>());
 
-        // 从 CDN 下载 ZIP
-        let resp = self.http.get(zip_url).send().await.map_err(|e| {
-            error!("下载 ZIP 连接失败: {}", e);
-            anyhow::anyhow!("下载 ZIP 连接失败: {}", e)
+        // 结果包先流式落盘（`result.zip`），再解压：
+        // 不再 `resp.bytes()` —— 既不占内存，也不再被 120s 整体超时提前掉断
+        let zip_path = Path::new(output_dir).join("result.zip");
+        let zip_size = fetch::download_to_file(
+            &self.http_stream,
+            zip_url,
+            &zip_path,
+            &[],
+            self.download,
+            "解析结果 ZIP",
+        )
+        .await
+        .map_err(|e| {
+            error!("下载解析结果 ZIP 失败: {}", e);
+            e
         })?;
 
-        if !resp.status().is_success() {
-            error!("下载 ZIP 失败: HTTP {}, url={}", resp.status(), zip_url.chars().take(80).collect::<String>());
-            anyhow::bail!("下载 ZIP 失败: HTTP {}", resp.status());
-        }
+        info!("ZIP 下载成功, 大小: {} 字节", zip_size);
 
-        let zip_bytes = resp.bytes().await.map_err(|e| {
-            error!("读取 ZIP 响应体失败: {}", e);
-            anyhow::anyhow!("读取 ZIP 响应体失败: {}", e)
-        })?.to_vec();
-
-        info!("ZIP 下载成功, 大小: {} 字节", zip_bytes.len());
-
-        // 从 ZIP 提取 markdown 和图片
-        let (final_markdown, extracted_images) = extract_from_zip(&zip_bytes, output_dir);
+        // 从 ZIP 提取 markdown 和图片（直接读盘，不在内存里再拷一份）
+        let (final_markdown, extracted_images) = extract_from_zip_file(&zip_path, output_dir);
+        let _ = std::fs::remove_file(&zip_path);
 
         let md = match final_markdown {
             Some(m) => {
@@ -1129,7 +1204,7 @@ impl MinerUClient {
 
         if !extracted_images.is_empty() {
             info!("从 ZIP 提取了 {} 张图片", extracted_images.len());
-            save_images_zip(output_dir, &extracted_images);
+            save_images_zip_from_files(output_dir, &extracted_images);
         }
 
         let md_filename = match doc_id {
@@ -1235,7 +1310,7 @@ impl MinerUClient {
             .part("file", part);
 
         let resp = self
-            .http
+            .http_stream
             .post(format!("{}/v1/agent/parse/file", self.base_url))
             .multipart(form)
             .send()
@@ -1353,25 +1428,30 @@ impl MinerUClient {
 
         info!("轻量 API 正在下载解析结果: task_id={}", task_id);
 
-        // 下载 markdown
-        let resp = self.http.get(md_url).send().await.map_err(|e| {
-            error!("轻量 API 下载 markdown 连接失败: {}", e);
-            anyhow::anyhow!("下载 markdown 连接失败: {}", e)
-        })?;
-
-        if !resp.status().is_success() {
-            error!("轻量 API 下载 markdown 失败: HTTP {}", resp.status());
-            anyhow::bail!("下载 markdown 失败: HTTP {}", resp.status());
-        }
-
-        let md_content = resp.text().await.map_err(|e| {
-            error!("轻量 API 读取 markdown 响应体失败: {}", e);
-            anyhow::anyhow!("读取 markdown 响应体失败: {}", e)
-        })?;
-
-        info!("轻量 API Markdown 下载成功, {} 字节", md_content.len());
-
         std::fs::create_dir_all(output_dir)?;
+
+        // 先落盘再读文本（不再 `resp.text()`，避免被整体超时 / 内存峰值卡住）
+        let tmp_path = Path::new(output_dir).join("_standalone.md");
+        let size = fetch::download_to_file(
+            &self.http_stream,
+            md_url,
+            &tmp_path,
+            &[],
+            self.download,
+            "轻量 API Markdown",
+        )
+        .await
+        .map_err(|e| {
+            error!("轻量 API 下载 markdown 失败: {}", e);
+            e
+        })?;
+
+        let md_content = std::fs::read(&tmp_path)
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+            .map_err(|e| anyhow::anyhow!("读取 markdown 文件失败: {}", e))?;
+        let _ = std::fs::remove_file(&tmp_path);
+
+        info!("轻量 API Markdown 下载成功, {} 字节", size);
 
         let md_filename = match doc_id {
             Some(id) => format!("{}.md", id),
@@ -1475,11 +1555,28 @@ pub(crate) async fn stream_file_part(
 }
 
 /// 从 ZIP 包中提取 markdown 和图片文件
-fn extract_from_zip(zip_data: &[u8], output_dir: &str) -> (Option<String>, Vec<(String, Vec<u8>)>) {
-    let mut markdown_content: Option<String> = None;
-    let mut image_bytes: Vec<(String, Vec<u8>)> = Vec::new();
+///
+/// 返回 `(markdown 内容, 已落盘的图片文件名列表)`。图片先写到 `output_dir`，
+/// **不再同时留一份在内存里** —— 一份 200 页的 VLM 解析结果可能上千张图，
+/// 在 OrangePi 这类小内存机器上双份拷贝很容易被 OOM 杀掉。
+fn extract_from_zip_file(zip_path: &Path, output_dir: &str) -> (Option<String>, Vec<String>) {
+    match std::fs::File::open(zip_path) {
+        Ok(file) => extract_from_zip_reader(std::io::BufReader::new(file), output_dir),
+        Err(e) => {
+            error!("打开解析结果 ZIP 失败 ({}): {}", zip_path.display(), e);
+            (None, Vec::new())
+        }
+    }
+}
 
-    if let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(zip_data)) {
+fn extract_from_zip_reader<R: Read + std::io::Seek>(
+    reader: R,
+    output_dir: &str,
+) -> (Option<String>, Vec<String>) {
+    let mut markdown_content: Option<String> = None;
+    let mut saved_images: Vec<String> = Vec::new();
+
+    if let Ok(mut archive) = zip::ZipArchive::new(reader) {
         for i in 0..archive.len() {
             if let Ok(mut entry) = archive.by_index(i) {
                 let name = entry.name().to_string();
@@ -1504,34 +1601,54 @@ fn extract_from_zip(zip_data: &[u8], output_dir: &str) -> (Option<String>, Vec<(
                         if let Some(parent) = img_path.parent() {
                             let _ = std::fs::create_dir_all(parent);
                         }
-                        let _ = std::fs::write(&img_path, &buf);
-                        image_bytes.push((fname, buf));
+                        if std::fs::write(&img_path, &buf).is_ok() {
+                            saved_images.push(fname);
+                        }
                     }
                 }
             }
         }
     }
 
-    (markdown_content, image_bytes)
+    (markdown_content, saved_images)
 }
 
-/// 将图片列表打包为 images.zip
-fn save_images_zip(output_dir: &str, images: &[(String, Vec<u8>)]) {
+/// 把 `output_dir` 里已落盘的图片打包为 `images.zip`（逐张读盘写入，不在内存里攒整包）
+pub fn save_images_zip_from_files(output_dir: &str, images: &[String]) {
+    let entries: Vec<(String, std::path::PathBuf)> = images
+        .iter()
+        .map(|name| (name.clone(), Path::new(output_dir).join(name)))
+        .collect();
+    save_images_zip_from_entries(output_dir, &entries);
+}
+
+/// 把「zip 内文件名 → 磁盘源文件」逐项写入 `images.zip`。
+///
+/// 分片合并时图片仍在各自 `chunk_NNN/` 目录里，只改名不改内容，
+/// 所以直接以源路径读流写 zip，不用先拷到 `output_dir`（少一次全量磁盘拷贝）。
+fn save_images_zip_from_entries(output_dir: &str, entries: &[(String, std::path::PathBuf)]) {
     let images_zip_path = Path::new(output_dir).join("images.zip");
     match std::fs::File::create(&images_zip_path) {
         Ok(zip_file) => {
             let mut zip_writer = zip::ZipWriter::new(zip_file);
             let options = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored);
-            for (filename, data) in images {
-                if zip_writer.start_file(filename, options).is_ok() {
-                    let _ = zip_writer.write_all(data);
+            for (filename, source) in entries {
+                let mut file = match std::fs::File::open(source) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        warn!("图片 {} 读取失败，未写入 images.zip: {}", source.display(), e);
+                        continue;
+                    }
+                };
+                if zip_writer.start_file(filename.as_str(), options).is_ok() {
+                    let _ = std::io::copy(&mut file, &mut zip_writer);
                 }
             }
             let _ = zip_writer.finish();
         }
         Err(e) => {
-            tracing::warn!("无法创建 images.zip: {}", e);
+            warn!("无法创建 images.zip: {}", e);
         }
     }
 }
@@ -1561,6 +1678,53 @@ impl ParseChunk {
             (None, false) => format!("{} 页", self.pages),
         }
     }
+}
+
+/// 分片结果缓存标记文件名（与 `{doc_id}.md` 同放在 `chunk_NNN/` 里）
+const CHUNK_META_FILE: &str = "chunk.json";
+
+/// 分片结果复用键：分片文件字节（sha256）+ 页码范围 + 分片方式 + MinerU 端信息。
+///
+/// 任一不同就不复用：换了 PDF（字节变了）、换了页码范围、换了解析档位/服务端都要重新解析。
+fn chunk_cache_key(
+    chunk: &ParseChunk,
+    file_hashes: &HashMap<String, String>,
+    mineru_type: &MineruType,
+    tier: &str,
+    base_url: &str,
+) -> String {
+    let hash = file_hashes.get(&chunk.file_path).cloned().unwrap_or_default();
+    if hash.is_empty() {
+        // 哈希失败：故意给一个不可能匹配的键（不复用，宁可重解析）
+        return String::new();
+    }
+    format!(
+        "{}|{}|{}|{:?}|{}|{}",
+        hash,
+        chunk.page_range.as_deref().unwrap_or("local-split"),
+        chunk.pages,
+        mineru_type,
+        tier,
+        base_url
+    )
+}
+
+/// 命中缓存时返回已下载的分片 Markdown 路径
+fn reuse_chunk_result(chunk_dir: &Path, cache_key: &str) -> Option<String> {
+    if cache_key.is_empty() {
+        return None;
+    }
+    let text = std::fs::read_to_string(chunk_dir.join(CHUNK_META_FILE)).ok()?;
+    let meta: Value = serde_json::from_str(&text).ok()?;
+    if meta["key"].as_str() != Some(cache_key) {
+        return None;
+    }
+    let md_name = meta["md"].as_str()?;
+    let md_path = chunk_dir.join(md_name);
+    if !md_path.is_file() {
+        return None;
+    }
+    Some(md_path.to_string_lossy().to_string())
 }
 
 /// 删掉本地切页产生的临时 PDF（`temporary = false` 时不动，避免误删原文件）
@@ -1662,7 +1826,7 @@ fn pages_in_range(range: &str) -> i64 {
     }
 }
 
-/// 是否为图片文件名（与 [`extract_from_zip`] 认可的扩展名一致）
+/// 是否为图片文件名（与 [`extract_from_zip_reader`] 认可的扩展名一致）
 fn is_image_name(name: &str) -> bool {
     let lower = name.to_lowercase();
     [
@@ -1670,6 +1834,14 @@ fn is_image_name(name: &str) -> bool {
     ]
     .iter()
     .any(|ext| lower.ends_with(ext))
+}
+
+/// 两个文件内容是否完全一致（分片图片判重用，只在字节数相同时才对比）
+fn files_equal(a: &Path, b: &Path) -> bool {
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
 }
 
 /// 合并各分片的结果目录为单一 Markdown + images.zip。
@@ -1686,8 +1858,10 @@ fn merge_chunk_results(
     std::fs::create_dir_all(out_dir)?;
 
     let mut merged = String::new();
-    // 已合并的图片：文件名 → 内容（用于判重与打包）
-    let mut images: HashMap<String, Vec<u8>> = HashMap::new();
+    // 已合并的图片：最终文件名 → (字节数, 源文件路径)。
+    // 只记路径不记内容：上千张图的 VLM 结果在 OrangePi 这类小内存机器上才能不爆。
+    let mut images: HashMap<String, (u64, std::path::PathBuf)> = HashMap::new();
+    let mut image_order: Vec<String> = Vec::new();
 
     for (idx, md_path) in md_paths.iter().enumerate() {
         let md_path = Path::new(md_path);
@@ -1710,24 +1884,23 @@ fn merge_chunk_results(
                 if !is_image_name(&name) {
                     continue;
                 }
-                let Ok(data) = std::fs::read(&path) else {
-                    continue;
-                };
-                match images.get(&name) {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let final_name = match images.get(&name) {
                     // 同名同内容（重复图片）：只保留一份
-                    Some(existing) if existing == &data => {}
-                    None => {
-                        images.insert(name, data);
-                    }
+                    Some((existing_size, existing_path))
+                        if *existing_size == size && files_equal(existing_path, &path) => continue,
+                    None => name,
                     // 同名不同内容：改名，避免后一片盖掉前一片的图
                     Some(_) => {
                         let renamed = format!("chunk{}__{}", idx + 1, name);
                         content = content.replace(&name, &renamed);
                         debug!("分片 {} 图片重名，{} → {}", idx + 1, name, renamed);
                         renames += 1;
-                        images.insert(renamed, data);
+                        renamed
                     }
-                }
+                };
+                images.insert(final_name.clone(), (size, path));
+                image_order.push(final_name);
             }
         }
         if renames > 0 {
@@ -1750,9 +1923,12 @@ fn merge_chunk_results(
     }
 
     if !images.is_empty() {
-        let list: Vec<(String, Vec<u8>)> = images.into_iter().collect();
-        info!("分片解析合并图片 {} 张", list.len());
-        save_images_zip(output_dir, &list);
+        let entries: Vec<(String, std::path::PathBuf)> = image_order
+            .iter()
+            .filter_map(|name| images.get(name).map(|(_, path)| (name.clone(), path.clone())))
+            .collect();
+        info!("分片解析合并图片 {} 张", entries.len());
+        save_images_zip_from_entries(output_dir, &entries);
     }
 
     let md_filename = match doc_id {

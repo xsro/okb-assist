@@ -31,6 +31,11 @@ pub struct MinerUConfig {
     /// 按 `page_chunk` 页切片逐片提交，最后合并 Markdown 与图片。
     /// `0` = 不分片（整份 PDF 一次提交）。
     pub page_chunk: usize,
+    /// 解析结果包（ZIP）下载的「停滞超时」（秒）：多少秒没有任何字节进账才算失败，
+    /// `0` = 不限。默认 120。**不是整包总超时**，慢链路会一直等到下完为止。
+    pub download_timeout: u64,
+    /// 解析结果包下载失败的重试次数（0 = 不重试），默认 3；重试会自动断点续传。
+    pub download_retries: u64,
 }
 
 /// 单个模型端点配置（协议 + 地址 + 凭据 + 模型名）。
@@ -151,6 +156,9 @@ impl Settings {
                 max_tasks: v["max_tasks"].as_u64().unwrap_or(3) as usize,
                 // 缺省 100 页：既照顾官方 API 的 200 页上限，也不会把任务切得太碎
                 page_chunk: v["page_chunk"].as_u64().unwrap_or(100) as usize,
+                // 结果包下载：停滞 120 秒算失败、失败重试 3 次（自动断点续传）
+                download_timeout: v["download_timeout"].as_u64().unwrap_or(120),
+                download_retries: v["download_retries"].as_u64().unwrap_or(3),
             })
             .collect()
     }

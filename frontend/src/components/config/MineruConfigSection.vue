@@ -96,7 +96,37 @@
               超过该页数时按此页数切片逐片解析再合并（官方 API 单文件上限 200 页）
             </p>
           </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>结果下载停滞超时 (秒)</label>
+            <input
+              v-model.number="mu.download_timeout"
+              type="number"
+              min="0"
+              step="30"
+              placeholder="120"
+              @input="emitUpdate"
+            />
+            <p class="field-hint">
+              多少秒没有任何字节进账才算失败（0 = 不限）；<strong>不是整包总超时</strong>，慢链路会一直等到下完
+            </p>
           </div>
+          <div class="form-group">
+            <label>结果下载重试次数</label>
+            <input
+              v-model.number="mu.download_retries"
+              type="number"
+              min="0"
+              max="10"
+              placeholder="3"
+              @input="emitUpdate"
+            />
+            <p class="field-hint">
+              失败后自动重试（断点续传，只补没下完的部分）；建议 3，0 = 不重试
+            </p>
+          </div>
+        </div>
         <div class="status-test-row">
           <span class="status-dot" :class="getStatusClass(idx)"></span>
           <span class="status-text">{{ getStatusText(idx) }}</span>
@@ -172,7 +202,9 @@ function defaultMineruConfig(): MinerUConfig {
     task_timeout: 300,
     tier: 'standard',
     max_tasks: 3,
-    page_chunk: 100
+    page_chunk: 100,
+    download_timeout: 120,
+    download_retries: 3
   }
 }
 

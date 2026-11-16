@@ -56,6 +56,10 @@ export interface MinerUConfig {
   max_tasks?: number
   /** 分片解析每片页数（0 = 不分片），默认 100；官方 API 单文件上限 200 页 */
   page_chunk?: number
+  /** 解析结果包下载「停滞超时」秒数（多少秒没字节进账才算失败，0 = 不限），默认 120 */
+  download_timeout?: number
+  /** 解析结果包下载失败重试次数（自动断点续传），默认 3 */
+  download_retries?: number
 }
 
 /** PDF 解析引擎：外部 mutool 命令行 或 内置 mupdf 库（需 --features mupdf） */

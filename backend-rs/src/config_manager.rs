@@ -121,6 +121,9 @@ pub fn default_config() -> serde_json::Value {
                 "max_tasks": 3,
                 // 分片解析每片页数（0 = 不分片）：官方 API 单文件上限 200 页
                 "page_chunk": 100,
+                // 解析结果包下载：停滞超时（秒，0 = 不限）与失败重试次数
+                "download_timeout": 120,
+                "download_retries": 3,
                 "task_timeout": 300,
                 "tier": "standard"
             }

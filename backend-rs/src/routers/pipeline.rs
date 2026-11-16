@@ -2642,6 +2642,11 @@ async fn reset(
     let zip_path = paths::get_asset_path(&settings, id);
     let md_removed = std::fs::remove_file(&md_path).is_ok();
     let zip_removed = std::fs::remove_file(&zip_path).is_ok();
+    // 分片解析的中间产物（chunk_NNN 的分片结果缓存 + 本地切页残留）一并删掉：
+    // 否则重新解析会「复用」上一轮的旧分片结果（见 services/mineru.rs 的分片缓存），
+    // 用户点了「清空解析产物」却拿到旧结果。
+    let upload_dir = std::path::Path::new(&settings.uploads_folder()).join(id.to_string());
+    remove_dir_all_ignore(&upload_dir);
     image_cache::invalidate(id);
 
     let _ = sqlx::query(

@@ -74,7 +74,7 @@ cargo build --release
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`drive.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/drive.rs` | 用户网盘：路径安全、角色阈值、配额统计、目录列举、Content-Type 推断 |
 | `backend-rs/src/services/pdf_engine.rs` | PDF 解析引擎运行时选择（`mutool` 命令行 / 内置 `mupdf`，含能力兜底） |
-| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`doc_type.rs`（**文档类型唯一词表**：归一化 / 标准列表 / Crossref 映射，见下方「文档类型词表」）、`file_state.rs`（文件事实 → 文献状态推导 + 运行时状态注册表 + 三态/PDF 健康 SQL 条件）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`（**检索式唯一解析器**：WoS 风格词法/语法分析 → AST → SQL，见易错点 29）、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存）、`pdf_split.rs`（mutool 按页切分 PDF，供 MinerU 分片解析） |
+| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`doc_type.rs`（**文档类型唯一词表**：归一化 / 标准列表 / Crossref 映射，见下方「文档类型词表」）、`file_state.rs`（文件事实 → 文献状态推导 + 运行时状态注册表 + 三态/PDF 健康 SQL 条件）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`（**检索式唯一解析器**：WoS 风格词法/语法分析 → AST → SQL，见易错点 29）、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存）、`pdf_split.rs`（mutool 按页切分 PDF，供 MinerU 分片解析）、`fetch.rs`（大文件上传/下载兜底：无整体超时的客户端 + 流式落盘 + 重试 + 断点续传，见「解析结果包下载兜底」） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
@@ -104,7 +104,7 @@ cargo build --release
 - `backend-rs/system.json`：系统配置，改后**必须重启进程**才生效（进程内缓存）。
 - 配置读取层：`backend-rs/src/config_manager.rs`（带锁 + 进程内缓存）；`backend-rs/src/config.rs:Settings` 是单例代理，属性每次从 JSON 实时读取。
 - 添加新配置字段时：在 `config_manager.rs` 的默认值中加默认值；若是敏感字段，扩展脱敏函数。
-- `config.json` 中 MinerU 配置支持多配置数组，通过 `active_mineru` 按 `name` 选择当前使用的配置。每个配置的 `max_tasks` 控制该 MinerU 服务的并发解析数（对应 `pipeline.rs` 中独立的 `MINERU_SEMAPHORE`），`task_timeout` 控制单任务超时，`page_chunk` 控制分片解析的每片页数（默认 100，见下方「MinerU 分片解析」），`token` 为 API 认证凭据。
+- `config.json` 中 MinerU 配置支持多配置数组，通过 `active_mineru` 按 `name` 选择当前使用的配置。每个配置的 `max_tasks` 控制该 MinerU 服务的并发解析数（对应 `pipeline.rs` 中独立的 `MINERU_SEMAPHORE`），`task_timeout` 控制单任务超时，`page_chunk` 控制分片解析的每片页数（默认 100，见下方「MinerU 分片解析」），`download_timeout` / `download_retries` 控制解析结果包的下载兜底（默认 120 秒停滞超时 / 重试 3 次，见下方「解析结果包下载兜底」），`token` 为 API 认证凭据。
 - 文件路径来自 `system.json` 的路径模板（含 `{id}` 占位符），在 `backend-rs/src/paths.rs` 解析，**不要**在 `Document` 模型里加路径列。
 
 ### MinerU 分片解析（`config.json` 的 `mineru[].page_chunk`）
@@ -138,9 +138,45 @@ cargo build --release
   放顶层会被静默忽略、返回整份文档——实测踩过）**；`datalab` → multipart 的 `page_range`；
   `official-lightweight` → `supports_page_range()` 为 false。
 - `task_timeout` 在分片模式下**按片计时**（每片各自一份超时），不是整份文档的总超时。
-- 分片模式**没有断点续传**：一次调用里串行跑完所有分片，`mineru_task_id` 全程为空（进入分片前会清空），
+- 分片模式不写 `mineru_task_id`：一次调用里串行跑完所有分片（进入分片前会清空），
   进度按「已解析页数 / 总页数」上报（`track_task_progress` + `track_task_clear_progress`，
-  文案「分片解析中：已解析 x/y 页」）。进程重启后需重新触发解析。
+  文案「分片解析中：已解析 x/y 页」）。进程重启后需重新触发解析，但**已下载的分片结果会被复用**（见下条）。
+- **分片结果复用（断点续跑）**：每片结果写完会在 `uploads/{id}/chunk_NNN/chunk.json` 落一个缓存标记，键是
+  「分片文件 sha256 + 页码范围 + 分片方式 + MinerU 类型/档位/URL」。重跑时键一致就直接复用那份 Markdown、
+  **不再重新提交解析**（官方 API 每次重解析都扣额度，而下载超时/进程重启与解析结果无关）。
+  换了 PDF（字节变了）、改了档位、或调了 `POST /pipeline/reset/:id`（会连同 `uploads/{id}` 一起清掉）即失效。
+
+### 解析结果包下载兜底（`services/fetch.rs`，`mineru[].download_timeout` / `download_retries`）
+
+历史问题（实测于 OrangePi + 家庭宽带）：解析结果 ZIP 下载时不时报
+`读取 ZIP 响应体失败: request or response body error: operation timed out` →
+`分片解析失败: 分片 1/3 获取结果失败: …`。根因不是 MinerU 慢，而是 MinerU 客户端原来**只有一个**
+带 `.timeout(120s)` 的 `reqwest::Client`，而这个超时是**整个请求（含响应体读完）**的时限，
+几十 MB 的 ZIP 在慢链路上读不完就被掐断，而且失败后**没有任何重试**（整个文档直接判死，已解析的分片全丢）。
+
+现在**控制面与数据面分开**（`MinerUClient` 有两个客户端，`DatalabClient` 同理）：
+
+| 客户端 | 用途 | 超时 |
+|---|---|---|
+| `http` | 提交任务、轮询状态、读 JSON | 整体 120s + 连接 15s |
+| `http_stream`（`fetch::stream_client()`） | **上传 PDF / 下载结果包 / 下载 Markdown** | 只有连接 20s，**无整体超时**；读多久由「停滞超时」控制 |
+
+`fetch::download_to_file()` 是唯一的结果包下载入口，兜底四件事：
+
+1. **流式落盘**：边读边写 `result.zip.part`，成功后才 rename 成 `result.zip`（不会把截断的包当完整结果），
+   也不再 `resp.bytes()` 把整包读进内存（小内存设备不再有 2–3 倍文件大小的内存峰值）；
+2. **停滞检测**：`download_timeout` 秒（默认 120，`0` = 不限）内**没有任何字节进账**才算失败——
+   慢但一直在动的下载会一直等到下完，不会在 120 秒处一刀切；
+3. **重试 + 断点续传**：失败后按 `download_retries`（默认 3）重试，重试用 `Range: bytes=N-` 续传，
+   只补没下完的部分；服务端不理 Range（回 200）时自动从头写；回 416 时丢弃半成品从头下；
+4. **进度与失败原因进日志**：每 5 秒一条 `下载中: x / y (n%)`，失败打「第 n/N 次下载失败: 原因」。
+
+额外两层兜底：`MinerUClient::get_task_result_with_retry()`（分片取结果失败后最多再补 2 次，
+重新查 `zip_url` 并继续下载，**不重新解析**）；解析结果解压改为从磁盘文件读（`extract_from_zip_file`），
+分片合并的图片也只记「最终名 → 源路径」（`save_images_zip_from_entries`），不再把上千张图全塞进内存。
+
+> 结论：看到 `读取 ZIP 响应体失败 … operation timed out` 时先看前面有没有 `下载中: …` 进度——
+> 有进度就是链路慢（把 `download_timeout` 调大或保持默认即可），没进度且连续重试都失败才是网络/服务端问题。
 
 ### LLM / 信息补全 / Embedding 配置（`config.json`）
 
@@ -975,6 +1011,7 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
 19. **静态目录的鉴权与内置路由不同**：它不走 `token_middleware`（后者只覆盖 `/assist/api/*`），而是在处理器内自己判（`static_files::authorize`：`okb_static` cookie / 会话・用户令牌 / 受信任子网），所以新增挂载时要保留这条判定，不能直接读文件。另外：`axum::body::Body` **不是 `Sync`**，`serve_mount` 里不能把 `&Request` 跨 `await` 传给 helper，否则整个 future 不再是 `Send`，axum 会报 `Handler` 未实现（现已改成传 `&str` / `&StaticMount`）。
 20. **前端启动重定向必须先 `await router.isReady()`**（`App.vue`）：硬导航（直接输入 URL / 外链）时 `route` 还是初始 `START_LOCATION`，`route.fullPath` 是 `/`，不等待会把 `?redirect=` 覆盖成 `/`，导致“登录后回跳”失效。
 21. **大文件唯一路径是流式**：上传/解析链路里 **禁止** `tokio::fs::read(整份 PDF)`、`field.bytes()`、`resp.bytes().to_vec()` 之后只为了“顺手算个哈希/交给下一个函数”。哈希用 `utils::calculate_file_hash_async`（流式）或 `stream_field_to_temp_file` 里顺带算；上传请求体用 `reqwest::Body::wrap_stream(ReaderStream::new(file))` **并显式给 `Content-Length`**（否则退化成 chunked，OSS 预签名 URL 会校验失败）；multipart 用 `Part::stream_with_length`。
+    - **大文件传输不能用带 `.timeout()` 的客户端**：`reqwest` 的 `Client::timeout` 是**整个请求（含响应体读完）**的时限，几十 MB 的解析结果 ZIP 在慢链路上会被它提前掰断（症状：`读取 ZIP 响应体失败: … operation timed out`）。所有上传/结果包下载一律用 `services/fetch.rs::stream_client()`（无整体超时 + 连接超时）+ `fetch::download_to_file()`（流式落盘 / 停滞超时 / 重试 / `Range` 续传），**不要**给下载客户端补 `.timeout()`，也不要走 `resp.bytes()`。
 22. **日志查看只读进程内环形缓冲，不读日志文件**：`logger.rs` 在文件层 / stdout 层之外多挂了一个 `fmt::layer().json()`（`RingBufferWriter`）——每条事件写完（写入器的 `Drop`）把**整行 JSON** 追加进 `LogStore` 的 `VecDeque`（`RING_CAPACITY = 2000`，进程重启即清空）。因为与 JSONL 文件层同源，缓冲里的行与 `okb-log.jsonl` 里的行逐字节一致。
     - `GET /assist/api/admin/logs?since=&level=&limit=&include_self=` 是**纯内存**增量接口（无 `spawn_blocking`、无磁盘 IO）：`since` 传上次响应的 `next_seq`，返回 `seq > since` 且不低于 `level` 的条目；`truncated = true` 表示命中数超过 `limit`（前端应立刻再拉一次追平），`lost` 是 `since` 之后被挤出缓冲区的条数。
     - **默认过滤掉本接口自身的请求日志**（`SELF_LOG_PATH = "/assist/api/admin/logs"`，匹配 `fields.path` / `fields.uri` / `spans[].uri`），否则前端每秒轮询会把自己的请求日志刷进列表；要看它们就传 `include_self=1`。过滤谓词在 `LogStore::snapshot` 内生效，`matched` / `truncated` / 游标都按过滤后的结果算，不会卡住游标。
@@ -1023,6 +1060,9 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
     判断依据：`/api/v4/extract-results/batch/{id}` 的 `extract_progress.total_pages` 仍是全文页数
     （切片成功时是这片页数）。本地 V1 是 `files[].page_range`（单数），Datalab 是 multipart 字段
     `page_range`，轻量 API 不支持页码参数（但支持本地切页）。
+    另外：**「分片解析失败: 分片 1/3 获取结果失败: 读取 ZIP 响应体失败: … operation timed out」不是解析失败**，
+    而是结果包下载被整体超时掰断（已修）。现象是 MinerU 那边任务已 `done`、日志里这个文档却没任何
+    `下载中:` 进度；处置与新增约定见上方「解析结果包下载兜底」与易错点 21。
 
 29. **检索式只有一套解析器：`services/query_parser.rs`（WoS 风格，兼容旧 `field:value`）**：`compile()` 直接返回
     `where_clause` + `binds` + `sort_by/order`，`routers/documents.rs::search_info` 是**唯一调用方**。
