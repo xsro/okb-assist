@@ -117,6 +117,8 @@ okb-client zotero <csv_file> [选项]
 - `--no-progress`             不显示上传进度（默认实时刷新已发送 / 总大小、速度、剩余时间）
 - `--upload-interval <SECONDS>` 每次上传之间的间隔秒数（默认 `1`；可写小数如 `0.5`，`0` 表示不等待）。
   新建上传与「更新 PDF」共用同一个计数，两次上传之间才等待，首个上传不等待
+- `-y, --yes`                不询问：新建全部选 `a`、更新全部选 `a`、末尾「确认执行」自动通过，用于脚本 / 定时任务
+  （与 `--dry-run` 同时使用时仍然不会上传）
 
 示例：
 ```
@@ -127,6 +129,7 @@ okb-client zotero data\我的文库.csv --dup-doi-action hash        # DOI 相�
 okb-client zotero data\我的文库.csv --dup-doi-action health-hash # 只修复不健康的 PDF
 okb-client zotero data\我的文库.csv --dup-doi-action hash --reuse-hash  # 复用上次算好的哈希，不重读 PDF
 okb-client zotero data\我的文库.csv --keys NTRNTRLJ,URB2Q2D5   # 只处理这两条
+okb-client zotero data\我的文库.csv -y             # 不询问，新建与更新全部直接执行
 ```
 
 ### `dir` — 目录 PDF 比对上传
@@ -150,10 +153,18 @@ okb-client zotero data\我的文库.csv --keys NTRNTRLJ,URB2Q2D5   # 只处理�
 
 - **需要上传的文件才计算哈希**：DOI 已经能定位到带 PDF 的条目就不读文件算 sha256，比旧版「逐个先算全目录哈希」快；
 - DOI 取自 Info 字典（`lopdf::Document::load_metadata`，只解析文件结构与 Info 字典、**不抽取正文**），
-  整本字典的字符串值都扫一遍、键名含 `doi` 的优先；扫描规则与服务端 `pdf_meta::scan_doi` 对齐
-  （含「`10.3969/j. issn.…`」这种被空格折断的接续），所以客户端与服务端算出的是同一个 DOI 串；
+  整本字典的字符串值都扫一遍；命中多个时按键名可信度取：**带 `article` 的 DOI 键 > 纯 `/doi` > 其他含 `doi` 的键
+  （`/WPS-JOURNALDOI` 这类刊级 DOI）> 其余字段**，`(ISSN)` / `(ISBN)` 形态的刊级/书级标识直接跳过
+  （WPS 导出的 PDF 常同时写 `/WPS-ARTICLEDOI` 与 `/WPS-JOURNALDOI`，后者会把同刊文章并成一条记录）；
+  排序后再扫，所以同一个文件每次比对出的 DOI 都一样；
+  扫描规则与服务端 `pdf_meta::scan_doi` 对齐（含「`10.3969/j. issn.…`」这种被空格折断的接续）；
+  **同一个值两边算出来一样**，但字典里有多个 DOI 键时客户端可能和服务端不同 —— 服务端
+  `doi_from_info_dict()` 按字典顺序取第一个命中（`custom` 是无序 map，可能拿到刊级 DOI），客户端按上面的键名排序取。
 - 分组清单每组默认最多列 200 条，未列出的同样在编号序列里、确认后一样会上传；
 - 确认提示：`y` 全部上传、`s` 逐个挑选（每个文件问一次 `y/N`）、其他任意输入 = 取消且不上传任何文件；
+  提示单独占一行、输入在下一行（避免半截提示在某些终端里看不见）；
+  **stdin 不是终端时不提问**（管道 / 重定向 / 后台执行），直接按取消处理并提示加 `-y`，不会卡在等待输入上；
+  加 `-y` 就不会停在提示上，清单打印完直接全部上传（无人值守场景）；
 - 服务端仍会做自己的哈希/DOI 去重（409），清单结论只是「要不要传」，不是最终判定；
   清单说「条目缺 PDF」但服务端回 409 `kind=doi` 时按「索引已过期」处理，计入「服务端去重」而不是失败；
 - 哈希比对优先用一次性拉到的全量索引（本地比对），索引拿不到时回退为逐文件 `diff-hashes`、DOI 回退为逐条 `by-doi`；
@@ -176,6 +187,7 @@ okb-client dir <目录路径> [选项]
 - `--no-progress`             不显示上传进度（默认实时刷新已发送 / 总大小、速度、剩余时间）
 - `--upload-interval <SECONDS>` 每次上传之间的间隔秒数（默认 `1`；可写小数如 `0.5`，`0` 表示不等待），
   适合服务端限速或不想一次压满带宽的场景
+- `-y, --yes`                不询问：清单照常打印，之后直接全部上传（等价于确认时按 `y`），用于脚本 / 定时任务
 
 示例：
 ```
@@ -184,6 +196,7 @@ okb-client dir ./downloads --dry-run
 okb-client dir D:\Papers -r --upload-interval 3   # 每次上传之间等 3 秒
 okb-client dir D:\Papers -r --upload-interval 0   # 尽可能快（默认是 1 秒）
 okb-client dir D:\Papers --dry-run                # 只提取 + 比对 + 打清单
+okb-client dir D:\Papers -r -y                    # 不询问，清单里的全部直接上传
 ```
 
 输出片段：

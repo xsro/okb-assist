@@ -1,7 +1,7 @@
 //! 子命令 `dir`：扫描目录中的 PDF，先用 lopdf 从 Info 字典取 DOI 与服务端比对，
 //! 打印待上传清单让用户确认，确认后才逐个上传
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -187,7 +187,7 @@ pub(crate) async fn run_dir(args: &DirArgs) -> Result<()> {
         return Ok(());
     }
 
-    let selected = choose_uploads(&candidates);
+    let selected = choose_uploads(&candidates, args.interval.yes);
     if selected.is_empty() {
         println!("已取消，未上传任何文件。");
         return Ok(());
@@ -630,12 +630,21 @@ fn print_plan(plans: &[FilePlan]) -> Vec<&FilePlan> {
     candidates
 }
 
-/// 让用户确认清单：`y` 全部上传、`s` 逐个挑选、其他 = 取消
-fn choose_uploads<'a>(candidates: &[&'a FilePlan]) -> Vec<&'a FilePlan> {
-    print!(
+/// 让用户确认清单：`y` 全部上传、`s` 逐个挑选、其他 = 取消；带 `-y` 时不询问，直接全部上传
+fn choose_uploads<'a>(candidates: &[&'a FilePlan], assume_yes: bool) -> Vec<&'a FilePlan> {
+    if assume_yes {
+        println!("已用 -y 自动确认：{} 个文件全部上传。", candidates.len());
+        return candidates.to_vec();
+    }
+    // 提示末尾带换行：半截行在部分终端（重定向 / ConPTY）里会一直留在缓冲里，看不出程序其实在等输入
+    println!(
         "确认上传这 {} 个文件？[y] 全部上传  [s] 逐个挑选  [n] 取消: ",
         candidates.len()
     );
+    if !io::stdin().is_terminal() {
+        println!("标准输入不是终端（管道 / 重定向 / 后台执行），不会等待输入；要直接上传请加 -y。");
+        return Vec::new();
+    }
     io::stdout().flush().ok();
     let mut answer = String::new();
     io::stdin().read_line(&mut answer).ok();
@@ -644,7 +653,7 @@ fn choose_uploads<'a>(candidates: &[&'a FilePlan]) -> Vec<&'a FilePlan> {
         "s" => {
             let mut selected: Vec<&FilePlan> = Vec::new();
             for plan in candidates {
-                print!("  上传 {}？[y/N]: ", plan.path.display());
+                println!("  上传 {}？[y/N]: ", plan.path.display());
                 io::stdout().flush().ok();
                 let mut one = String::new();
                 io::stdin().read_line(&mut one).ok();
@@ -665,7 +674,8 @@ fn choose_uploads<'a>(candidates: &[&'a FilePlan]) -> Vec<&'a FilePlan> {
 /// 用 lopdf 只读文件结构与 Info 字典（不解析正文）拿 DOI
 ///
 /// 与服务端 `extract_meta=light` 同源：出版商把 DOI 写进自定义 Info 键（`/doi`）很常见，
-/// 也可能混在 `/Subject`、`/Keywords` 里，所以整本字典的字符串值都扫一遍，键名含 doi 的优先。
+/// 也可能混在 `/Subject`、`/Keywords` 里，所以整本字典的字符串值都扫一遍，
+/// 排序规则见 `best_doi_from_entries`。
 /// `Err` = 连结构都没读出来（损坏 / 加密），`Ok(None)` = 读到了但里面没有 DOI，
 /// 两种情况都退化成按文件哈希比对。
 fn doi_from_pdf_info(path: &Path) -> Result<Option<String>> {
@@ -694,13 +704,40 @@ fn doi_from_pdf_info(path: &Path) -> Result<Option<String>> {
         }
     }
 
-    // 键名含 doi 的先扫：避免 `/Producer` 里恰好出现的 `10.x/…` 抢掉真正的 `/doi`
-    let hit = entries
-        .iter()
-        .filter(|(key, _)| key.to_ascii_lowercase().contains("doi"))
-        .chain(entries.iter().filter(|(key, _)| !key.to_ascii_lowercase().contains("doi")))
-        .find_map(|(_, value)| find_doi_in(value));
-    Ok(hit)
+    Ok(best_doi_from_entries(entries))
+}
+
+/// 按「键名可信度 → 键名」排序后逐个扫描，取第一个像 DOI 的值
+///
+/// `lopdf` 的 custom 是 HashMap，遍历顺序每次都不一样，直接扫会让同一个文件在两轮比对里
+/// 报出不同的 DOI；排序后结果与遍历顺序无关。
+fn best_doi_from_entries(entries: Vec<(String, String)>) -> Option<String> {
+    let mut entries = entries;
+    entries.sort_by(|a, b| {
+        doi_key_rank(&a.0)
+            .cmp(&doi_key_rank(&b.0))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    entries.iter().find_map(|(_, value)| find_doi_in(value))
+}
+
+/// Info 键名的 DOI 可信度（越小越先扫）
+///
+/// WPS 导出的 PDF 会把刊级 DOI 和文章 DOI 并存：`/WPS-ARTICLEDOI` = `10.1049/cth2.12206`、
+/// `/WPS-JOURNALDOI` = `10.1049/(ISSN)1751-8652`。后者标识的是**刊物**，拿它登记会把同刊文章
+/// 并成同一条记录，所以带 `article` 的键排最前，其次才是单纯的 `/doi`。
+fn doi_key_rank(key: &str) -> u8 {
+    let k = key.to_ascii_lowercase();
+    let plain: String = k.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if k.contains("doi") && k.contains("article") {
+        0
+    } else if plain == "doi" {
+        1
+    } else if k.contains("doi") {
+        2
+    } else {
+        3
+    }
 }
 
 /// `doi_from_pdf_info` 的异步版（读整个文件 + 解析结构都是阻塞操作，丢到后台线程）
@@ -794,6 +831,11 @@ fn find_doi_in(text: &str) -> Option<String> {
         // 后缀字符集是 ASCII，切片两端必然落在字符边界上
         let matched = &text[start..end];
         let extended = extend_doi_over_space(matched, &text[end..]);
+        // 刊级/书级标识不是这篇文献的 DOI（`10.1049/(ISSN)1751-8652`），继续找下一个候选
+        let lower = extended[3..].to_ascii_lowercase();
+        if lower.contains("(issn") || lower.contains("(isbn") {
+            continue;
+        }
         if let Some(doi) = normalize_doi(&extended) {
             return Some(doi);
         }
@@ -851,15 +893,52 @@ mod doi_tests {
     }
 
     #[test]
-    fn prefers_doi_named_info_keys() {
-        // 真实样本里见过的写法：自定义键 /doi 与 /Subject 混在一起
-        let mut dict = lopdf::Dictionary::new();
-        dict.set(b"Producer".as_slice(), lopdf::Object::string_literal("Acrobat 10.0 /10.9999/typo"));
-        dict.set(b"doi".as_slice(), lopdf::Object::string_literal("10.1000/real-doi"));
-        let hit = dict
-            .iter()
-            .filter(|(k, _)| String::from_utf8_lossy(k).to_ascii_lowercase().contains("doi"))
-            .find_map(|(_, v)| info_value_text(v).and_then(|t| find_doi_in(&t)));
-        assert_eq!(hit.as_deref(), Some("10.1000/real-doi"));
+    fn skips_journal_level_issn_doi() {
+        assert_eq!(find_doi_in("10.1049/(ISSN)1751-8652"), None);
+        // 同一串里先刊级后文章级：跳过前者
+        assert_eq!(
+            find_doi_in("10.1049/(ISSN)1751-8652; 10.1049/cth2.12206").as_deref(),
+            Some("10.1049/cth2.12206")
+        );
+        // 中文期刊 `j.issn.` 的常规写法不受影响
+        assert_eq!(
+            find_doi_in("10.3969/j.issn.1007-130X.2024.12.001").as_deref(),
+            Some("10.3969/j.issn.1007-130X.2024.12.001")
+        );
+    }
+
+    #[test]
+    fn prefers_article_doi_over_journal_doi() {
+        // 实测样本：WPS 导出的 PDF 里 /WPS-ARTICLEDOI 与 /WPS-JOURNALDOI 并存
+        let hit = best_doi_from_entries(vec![
+            (
+                "Subject".to_string(),
+                "IET Control Theory & Appl 2022.16:79-93".to_string(),
+            ),
+            (
+                "WPS-JOURNALDOI".to_string(),
+                "10.1049/(ISSN)1751-8652".to_string(),
+            ),
+            ("Producer".to_string(), "Acrobat 10.0".to_string()),
+            ("WPS-ARTICLEDOI".to_string(), "10.1049/cth2.12206".to_string()),
+        ]);
+        assert_eq!(hit.as_deref(), Some("10.1049/cth2.12206"));
+    }
+
+    #[test]
+    fn entry_order_does_not_change_the_result() {
+        // custom 是 HashMap，遍历顺序每次不同；排序后同一个文件必须每次给出同一个 DOI
+        let entries = vec![
+            ("doi".to_string(), "10.1000/real-doi".to_string()),
+            ("Producer".to_string(), "Acrobat 10.0 /10.9999/typo".to_string()),
+        ];
+        assert_eq!(
+            best_doi_from_entries(entries.clone()).as_deref(),
+            Some("10.1000/real-doi")
+        );
+        assert_eq!(
+            best_doi_from_entries(entries.into_iter().rev().collect()).as_deref(),
+            Some("10.1000/real-doi")
+        );
     }
 }

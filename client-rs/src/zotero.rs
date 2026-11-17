@@ -1047,23 +1047,28 @@ pub(crate) async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         for (i, dw) in new_entries.iter().enumerate() {
             println!("  [{:>3}] {} | {}", i + 1, dw.doi, dw.title.clone().unwrap_or_default());
         }
-        print!("\n新建策略 [a] 全部新建  [s] 逐个选择  [n] 全部跳过: ");
-        io::stdout().flush().ok();
-        let mut choice = String::new();
-        io::stdin().read_line(&mut choice).ok();
-        match choice.trim().to_lowercase().as_str() {
-            "a" => new_choices = vec![true; new_entries.len()],
-            "n" => new_choices = vec![false; new_entries.len()],
-            "s" => {
-                for (i, dw) in new_entries.iter().enumerate() {
-                    print!("  新建 [{}] {} ？[y/N]: ", i + 1, dw.doi);
-                    io::stdout().flush().ok();
-                    let mut ans = String::new();
-                    io::stdin().read_line(&mut ans).ok();
-                    new_choices.push(ans.trim().to_lowercase() == "y");
+        if args.interval.yes {
+            new_choices = vec![true; new_entries.len()];
+            println!("\n新建策略：-y 自动确认，全部新建。");
+        } else {
+            print!("\n新建策略 [a] 全部新建  [s] 逐个选择  [n] 全部跳过: ");
+            io::stdout().flush().ok();
+            let mut choice = String::new();
+            io::stdin().read_line(&mut choice).ok();
+            match choice.trim().to_lowercase().as_str() {
+                "a" => new_choices = vec![true; new_entries.len()],
+                "n" => new_choices = vec![false; new_entries.len()],
+                "s" => {
+                    for (i, dw) in new_entries.iter().enumerate() {
+                        print!("  新建 [{}] {} ？[y/N]: ", i + 1, dw.doi);
+                        io::stdout().flush().ok();
+                        let mut ans = String::new();
+                        io::stdin().read_line(&mut ans).ok();
+                        new_choices.push(ans.trim().to_lowercase() == "y");
+                    }
                 }
+                _ => new_choices = vec![false; new_entries.len()],
             }
-            _ => new_choices = vec![false; new_entries.len()],
         }
         println!();
     }
@@ -1098,23 +1103,28 @@ pub(crate) async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
                     preview_hash(local_hash.as_deref().unwrap_or("")));
             }
         }
-        print!("\n更新策略 [a] 全部更新  [s] 逐个选择  [n] 全部跳过: ");
-        io::stdout().flush().ok();
-        let mut choice = String::new();
-        io::stdin().read_line(&mut choice).ok();
-        match choice.trim().to_lowercase().as_str() {
-            "a" => update_choices = vec![true; to_update_pdf.len()],
-            "n" => update_choices = vec![false; to_update_pdf.len()],
-            "s" => {
-                for (i, (server_id, dw, _, _)) in to_update_pdf.iter().enumerate() {
-                    print!("  更新 PDF [{}] ID={} ({}) ？[y/N]: ", i + 1, server_id, dw.doi);
-                    io::stdout().flush().ok();
-                    let mut ans = String::new();
-                    io::stdin().read_line(&mut ans).ok();
-                    update_choices.push(ans.trim().to_lowercase() == "y");
+        if args.interval.yes {
+            update_choices = vec![true; to_update_pdf.len()];
+            println!("\n更新策略：-y 自动确认，全部更新。");
+        } else {
+            print!("\n更新策略 [a] 全部更新  [s] 逐个选择  [n] 全部跳过: ");
+            io::stdout().flush().ok();
+            let mut choice = String::new();
+            io::stdin().read_line(&mut choice).ok();
+            match choice.trim().to_lowercase().as_str() {
+                "a" => update_choices = vec![true; to_update_pdf.len()],
+                "n" => update_choices = vec![false; to_update_pdf.len()],
+                "s" => {
+                    for (i, (server_id, dw, _, _)) in to_update_pdf.iter().enumerate() {
+                        print!("  更新 PDF [{}] ID={} ({}) ？[y/N]: ", i + 1, server_id, dw.doi);
+                        io::stdout().flush().ok();
+                        let mut ans = String::new();
+                        io::stdin().read_line(&mut ans).ok();
+                        update_choices.push(ans.trim().to_lowercase() == "y");
+                    }
                 }
+                _ => update_choices = vec![false; to_update_pdf.len()],
             }
-            _ => update_choices = vec![false; to_update_pdf.len()],
         }
         println!();
     }
@@ -1135,13 +1145,17 @@ pub(crate) async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     println!("  新建文献:  {}", new_count);
     println!("  更新 PDF:  {}", update_count);
     println!("  跳过:      {}", skip_count);
-    print!("\n确认执行？[Y/n]: ");
-    io::stdout().flush().ok();
-    let mut confirm = String::new();
-    io::stdin().read_line(&mut confirm).ok();
-    if confirm.trim().to_lowercase() == "n" {
-        println!("已取消。");
-        return Ok(());
+    if args.interval.yes {
+        println!("\n已用 -y 自动确认。");
+    } else {
+        print!("\n确认执行？[Y/n]: ");
+        io::stdout().flush().ok();
+        let mut confirm = String::new();
+        io::stdin().read_line(&mut confirm).ok();
+        if confirm.trim().to_lowercase() == "n" {
+            println!("已取消。");
+            return Ok(());
+        }
     }
     println!();
 

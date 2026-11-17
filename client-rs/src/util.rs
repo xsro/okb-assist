@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_stream::StreamExt;
 
-// ==================== 上传节流参数 ====================
+// ==================== 共用的上传选项 ====================
 
-/// 上传节流参数（`zotero` / `dir` 两个子命令共用）
+/// 两个子命令共用的上传选项（节流 / 超时 / 进度 / 元数据抽取 / 免确认）
 #[derive(clap::Args, Debug, Clone)]
 pub(crate) struct UploadIntervalArgs {
     /// 每次上传之间的间隔秒数（默认 1 秒；可写小数，0 表示不等待）
@@ -39,6 +39,13 @@ pub(crate) struct UploadIntervalArgs {
     /// `POST /assist/api/pipeline/extract-pdf-meta/:id` 补即可。
     #[arg(long)]
     pub(crate) extract_meta: bool,
+
+    /// 不询问，比对结果里所有「需要上传」的一律直接执行
+    ///
+    /// 用于脚本 / 定时任务：`dir` 等价于清单确认后按 `y`，`zotero` 等价于新建与更新都选 `a` 再确认 `Y`。
+    /// 与 `--dry-run` 同时使用时仍然不会上传。
+    #[arg(short = 'y', long = "yes")]
+    pub(crate) yes: bool,
 }
 
 impl UploadIntervalArgs {
