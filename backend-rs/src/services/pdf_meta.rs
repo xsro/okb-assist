@@ -42,6 +42,14 @@ pub fn normalize_doi(raw: &str) -> Option<String> {
     }
 }
 
+/// DOI **比较键**：[`normalize_doi`] 再去大小写差异，是「这两个 DOI 是不是同一个」的唯一判据。
+///
+/// 所有按 DOI 比对的路径（`by-doi`、`diff-dois`、去重检测、客户端全量索引）都必须走这里，
+/// 不要在外面直接对字符串相等比较。
+pub fn doi_key(raw: &str) -> Option<String> {
+    normalize_doi(raw).map(|d| d.to_lowercase())
+}
+
 /// 异步从磁盘上的 PDF 提取元数据（在后台线程执行，不把整份 PDF 读进内存）
 pub async fn extract_pdf_metadata_from_path_async(
     path: String,

@@ -124,14 +124,7 @@ pub(crate) async fn run_dir(args: &DirArgs) -> Result<()> {
     println!("扫描目录: {}", args.dir);
     println!("递归搜索: {}", if args.recursive { "是" } else { "否" });
     println!("上传间隔: {}", args.interval.describe());
-    println!(
-        "PDF 元数据抽取: {}",
-        if args.interval.extract_meta {
-            "开启"
-        } else {
-            "跳过（默认，--extract-meta 开启）"
-        }
-    );
+    println!("PDF 元数据抽取: {}", args.interval.extract_meta.describe());
     println!("服务地址: {}", base_url);
     println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
     println!();

@@ -667,7 +667,7 @@ async fn upload_one_zotero(
     client: &Client,
     token: &Option<String>,
     timeout_override: Option<f64>,
-    extract_meta: bool,
+    extract_meta: ExtractMeta,
 ) -> bool {
     if dry_run {
         println!("  [dry-run] 跳过上传: {} ({})", d.doi, d.file_path);
@@ -738,14 +738,7 @@ pub(crate) async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
     println!("更新元数据: {}", if update_meta { "是" } else { "否 (默认)" });
     println!("上传间隔: {}", args.interval.describe());
-    println!(
-        "PDF 元数据抽取: {}",
-        if args.interval.extract_meta {
-            "开启"
-        } else {
-            "跳过（默认，--extract-meta 开启）"
-        }
-    );
+    println!("PDF 元数据抽取: {}", args.interval.extract_meta.describe());
     if !args.keys.is_empty() {
         println!("只处理 key: {}", args.keys.join(", "));
     }

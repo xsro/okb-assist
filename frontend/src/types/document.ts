@@ -193,29 +193,72 @@ export interface ChunkResponse {
   doc_id: number
 }
 
+/** 标题相似组：除成员外还带算法给出的分数与 DOI / 跨语言证据 */
+export interface SimilarTitleItem {
+  normalized_title: string
+  /** 组内最弱一条边的相似度（0–1），分数低说明是靠「重合度」而非「改写程度」聚上来的 */
+  score?: number
+  count: number
+  /** 组内 DOI 全部一致（或至多一篇有 DOI） */
+  same_doi?: boolean
+  /** 组内出现互不相同的 DOI：标题像但 DOI 冲突，需人工核对 */
+  doi_conflict?: boolean
+  /** 由 `i18n.en.title` 别名牵进来的组（中英标题互认） */
+  cross_lang?: boolean
+  documents: Document[]
+}
+
 export interface SimilarTitleGroup {
-  groups: {
-    normalized_title: string
-    count: number
-    documents: Document[]
-  }[]
+  groups: SimilarTitleItem[]
   total_groups: number
   total_documents: number
 }
 
-/** 按归一化 DOI 分组的重复文献（`GET /documents/similar-dois`） */
+/** 按归一化 DOI 分组的重复文献 */
+export interface SimilarDoiItem {
+  /** 归一化后的 DOI（小写、去 `https://doi.org/` 前缀与尾部标点），用于分组去重 */
+  doi_key: string
+  /** 组内第一个非空的原始 DOI，仅用于展示 */
+  doi: string
+  count: number
+  /** 组内标题之间的最高相似度；标题都取不到时为 null */
+  title_score?: number | null
+  /** 同 DOI 但标题完全不像：多半是 DOI 填错，提示人工核对而不是直接合并 */
+  title_conflict?: boolean
+  documents: Document[]
+}
+
 export interface SimilarDoiGroup {
-  groups: {
-    /** 归一化后的 DOI（小写、去 `https://doi.org/` 前缀与尾部标点），用于分组去重 */
-    doi_key: string
-    /** 组内第一个非空的原始 DOI，仅用于展示 */
-    doi: string
-    count: number
-    documents: Document[]
-  }[]
+  groups: SimilarDoiItem[]
   total_groups: number
   total_documents: number
 }
+
+/** 一次全库比较的结果（记录在 system.json 的 tmp_folder_path/duplicate-scan.json） */
+export interface DuplicateScanRecord {
+  /** 检测完成时间（UTC ISO8601） */
+  generated_at: string
+  /** 检测时的库签名（`文档数|MAX(updated_at)`），与当前不一致即结果过期 */
+  signature: string
+  /** 参与比较的文档数 */
+  scanned_docs: number
+  title: SimilarTitleGroup
+  doi: SimilarDoiGroup
+}
+
+/** GET / POST /documents/duplicate-scan 的响应 */
+export interface DuplicateScanResponse {
+  /** false = 还没有可用的检测记录 */
+  found: boolean
+  /** GET：记录里的库签名与当前库不一致（结果是旧的） */
+  stale?: boolean
+  /** POST：本次结果是否写盘成功 */
+  saved?: boolean
+  record_path?: string
+  detail?: string
+  result?: DuplicateScanRecord
+}
+
 // ── PDF 元信息 / Crossref / 引用条目 ──────────────────────
 
 /** PDF 元信息报告（后端 /pdf-info） */

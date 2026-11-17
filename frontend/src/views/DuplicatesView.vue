@@ -2,38 +2,50 @@
   <div class="duplicates-view">
     <h2>去重</h2>
 
-    <!-- 检测模式：标题相似 / DOI 重复 -->
+    <!-- 检测模式：标题相似 / DOI 重复（两种依据来自同一次比较） -->
     <div class="mode-tabs">
       <button
         class="btn btn-sm"
         :class="mode === 'title' ? 'btn-primary' : 'btn-outline'"
         @click="mode = 'title'"
       >
-        标题相似（{{ titleDetected ? titleGroups.length + ' 组' : '未检测' }}）
+        标题相似（{{ hasScan ? titleGroups.length + ' 组' : '未比较' }}）
       </button>
       <button
         class="btn btn-sm"
         :class="mode === 'doi' ? 'btn-primary' : 'btn-outline'"
         @click="mode = 'doi'"
       >
-        DOI 重复（{{ doiDetected ? doiGroups.length + ' 组' : '未检测' }}）
+        DOI 重复（{{ hasScan ? doiGroups.length + ' 组' : '未比较' }}）
       </button>
-      <!-- 只检测当前标签页对应的那一种 -->
-      <button class="btn btn-sm" :disabled="loadingMode !== null || merging" @click="load">
-        {{ loading ? '检测中…' : detected ? '重新检测' : '开始检测' }}
+      <!-- 一次比较同时产出两个标签页的结果，并覆盖写检测记录 -->
+      <button class="btn btn-sm" :disabled="scanning || merging" @click="runScan">
+        {{ scanning ? '比较中…' : hasScan ? '重新比较' : '开始比较' }}
       </button>
     </div>
 
     <p class="hint">
       <template v-if="mode === 'title'">
-        按「归一化标题 + 编辑距离相似度」分组。默认全部打勾（全部保留），取消勾选表示该条将被合并删除。
-        「开始检测」只检测标题相似，不动 DOI 重复的结果。
+        按「归一化标题 + 编辑距离 / 内容词重合度」聚类，英文题名（<code>i18n.en.title</code>）
+        作为别名参与比较。默认全部打勾（全部保留），取消勾选表示该条将被合并删除。
       </template>
       <template v-else>
-        按「归一化 DOI」分组（忽略 <code>https://doi.org/</code> 前缀、大小写与尾部标点）。默认全部打勾（全部保留），取消勾选表示该条将被合并删除。
-        「开始检测」只检测 DOI 重复，不动标题相似的结果。
+        按「归一化 DOI」分组（忽略 <code>https://doi.org/</code> 前缀、大小写与尾部标点），
+        组内同时给出标题一致性。默认全部打勾（全部保留），取消勾选表示该条将被合并删除。
       </template>
     </p>
+
+    <!-- 记录状态条：检测时间、库是否已变化、写盘是否成功 -->
+    <div v-if="hasScan" class="scan-status">
+      <span class="scan-time">
+        检测时间：{{ formatTime(generatedAt) }}
+        <template v-if="scannedDocs"> · 参与比较 {{ scannedDocs }} 篇</template>
+      </span>
+      <span v-if="stale" class="scan-flag is-stale" title="检测之后库里又有增删改">
+        库已变化，建议重新比较
+      </span>
+      <span v-if="notSaved" class="scan-flag is-warn" :title="detail">{{ notSavedText }}</span>
+    </div>
 
     <!-- 批量操作条 -->
     <div v-if="plans.length" class="groups-toolbar">
@@ -67,6 +79,14 @@
         <div class="group-head">
           <h4>组 {{ idx + 1 }} · {{ plan.group.documents.length }} 篇 · {{ plan.group.label }}</h4>
           <div class="group-head-actions">
+            <span
+              v-for="badge in plan.group.badges"
+              :key="badge.text"
+              class="group-badge"
+              :class="`is-${badge.tone}`"
+              :title="badge.title"
+              >{{ badge.text }}</span
+            >
             <span class="keep-count" :class="{ 'is-empty': !plan.kept.length }">
               保留 {{ plan.kept.length }} / {{ plan.group.documents.length }}
             </span>
@@ -138,14 +158,17 @@
     </div>
 
     <div v-else class="empty">
-      <template v-if="loading">检测中…</template>
-      <template v-else-if="!detected">
-        <p>尚未检测。</p>
+      <template v-if="loading">{{ scanning ? '整库比较中…' : '载入上次检测结果…' }}</template>
+      <template v-else-if="!hasScan">
+        <p>尚未比较。</p>
         <p class="empty-tip">
-          点击上方「开始检测」只查询当前标签页的重复文献（
-          {{ mode === 'title' ? '标题相似' : 'DOI 重复' }}），另一种检测需切到对应标签页单独执行。
+          点击上方「开始比较」对整库执行一次重复检测（标题相似 + DOI 重复），
+          结果会存到服务端，下次打开本页自动载入。
+          <template v-if="detail">（{{ detail }}）</template>
         </p>
-        <button class="btn btn-sm" :disabled="loading" @click="load">开始检测</button>
+        <button class="btn btn-sm" :disabled="scanning || merging" @click="runScan">
+          开始比较
+        </button>
       </template>
       <template v-else>
         {{ mode === 'title' ? '暂无相似文献' : '暂无 DOI 重复的文献' }}
@@ -155,36 +178,109 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { getSimilarTitles, getSimilarDois, mergeDocuments } from '@/api/documents'
+import { onMounted, ref, computed } from 'vue'
+import { getDuplicateScan, runDuplicateScan, mergeDocuments } from '@/api/documents'
 import { useToast } from '@/composables/useToast'
 import { useRequireToken } from '@/composables/useRequireToken'
-import type { Document, SimilarTitleGroup, SimilarDoiGroup } from '@/types/document'
+import type {
+  Document,
+  DuplicateScanRecord,
+  SimilarDoiItem,
+  SimilarTitleItem,
+} from '@/types/document'
 
 const { showSuccess, showError, showInfo } = useToast()
 const { requireToken } = useRequireToken()
 
 const mode = ref<'title' | 'doi'>('title')
-const titleGroups = ref<SimilarTitleGroup['groups']>([])
-const doiGroups = ref<SimilarDoiGroup['groups']>([])
-/** 正在检测的模式（null = 空闲）；按模式区分，切换标签页不会串状态 */
-const loadingMode = ref<'title' | 'doi' | null>(null)
-const loading = computed(() => loadingMode.value === mode.value)
-/** 各模式是否已主动检测过（进入页面不自动检测，由用户点「开始检测」触发） */
-const titleDetected = ref(false)
-const doiDetected = ref(false)
-const detected = computed(() =>
-  mode.value === 'title' ? titleDetected.value : doiDetected.value
+const titleGroups = ref<SimilarTitleItem[]>([])
+const doiGroups = ref<SimilarDoiItem[]>([])
+/** 正在执行整库比较（POST）/ 正在载入上次记录（GET） */
+const scanning = ref(false)
+const recordLoading = ref(false)
+/** 载入或比较期间禁用写操作 */
+const loading = computed(() => scanning.value || recordLoading.value)
+/** 是否已经有一次比较结果（0 组也算比较过） */
+const hasScan = ref(false)
+/** 记录元信息：检测时间、参与比较的文档数、是否已过期、是否写盘成功 */
+const generatedAt = ref('')
+const scannedDocs = ref(0)
+const stale = ref(false)
+const notSaved = ref(false)
+/** 后端给出的原因（记录读不出来 / 写不进去） */
+const detail = ref('')
+const notSavedText = computed(
+  () => detail.value || '检测记录未写入服务端，下次打开需要重新比较'
 )
 const merging = ref(false)
 const progressDone = ref(0)
 const progressTotal = ref(0)
+
+/** 组头徽标：算法给出的分数与「另一条依据」的佐证 */
+interface GroupBadge {
+  text: string
+  title: string
+  tone: 'ok' | 'warn' | 'info'
+}
 
 /** 两种模式统一成同一渲染结构：key 用于稳定绑定「保留」选择 */
 interface GroupView {
   key: string
   label: string
   documents: Document[]
+  badges: GroupBadge[]
+}
+
+function percent(score?: number | null): string {
+  return score === null || score === undefined ? '' : `${Math.round(score * 100)}%`
+}
+
+function titleBadges(g: SimilarTitleItem): GroupBadge[] {
+  const out: GroupBadge[] = []
+  if (g.score !== undefined && g.score !== null) {
+    out.push({
+      text: `相似 ${percent(g.score)}`,
+      title: '组内最弱一条边的相似度（编辑距离 + 内容词重合度），偏低说明只是部分重合',
+      tone: (g.score ?? 1) >= 0.9 ? 'ok' : 'info',
+    })
+  }
+  if (g.same_doi) {
+    out.push({ text: '同 DOI', title: '组内 DOI 一致，基本可以确认是同一条文献', tone: 'ok' })
+  }
+  if (g.doi_conflict) {
+    out.push({
+      text: 'DOI 冲突',
+      title: '组内出现互不相同的 DOI：标题像但标识不一致，请先核对再合并',
+      tone: 'warn',
+    })
+  }
+  if (g.cross_lang) {
+    out.push({
+      text: '中英标题',
+      title: '这组里有成员是靠 i18n 英文题名别名与对方主标题对上的',
+      tone: 'info',
+    })
+  }
+  return out
+}
+
+function doiBadges(g: SimilarDoiItem): GroupBadge[] {
+  const out: GroupBadge[] = []
+  if (g.title_score !== null && g.title_score !== undefined) {
+    out.push({
+      text: `标题相似 ${percent(g.title_score)}`,
+      title: '组内标题之间的最高相似度',
+      tone: (g.title_score ?? 0) >= 0.9 ? 'ok' : 'info',
+    })
+  }
+  if (g.title_conflict) {
+    out.push({
+      text: '标题不符',
+      title: 'DOI 相同但标题明显不像：多半是某条的 DOI 填错，请核对后再合并',
+      tone: 'warn',
+    })
+  }
+  return out
 }
 
 const currentGroups = computed<GroupView[]>(() =>
@@ -193,11 +289,13 @@ const currentGroups = computed<GroupView[]>(() =>
         key: `title:${g.normalized_title}`,
         label: `相似标题：${g.normalized_title}`,
         documents: g.documents,
+        badges: titleBadges(g),
       }))
     : doiGroups.value.map((g) => ({
         key: `doi:${g.doi_key}`,
         label: `DOI：${g.doi}`,
         documents: g.documents,
+        badges: doiBadges(g),
       }))
 )
 
@@ -207,18 +305,14 @@ const currentGroups = computed<GroupView[]>(() =>
  */
 const keepMap = ref<Record<string, number[]>>({})
 
-/** 把指定模式（或两种）检测结果的组重置为「全部保留」，另一模式的选择不受影响 */
-function resetSelection(scope: 'title' | 'doi' | 'all' = 'all') {
+/** 把两组分组的选择都重置为「全部保留」（一次比较同时给出两种依据） */
+function resetSelection() {
   const next: Record<string, number[]> = { ...keepMap.value }
-  if (scope !== 'doi') {
-    for (const g of titleGroups.value) {
-      next[`title:${g.normalized_title}`] = g.documents.map((d) => d.id)
-    }
+  for (const g of titleGroups.value) {
+    next[`title:${g.normalized_title}`] = g.documents.map((d) => d.id)
   }
-  if (scope !== 'title') {
-    for (const g of doiGroups.value) {
-      next[`doi:${g.doi_key}`] = g.documents.map((d) => d.id)
-    }
+  for (const g of doiGroups.value) {
+    next[`doi:${g.doi_key}`] = g.documents.map((d) => d.id)
   }
   keepMap.value = next
 }
@@ -287,29 +381,77 @@ function isOnlyKept(plan: GroupPlan, id: number): boolean {
   return plan.kept.length === 1 && plan.kept[0]?.id === id
 }
 
-/**
- * 检测按钮只跑当前标签页对应的那一种检测：
- * 两个端点都是 admin 级只读查询，互不影响，另一种结果原样保留。
- */
-async function load() {
+function formatTime(iso: string): string {
+  if (!iso) return '未知'
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString()
+}
+
+/** 把一次比较的结果（或上次记录）套用到两个标签页 */
+function applyRecord(record: DuplicateScanRecord) {
+  titleGroups.value = record.title.groups
+  doiGroups.value = record.doi.groups
+  hasScan.value = true
+  generatedAt.value = record.generated_at
+  scannedDocs.value = record.scanned_docs ?? 0
+  // 分组数据一旦换过，旧的「保留」勾选就不适用了，统一恢复全部保留
+  resetSelection()
+  // 当前标签页空了、另一页有结果时切过去；用户停在有结果的那页则不动
+  const currentEmpty = (mode.value === 'title' ? record.title.groups : record.doi.groups).length === 0
+  const otherHasGroups = (mode.value === 'title' ? record.doi.groups : record.title.groups).length > 0
+  if (currentEmpty && otherHasGroups) mode.value = mode.value === 'title' ? 'doi' : 'title'
+}
+
+/** 读取服务端记录：进入页面自动调用，失败只提示不阻断 */
+async function loadRecord() {
   if (!requireToken()) return
-  if (loadingMode.value !== null) return
-  const target = mode.value
-  loadingMode.value = target
+  if (loading.value) return
+  recordLoading.value = true
   try {
-    if (target === 'title') {
-      titleGroups.value = (await getSimilarTitles()).groups
-      titleDetected.value = true
-    } else {
-      doiGroups.value = (await getSimilarDois()).groups
-      doiDetected.value = true
+    const res = await getDuplicateScan()
+    detail.value = res.detail || ''
+    if (res.found && res.result) {
+      applyRecord(res.result)
+      stale.value = !!res.stale
     }
-    // 重新检测后该模式恢复「全部保留」，避免沿用已失效的选择
-    resetSelection(target)
   } catch {
-    showError(target === 'title' ? '标题相似检测失败' : 'DOI 重复检测失败')
+    showError('载入上次检测结果失败')
   } finally {
-    loadingMode.value = null
+    recordLoading.value = false
+  }
+}
+
+/**
+ * 重新比较整库：一次请求同时刷新「标题相似」与「DOI 重复」，并覆盖写检测记录。
+ * 合并完成后也走这里，保证库内容与落盘记录同步。返回是否真的比较成功，
+ * 调用方（合并流程）据此决定能不能清掉「库已变化」提示。
+ */
+async function runScan(): Promise<boolean> {
+  if (!requireToken()) return false
+  // 这里只挡「已在比较中」，不挡 merging：合并流程本身就在 merging 期间调用它刷新结果，
+  // 手动触发比较的按钮和入口在 merging 时都是禁用的，不会并发。
+  if (scanning.value) return false
+  scanning.value = true
+  try {
+    const res = await runDuplicateScan()
+    if (!res.found || !res.result) {
+      detail.value = res.detail || ''
+      showError(res.detail || '重复比较失败')
+      return false
+    }
+    applyRecord(res.result)
+    stale.value = false
+    notSaved.value = res.saved === false
+    detail.value = res.detail || ''
+    showSuccess(
+      `比较完成：标题相似 ${res.result.title.total_groups} 组 · DOI 重复 ${res.result.doi.total_groups} 组`
+    )
+    return true
+  } catch {
+    showError('重复比较失败，请查看日志')
+    return false
+  } finally {
+    scanning.value = false
   }
 }
 
@@ -344,7 +486,7 @@ async function applyGroup(plan: GroupPlan) {
   try {
     const ok = await mergeInto(plan.group, target, plan.removed)
     progressDone.value = 1
-    if (ok) await load()
+    if (ok) await runScan()
   } finally {
     merging.value = false
   }
@@ -403,7 +545,7 @@ async function runBatchMerge() {
     }
     if (okGroups) showSuccess(`已去重 ${okGroups} 组，删除 ${deletedCount} 篇文献`)
     if (failGroups) showError(`${failGroups} 组去重失败，请查看日志后重试`)
-    if (okGroups) await load()
+    if (okGroups) await runScan()
   } finally {
     merging.value = false
     progressDone.value = 0
@@ -411,7 +553,8 @@ async function runBatchMerge() {
   }
 }
 
-// 不自动检测：进入页面只展示提示，等用户点「开始检测」
+// 进入页面自动载入上次检测记录（记录在服务端 data/tmp 下），不重新比较
+onMounted(loadRecord)
 </script>
 
 <style scoped>
@@ -425,6 +568,60 @@ async function runBatchMerge() {
 .hint {
   color: var(--text-secondary);
   margin-bottom: 16px;
+}
+
+/* ── 记录状态条 ─────────────────────────────────────── */
+.scan-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.scan-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.scan-flag {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.scan-flag.is-stale {
+  background: rgba(245, 158, 11, 0.14);
+  color: #92400e;
+}
+
+.scan-flag.is-warn {
+  background: rgba(239, 68, 68, 0.12);
+  color: #b91c1c;
+}
+
+/* 组头徽标：相似度分数与另一条依据的佐证 */
+.group-badge {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.group-badge.is-ok {
+  background: rgba(34, 197, 94, 0.12);
+  color: #15803d;
+}
+
+.group-badge.is-warn {
+  background: rgba(239, 68, 68, 0.12);
+  color: #b91c1c;
+}
+
+.group-badge.is-info {
+  background: rgba(59, 130, 246, 0.12);
+  color: #1d4ed8;
 }
 
 /* ── 批量操作条 ─────────────────────────────────────── */

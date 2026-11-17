@@ -30,15 +30,23 @@ pub(crate) struct UploadIntervalArgs {
     #[arg(long)]
     pub(crate) no_progress: bool,
 
-    /// 上传时让服务端做完整的 PDF 元数据抽取（`extract_meta=full`：Info 字典 DOI → Crossref，
-    /// 没有 DOI 时再跑启发式抽取题名/作者/年份/摘要等）
+    /// 上传时服务端的 PDF 元数据抽取方式：
+    /// `light`（默认）= 只读 Info 字典拿 DOI + Crossref，不抽正文；
+    /// `full` = Info 字典没有 DOI 时再跑启发式抽取（题名/作者/年份/摘要，会起 mutool 过一遍正文）；
+    /// `off` = 完全跳过
     ///
-    /// 默认**不开**（请求里带 `extract_meta=false`）：抽取会起几个 mutool 子进程把整份文档正文过一遍，
-    /// 批量上传大文件时这是「等待服务端处理」的主要耗时。
-    /// 不抽也能先把记录建好（列表里显示文件名），之后在文档管理页 / 
-    /// `POST /assist/api/pipeline/extract-pdf-meta/:id` 补即可。
-    #[arg(long)]
-    pub(crate) extract_meta: bool,
+    /// 单独写 `--extract-meta` 不带值等价于 `--extract-meta full`。
+    /// 抽取不是建记录的必需步骤：跳过也能先把记录建好（列表里显示文件名），
+    /// 之后在文档管理页 / `POST /assist/api/pipeline/extract-pdf-meta/:id` 补即可。
+    #[arg(
+        long,
+        value_enum,
+        value_name = "MODE",
+        default_value = "light",
+        default_missing_value = "full",
+        num_args = 0..=1
+    )]
+    pub(crate) extract_meta: ExtractMeta,
 
     /// 不询问，比对结果里所有「需要上传」的一律直接执行
     ///
@@ -71,6 +79,37 @@ impl UploadIntervalArgs {
 }
 
 // ==================== 数据类型 ====================
+
+/// 服务端元数据抽取方式（上传表单字段 `extract_meta`）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ExtractMeta {
+    /// 只读 PDF Info 字典拿 DOI + Crossref，不抽正文（默认）
+    Light,
+    /// 完整抽取：Info 字典没有 DOI 时再跑启发式正文抽取
+    Full,
+    /// 完全跳过
+    Off,
+}
+
+impl ExtractMeta {
+    /// 表单字段值（`off` 对应服务端的 `false`）
+    pub(crate) fn field(self) -> &'static str {
+        match self {
+            ExtractMeta::Light => "light",
+            ExtractMeta::Full => "full",
+            ExtractMeta::Off => "false",
+        }
+    }
+
+    /// 头部提示用的可读描述
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            ExtractMeta::Light => "light（只读 Info 字典 + Crossref，不抽正文）",
+            ExtractMeta::Full => "full（含启发式正文抽取，慢）",
+            ExtractMeta::Off => "跳过",
+        }
+    }
+}
 
 /// 文档元数据（上传后 PUT 更新用，字段名与服务端一致）
 #[derive(Debug, Clone, Serialize)]
@@ -1044,8 +1083,8 @@ pub(crate) enum UploadOutcome {
 
 /// 上传 PDF 文件到服务器（新建文献，默认不触发自动处理）
 ///
-/// `extract_meta` 为 false 时请求里带 `extract_meta=false`（服务端跳过所有抽取），
-/// 为 true 时带 `extract_meta=full`（客户端批量上传默认跳过：那是上传后最慢的一步，且可事后补）。
+/// `extract_meta` 直接决定请求里的 `extract_meta` 字段（`light` / `full` / `false`），
+/// 客户端默认 `light`：只让服务端读 Info 字典 + 查 Crossref，不起 mutool 抽正文。
 ///
 /// 链路或服务端卡顿导致请求失败时会自动重试一次；若重试后服务端返回 409 且
 /// 已有记录的 DOI 与我们上传的一致，说明「上一次请求其实已经落库」，按成功处理。
@@ -1055,14 +1094,11 @@ pub(crate) async fn api_upload(
     doi: Option<&str>,
     token: &Option<String>,
     timeout_override: Option<f64>,
-    extract_meta: bool,
+    extract_meta: ExtractMeta,
 ) -> UploadOutcome {
     let url = format!("{}/assist/api/documents/upload", base_url);
     // 显式带 DOI：服务端不必解析 PDF 就能做 DOI 去重（命中时返回 409 `kind=doi`）
-    let mut fields: Vec<(&str, &str)> = vec![(
-        "extract_meta",
-        if extract_meta { "full" } else { "false" },
-    )];
+    let mut fields: Vec<(&str, &str)> = vec![("extract_meta", extract_meta.field())];
     if let Some(doi) = doi {
         fields.push(("doi", doi));
     }

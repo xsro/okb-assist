@@ -4,8 +4,7 @@ import type {
   PublicDocument,
   SearchResult,
   SearchResultList,
-  SimilarTitleGroup,
-  SimilarDoiGroup,
+  DuplicateScanResponse,
   TocItem,
   MarkdownResponse,
   MarkdownLinesSaveResult,
@@ -551,14 +550,24 @@ export function getDocTypes() {
   }>('/assist/api/documents/doc-types/')
 }
 
-/** 获取相似标题分组（去重用，后端按归一化标题 + 编辑距离聚类） */
-export function getSimilarTitles() {
-  return apiGet<SimilarTitleGroup>('/assist/api/documents/similar-titles/')
+/**
+ * 读取上次的重复检测结果（后端记录在 system.json 的 `tmp_folder_path` 里）。
+ * 去重页进入时自动调用：`found = false` 表示还没有记录，需要点「重新比较」。
+ */
+export function getDuplicateScan() {
+  return apiGet<DuplicateScanResponse>('/assist/api/documents/duplicate-scan/')
 }
 
-/** 按归一化 DOI 查找重复文献组（用于手动去重） */
-export function getSimilarDois() {
-  return apiGet<SimilarDoiGroup>('/assist/api/documents/similar-dois/')
+/**
+ * 重新比较整库（标题相似 + DOI 重复）并覆盖写检测记录。
+ * 大库比较是 CPU 密集，超时放大到 5 分钟。
+ */
+export function runDuplicateScan() {
+  return apiPost<DuplicateScanResponse>(
+    '/assist/api/documents/duplicate-scan/',
+    undefined,
+    { timeout: 300000 }
+  )
 }
 
 /** 将 sourceIds 合并进 targetId（去重合并，源文档将被删除） */

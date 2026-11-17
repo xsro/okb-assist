@@ -74,7 +74,7 @@ cargo build --release
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`drive.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/drive.rs` | 用户网盘：路径安全、角色阈值、配额统计、目录列举、Content-Type 推断 |
 | `backend-rs/src/services/pdf_engine.rs` | PDF 解析引擎运行时选择（`mutool` 命令行 / 内置 `mupdf`，含能力兜底） |
-| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`doc_type.rs`（**文档类型唯一词表**：归一化 / 标准列表 / Crossref 映射，见下方「文档类型词表」）、`file_state.rs`（文件事实 → 文献状态推导 + 运行时状态注册表 + 三态/PDF 健康 SQL 条件）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`（**检索式唯一解析器**：WoS 风格词法/语法分析 → AST → SQL，见易错点 29）、`chat_store.rs`（问答会话文件存取）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存）、`pdf_split.rs`（mutool 按页切分 PDF，供 MinerU 分片解析）、`fetch.rs`（大文件上传/下载兜底：无整体超时的客户端 + 流式落盘 + 重试 + 断点续传，见「解析结果包下载兜底」） |
+| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`doc_type.rs`（**文档类型唯一词表**：归一化 / 标准列表 / Crossref 映射，见下方「文档类型词表」）、`file_state.rs`（文件事实 → 文献状态推导 + 运行时状态注册表 + 三态/PDF 健康 SQL 条件）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`（**检索式唯一解析器**：WoS 风格词法/语法分析 → AST → SQL，见易错点 29）、`chat_store.rs`（问答会话文件存取）、`dup_scan.rs`（**重复检测唯一实现**：标题归一化 + 内容词分块 + 分带 Levenshtein + 并查集聚类，结果原子写入 `tmp_folder_path`，见「重复检测」一节）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存）、`pdf_split.rs`（mutool 按页切分 PDF，供 MinerU 分片解析）、`fetch.rs`（大文件上传/下载兜底：无整体超时的客户端 + 流式落盘 + 重试 + 断点续传，见「解析结果包下载兜底」） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
@@ -94,7 +94,7 @@ cargo build --release
 | `frontend/src/docs/` | 用户文档清单与加载器：`userDocs.ts`（`DOC_GROUPS` 分组/顺序/标题、`loadDocContent()` 用 `import.meta.glob('../../public/docs/*.md', { query: '?raw' })` 惰性读原文、`rawDocUrl()`） |
 | `frontend/` | **Vue 3 + TypeScript SPA 前端**（Vite 8 构建，输出到 `frontend/dist/`，包管理器 `pnpm`） |
 | `frontend/dist/` | 前端构建产物（`index.html`、`assets/`），由后端 serving |
-| `data/` | 运行时数据（`okb_assist.db`、`_uploads/`、`tokens/` 等），由 `system.json` 模板决定路径；实际位置为 `backend-rs/data/`，已被 `backend-rs/.gitignore` 忽略 |
+| `data/` | 运行时数据（`okb_assist.db`、`_uploads/`、`tokens/`、`tmp/`（去重检测记录 `duplicate-scan.json`）等），由 `system.json` 模板决定路径；实际位置为 `backend-rs/data/`，已被 `backend-rs/.gitignore` 忽略 |
 | `document/` | **开发文档**（同时是 **docsify 文档站**，由 `system.json` 的 `static_dirs` 挂到 `/document`）：`index.html`（docsify 入口）、`README.md`（首页/索引）、`_sidebar.md`（左侧目录）、`_404.md`、`assets/`（自有样式与登录守卫）；内容页 `build.md`（部署构建）、`webdav-plan.md`（网盘 WebDAV 同步方案与 TODO）、`db-status-removal-plan.md`（文献状态去库化）、`datalab.to.md`、`openwebui.md`、`qdrant.md`、`udisks2-automount.md`、`mineru4/`、`skills/`。**面向使用者的说明不在这里**（见下一行） |
 | `frontend/public/docs/` | **用户文档（使用文档）** Markdown 原文：`user-management.md`（登录/令牌/用户管理）、`drive.md`（网盘）、`search.md`（高级搜索语法）、`mcp.md`（MCP 连接指南）、`mcp-tools.md`（工具列表）。`pnpm run build` 复制到 `dist/docs/`，可由后端直链 `/assist/docs/<file>.md`（`text/markdown`）；应用内在 `/assist/docs` 页渲染（见「用户文档页」）。导航顺序/标题在 `frontend/src/docs/userDocs.ts` |
 
@@ -535,6 +535,46 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
   历史脏值单独列一项提示「保存后归一为 …」），`QueryBuilder.vue` 的「文献类型」筛选也用它，
   列表/详情页显示中文标签（原始值放 `title` / 括号里）。**不要在模板里手写 `<option>`**。
 
+### 重复检测（`services/dup_scan.rs`）
+
+去重页的两条依据（**标题相似** / **DOI 重复**）只有一套实现：`backend-rs/src/services/dup_scan.rs`。
+`GET/POST /assist/api/documents/duplicate-scan` 与 `similar-titles` / `similar-dois` 都调 `scan()`，
+区别只在于**要不要把结果写进 `tmp_folder_path`**（旧端点传 `None`，只算不存）。
+
+**标题比较**（`title_groups`）四步：
+
+1. **归一化**（`normalize_key`）：全角转半角 → 小写 → 「非字母数字且非 CJK」的字符压成一个空格 → `trim`。
+   `i18n.en.title` 拍平成 `title_alt` 一起参与比较（中文主标题 ↔ 英文译名互认，由别名牵进来的组记 `cross_lang`）。
+2. **分块**（`title_groups` 里的倒排表）：内容词（`content_tokens`）= 拉丁词去 `STOPWORDS` + CJK 连续串取二元组去 `CJK_STOPCHARS`；
+   只把「文档频率 ∈ [2, `MAX_DF_RATIO`×N]」的**稀有词**投进倒排表，每篇最多取 `MAX_BLOCK_TOKENS`=8 个词，
+   另有一张「归一化全等」精确表。两篇标题共享一个稀有词（或完全相同）才成为候选对；
+   每篇最多比 `MAX_PAIRS_PER_DOC`=256 对（含被拒的），所以候选规模与文档数成正比而不是平方。
+3. **打分**（`pair_score` → `title_similarity`）：先算便宜的统计量（长度差、内容词 Jaccard / 重合度），
+   据此定「最低可接受编辑相似度」，再用**分带 Levenshtein**（`levenshtein_band`：Ukkola 带宽 + 整行超带宽提前放弃）算编辑距离，
+   带宽之外的距离直接返回 `None`（= 不可接受）：
+
+   | 情形 | 要求 |
+   |---|---|
+   | 归一化完全相同 | 直接 1.0 |
+   | 常规标题 | 编辑相似度 ≥ `EDIT_ACCEPT`(0.90)；或 ≥ `EDIT_LOOSE`(0.78) 且内容词重合（`JACCARD_ACCEPT`0.65 / `CONTAINMENT_ACCEPT`0.90 + `CONTAINMENT_MIN_TOKENS`4） |
+   | 内容词高度重合（Jaccard ≥ `JACCARD_STRONG`0.85） | 编辑仍须 ≥ `EDIT_FLOOR_STRONG_JAC`(0.60) —— 专门拦「A and B」↔「B and A」这类词序改写（实测样本：*Sliding-Mode Control and Variable-Structure Systems* vs *Variable-Structure Systems and Sliding-Mode Control*，两本不同 DOI 的书） |
+   | 短标题（< `SHORT_MAX_LEN`15 或内容词 < `SHORT_MIN_TOKENS`3） | 只认编辑 ≥ `SHORT_EDIT_ACCEPT`(0.95)（两三个词的库重合度毫无区分力） |
+
+   最终分数 = 编辑相似度与内容词重合度各半（`blend`）。
+4. **聚类**：候选对按分数降序做**并查集**（单链接，路径压缩 + 按秩合并），组分数取**组内最弱一条边**（`min`）——
+   靠传递关系连起来的链条只能拿到 0.7x，前端徽标写「相似 7x%」，与 `doi_conflict` 一起提示人工核对。
+
+**DOI 分组**（`doi_groups`）按 `pdf_meta::doi_key()` 归组，另算 `title_score`（组内两两标题的最高相似度）与
+`title_conflict`（没有一对达到 `EDIT_ACCEPT` → DOI 大概率填错）；标题组反过来得到 `same_doi` / `doi_conflict` 佐证。
+
+**性能**：7452 篇（含 418 篇长英文标题）纯算法 release **1.3s**、debug 17s（旧实现 debug 要 512s），
+HTTP 端到端 release **1.7s**。`scan()` 是 CPU 密集，router 里必须 `spawn_blocking`（易错点 11），
+回归哨兵是 `tests::real_library_pairs_stay_linear` 与 `#[ignore]` 的 `bench_scan_on_real_library`
+（用 `cargo test --release -- --ignored --nocapture` 跑）。
+
+**落盘**：`tmp_folder_path`（默认 `data/tmp`）下的 `duplicate-scan.json`，原子写（`*.json.tmp` + `rename`），
+内容只有分组 + `doc_ids` + `generated_at` + `signature` + `scanned_docs`，见易错点 30。
+
 ### 元数据抽取（信息补全）的校对语义
 
 实现在 `backend-rs/src/routers/pipeline.rs` 的 `do_extract_impl` + `backend-rs/src/services/llm.rs` 的 `extract_metadata` / `build_extract_prompt`。
@@ -614,6 +654,7 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 | `info_path` | 元信息 JSON 路径模板 | `data/markdowns/{id}.json` |
 | `chat_session_path` | 问答会话文件路径模板（`{id}` 为会话 ID，字符串） | `data/chat_sessions/{id}.json` |
 | `runtime_state_path` | 运行时状态 sidecar 路径模板（`{id}` = 文档 ID；空串 = 只用进程内存） | `data/pipeline/{id}.json` |
+| `tmp_folder_path` | **临时/结果文件目录**：目前存放去重检测记录 `duplicate-scan.json`；相对路径按 `cwd`，支持 `{system_dir}` / `{env:VAR}`（与 `drive_root` 共用 `Settings::resolve_dir`） | `data/tmp` |
 | `drive_root` | 用户网盘根目录（私有 `users/{user_id}/`、公有 `_public/{folder_id}/`）；相对路径按 `cwd`，也可写绝对路径（独立磁盘/挂载点），支持 `{system_dir}` / `{env:VAR}` | `data/drive` |
 | `crossref_path` | Crossref 数据路径模板 | `data/markdowns/{id}_crossref.json` |
 | `markdown_asset_path` | Markdown 资产包路径模板 | `data/pdfs/{id}/{id}.zip` |
@@ -702,8 +743,8 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
    - **全量比对索引**（`GET /documents/doi-hash-index`）：一次返回库内全部文献的 `{count, with_doi, with_hash, generated_at, documents:[{id, doi, doi_key, file_hash, pdf_health}]}`（`doi_key` 已归一化小写，空 DOI/空哈希为 `null`），供 `client-rs` 批量比对；客户端拉一次就完成整库比对，不再按 DOI 逐条请求 `by-doi`。只返回比对必需字段（不带 title/abstract），新增字段时注意保持轻量。
    - **元数据抽取模式**（表单字段 `extract_meta`，三态，缺省 `full`）：
      - `full`（默认，Web 上传不传即此值）：先读 PDF **Info 字典** 拿 DOI（`pdf_meta::doi_from_info_dict_async`，单次 `mutool show trailer.Info` / mupdf 遍历 `/Info`）→ 有 DOI 就 `tokio::spawn(pipeline::run_crossref_or_heuristic)` 走 Crossref 回填权威元数据；Info 字典**没有** DOI 时退化为启发式抽取（`extract_pdf_metadata_from_path_async`，题名/作者/年份/刊名/摘要/关键词 + 从正文里搜 DOI），搜到 DOI 也跑 Crossref。**Crossref 查不到（无记录/断网）时 `run_crossref_or_heuristic` 会回退为「PDF 启发式抽取」（复用 `pipeline::run_extract_pdf_meta`，只补空字段）**—— 但上传阶段已经跑过启发式的（Info 字典没 DOI 的那条路径）不会重复跑；想补 Crossref 记录可事后调 `POST /assist/api/admin/fill-crossref`。
-     - `light`：只做 Info 字典 DOI → Crossref，**不抽正文**（不再起 `mutool draw -F text`，上传后「等服务端处理」基本只剩落盘 + 落库）。
-     - `false`：完全跳过（`meta` 为空对象、不读 PDF、不跑 Crossref），记录只有文件名 / 哈希 / 调用方显式传入的 `doi`。`client-rs` 批量上传**默认**传 `extract_meta=false`（`--extract-meta` 改成传 `full`），事后可用 `POST /assist/api/pipeline/extract-pdf-meta/:id`（文档管理页 / 流水线）补上。
+     - `light`：只做 Info 字典 DOI → Crossref，**不抽正文**（不再起 `mutool draw -F text`，上传后「等服务端处理」基本只剩落盘 + 落库）。**`client-rs` 的 `zotero` / `dir` 默认就是这一档**；它的 `--extract-meta` 取值为 `light` / `full` / `off`（`off` 发的是 `extract_meta=false`），**单独写 `--extract-meta` 不带值 = `full`**（兼容旧的开关写法），见 `ExtractMeta`（`client-rs/src/util.rs`）。
+     - `false`：完全跳过（`meta` 为空对象、不读 PDF、不跑 Crossref），记录只有文件名 / 哈希 / 调用方显式传入的 `doi`。事后可用 `POST /assist/api/pipeline/extract-pdf-meta/:id`（文档管理页 / 流水线）补上。
      - 其他值 → **400**；`true`/空串 按 `full` 处理（兼容旧布尔写法）。**不要再加 `auto_process` 字段**（已删除）：Crossref 回填由「模式 ≠ false 且解析出 DOI」决定。
    - **上传去重**（`POST /documents/upload`，`upload_document`）：先用 `find_doc_by_hash`（只查 `file_hash` 索引，**不抽 PDF 元数据**）比哈希；未命中再比 DOI —— DOI 来源：**显式表单字段优先**，否则 `extract_meta` ≠ `false` 时读一次 **PDF Info 字典**（`light`/`full` 都走，成本只有一次结构读取）；`full` 模式且 Info 字典没有 DOI 时才退化为启发式抽取拿 DOI（结果缓存进 `meta_cache`，建记录时复用，不重复拆 PDF）；`extract_meta=false` 且没有显式 `doi` 时不做这层 DOI 去重。
 
@@ -714,9 +755,19 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
      `on_duplicate` 其余取值照旧：`error`（默认，409）/ `skip`（200 `{status:"skipped"}`）/ `replace`（同哈希等价 skip，否则覆盖 PDF）。`force=true` 跳过全部去重检查。新文档的 `doi` 取显式字段或 PDF 元数据（`fill_meta_fields` 只补空）。去重依赖 `database.rs::init` 建的 `idx_documents_file_hash` / `idx_documents_doi`（`CREATE INDEX IF NOT EXISTS`，幂等），新增按列等值查找的功能时同步补索引。
    - **BibTeX 批量新建条目**（`POST /assist/api/documents/import-bibtex`，`import_bibtex`）：请求体 `{content, dry_run}`，`content` 为 `.bib` 文件原始文本（≤8 MB，单次最多处理 2000 条）。服务端用 `services/bibtex.rs` 手写解析器（`@article{key,…}` / `@article(key,…)`、花括号嵌套、`"…"` 引号值、`#` 拼接、`@string` 宏、`@comment`/`@preamble` 跳过、LaTeX 重音与转义还原），把条目映射到 `documents` 的 11 个基础元数据字段（**不写 `i18n`**，语言未知时不拆；`filename` 用 `<引用键>.bib` 占位，`source` 取 `publisher` 否则 `bibtex`，类型走 Zotero 名）。**只新建库里缺失的条目**：先按文件内 DOI/标题去重，再与全库比对（`doi_key` 归一化 DOI 优先，其次 `normalize_title` + 年份），命中则跳过并回传 `existing_id`；`dry_run=true` 只返回预览统计（不做写库）。新建记录**复用最小可用 ID**（与上传/登记路径一致：`INSERT INTO ... SELECT {NEXT_GAP_ID_SQL}, ...` 在同一条语句里算空号，有空洞就补进去、没有则 `NULL` 触发 SQLite 分配 `max(id)+1`；并发写由 SQLite 写锁串行化，外层另有唯一约束重试兜底），并**直接写入 `fs_synced_at`**（三个 size 保持 `NULL` = 三个文件全部「已同步且不存在」），`pdf_health = 'missing'`，因此派生状态为 `uploaded` + 「PDF 缺失」。响应 `{dry_run,total,processed,truncated,missing,created_count,existing_count,duplicate_count,invalid_count,failed_count,created,items,items_truncated,warnings,detail}`，`items[].action ∈ created|create|exists|duplicate|invalid|error`。
    - **手动去重的检测端点**（都只读，`admin` 才能访问，供 `/assist/duplicates` 页使用）：
-     - `GET /assist/api/documents/similar-titles` —— 归一化标题 + 编辑距离（`SIMILARITY_THRESHOLD`）贪心聚类，返回 `{groups:[{normalized_title,count,documents}],total_groups,total_documents}`；
-     - `GET /assist/api/documents/similar-dois` —— 按 `doi_key()`（`normalize_doi` 去 `https://doi.org/` 等前缀与尾部标点 + 转小写）分组，只返回组内 ≥2 篇的组，返回 `{groups:[{doi_key,doi,count,documents}],total_groups,total_documents}`（`doi` 是组内第一个非空原值，仅用于展示；无 DOI 的文档不参与）。
-     - 两个端点的 `documents` 元素都是完整 `DocumentOut`；合并统一走 `POST /assist/api/documents/merge`（`{target_id, source_ids}`，会合并元数据、删源文档与其文件/向量）。
+    - `GET /assist/api/documents/duplicate-scan/` —— **读取上次比较记录**（不重新比较）：`{found, stale, record_path, result}`；
+      记录不存在 → `{found:false, detail}`，文件损坏/不可解析 → `{found:false, detail:"…不是有效的检测记录…"}`（不静默当成「没检测过」）。
+    - `POST /assist/api/documents/duplicate-scan/` —— **重新比较整库并覆盖写记录**（同步执行，7000 篇约 1.7s / release）：
+      `{found:true, saved, stale:false, record_path, result}`；写盘失败时 `saved:false` + `detail` 说明（结果照样返回，只是下次打开还得重新比较）；
+      比较失败 → 500 `{error, detail}`。
+    - `result`（即落盘内容）：`{generated_at, signature, scanned_docs, title:{groups,total_groups,total_documents}, doi:{…}}`，
+      **分组里只存 `doc_ids`**，`documents`（完整 `DocumentOut`）由 `docs_by_ids()` 按 ID 回查 —— 元数据改了、或库外文件换了，打开页面看到的都是最新值；
+      `signature` = `文档数|归一化后的 MAX(updated_at)`，与当前库不一致 → `stale:true`（前端显示「库已变化，建议重新比较」）。
+    - `GET /assist/api/documents/similar-titles`、`GET /assist/api/documents/similar-dois` —— **只算不存**的兼容端点
+      （内部走同一个 `dup_scan::scan()`，只是把 `record_path` 传 `None`），返回形状与改造前一致（组数组 + `total_groups` / `total_documents`，
+      每组多给 `score` / `same_doi` / `doi_conflict` / `cross_lang`、`title_score` / `title_conflict`）。
+    - 合并统一走 `POST /assist/api/documents/merge`（`{target_id, source_ids}`，会合并元数据、删源文档与其文件/向量）；
+      算法与阈值见「重复检测（`services/dup_scan.rs`）」一节与易错点 30。
 5. **配置/管理**（`config.rs`、`admin.rs`）：查看/更新服务配置、重连测试、统计、按文件哈希去重、索引重置。
 6. **问答**（`chat.rs`）：`GET /assist/api/chat/models`、`GET /assist/api/chat/tools` 列出模型池与可调用的 MCP 工具，`POST /assist/api/chat` 基于 `llm.models` 做多轮对话，并可在本请求内循环调用 MCP 工具（非流式）。见下方「问答（Chat）」。
 7. **向量库抽象**（`vector_db.rs` 工厂 `get_vector_db(db_id)` → Qdrant/Milvus/Chroma 适配器）。
@@ -865,7 +916,7 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
 | `/assist/upload` | `UploadView.vue` | 上传 PDF；命中重复时按情况提示（DOI 相同且已有条目缺 PDF → 服务端自动补入并显示「已补入已有条目」；已有 PDF → 队列项上出现「覆盖已有 PDF / 保留原 PDF」；同哈希 → 「强制上传（新建一条）」） | admin / view-upload |
 | `/assist/doc/:id` | `DocManageView.vue` | 文档管理（含「PDF 健康」单篇检查，仅 admin 可见） | 全部 |
 | `/assist/admin` | `AdminView.vue` | 监控面板（统计 + PDF 健康概览 + 维护操作 + 流水线监控） | admin |
-| `/assist/duplicates` | `DuplicatesView.vue` | 去重（两种检测模式：标题相似 / DOI 重复，确认后合并到指定文档） | admin |
+| `/assist/duplicates` | `DuplicatesView.vue` | 去重（两种检测依据：标题相似 / DOI 重复。**打开页面自动 `GET` 服务端上次的比较记录**（不重新比较），状态条显示检测时间 / 参与比较篇数 / 「库已变化」提示；「开始比较 · 重新比较」按钮 `POST` 一次整库比较并覆盖写记录。组头徽标给出 `相似 xx%`、`同 DOI` / `DOI 冲突`、`中英标题`、`标题相似 xx%` / `标题不符`；默认全部勾选（全部保留），取消勾选即标记为将被合并删除，「每组只留第一篇」+「一键去重」做批量处理，合并后自动重新比较） | admin |
 | `/assist/point` | `PointView.vue` | 向量库管理 | admin |
 | `/assist/tools` | `ToolsView.vue` | 工具面板（全文搜索、语义搜索、问答、公式编辑、MCP 配置；支持 `?tab=` 直达，切 tab 同步地址栏） | 全部 |
 | `/assist/docs/:slug?` | `DocsView.vue` | **用户文档阅读页**（见下方「用户文档页」）：左侧目录 + 正文 + 右侧本页目录，内容来自 `frontend/public/docs/*.md` | 全部 |
@@ -1082,6 +1133,30 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
       `NEAR/n` / `SAME` 目前按 AND 处理（没做词距判定）。
 
     前端 `HomeView.vue` 只做三件事：把原始检索式发给 `search-info`、用 `parseWosQuery()` 显示语法错误、用 `highlightWosQuery()` 给背景层上色。**前端校验比后端宽松是有意的**，别在前端实现第二套 SQL 语义。
+
+30. **重复检测：算法只有一套、读记录绝不回写、阈值与分带成对**（`services/dup_scan.rs`，详见「重复检测」一节）：
+    - **唯一实现**：`duplicate-scan` 的 GET/POST 与 `similar-titles` / `similar-dois` 全部走 `scan()`。新增证据（作者、年份、卷页）
+      请改 `pair_score` / `title_groups` 并补 `tests`，**不要**在 router 或前端另写一套比较（`title_similarity` 已公开，是共用的打分入口）。
+    - **GET 只读文件**：旧实现会在「没有记录」时顺手比较一次并写盘，结果一次页面访问就把上次的结论换掉了，
+      既说不清结果是哪一刻的，也让「自动加载上次记录」形同虚设。读就是读，比较必须由 `POST`（页面上的按钮）触发。
+    - **记录里只存 `doc_ids`**，元数据由 `docs_by_ids()` 按 ID 回查；把整份 `DocumentOut` 存进 JSON 会立刻过时（改了标题、换了 PDF 也看不出来）。
+    - `signature` 用**归一化后的** `MAX(updated_at)`：`updated_at` 有两种历史写法（`2026-11-17T06:24:16Z` 与 SQLite `CURRENT_TIMESTAMP`
+      的 `2026-11-17 06:29:31`），文本比序时 `T` > 空格，直接 `MAX(updated_at)` 会把**刚写入的空格格式当成更早**，
+      于是「库已变化」永远不亮（实测踩过）。用 `MAX(COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', updated_at), updated_at))`
+      —— 也就是 `dup_signature()` 现在的写法（两种写法是真实并存的：建表默认值与 `update_document` 用
+      `datetime('now')`（空格、无 `Z`），而 `sync_doc_file_sizes` / 重算哈希等路径把 Rust 的 RFC3339 字符串直接绑进 `updated_at`）。
+      签名查询失败要**报错并回 `detail`**，不要 `unwrap_or_default()`（易错点 25）。
+    - **阈值和分带宽度是同一件事**：`pair_score` 里的 `min_sim` 决定 `max_dist`，改 `EDIT_ACCEPT` / `EDIT_LOOSE` /
+      `EDIT_FLOOR_STRONG_JAC` 任一个都会改变候选是否落在带内；只调其一会让高重合度对**静默判成不相似**
+      （带宽外 `levenshtein_band` 返回 `None`，没有分数也没有日志）。`EDIT_FLOOR_STRONG_JAC` 存在的意义是拦住词序改写，
+      想放宽成「只要内容词全重合就算重复」必须连带想清楚误报（上面那对书名就是反例）。
+    - 记录落在 `Settings::tmp_folder()`（`system.json` 的 `tmp_folder_path`，默认 `data/tmp`）下的 `duplicate-scan.json`，
+      写盘失败**不影响本次结果**（响应 `saved:false` + `detail`，前端显示「未写入服务端」)；
+      新增临时/结果文件同样走 `resolve_dir("tmp_folder_path", …)`，不要硬拼 `data/tmp` 或塞进 `documents` 表。
+    - `scan()` 是 CPU 重活，router 里必须 `spawn_blocking`（易错点 11）；比较规模由
+      `MAX_BLOCK_TOKENS` / `MAX_DF_RATIO` / `MAX_PAIRS_PER_DOC` 三个上界兜住，**不要**改回全矩阵比较
+      （7000+ 篇时是分钟级）。回归哨兵：`real_library_pairs_stay_linear`（配对数应约为文档数量级）+
+      `bench_scan_on_real_library`（`--ignored`，打印秒级耗时，别让它超过几秒）。
 
 ## 入口与关键文件速查
 

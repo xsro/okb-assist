@@ -220,6 +220,8 @@ pub fn default_system() -> serde_json::Value {
         "pdf_path": "data/pdfs/{id}/{id}.pdf",
         // 运行时状态 sidecar（失败原因等）一个文档一个文件；空串 = 只用进程内存
         "runtime_state_path": "data/pipeline/{id}.json",
+        // 中间产物目录（去重检测结果等），解析规则同 drive_root
+        "tmp_folder_path": "data/tmp",
         "config_path": "config.json",
         "log_path": "okb-log.jsonl",
         "drive_root": "data/drive",

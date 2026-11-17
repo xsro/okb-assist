@@ -9,6 +9,7 @@ pub mod datalab;
 pub mod i18n;
 pub mod doc_type;
 pub mod drive;
+pub mod dup_scan;
 pub mod fetch;
 pub mod file_state;
 pub mod image_cache;

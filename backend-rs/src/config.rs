@@ -468,21 +468,21 @@ impl Settings {
     }
 
     // ── 系统配置 ──
-    /// 用户网盘根目录（`system.json` 的 `drive_root`，默认 `data/drive`）。
+    /// 把 `system.json` 里的目录字段解析成绝对路径。
     ///
     /// 解析规则与 `static_dirs[].dir` 一致：
     /// - 支持 `{system_dir}`（system.json 所在目录）与 `{env:VAR_NAME}` 变量；
-    /// - 绝对路径（`/mnt/disk/drive`、`D:/drive`）原样使用，可把网盘放到独立磁盘/挂载点；
+    /// - 绝对路径（`/mnt/disk/data`、`D:/data`）原样使用，可把该目录放到独立磁盘/挂载点；
     /// - 相对路径按 `cwd` 解析（进程启动时已 chdir 到该目录，因此实际就是相对进程工作目录）。
     ///
     /// `system.json` 改后需重启进程才生效（进程内缓存）。
-    pub fn drive_root(&self) -> PathBuf {
+    fn resolve_dir(&self, key: &str, default: &str) -> PathBuf {
         let system_config = self.get_system_config();
-        let raw = system_config["drive_root"]
+        let raw = system_config[key]
             .as_str()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or("data/drive");
+            .unwrap_or(default);
         let expanded = crate::config_manager::ConfigManager::substitute_path_variables_str(
             &raw.replace("{system_dir}", &self.system_dir()),
             "",
@@ -492,6 +492,18 @@ impl Settings {
         } else {
             Path::new(&self.cwd()).join(expanded)
         }
+    }
+
+    /// 用户网盘根目录（`system.json` 的 `drive_root`，默认 `data/drive`）。
+    pub fn drive_root(&self) -> PathBuf {
+        self.resolve_dir("drive_root", "data/drive")
+    }
+
+    /// 中间产物目录（`system.json` 的 `tmp_folder_path`，默认 `data/tmp`）。
+    ///
+    /// 目前存放「去重」页的检测结果记录（见 [`crate::services::dup_scan`]）。
+    pub fn tmp_folder(&self) -> PathBuf {
+        self.resolve_dir("tmp_folder_path", "data/tmp")
     }
 
     pub fn max_concurrent_tasks(&self) -> usize {

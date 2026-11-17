@@ -22,6 +22,7 @@ use crate::services::pdf_meta::{
 };
 use crate::services::image_cache;
 use crate::services::bibtex;
+use crate::services::dup_scan;
 use crate::services::file_state;
 use crate::services::citation::{self, CitationRecord};
 use crate::auth;
@@ -270,6 +271,9 @@ pub fn router() -> axum::Router<()> {
         .route("/assist/api/documents/similar-titles", get(find_similar_titles))
         .route("/assist/api/documents/similar-dois/", get(find_similar_dois))
         .route("/assist/api/documents/similar-dois", get(find_similar_dois))
+        // 去重检测记录（写在 system.json 的 tmp_folder_path 下）：GET 读上次结果，POST 重新比较
+        .route("/assist/api/documents/duplicate-scan/", get(duplicate_scan_get).post(duplicate_scan_run))
+        .route("/assist/api/documents/duplicate-scan", get(duplicate_scan_get).post(duplicate_scan_run))
         .route("/assist/api/documents/merge/", post(merge_documents))
         .route("/assist/api/documents/merge", post(merge_documents))
         .route("/assist/api/documents/vector-dbs/", get(list_vector_dbs))
@@ -2426,192 +2430,328 @@ fn normalize_title(title: &str) -> String {
     out.trim().to_string()
 }
 
-/// Levenshtein 编辑距离（滚动数组，空间 O(min(m, n))）。
-fn levenshtein_distance(s1: &str, s2: &str) -> usize {
-    let mut a: Vec<char> = s1.chars().collect();
-    let mut b: Vec<char> = s2.chars().collect();
-    // 保证 a 较长、b 较短，缩小滚动数组宽度
-    if a.len() < b.len() {
-        std::mem::swap(&mut a, &mut b);
-    }
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut curr = vec![0usize; b.len() + 1];
-    for i in 1..=a.len() {
-        curr[0] = i;
-        for j in 1..=b.len() {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[b.len()]
+/// 相似文献检测的算法与记录读写都在 [`crate::services::dup_scan`]，
+/// 这里只负责取数据、渲染成员元数据、落盘与读盘。
+
+/// 检测只需要这几列，拉整行 `Document` 没必要
+#[derive(sqlx::FromRow)]
+struct DupScanRow {
+    id: i64,
+    title: Option<String>,
+    /// `i18n.en.title`：英文题名作为标题比较的别名
+    en_title: Option<String>,
+    doi: Option<String>,
 }
 
-/// 归一化后的标题相似度 = 1 - 编辑距离 / 较长标题长度，范围 [0, 1]。
-fn title_similarity(a: &str, b: &str) -> f64 {
-    let max_len = a.chars().count().max(b.chars().count());
-    if max_len == 0 {
-        return 1.0;
-    }
-    let dist = levenshtein_distance(a, b);
-    1.0 - (dist as f64 / max_len as f64)
+/// 取出全库参与检测的文档（标题 / 英文题名 / DOI）
+async fn load_dup_docs(db: &Database) -> Result<Vec<dup_scan::ScanDoc>, String> {
+    let rows: Vec<DupScanRow> = sqlx::query_as(
+        "SELECT id, title, json_extract(i18n, '$.en.title') AS en_title, doi \
+         FROM documents ORDER BY id",
+    )
+    .fetch_all(db.pool())
+    .await
+    .map_err(|e| format!("读取文献库失败：{}", e))?;
+    Ok(rows
+        .into_iter()
+        .map(|r| dup_scan::ScanDoc {
+            id: r.id,
+            title: r.title.unwrap_or_default(),
+            title_alt: r.en_title.unwrap_or_default(),
+            doi: r.doi.unwrap_or_default(),
+        })
+        .collect())
 }
 
-/// 相似标题判定阈值：归一化相似度 >= 该值视为重复。
-const SIMILARITY_THRESHOLD: f64 = 0.75;
-
-/// GET /assist/api/documents/similar-dois —— 按归一化 DOI 分组的重复文献。
+/// 当前库签名（`文档数|最新更新时间`）：与记录里的签名不一致就说明结果过期了。
 ///
-/// DOI 比较统一走 [`doi_key`]（`normalize_doi` 去前缀/尾部标点 + 转小写），
-/// 兼容历史数据里 `https://doi.org/…`、大写、尾部标点等写法差异。
-/// 只返回组内 ≥ 2 篇的分组，供前端「手动去重」按 DOI 合并。
+/// `updated_at` 有两种历史写法（`2026-11-17T06:24:16Z` 与 SQLite `CURRENT_TIMESTAMP`
+/// 的 `2026-11-17 06:29:31`），直接 `MAX()` 是按文本比序，而 `T` 排在空格前面，
+/// 会把刚写入的空格格式当成「更早」从而漏掉变化，所以先归一成 ISO 再取最大值。
+async fn dup_signature(db: &Database) -> Result<String, String> {
+    let (count, max_updated_at): (i64, Option<String>) = sqlx::query_as(
+        "SELECT COUNT(*), MAX(COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', updated_at), updated_at)) FROM documents",
+    )
+    .fetch_one(db.pool())
+    .await
+    .map_err(|e| format!("读取文献库签名失败：{}", e))?;
+    Ok(dup_scan::signature(count, max_updated_at.as_deref().unwrap_or("")))
+}
+
+/// 按 ID 批量回查文档（分组记录里只存 ID，元数据永远取最新的）
+async fn docs_by_ids(db: &Database, ids: &[i64]) -> Result<HashMap<i64, Document>, String> {
+    let mut out: HashMap<i64, Document> = HashMap::new();
+    // 分片绑定，避免一次塞太多占位符撞上 SQLite 的参数上限
+    for chunk in ids.chunks(500) {
+        let sql = format!(
+            "SELECT {} FROM documents WHERE id IN ({})",
+            DOC_COLUMNS,
+            chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",")
+        );
+        let mut q = sqlx::query_as::<_, Document>(&sql);
+        for id in chunk {
+            q = q.bind(*id);
+        }
+        for doc in q.fetch_all(db.pool()).await.map_err(|e| e.to_string())? {
+            out.insert(doc.id, doc);
+        }
+    }
+    Ok(out)
+}
+
+/// 把检测记录渲染成接口返回的 `{generated_at, signature, scanned_docs, title, doi}`。
+///
+/// 成员按 ID 回查最新元数据；已被删除/合并掉、导致组内不足 2 篇的组不再输出。
+async fn dup_render(
+    record: &dup_scan::ScanRecord,
+    db: &Arc<Database>,
+    settings: &Arc<Settings>,
+) -> Result<Value, String> {
+    let mut ids: Vec<i64> = Vec::new();
+    for g in &record.title {
+        ids.extend(&g.doc_ids);
+    }
+    for g in &record.doi {
+        ids.extend(&g.doc_ids);
+    }
+    let by_id = docs_by_ids(db, &ids).await?;
+
+    let mut title_groups: Vec<Value> = Vec::new();
+    for g in &record.title {
+        let docs: Vec<&Document> = g.doc_ids.iter().filter_map(|id| by_id.get(id)).collect();
+        if docs.len() < 2 {
+            continue;
+        }
+        let mut out_docs: Vec<Value> = Vec::with_capacity(docs.len());
+        for d in &docs {
+            out_docs.push(json!(doc_to_out(d, settings, db).await));
+        }
+        title_groups.push(json!({
+            "normalized_title": g.normalized_title,
+            "score": g.score,
+            "count": docs.len(),
+            "same_doi": g.same_doi,
+            "doi_conflict": g.doi_conflict,
+            "cross_lang": g.cross_lang,
+            "documents": out_docs,
+        }));
+    }
+
+    let mut doi_groups: Vec<Value> = Vec::new();
+    for g in &record.doi {
+        let docs: Vec<&Document> = g.doc_ids.iter().filter_map(|id| by_id.get(id)).collect();
+        if docs.len() < 2 {
+            continue;
+        }
+        let mut out_docs: Vec<Value> = Vec::with_capacity(docs.len());
+        for d in &docs {
+            out_docs.push(json!(doc_to_out(d, settings, db).await));
+        }
+        doi_groups.push(json!({
+            "doi_key": g.doi_key,
+            "doi": g.doi,
+            "count": docs.len(),
+            "title_score": g.title_score,
+            "title_conflict": g.title_conflict,
+            "documents": out_docs,
+        }));
+    }
+
+    let sum = |groups: &Vec<Value>| -> usize {
+        groups
+            .iter()
+            .map(|g| g["documents"].as_array().map(|a| a.len()).unwrap_or(0))
+            .sum()
+    };
+
+    Ok(json!({
+        "generated_at": record.generated_at,
+        "signature": record.signature,
+        "scanned_docs": record.scanned_docs,
+        "title": {
+            "groups": title_groups,
+            "total_groups": title_groups.len(),
+            "total_documents": sum(&title_groups),
+        },
+        "doi": {
+            "groups": doi_groups,
+            "total_groups": doi_groups.len(),
+            "total_documents": sum(&doi_groups),
+        },
+    }))
+}
+
+/// 全库检测（**不落盘**），供 `similar-titles` / `similar-dois` 这类只比较不记录的端点复用。
+///
+/// 比较次数已按文档数线性封顶，但仍是 CPU 密集，放阻塞线程池里跑。
+async fn dup_scan_transient(
+    db: &Arc<Database>,
+    settings: &Arc<Settings>,
+) -> Result<Value, String> {
+    let docs = load_dup_docs(db).await?;
+    let signature = dup_signature(db).await?;
+    let record = tokio::task::spawn_blocking(move || dup_scan::scan(&docs, signature))
+        .await
+        .map_err(|e| format!("检测任务失败：{}", e))?;
+    dup_render(&record, db, settings).await
+}
+
+/// GET /assist/api/documents/similar-dois —— 按归一化 DOI 分组的重复文献（只检测，不写记录）。
+///
+/// DOI 比较统一走 `pdf_meta::doi_key`（去前缀/尾部标点 + 转小写），组内额外回填标题一致性，
+/// 供前端「手动去重」按 DOI 合并，也用来暴露「同 DOI 但标题完全不像」的疑似填错。
 async fn find_similar_dois(
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
-) -> Json<Value> {
-    let docs: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
-        "SELECT {} FROM documents WHERE doi IS NOT NULL AND trim(doi) != '' ORDER BY id",
-        DOC_COLUMNS
-    ))
-    .fetch_all(db.pool())
-    .await
-    .unwrap_or_default();
-
-    // 1. 按归一化 DOI 分组
-    let mut groups: HashMap<String, Vec<Document>> = HashMap::new();
-    for doc in docs {
-        if let Some(key) = doc.doi.as_deref().and_then(doi_key) {
-            groups.entry(key).or_default().push(doc);
-        }
+) -> Response {
+    match dup_scan_transient(&db, &settings).await {
+        Ok(payload) => Json(payload["doi"].clone()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": e})),
+        )
+            .into_response(),
     }
-
-    // 2. 只留重复组，按组内最小 id 排序保证输出稳定
-    let mut repeated: Vec<(String, Vec<Document>)> = groups
-        .into_iter()
-        .filter(|(_, docs)| docs.len() > 1)
-        .collect();
-    repeated.sort_by_key(|(_, docs)| docs.iter().map(|d| d.id).min().unwrap_or(0));
-
-    // 3. 转输出结构（`doi` 给组内第一个非空原值，仅用于展示）
-    let mut out_groups: Vec<Value> = Vec::new();
-    for (key, docs) in repeated {
-        let count = docs.len();
-        let display_doi = docs
-            .iter()
-            .find_map(|d| d.doi.clone().filter(|s| !s.trim().is_empty()))
-            .unwrap_or_else(|| key.clone());
-        let mut out_docs: Vec<Value> = Vec::with_capacity(count);
-        for d in &docs {
-            out_docs.push(json!(doc_to_out(d, &settings, &db).await));
-        }
-        out_groups.push(json!({
-            "doi_key": key,
-            "doi": display_doi,
-            "count": count,
-            "documents": out_docs,
-        }));
-    }
-
-    let total_documents: usize = out_groups
-        .iter()
-        .map(|g| g["documents"].as_array().map(|a| a.len()).unwrap_or(0))
-        .sum();
-
-    Json(json!({
-        "groups": out_groups,
-        "total_groups": out_groups.len(),
-        "total_documents": total_documents,
-    }))
 }
 
+/// GET /assist/api/documents/similar-titles —— 相似标题聚类（只检测，不写记录）。
+///
+/// 算法见 [`crate::services::dup_scan::title_groups`]：内容词分块生成候选 +
+/// 编辑距离与重合度双证据 + 并查集聚类，`i18n.en.title` 作为别名参与比较。
 async fn find_similar_titles(
     axum::Extension(db): axum::Extension<Arc<Database>>,
     axum::Extension(settings): axum::Extension<Arc<Settings>>,
-) -> Json<Value> {
-    let docs: Vec<Document> = sqlx::query_as::<_, Document>(&format!(
-        "SELECT {} FROM documents WHERE title IS NOT NULL AND title != '' ORDER BY id",
-        DOC_COLUMNS
-    ))
-    .fetch_all(db.pool())
-    .await
-    .unwrap_or_default();
-
-    // 1. 归一化标题并按首字符分桶，缩小候选对规模
-    let mut buckets: HashMap<char, Vec<(String, Document)>> = HashMap::new();
-    for doc in docs {
-        if let Some(title) = &doc.title {
-            let norm = normalize_title(title);
-            if norm.is_empty() {
-                continue;
-            }
-            if let Some(first) = norm.chars().next() {
-                buckets.entry(first).or_default().push((norm, doc));
-            }
-        }
+) -> Response {
+    match dup_scan_transient(&db, &settings).await {
+        Ok(payload) => Json(payload["title"].clone()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": e})),
+        )
+            .into_response(),
     }
+}
 
-    // 2. 桶内贪心聚类：每组以第一个文档的归一化标题为代表
-    let mut groups: Vec<(String, Vec<Document>)> = Vec::new();
-    let mut reps: Vec<String> = Vec::new();
-
-    for (_, items) in buckets {
-        for (norm, doc) in items {
-            let mut matched_group: Option<usize> = None;
-            for (gi, rep) in reps.iter().enumerate() {
-                // 长度差剪枝：编辑距离 >= 长度差，若按长度差已无法达到阈值则跳过
-                let a_len = norm.chars().count();
-                let b_len = rep.chars().count();
-                let max_len = a_len.max(b_len);
-                let len_diff = a_len.abs_diff(b_len);
-                if max_len == 0 || (len_diff as f64) / (max_len as f64) > 1.0 - SIMILARITY_THRESHOLD {
-                    continue;
-                }
-                if title_similarity(&norm, rep) >= SIMILARITY_THRESHOLD {
-                    matched_group = Some(gi);
-                    break;
-                }
-            }
-            match matched_group {
-                Some(gi) => groups[gi].1.push(doc),
-                None => {
-                    reps.push(norm.clone());
-                    groups.push((norm, vec![doc]));
-                }
-            }
-        }
+/// GET /assist/api/documents/duplicate-scan —— 读取上次检测结果。
+///
+/// 记录来自 `system.json` 的 `tmp_folder_path`（默认 `data/tmp/duplicate-scan.json`），
+/// 页面进入时自动调用：没有记录返回 `{found:false}`；`stale=true` 表示检测之后库里又有增删改，
+/// 分组仍是上次的结果，需要点「重新检测」才刷新。
+async fn duplicate_scan_get(
+    axum::Extension(role): axum::Extension<auth::Role>,
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
     }
-
-    // 3. 按每组最小 id 排序，保证输出顺序稳定
-    groups.sort_by_key(|(_, docs)| docs.iter().map(|d| d.id).min().unwrap_or(0));
-
-    // 4. 过滤单篇组并转为输出结构（异步生成 DocumentOut）
-    let mut out_groups: Vec<Value> = Vec::new();
-    for (norm, docs) in groups {
-        if docs.len() <= 1 {
-            continue;
+    let record = match dup_scan::load(&settings) {
+        Ok(Some(r)) => r,
+        Ok(None) => return Json(json!({ "found": false })).into_response(),
+        Err(e) => {
+            // 记录坏了不能把页面卡住：按「还没有记录」处理，并把原因回给前端
+            tracing::warn!("读取去重检测记录失败: {}", e);
+            return Json(json!({
+                "found": false,
+                "detail": "上次的检测记录无法读取，请重新检测",
+            }))
+            .into_response();
         }
-        let count = docs.len();
-        let mut out_docs: Vec<Value> = Vec::with_capacity(count);
-        for d in &docs {
-            out_docs.push(json!(doc_to_out(d, &settings, &db).await));
+    };
+    let payload = match dup_render(&record, &db, &settings).await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": e})),
+            )
+                .into_response()
         }
-        out_groups.push(json!({
-            "normalized_title": norm,
-            "count": count,
-            "documents": out_docs,
-        }));
-    }
-
-    let total_documents: usize = out_groups
-        .iter()
-        .map(|g| g["documents"].as_array().map(|a| a.len()).unwrap_or(0))
-        .sum();
-
+    };
+    let signature = match dup_signature(&db).await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": e})),
+            )
+                .into_response()
+        }
+    };
     Json(json!({
-        "groups": out_groups,
-        "total_groups": out_groups.len(),
-        "total_documents": total_documents,
+        "found": true,
+        "stale": record.signature != signature,
+        "record_path": dup_scan::record_path(&settings).to_string_lossy(),
+        "result": payload,
     }))
+    .into_response()
+}
+
+/// POST /assist/api/documents/duplicate-scan —— 重新比较整库并覆盖写检测记录。
+///
+/// 一次跑完「标题相似 + DOI 重复」两种依据（同一份数据，成本主要在标题聚类），
+/// 两个标签页因此同时刷新。返回体与 GET 同形。
+async fn duplicate_scan_run(
+    axum::Extension(role): axum::Extension<auth::Role>,
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin"]) {
+        return resp;
+    }
+    let docs = match load_dup_docs(&db).await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": e})),
+            )
+                .into_response()
+        }
+    };
+    let signature = match dup_signature(&db).await {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
+    };
+    let record = match tokio::task::spawn_blocking(move || dup_scan::scan(&docs, signature)).await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": format!("检测任务失败：{}", e)})),
+            )
+                .into_response()
+        }
+    };
+    // 写盘失败不影响本次结果，只是下次打开没有记录可加载
+    let (saved, save_detail) = match dup_scan::save(&settings, &record) {
+        Ok(_) => (true, String::new()),
+        Err(e) => {
+            tracing::warn!("保存去重检测记录失败: {}", e);
+            (false, format!("检测记录写入失败：{}（结果仍已返回，但下次打开需要重新检测）", e))
+        }
+    };
+    let payload = match dup_render(&record, &db, &settings).await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": e})),
+            )
+                .into_response()
+        }
+    };
+    let mut body = json!({
+        "found": true,
+        "stale": false,
+        "saved": saved,
+        "record_path": dup_scan::record_path(&settings).to_string_lossy(),
+        "result": payload,
+    });
+    if !save_detail.is_empty() {
+        body["detail"] = json!(save_detail);
+    }
+    Json(body).into_response()
 }
 
 async fn list_vector_dbs() -> Json<Value> {
@@ -3074,7 +3214,7 @@ async fn by_hash(
 /// 也有历史数据里原样保存的 Zotero 写法（可能带 `https://doi.org/` 前缀）。
 /// 比对时统一压平成这个键。
 fn doi_key(raw: &str) -> Option<String> {
-    normalize_doi(raw).map(|d| d.to_lowercase())
+    crate::services::pdf_meta::doi_key(raw)
 }
 
 /// 按 DOI 查找文档（宽松匹配）。

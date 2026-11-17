@@ -113,7 +113,8 @@ okb-client zotero <csv_file> [选项]
   （需要比对哈希的策略才有意义：`--dup-doi-action hash` / `health-hash`）。文件没换过时才可靠
 - `--upload-timeout <SECONDS>` 单次上传请求的超时（默认 `0` = 自动：`300s + 每 MB 30s`，上限 2 小时）。
   慢链路或服务端卡顿时会看到 `error sending request`，调大这个值即可
-- `--extract-meta`            上传时让服务端做 PDF 元数据启发式抽取（默认**不开**，详见上方「PDF 元数据抽取」）
+- `--extract-meta [<MODE>]` 上传时的服务端元数据抽取方式：`light`（**默认**，只读 Info 字典 + Crossref）/
+  `full`（含启发式正文抽取）/ `off`（完全跳过）；单独写 `--extract-meta` 不带值 = `full`，详见下方「PDF 元数据抽取」
 - `--no-progress`             不显示上传进度（默认实时刷新已发送 / 总大小、速度、剩余时间）
 - `--upload-interval <SECONDS>` 每次上传之间的间隔秒数（默认 `1`；可写小数如 `0.5`，`0` 表示不等待）。
   新建上传与「更新 PDF」共用同一个计数，两次上传之间才等待，首个上传不等待
@@ -183,7 +184,7 @@ okb-client dir <目录路径> [选项]
 - `-r, --recursive`          递归搜索子目录
 - `--process`                上传后触发解析流水线（默认不触发）
 - `--upload-timeout <SECONDS>` 单次上传请求的超时（默认 `0` = 自动：`300s + 每 MB 30s`，上限 2 小时）
-- `--extract-meta`            上传时让服务端做 PDF 元数据启发式抽取（默认**不开**，详见上方「PDF 元数据抽取」）
+- `--extract-meta [<MODE>]` 服务端元数据抽取方式：`light`（**默认**）/ `full` / `off`；不带值 = `full`，详见下方「PDF 元数据抽取」
 - `--no-progress`             不显示上传进度（默认实时刷新已发送 / 总大小、速度、剩余时间）
 - `--upload-interval <SECONDS>` 每次上传之间的间隔秒数（默认 `1`；可写小数如 `0.5`，`0` 表示不等待），
   适合服务端限速或不想一次压满带宽的场景
@@ -347,23 +348,29 @@ okb-client sync
 - 上传失败/中断时保留已发送量：`⬆ 上传中断：已发送 3.0 MB / 18.0 MB（16%），用时 17 ms`；
 - `--no-progress` 完全关闭（`zotero` / `dir` 都支持）。
 
-## PDF 元数据抽取（默认跳过）
+## PDF 元数据抽取（默认 light）
 
 上传时服务端可以按三种模式抽元数据（表单字段 `extract_meta`）：
 
 - `full`：先从 PDF **Info 字典** 拿 DOI → Crossref 查权威元数据；Info 字典里没有 DOI 时退化为启发式抽取（题名 / 作者 / 年份 / 刊名 / 摘要）。启发式那一步要起几个 `mutool` 子进程，
   其中 `mutool draw -F text` 会把**整份文档**正文过一遍，大文件/扫描件能慢到几十秒——这正是上传停在「等待服务端处理」的主因。
-- `light`：只读 Info 字典拿 DOI + Crossref，**不抽正文**（最便宜的“带元数据”模式）。
-- `false`：完全跳过，记录只有文件名 + 哈希。
+- `light`（**客户端默认**）：只读 Info 字典拿 DOI + Crossref，**不抽正文**（最便宜的“带元数据”模式）。
+- `off`：完全跳过（请求里带 `extract_meta=false`），记录只有文件名 + 哈希。
 
-客户端两个子命令**默认跳过**（请求里带 `extract_meta=false`）：记录先建好（列表里显示文件名），不抽元数据。
-想开完整抽取加 `--extract-meta`（= `extract_meta=full`）；已上传的记录可以事后补：
+`--extract-meta` 现在带一个可选值，两个子命令通用：
+
+- 不写 → `light`（默认）
+- `--extract-meta`（不带值）→ `full`
+- `--extract-meta full` / `light` / `off` → 对应模式
+
+已上传的记录可以事后补：
 
 ```
 POST /assist/api/pipeline/extract-pdf-meta/:id     # 单篇重新抽取（文档管理页有按钮）
 ```
 
-注意：跳过抽取后，新建记录只有文件名 + 文件哈希 + 客户端从 Info 字典带到表单里的 `doi`（`dir` 流程），题名/作者都是空；
+注意：`light` 只在 PDF Info 字典里**有** DOI 时才拿到元数据（出版商写进自定义键 `/doi` 很常见，学位论文/扫描件常常没有），
+没有 DOI 的那份文件题名/作者仍是空——这类库要一次抽全就用 `--extract-meta`（`full`）。
 `zotero` 流程加的 `--update-meta` 不受影响（元数据来自 CSV，与服务端启发式抽取无关）。
 
 ## Token 设置
