@@ -952,19 +952,7 @@ pub(crate) async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         let server: Option<ServerEntry> = match &server_index {
             Some(idx) => idx.lookup(&d.doi).cloned(),
             None => match api_lookup_by_doi(&client, &base_url, &d.doi, &token).await {
-                (true, Some(doc)) => Some(ServerEntry {
-                    id: doc.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
-                    doi: doc.get("doi").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    doi_key: None,
-                    file_hash: doc
-                        .get("file_hash")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    pdf_health: doc
-                        .get("pdf_health")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                }),
+                (true, Some(doc)) => Some(ServerEntry::from_doc_json(&doc)),
                 // 查询失败或 found=true 但无 doc：安全起见视为新建
                 _ => None,
             },

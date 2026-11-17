@@ -1,8 +1,10 @@
-//! 子命令 `dir`：扫描目录中的 PDF，与服务端比对后交互上传
+//! 子命令 `dir`：扫描目录中的 PDF，先用 lopdf 从 Info 字典取 DOI 与服务端比对，
+//! 打印待上传清单让用户确认，确认后才逐个上传
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -27,7 +29,7 @@ pub(crate) struct DirArgs {
     #[arg(long)]
     token: Option<String>,
 
-    /// 试运行，不实际上传
+    /// 试运行：提取 DOI、与服务器比对并打印待上传清单，但不上传
     #[arg(long)]
     dry_run: bool,
 
@@ -116,7 +118,7 @@ pub(crate) async fn run_dir(args: &DirArgs) -> Result<()> {
     let process = args.process;
     // 上传进度开关（`--no-progress`）
     PROGRESS_ENABLED.store(!args.interval.no_progress, Ordering::Relaxed);
-    // `dir` 不知道 DOI（要等上传后服务端返回），所以只做记录：上传成功后写回 `~/.okb/client/doi-hash.json`
+    // 本地已知的「DOI → 哈希」（清单里已经拿到 DOI，成功后记下来供 `zotero --reuse-hash` 复用）
     let mut hash_store = HashDoiStore::load();
 
     println!("扫描目录: {}", args.dir);
@@ -134,7 +136,7 @@ pub(crate) async fn run_dir(args: &DirArgs) -> Result<()> {
     println!("Token: {}", if token.is_some() { "********" } else { "未设置" });
     println!();
 
-    // 1. 扫描 PDF（这里**不**计算哈希：哈希与比对放到上传前逐个做，避免先扫全库再上传）
+    // 1. 扫描 PDF
     let all_pdfs = scan_pdfs(Path::new(&args.dir), args.recursive)?;
     let total = all_pdfs.len();
     if total == 0 {
@@ -144,136 +146,80 @@ pub(crate) async fn run_dir(args: &DirArgs) -> Result<()> {
     println!("找到 {} 个 PDF 文件。", total);
     println!();
 
-    // 2. 拉一次服务端全量哈希索引，供上传前逐个比对（1 次请求；失败则逐文件回退 diff-hashes）
+    // 2. 拉一次服务端全量 DOI / 哈希索引，比对全在本地完成（1 次请求；失败则逐文件回退单条查询）
     let client = http_client()?;
-    println!("正在获取服务端索引（全部文件哈希）...");
+    println!("正在获取服务端索引（全部文献的 DOI / 文件哈希）...");
     let server_index = api_fetch_server_index(&client, &base_url, &token).await;
     match &server_index {
         Some(idx) => println!(
-            "  服务端索引：{} 篇文献，{} 个可比对哈希（1 次请求）",
+            "  服务端索引：{} 篇文献，{} 个可比对 DOI，{} 个可比对哈希（1 次请求）",
             idx.count,
+            idx.by_doi.len(),
             idx.hashes.len()
         ),
-        None => println!("  ⚠ 无法获取服务端索引，回退为逐个文件 diff-hashes 比对（较慢）"),
+        None => println!("  ⚠ 无法获取服务端索引，回退为逐个文件单条比对（较慢）"),
     }
     println!();
 
-    // 3. 列出本地文件（文件太多时只列前 200 个，避免刷屏）
-    const LIST_LIMIT: usize = 200;
-    for (i, p) in all_pdfs.iter().take(LIST_LIMIT).enumerate() {
-        println!("  [{:>3}] {}", i + 1, p.display());
-    }
-    if all_pdfs.len() > LIST_LIMIT {
-        println!("  …（其余 {} 个未列出）", all_pdfs.len() - LIST_LIMIT);
+    // 3. 比对阶段：逐个「lopdf 读 Info 字典取 DOI → 与服务端比对」，这一步不写服务器任何东西
+    println!("第一步：提取 DOI 并与服务器比对（共 {} 个）", total);
+    println!("  DOI 取自 PDF 的 Info 字典（不解析正文）；提不到 DOI 的文件才计算 sha256 按哈希比对。");
+    println!();
+    let analyze_started = Instant::now();
+    let mut plans: Vec<FilePlan> = Vec::with_capacity(total);
+    for (i, path) in all_pdfs.iter().enumerate() {
+        let plan = analyze_file(&client, &base_url, &token, &server_index, path).await;
+        println!("  [{}/{}] {}", i + 1, total, plan.summary());
+        plans.push(plan);
     }
     println!();
-    println!("提示：上传前会逐个计算哈希并与服务器比对，服务器已有的文件自动跳过。");
+    println!("比对完成，用时 {}。", format_duration(analyze_started.elapsed()));
     println!();
 
-    // 4. 交互选择
-    print!("请选择 [a] 全部上传  [s] 逐个选择  [q] 退出: ");
-    io::stdout().flush().ok();
-    let mut choice = String::new();
-    io::stdin().read_line(&mut choice).ok();
-    let choice = choice.trim().to_lowercase();
-
-    if choice == "q" {
-        println!("已退出。");
+    // 4. 打印待上传清单（编号即后面的上传顺序），等用户确认
+    let candidates = print_plan(&plans);
+    if candidates.is_empty() {
+        println!("没有需要上传的文件。");
+        return Ok(());
+    }
+    if args.dry_run {
+        println!("试运行：以上清单不会上传。");
         return Ok(());
     }
 
-    let selected: Vec<&PathBuf> = if choice == "a" {
-        all_pdfs.iter().collect()
-    } else if choice == "s" {
-        let mut sel = Vec::new();
-        for p in &all_pdfs {
-            print!("上传 {}？[y/N]: ", p.display());
-            io::stdout().flush().ok();
-            let mut ans = String::new();
-            io::stdin().read_line(&mut ans).ok();
-            if ans.trim().to_lowercase() == "y" {
-                sel.push(p);
-            } else {
-                println!("  跳过。");
-            }
-        }
-        sel
-    } else {
-        println!("无效选择，退出。");
-        return Ok(());
-    };
-
+    let selected = choose_uploads(&candidates);
     if selected.is_empty() {
-        println!("未选择任何文件。");
+        println!("已取消，未上传任何文件。");
         return Ok(());
     }
 
-    // 5. 逐个文件：计算哈希 -> 与服务端比对 -> 决定是否上传
+    // 5. 上传阶段
     println!();
-    println!("开始处理 {} 个文件 ...", selected.len());
-    let mut uploaded = 0usize;
-    let mut skipped = 0usize;
-    let mut hash_failed = 0usize;
+    println!("开始上传 {} 个文件 ...", selected.len());
+    let mut created = 0usize;
+    let mut attached = 0usize;
+    let mut duplicated = 0usize;
     let mut failed = 0usize;
     // 已执行的上传次数（用于按 `--upload-interval` 节流，首个不等待）
     let mut upload_seq = 0usize;
-    let loop_started = std::time::Instant::now();
+    let loop_started = Instant::now();
 
-    for (i, path) in selected.iter().enumerate() {
-        // 哈希是阻塞 IO：丢到后台线程，不卡住 tokio worker
-        print!(
-            "  [{}/{}] 计算哈希: {} ... ",
-            i + 1,
-            selected.len(),
-            path.display()
-        );
-        io::stdout().flush().ok();
-        let item_started = std::time::Instant::now();
-        let hash = match sha256_file_async((*path).clone()).await {
-            Ok(h) => {
-                println!(
-                    "{} ({})",
-                    &h[..16.min(h.len())],
-                    format_duration(item_started.elapsed())
-                );
-                h
-            }
-            Err(e) => {
-                println!("失败: {} ({})", e, format_duration(item_started.elapsed()));
-                hash_failed += 1;
-                continue;
-            }
-        };
-
-        // 上传前比对：服务器已有相同哈希则跳过
-        match server_has_hash(&client, &base_url, &token, &server_index, &hash).await {
-            Some(true) => {
-                println!("        -> 服务器已存在该文件，跳过");
-                skipped += 1;
-                continue;
-            }
-            Some(false) => {}
-            None => {
-                println!("        -> ⚠ 哈希比对请求失败，本文件未上传（可重试）");
-                failed += 1;
-                continue;
-            }
-        }
-
-        if args.dry_run {
-            println!("        -> [dry-run] 服务器没有该文件，跳过上传");
-            continue;
-        }
-
-        // 两次上传之间按 `--upload-interval` 等待（首个不等待）
+    for (i, plan) in selected.iter().enumerate() {
         args.interval.throttle(upload_seq).await;
         upload_seq += 1;
         // 行尾先换行，进度行独占一行（见 `UploadProgress`）
-        println!("        上传 ...");
+        println!(
+            "  [{}/{}] {} · {}（{}）",
+            i + 1,
+            selected.len(),
+            plan.upload_label(),
+            plan.path.display(),
+            format_bytes(plan.size)
+        );
         match api_upload(
             &base_url,
-            path,
-            None,
+            &plan.path,
+            plan.doi.as_deref(),
             &token,
             args.interval.timeout_override(),
             args.interval.extract_meta,
@@ -281,14 +227,28 @@ pub(crate) async fn run_dir(args: &DirArgs) -> Result<()> {
         .await
         {
             UploadOutcome::Created(result) => {
-                println!("        成功 -> id={}", result.id);
-                // 记下 DOI → 哈希（服务端算的与本地一致，优先用服务端返回值），供 `zotero --reuse-hash` 复用
-                if let Some(doi) = result.doi.as_deref().filter(|s| !s.trim().is_empty()) {
-                    let h = result.file_hash.as_deref().unwrap_or(hash.as_str());
+                // 比对结论说「补入」但服务端另给了 id / 状态时以服务端为准
+                let status = result.status.as_deref().unwrap_or("created");
+                match plan.action {
+                    Action::Attach(_) => attached += 1,
+                    _ => created += 1,
+                }
+                println!("        成功 -> id={}（{}）", result.id, status);
+                // 记下 DOI → 哈希：DOI 以本地 Info 字典提取值兜底，服务端补入时不回传 doi
+                let doi = result
+                    .doi
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .or(plan.doi.as_deref());
+                if let Some(doi) = doi {
+                    let h = result
+                        .file_hash
+                        .as_deref()
+                        .or(plan.hash.as_deref())
+                        .unwrap_or_default();
                     hash_store.record(doi, h);
                     hash_store.flush();
                 }
-                uploaded += 1;
                 // 触发解析流水线
                 if process && api_trigger_pipeline(&client, &base_url, result.id, &token).await {
                     println!("        -> 已触发流水线");
@@ -302,6 +262,16 @@ pub(crate) async fn run_dir(args: &DirArgs) -> Result<()> {
                 same_file,
                 message,
             } => {
+                // 清单里判定「条目缺 PDF」才上传，服务端却说它已有文件 → 索引/健康状态过期，按已存在处理
+                let stale_attach = matches!(plan.action, Action::Attach(_)) && kind == "doi";
+                if stale_attach {
+                    println!(
+                        "        -> 服务端已有该 DOI 记录 id={} 且带 PDF（本地索引已过期），未上传",
+                        existing_id
+                    );
+                    duplicated += 1;
+                    continue;
+                }
                 println!("        被服务端去重拦下");
                 println!(
                     "        已有文档: id={} | DOI={} | 文件名={}",
@@ -320,9 +290,9 @@ pub(crate) async fn run_dir(args: &DirArgs) -> Result<()> {
                     );
                 } else {
                     println!("        原因: {}", if message.is_empty() { "DOI 已存在" } else { message.as_str() });
-                    println!("        处理: 用 --dup-doi-action hash 可改走「比对哈希、不同则覆盖已有 PDF」的路子");
+                    println!("        处理: 用 zotero 子命令的 --dup-doi-action hash 可改走「比对哈希、不同则覆盖已有 PDF」的路子");
                 }
-                failed += 1;
+                duplicated += 1;
             }
             UploadOutcome::Failed => {
                 println!("        失败");
@@ -332,19 +302,219 @@ pub(crate) async fn run_dir(args: &DirArgs) -> Result<()> {
     }
 
     // 6. 最终统计
+    let blocked = plans
+        .iter()
+        .filter(|p| matches!(&p.action, Action::Blocked(_)))
+        .count();
     println!();
     println!("==================================================");
     println!("本地 PDF:     {}", total);
-    println!("已上传:       {}", uploaded);
-    println!("服务器已存在: {}", skipped);
-    if hash_failed > 0 {
-        println!("哈希失败:     {}", hash_failed);
+    println!("新建记录:     {}", created);
+    println!("补入已有条目: {}", attached);
+    println!("服务器已存在: {}", plans.iter().filter(|p| matches!(&p.action, Action::Exists(..))).count());
+    println!("服务端去重:   {}", duplicated);
+    if blocked > 0 {
+        println!("未能比对:   {}", blocked);
     }
     println!("失败:         {}", failed);
     println!("用时:         {}", format_duration(loop_started.elapsed()));
     println!("==================================================");
 
     Ok(())
+}
+
+// ==================== 比对计划 ====================
+
+/// 比对阶段对单个 PDF 的结论
+struct FilePlan {
+    path: PathBuf,
+    size: u64,
+    /// 从 PDF Info 字典提取并归一化后的 DOI
+    doi: Option<String>,
+    /// 提不到 DOI 时才计算，用来与服务端比文件内容
+    hash: Option<String>,
+    action: Action,
+    /// 附注（如 Info 字典读不出来），只在比对阶段那一行尾部显示
+    note: Option<String>,
+}
+
+/// 单个 PDF 的处置结论
+enum Action {
+    /// 库里没有这个 DOI（没有 DOI 时 = 没有这份文件）→ 新建记录
+    Create,
+    /// 库里有同 DOI 的条目但没有 PDF → 把这份文件补进该条目
+    Attach(u64),
+    /// 库里已经有了，不上传：`(归类, 详情)`
+    Exists(&'static str, String),
+    /// 比对没做成（文件读不了 / 请求失败），本次不动它
+    Blocked(String),
+}
+
+/// 清单分组（决定编号顺序）
+#[derive(PartialEq, Clone, Copy)]
+enum Category {
+    NewByDoi,
+    Attach,
+    NewByHash,
+}
+
+impl FilePlan {
+    fn is_upload(&self) -> bool {
+        matches!(self.action, Action::Create | Action::Attach(_))
+    }
+
+    fn category(&self) -> Category {
+        match &self.action {
+            Action::Attach(_) => Category::Attach,
+            _ if self.doi.is_some() => Category::NewByDoi,
+            _ => Category::NewByHash,
+        }
+    }
+
+    /// 比对阶段的一行结论
+    fn summary(&self) -> String {
+        let line = match (&self.doi, &self.hash) {
+            (Some(doi), _) => doi.clone(),
+            (None, Some(hash)) => format!("无 DOI · sha256 {}", &hash[..12.min(hash.len())]),
+            (None, None) => "无 DOI · 未取哈希".to_string(),
+        };
+        let verdict = match &self.action {
+            Action::Create => "需上传（库中没有）".to_string(),
+            Action::Attach(id) => format!("需上传（补入条目 id={}）", id),
+            Action::Exists(kind, detail) if detail.is_empty() => {
+                format!("跳过（{}）", kind)
+            }
+            Action::Exists(kind, detail) => format!("跳过（{}：{}）", kind, detail),
+            Action::Blocked(why) => format!("未比对：{}", why),
+        };
+        match &self.note {
+            Some(note) => format!("{} → {} · {}", line, verdict, note),
+            None => format!("{} → {}", line, verdict),
+        }
+    }
+
+    /// 清单里的一行
+    fn plan_line(&self) -> String {
+        let head = match (&self.doi, &self.hash) {
+            (Some(doi), _) => doi.clone(),
+            (None, Some(hash)) => format!("sha256 {}…", &hash[..16.min(hash.len())]),
+            (None, None) => "（无 DOI / 无哈希）".to_string(),
+        };
+        let target = match &self.action {
+            Action::Attach(id) => format!("  → 补入 id={}", id),
+            _ => String::new(),
+        };
+        format!(
+            "{} · {} · {}{}",
+            head,
+            format_bytes(self.size),
+            self.path.display(),
+            target
+        )
+    }
+
+    fn upload_label(&self) -> String {
+        match &self.action {
+            Action::Attach(id) => format!("补入条目 id={}", id),
+            _ if self.doi.is_some() => "新建（库中无此 DOI）".to_string(),
+            _ => "新建（库中无此哈希）".to_string(),
+        }
+    }
+}
+
+/// 单个文件的「取 DOI → 比对」：只读本地文件与查服务端，不写服务器
+async fn analyze_file(
+    client: &Client,
+    base_url: &str,
+    token: &Option<String>,
+    index: &Option<ServerIndex>,
+    path: &Path,
+) -> FilePlan {
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let (doi, note) = match extract_doi_async(path.to_path_buf()).await {
+        Ok(Some(doi)) => (Some(doi), None),
+        Ok(None) => (None, None),
+        Err(e) => (
+            None,
+            Some(format!("Info 字典读不出（按哈希比对）: {:#}", e)),
+        ),
+    };
+
+    // 有 DOI 就以 DOI 为准：库里没有该 DOI，或有该 DOI 但条目没有 PDF，才需要传
+    if let Some(doi) = doi.as_ref() {
+        let action = match lookup_server_entry(client, base_url, token, index, doi).await {
+            None => Action::Create,
+            Some(entry) => {
+                // 「没有文件」= 服务端没算出 file_hash，或健康检查已判定 missing
+                if entry.hash().is_empty() || entry.health() == "missing" {
+                    Action::Attach(entry.id)
+                } else {
+                    let h = entry.hash();
+                    Action::Exists(
+                        "同 DOI 条目已有 PDF",
+                        format!("id={} · 服务端哈希 {}", entry.id, &h[..12.min(h.len())]),
+                    )
+                }
+            }
+        };
+        return FilePlan {
+            path: path.to_path_buf(),
+            size,
+            doi: Some(doi.clone()),
+            hash: None,
+            action,
+            note,
+        };
+    }
+
+    // 提不到 DOI：只能比文件内容
+    let hash = match sha256_file_async(path.to_path_buf()).await {
+        Ok(h) => h,
+        Err(e) => {
+            return FilePlan {
+                path: path.to_path_buf(),
+                size,
+                doi: None,
+                hash: None,
+                action: Action::Blocked(format!("计算哈希失败: {:#}", e)),
+                note,
+            }
+        }
+    };
+    let action = match server_has_hash(client, base_url, token, index, &hash).await {
+        Some(true) => Action::Exists("哈希已在库中", String::new()),
+        Some(false) => Action::Create,
+        None => Action::Blocked("哈希比对请求失败（可重试）".to_string()),
+    };
+    FilePlan {
+        path: path.to_path_buf(),
+        size,
+        doi: None,
+        hash: Some(hash),
+        action,
+        note,
+    }
+}
+
+/// 按 DOI 取服务端记录：`None` = 库里没有这个 DOI。
+///
+/// 全量索引可用时在本地查；不可用时回退 `by-doi` 单条查询。回退路径分不清
+/// 「查不到」与「请求失败」，一律当「库里没有」处理 —— 真重复时服务端的 DOI 去重
+/// 会返回 409，不会造出第二条记录。
+async fn lookup_server_entry(
+    client: &Client,
+    base_url: &str,
+    token: &Option<String>,
+    index: &Option<ServerIndex>,
+    doi: &str,
+) -> Option<ServerEntry> {
+    match index {
+        Some(idx) => idx.lookup(doi).cloned(),
+        None => match api_lookup_by_doi(client, base_url, doi, token).await {
+            (true, Some(doc)) => Some(ServerEntry::from_doc_json(&doc)),
+            _ => None,
+        },
+    }
 }
 
 /// 与服务器比对单个文件哈希：`Some(true)` 已存在 / `Some(false)` 缺失 / `None` 比对失败。
@@ -363,5 +533,333 @@ async fn server_has_hash(
             let diff = api_diff_hashes(client, base_url, &[hash.to_string()], token).await?;
             Some(!diff.missing.iter().any(|h| h.eq_ignore_ascii_case(hash)))
         }
+    }
+}
+
+// ==================== 清单确认 ====================
+
+/// 打印待上传清单（按处置方式分组）与不上传的部分，返回带编号的候选项
+fn print_plan(plans: &[FilePlan]) -> Vec<&FilePlan> {
+    /// 每组最多列出的条数（未列出的仍然会被上传）
+    const LIST_LIMIT: usize = 200;
+
+    let upload: Vec<&FilePlan> = plans.iter().filter(|p| p.is_upload()).collect();
+    let exists: Vec<(&'static str, usize)> = {
+        let mut buckets: Vec<(&'static str, usize)> = Vec::new();
+        for p in plans.iter().filter_map(|p| match &p.action {
+            Action::Exists(kind, _) => Some(*kind),
+            _ => None,
+        }) {
+            match buckets.iter_mut().find(|(k, _)| *k == p) {
+                Some((_, n)) => *n += 1,
+                None => buckets.push((p, 1)),
+            }
+        }
+        buckets
+    };
+    let blocked: Vec<&FilePlan> = plans
+        .iter()
+        .filter(|p| matches!(&p.action, Action::Blocked(_)))
+        .collect();
+    let no_doi = plans.iter().filter(|p| p.doi.is_none()).count();
+
+    println!("==================================================");
+    println!(
+        "比对结果：{} 个文件，{} 个需要上传（{} 个提取不到 DOI，改按文件哈希比对）",
+        plans.len(),
+        upload.len(),
+        no_doi
+    );
+    println!();
+
+    let groups = [
+        (Category::NewByDoi, "新建 —— 库中没有这个 DOI"),
+        (Category::Attach, "补入 —— 同 DOI 的条目已存在但缺 PDF"),
+        (Category::NewByHash, "新建 —— 提取不到 DOI，按文件哈希比对"),
+    ];
+    let mut candidates: Vec<&FilePlan> = Vec::new();
+    for (category, title) in groups {
+        let items: Vec<&FilePlan> = upload
+            .iter()
+            .copied()
+            .filter(|p| p.category() == category)
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        let bytes: u64 = items.iter().map(|p| p.size).sum();
+        println!("── {}（{} 个 · {}）", title, items.len(), format_bytes(bytes));
+        for (i, item) in items.iter().enumerate() {
+            if i < LIST_LIMIT {
+                println!("  [{:>3}] {}", candidates.len() + 1, item.plan_line());
+            }
+            candidates.push(item);
+        }
+        if items.len() > LIST_LIMIT {
+            println!(
+                "  …（其余 {} 个未列出，确认后同样会上传）",
+                items.len() - LIST_LIMIT
+            );
+        }
+        println!();
+    }
+
+    if !exists.is_empty() {
+        let detail: Vec<String> = exists
+            .iter()
+            .map(|(kind, n)| format!("{} {} 个", kind, n))
+            .collect();
+        println!(
+            "不需要上传（{}）：{}",
+            exists.iter().map(|(_, n)| n).sum::<usize>(),
+            detail.join(" / ")
+        );
+    }
+    if !blocked.is_empty() {
+        println!("未能比对（{}，本次不会上传）：", blocked.len());
+        for p in blocked.iter().take(20) {
+            if let Action::Blocked(why) = &p.action {
+                println!("  · {} —— {}", p.path.display(), why);
+            }
+        }
+        if blocked.len() > 20 {
+            println!("  …（其余 {} 个未列出）", blocked.len() - 20);
+        }
+    }
+    println!();
+    candidates
+}
+
+/// 让用户确认清单：`y` 全部上传、`s` 逐个挑选、其他 = 取消
+fn choose_uploads<'a>(candidates: &[&'a FilePlan]) -> Vec<&'a FilePlan> {
+    print!(
+        "确认上传这 {} 个文件？[y] 全部上传  [s] 逐个挑选  [n] 取消: ",
+        candidates.len()
+    );
+    io::stdout().flush().ok();
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).ok();
+    match answer.trim().to_lowercase().as_str() {
+        "y" | "yes" => candidates.to_vec(),
+        "s" => {
+            let mut selected: Vec<&FilePlan> = Vec::new();
+            for plan in candidates {
+                print!("  上传 {}？[y/N]: ", plan.path.display());
+                io::stdout().flush().ok();
+                let mut one = String::new();
+                io::stdin().read_line(&mut one).ok();
+                if one.trim().eq_ignore_ascii_case("y") {
+                    selected.push(*plan);
+                } else {
+                    println!("    跳过。");
+                }
+            }
+            selected
+        }
+        _ => Vec::new(),
+    }
+}
+
+// ==================== PDF Info → DOI（lopdf） ====================
+
+/// 用 lopdf 只读文件结构与 Info 字典（不解析正文）拿 DOI
+///
+/// 与服务端 `extract_meta=light` 同源：出版商把 DOI 写进自定义 Info 键（`/doi`）很常见，
+/// 也可能混在 `/Subject`、`/Keywords` 里，所以整本字典的字符串值都扫一遍，键名含 doi 的优先。
+/// `Err` = 连结构都没读出来（损坏 / 加密），`Ok(None)` = 读到了但里面没有 DOI，
+/// 两种情况都退化成按文件哈希比对。
+fn doi_from_pdf_info(path: &Path) -> Result<Option<String>> {
+    let meta = lopdf::Document::load_metadata(path)
+        .with_context(|| format!("无法解析 PDF: {}", path.display()))?;
+
+    // 标准字段已在 PdfMetadata 上拍平成 String，自定义键（`/doi` 这类）还在 custom 里
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for (key, value) in [
+        ("Title", meta.title),
+        ("Author", meta.author),
+        ("Subject", meta.subject),
+        ("Keywords", meta.keywords),
+        ("Creator", meta.creator),
+        ("Producer", meta.producer),
+    ] {
+        if let Some(value) = value.filter(|v| !v.trim().is_empty()) {
+            entries.push((key.to_string(), value));
+        }
+    }
+    for (key, value) in &meta.custom {
+        if let Some(text) = info_value_text(value) {
+            if !text.trim().is_empty() {
+                entries.push((String::from_utf8_lossy(key).to_string(), text));
+            }
+        }
+    }
+
+    // 键名含 doi 的先扫：避免 `/Producer` 里恰好出现的 `10.x/…` 抢掉真正的 `/doi`
+    let hit = entries
+        .iter()
+        .filter(|(key, _)| key.to_ascii_lowercase().contains("doi"))
+        .chain(entries.iter().filter(|(key, _)| !key.to_ascii_lowercase().contains("doi")))
+        .find_map(|(_, value)| find_doi_in(value));
+    Ok(hit)
+}
+
+/// `doi_from_pdf_info` 的异步版（读整个文件 + 解析结构都是阻塞操作，丢到后台线程）
+async fn extract_doi_async(path: PathBuf) -> Result<Option<String>> {
+    tokio::task::spawn_blocking(move || doi_from_pdf_info(&path))
+        .await
+        .map_err(|e| anyhow::anyhow!("DOI 提取任务崩溃: {}", e))?
+}
+
+/// Info 条目取可读文本：字符串按 PDF 编码（PDFDocEncoding / UTF-16BE）解码，名字直接按字节取
+fn info_value_text(value: &lopdf::Object) -> Option<String> {
+    match value {
+        lopdf::Object::String(_, _) => lopdf::decode_text_string(value).ok(),
+        lopdf::Object::Name(bytes) => Some(String::from_utf8_lossy(bytes).to_string()),
+        _ => None,
+    }
+}
+
+/// DOI 允许的字符集（与服务端 `pdf_meta::is_doi_char` 一致）
+fn is_doi_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "-._;()/:".contains(c)
+}
+
+/// 是否停在 DOI 常见的「折断点」上（`.` `/` `-` `_`）
+fn ends_at_doi_break(s: &str) -> bool {
+    let t = s.trim_end();
+    t.ends_with('.') || t.ends_with('/') || t.ends_with('-') || t.ends_with('_')
+}
+
+/// 拼回「同一串里被空格拆开的 DOI 续写」，判据与服务端 `extend_doi_over_space` 相同
+///
+/// 中文期刊的 `/doi` 值常见 `10.3969/j. issn.1007-130X.2024.12.001`，不接续就只能拿到
+/// 半截 `10.3969/j`（与服务端存的 DOI 指纹对不上，还会把残值写进库里）。
+/// 只在「已匹配到折断点」且「空格后的片段明显像 DOI 续写（≥2 个点，或含 `-` / `/`）」时接续，
+/// 句末句号后面跟英文单词不会被粘进来。
+fn extend_doi_over_space(matched: &str, rest: &str) -> String {
+    let mut doi = matched.to_string();
+    let mut rest = rest;
+    while ends_at_doi_break(&doi) {
+        let trimmed = rest.trim_start();
+        if trimmed.len() == rest.len() {
+            break; // 后面没有空白 ⇒ 已经到头
+        }
+        let token: String = trimmed.chars().take_while(|c| is_doi_char(*c)).collect();
+        if token.is_empty() {
+            break;
+        }
+        let doi_ish =
+            token.matches('.').count() >= 2 || token.contains('-') || token.contains('/');
+        if !doi_ish {
+            break;
+        }
+        doi.push_str(&token);
+        rest = &trimmed[token.len()..];
+    }
+    doi
+}
+
+/// 在任意文本里找第一个 `10.NNNN/后缀` 形态的 DOI（对齐服务端 `scan_doi` 的 plain 分支）
+///
+/// 前缀（`doi:`、`https://doi.org/`）不用管：只认 `10.` 起始的核心，尾部标点交给 `normalize_doi`。
+fn find_doi_in(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut from = 0usize;
+    while let Some(offset) = text[from..].find("10.") {
+        let start = from + offset;
+        from = start + 3;
+        // 前面贴着数字或点号的不是 DOI 起点（`110.1234/x` 是版本号/长号，不是注册机构号）；
+        // `https://doi.org/10.x` 这种带前缀的写法很常见，分隔符一律放行
+        if start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'.') {
+            continue;
+        }
+        // `10.` 后必须是 4~9 位注册机构号，再跟一个 `/`
+        let mut idx = start + 3;
+        let digits_start = idx;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            idx += 1;
+        }
+        let digits = idx - digits_start;
+        if !(4..=9).contains(&digits) || idx >= bytes.len() || bytes[idx] != b'/' {
+            continue;
+        }
+        let suffix_start = idx + 1;
+        let mut end = suffix_start;
+        while end < bytes.len() && is_doi_char(bytes[end] as char) {
+            end += 1;
+        }
+        if end == suffix_start {
+            continue;
+        }
+        // 后缀字符集是 ASCII，切片两端必然落在字符边界上
+        let matched = &text[start..end];
+        let extended = extend_doi_over_space(matched, &text[end..]);
+        if let Some(doi) = normalize_doi(&extended) {
+            return Some(doi);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod doi_tests {
+    use super::*;
+
+    #[test]
+    fn finds_plain_doi() {
+        assert_eq!(
+            find_doi_in("10.1007/s11118-024-10109-8").as_deref(),
+            Some("10.1007/s11118-024-10109-8")
+        );
+        assert_eq!(
+            find_doi_in("doi: 10.1360/SST-2023-0410.").as_deref(),
+            Some("10.1360/SST-2023-0410")
+        );
+        assert_eq!(
+            find_doi_in("https://doi.org/10.1109/TWC.2024.1234567").as_deref(),
+            Some("10.1109/TWC.2024.1234567")
+        );
+        // Info 字典里 `/doi` 常整条写成 URL
+        assert_eq!(
+            find_doi_in("http://dx.doi.org/10.1016/j.ins.2024.123456").as_deref(),
+            Some("10.1016/j.ins.2024.123456")
+        );
+    }
+
+    #[test]
+    fn rejoins_space_split_doi() {
+        // 中文期刊 /doi 值的常见写法
+        assert_eq!(
+            find_doi_in("10.3969/j. issn.1007-130X.2024.12.001").as_deref(),
+            Some("10.3969/j.issn.1007-130X.2024.12.001")
+        );
+    }
+
+    #[test]
+    fn does_not_swallow_prose_after_the_doi() {
+        assert_eq!(
+            find_doi_in("see 10.1234/abc. In this paper we study").as_deref(),
+            Some("10.1234/abc")
+        );
+    }
+
+    #[test]
+    fn rejects_numbers_that_are_not_doi_prefixes() {
+        // 注册机构号不足 4 位 / 前面还贴着一串数字 ⇒ 不是 DOI
+        assert_eq!(find_doi_in("version 10.1 fixed"), None);
+        assert_eq!(find_doi_in("build 110.1234/abc"), None);
+    }
+
+    #[test]
+    fn prefers_doi_named_info_keys() {
+        // 真实样本里见过的写法：自定义键 /doi 与 /Subject 混在一起
+        let mut dict = lopdf::Dictionary::new();
+        dict.set(b"Producer".as_slice(), lopdf::Object::string_literal("Acrobat 10.0 /10.9999/typo"));
+        dict.set(b"doi".as_slice(), lopdf::Object::string_literal("10.1000/real-doi"));
+        let hit = dict
+            .iter()
+            .filter(|(k, _)| String::from_utf8_lossy(k).to_ascii_lowercase().contains("doi"))
+            .find_map(|(_, v)| info_value_text(v).and_then(|t| find_doi_in(&t)));
+        assert_eq!(hit.as_deref(), Some("10.1000/real-doi"));
     }
 }

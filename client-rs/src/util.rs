@@ -128,6 +128,22 @@ impl ServerEntry {
     pub(crate) fn health(&self) -> &str {
         self.pdf_health.as_deref().unwrap_or("")
     }
+
+    /// 从 `by-doi` 返回的文档 JSON 构造（服务端索引不可用时的逐条查询回退路径）
+    pub(crate) fn from_doc_json(doc: &serde_json::Value) -> Self {
+        let text = |key: &str| {
+            doc.get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        };
+        ServerEntry {
+            id: doc.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
+            doi: text("doi"),
+            doi_key: None,
+            file_hash: text("file_hash"),
+            pdf_health: text("pdf_health"),
+        }
+    }
 }
 
 /// doi-hash-index 接口返回
@@ -192,6 +208,9 @@ impl ServerIndex {
 #[derive(Debug, Deserialize)]
 pub(crate) struct UploadResult {
     pub(crate) id: u64,
+    /// 服务端对这次上传的处置：新建时没有这个字段，去重分支回 `attached` / `skipped` / `replaced`
+    #[serde(default)]
+    pub(crate) status: Option<String>,
     #[serde(default)]
     pub(crate) doi: Option<String>,
     #[serde(default)]
@@ -1113,6 +1132,8 @@ pub(crate) async fn api_upload(
             );
             return UploadOutcome::Created(UploadResult {
                 id,
+                // 409 响应体没有 `status`，这里给一个客户端侧标记，表示「库里本来就有同内容记录」
+                status: Some("existing".to_string()),
                 doi: existing_doi,
                 file_hash: get_str("/existing/file_hash"),
             });
