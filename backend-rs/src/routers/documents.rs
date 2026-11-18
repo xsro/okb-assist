@@ -5,13 +5,16 @@ use std::sync::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, head, post};
+use tokio_stream::wrappers::ReceiverStream;
 use serde::{de, Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
+use sqlx::Row;
 
 use crate::config::Settings;
 use crate::database::Database;
@@ -259,6 +262,12 @@ pub fn router() -> axum::Router<()> {
         // DOI → 文档 ID（`/assist/doi/{doi}` 短链用）：DOI 必然带 `/`，所以用通配符收整段余量，
         // 同时兼容前端 `encodeURIComponent` 后的 `%2F`（axum 的 Path 会自动解码）。
         .route("/assist/api/documents/public/by-doi/*doi", get(resolve_public_doc_id_by_doi))
+        .route("/assist/api/stats/facets/", get(stats_facets))
+        .route("/assist/api/stats/facets", get(stats_facets))
+        .route("/assist/api/markdown/batch/", get(markdown_batch_get).post(markdown_batch_post))
+        .route("/assist/api/markdown/batch", get(markdown_batch_get).post(markdown_batch_post))
+        .route("/assist/api/markdown/export/", get(markdown_export))
+        .route("/assist/api/markdown/export", get(markdown_export))
         .route("/assist/api/documents/", get(list_documents).post(upload_document))
         .route("/assist/api/documents", get(list_documents).post(upload_document))
         .route("/assist/api/documents/upload/", post(upload_document))
@@ -3103,6 +3112,18 @@ pub struct GrepSearchQuery {
     pub algorithm: Option<String>,
     #[serde(default, deserialize_with = "de_flexible_bool")]
     pub regex: Option<bool>,
+    #[serde(default, deserialize_with = "de_flexible_bool")]
+    pub case_sensitive: Option<bool>,
+    #[serde(default, deserialize_with = "de_flexible_bool")]
+    pub whole_word: Option<bool>,
+    #[serde(default, deserialize_with = "de_flexible_bool")]
+    pub include_sentence: Option<bool>,
+    #[serde(default, deserialize_with = "de_flexible_bool")]
+    pub strip_references: Option<bool>,
+    #[serde(default, deserialize_with = "de_flexible_bool")]
+    pub count_only: Option<bool>,
+    pub mode: Option<String>,
+    pub max_matches_per_doc: Option<i64>,
     pub journal: Option<String>,
     pub year_start: Option<i64>,
     pub year_end: Option<i64>,
@@ -3125,21 +3146,31 @@ async fn grep_search(
     };
 
     let settings = crate::settings::get_settings();
-    let results = crate::services::grep_search::grep_search(
-        q.trim(),
-        params.context.unwrap_or(2) as usize,
-        params.limit.unwrap_or(10) as usize,
-        id_list.as_deref(),
-        params.algorithm.as_deref().unwrap_or("full"),
-        params.regex.unwrap_or(true),
-        db.pool(),
-        &settings,
-        params.journal.as_deref(),
-        params.year_start,
-        params.year_end,
-        params.start_after_id,
-    )
-    .await;
+    let mut gq = crate::services::grep_search::GrepQuery::new(q.trim());
+    gq.context = params.context.unwrap_or(2).max(0) as usize;
+    gq.limit = params.limit.unwrap_or(10).clamp(1, 100) as usize;
+    gq.max_matches_per_doc = params
+        .max_matches_per_doc
+        .map(|v| v.clamp(0, 200) as usize)
+        .unwrap_or(5);
+    gq.doc_ids = id_list;
+    gq.algorithm = params.algorithm.unwrap_or_else(|| "full".to_string());
+    gq.regex = params.regex.unwrap_or(true);
+    gq.case_sensitive = params.case_sensitive.unwrap_or(false);
+    gq.whole_word = params.whole_word.unwrap_or(false);
+    gq.include_sentence = params.include_sentence.unwrap_or(true);
+    gq.strip_references = params.strip_references.unwrap_or(false);
+    gq.count_only = params.count_only.unwrap_or(false);
+    gq.mode = crate::services::grep_search::MatchMode::parse(params.mode.as_deref().unwrap_or("doc"));
+    gq.journal = params.journal.filter(|s| !s.trim().is_empty());
+    gq.year_start = params.year_start.filter(|v| *v > 0);
+    gq.year_end = params.year_end.filter(|v| *v > 0);
+    gq.start_after_id = params.start_after_id.filter(|v| *v > 0);
+
+    let results = match crate::services::grep_search::grep_search(&gq, db.pool(), &settings).await {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response(),
+    };
 
     // 补充文档元数据（批量查询，避免 N+1）
     let mut enriched = Vec::new();
@@ -3150,7 +3181,6 @@ async fn grep_search(
         let sql = format!("SELECT {} FROM documents WHERE id IN ({})", DOC_COLUMNS, ids_str.join(","));
         if let Ok(rows) = sqlx::query_as::<_, Document>(&sql).fetch_all(db.pool()).await {
             for doc in rows {
-                // 同样不再给 `status`：只给文件事实
                 doc_map.insert(doc.id, json!({
                     "title": doc.title,
                     "filename": doc.filename,
@@ -3165,7 +3195,9 @@ async fn grep_search(
             }
         }
     }
+    let mut total_matches = 0i64;
     for hit in &results {
+        total_matches += hit["match_count"].as_i64().unwrap_or(0);
         let mut item = hit.clone();
         if let Some(did) = hit["id"].as_i64() {
             if let Some(info) = doc_map.get(&did) {
@@ -3183,7 +3215,12 @@ async fn grep_search(
         .filter_map(|r| r["id"].as_i64())
         .max();
 
-    Json(json!({"results": enriched, "query": q, "last_id": last_id})).into_response()
+    Json(json!({
+        "results": enriched,
+        "query": q,
+        "total_matches": total_matches,
+        "last_id": last_id,
+    })).into_response()
 }
 
 async fn by_hash(
@@ -3372,7 +3409,7 @@ fn extract_toc(content: &str) -> Vec<Value> {
 }
 
 /// 重写 Markdown 中的图片路径
-fn rewrite_image_paths(content: &str, doc_id: i64) -> String {
+pub(crate) fn rewrite_image_paths(content: &str, doc_id: i64) -> String {
     let re = regex::Regex::new(r"\]\(([^)]+)\)").unwrap();
     re.replace_all(content, |caps: &regex::Captures| {
         let img_path = &caps[1];
@@ -3414,6 +3451,379 @@ pub struct MarkdownQuery {
 ///   - line_start: 起始行号（0-indexed，默认 0）
 ///   - line_count: 返回行数（默认 -1 即到末尾）
 ///   - full: 忽略其他参数，返回全部内容
+// ── 元数据分面（/api/stats/facets）──
+
+#[derive(Debug, Deserialize)]
+pub struct FacetQuery {
+    pub field: Option<String>,
+    pub q: Option<String>,
+    pub doc_type: Option<String>,
+    pub journal: Option<String>,
+    pub year_from: Option<i64>,
+    pub year_to: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+/// 分面字段 → 允许的 SQL 表达式（白名单，防注入）。
+fn facet_expr(field: &str) -> Option<&'static str> {
+    match field.to_ascii_lowercase().as_str() {
+        "journal" => Some("COALESCE(NULLIF(TRIM(journal), ''), '(unknown)')"),
+        "year" => Some("CAST(NULLIF(TRIM(year), '') AS TEXT)"),
+        "doc_type" => Some("COALESCE(NULLIF(TRIM(doc_type), ''), '(unknown)')"),
+        "source" => Some("COALESCE(NULLIF(TRIM(source), ''), '(unknown)')"),
+        "language" => Some("COALESCE(NULLIF(TRIM(language), ''), '(unknown)')"),
+        "pdf_health" => Some("COALESCE(NULLIF(TRIM(pdf_health), ''), '(unchecked)')"),
+        "category" => Some("COALESCE(NULLIF(TRIM(category), ''), '(unknown)')"),
+        _ => None,
+    }
+}
+
+/// GET /assist/api/stats/facets?field=journal&limit=100
+async fn stats_facets(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    Query(params): Query<FacetQuery>,
+) -> Response {
+    let field = params.field.unwrap_or_else(|| "journal".to_string());
+    let Some(expr) = facet_expr(&field) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"detail": "field 仅支持 journal / year / doc_type / source / language / pdf_health / category"})),
+        )
+            .into_response();
+    };
+    let limit = params.limit.unwrap_or(100).clamp(1, 1000);
+
+    let mut qb = sqlx::QueryBuilder::new(format!(
+        "SELECT {} AS bucket, COUNT(*) AS count FROM documents WHERE 1=1",
+        expr
+    ));
+    if let Some(q) = params.q.as_deref().filter(|q| !q.trim().is_empty()) {
+        let like = format!("%{}%", q.trim());
+        qb.push(" AND (title LIKE ")
+            .push_bind(like.clone())
+            .push(" OR authors LIKE ")
+            .push_bind(like.clone())
+            .push(" OR filename LIKE ")
+            .push_bind(like)
+            .push(")");
+    }
+    let types = crate::services::doc_type::normalize_many(params.doc_type.as_deref().unwrap_or(""));
+    if !types.is_empty() {
+        qb.push(" AND doc_type IN (");
+        for (i, t) in types.iter().enumerate() {
+            if i > 0 {
+                qb.push(", ");
+            }
+            qb.push_bind(t.clone());
+        }
+        qb.push(")");
+    }
+    if let Some(j) = params.journal.as_deref().filter(|j| !j.trim().is_empty()) {
+        qb.push(" AND journal LIKE ")
+            .push_bind(format!("%{}%", j.trim()));
+    }
+    if let Some(y) = params.year_from.filter(|v| *v > 0) {
+        qb.push(" AND CAST(NULLIF(TRIM(year), '') AS INTEGER) >= ")
+            .push_bind(y);
+    }
+    if let Some(y) = params.year_to.filter(|v| *v > 0) {
+        qb.push(" AND CAST(NULLIF(TRIM(year), '') AS INTEGER) <= ")
+            .push_bind(y);
+    }
+    qb.push(" GROUP BY bucket ORDER BY count DESC, bucket ASC LIMIT ")
+        .push_bind(limit);
+
+    let rows = match qb.build().fetch_all(db.pool()).await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let buckets: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "value": r.get::<Option<String>, _>("bucket"),
+                "count": r.get::<i64, _>("count"),
+            })
+        })
+        .collect();
+    let total: i64 = buckets.iter().filter_map(|b| b["count"].as_i64()).sum();
+    Json(json!({"field": field, "total": total, "buckets": buckets})).into_response()
+}
+
+// ── 批量 / 导出 Markdown ──
+
+#[derive(Debug, Deserialize)]
+pub struct MarkdownBatchQuery {
+    pub ids: Option<String>,
+    #[serde(default, deserialize_with = "de_flexible_bool")]
+    pub full: Option<bool>,
+    #[serde(default, deserialize_with = "de_flexible_bool")]
+    pub raw: Option<bool>,
+    #[serde(default, deserialize_with = "de_flexible_bool")]
+    pub include_hash: Option<bool>,
+    pub budget_chars: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MarkdownBatchBody {
+    pub ids: Vec<i64>,
+    #[serde(default)]
+    pub full: Option<bool>,
+    #[serde(default)]
+    pub raw: Option<bool>,
+    #[serde(default)]
+    pub include_hash: Option<bool>,
+    pub budget_chars: Option<i64>,
+}
+
+/// GET /assist/api/markdown/batch?ids=1,2,3&full=1&raw=1
+async fn markdown_batch_get(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Query(params): Query<MarkdownBatchQuery>,
+) -> Response {
+    let ids = match crate::services::grep_search::parse_doc_ids(params.ids.as_deref().unwrap_or("")) {
+        Ok(Some(ids)) => ids,
+        Ok(None) => return (StatusCode::BAD_REQUEST, Json(json!({"detail": "ids 不能为空"}))).into_response(),
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response(),
+    };
+    markdown_batch_impl(
+        ids,
+        params.full.unwrap_or(true),
+        params.raw.unwrap_or(false),
+        params.include_hash.unwrap_or(false),
+        params.budget_chars.unwrap_or(1_000_000),
+        &db,
+        &settings,
+    )
+    .await
+}
+
+/// POST /assist/api/markdown/batch  {"ids":[1,2],"full":true,"raw":false}
+async fn markdown_batch_post(
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Json(body): Json<MarkdownBatchBody>,
+) -> Response {
+    if body.ids.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"detail": "ids 不能为空"}))).into_response();
+    }
+    markdown_batch_impl(
+        body.ids,
+        body.full.unwrap_or(true),
+        body.raw.unwrap_or(false),
+        body.include_hash.unwrap_or(false),
+        body.budget_chars.unwrap_or(1_000_000),
+        &db,
+        &settings,
+    )
+    .await
+}
+
+async fn markdown_batch_impl(
+    ids: Vec<i64>,
+    full: bool,
+    raw: bool,
+    include_hash: bool,
+    budget_chars: i64,
+    db: &Arc<Database>,
+    settings: &Arc<Settings>,
+) -> Response {
+    let budget = budget_chars.max(1) as usize;
+    let mut items: Vec<Value> = Vec::new();
+    let mut skipped: Vec<Value> = Vec::new();
+    let mut used = 0usize;
+
+    for id in ids {
+        let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM documents WHERE id = ?")
+            .bind(id)
+            .fetch_optional(db.pool())
+            .await
+            .unwrap_or(None);
+        if exists.is_none() {
+            skipped.push(json!({"id": id, "reason": "not_found"}));
+            continue;
+        }
+        let md_path = paths::get_markdown_path(settings, id);
+        let content = match tokio::fs::read_to_string(&md_path).await {
+            Ok(c) => c,
+            Err(_) => {
+                skipped.push(json!({"id": id, "reason": "markdown_not_generated"}));
+                continue;
+            }
+        };
+        let total_lines = content.lines().count();
+        let hash = if include_hash {
+            Some(sha256_hex_async(content.clone().into_bytes()).await)
+        } else {
+            None
+        };
+        let body = if raw {
+            content
+        } else {
+            rewrite_image_paths(&content, id)
+        };
+        let body = if full {
+            body
+        } else {
+            body.lines().take(5000).collect::<Vec<_>>().join("\n")
+        };
+        let left = budget.saturating_sub(used);
+        let (out, truncated) = if body.chars().count() > left {
+            (body.chars().take(left).collect::<String>(), true)
+        } else {
+            (body, false)
+        };
+        used += out.chars().count();
+        let mut item = json!({
+            "id": id,
+            "total_lines": total_lines,
+            "content": out,
+            "truncated": truncated,
+        });
+        if let Some(h) = hash {
+            item["hash"] = json!(h);
+        }
+        items.push(item);
+        if used >= budget {
+            break;
+        }
+    }
+
+    Json(json!({
+        "items": items,
+        "skipped": skipped,
+        "budget_chars": budget,
+        "used_chars": used,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MarkdownExportQuery {
+    pub ids: Option<String>,
+    pub journal: Option<String>,
+    pub year_from: Option<i64>,
+    pub year_to: Option<i64>,
+    #[serde(default, deserialize_with = "de_flexible_bool")]
+    pub raw: Option<bool>,
+    pub limit: Option<i64>,
+}
+
+/// GET /assist/api/markdown/export?journal=...&year_from=...
+///
+/// 流式导出 NDJSON（每行一篇）：`{"id","title","year","journal","lines","content"}`。
+async fn markdown_export(
+    axum::Extension(role): axum::Extension<auth::Role>,
+    axum::Extension(db): axum::Extension<Arc<Database>>,
+    axum::Extension(settings): axum::Extension<Arc<Settings>>,
+    Query(params): Query<MarkdownExportQuery>,
+) -> Response {
+    if let Err(resp) = auth::assert_role(&role, &["admin", "view-only", "view-upload"]) {
+        return resp;
+    }
+    let id_list = match crate::services::grep_search::parse_doc_ids(params.ids.as_deref().unwrap_or("")) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"detail": e}))).into_response(),
+    };
+
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT id, title, CAST(NULLIF(TRIM(year), '') AS INTEGER) AS year, journal \
+         FROM documents WHERE COALESCE(md_size, 0) > 0",
+    );
+    if let Some(ids) = &id_list {
+        if ids.is_empty() {
+            return (StatusCode::BAD_REQUEST, Json(json!({"detail": "ids 不能为空"}))).into_response();
+        }
+        qb.push(" AND id IN (");
+        for (i, id) in ids.iter().enumerate() {
+            if i > 0 {
+                qb.push(", ");
+            }
+            qb.push_bind(*id);
+        }
+        qb.push(")");
+    }
+    if let Some(j) = params.journal.as_deref().filter(|j| !j.trim().is_empty()) {
+        qb.push(" AND journal LIKE ")
+            .push_bind(format!("%{}%", j.trim()));
+    }
+    if let Some(y) = params.year_from.filter(|v| *v > 0) {
+        qb.push(" AND CAST(NULLIF(TRIM(year), '') AS INTEGER) >= ")
+            .push_bind(y);
+    }
+    if let Some(y) = params.year_to.filter(|v| *v > 0) {
+        qb.push(" AND CAST(NULLIF(TRIM(year), '') AS INTEGER) <= ")
+            .push_bind(y);
+    }
+    qb.push(" ORDER BY id LIMIT ")
+        .push_bind(params.limit.unwrap_or(5000).clamp(1, 50_000));
+
+    let rows = match qb.build().fetch_all(db.pool()).await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let docs: Vec<(i64, Option<String>, Option<i64>, Option<String>)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<i64, _>("id"),
+                r.get::<Option<String>, _>("title"),
+                r.get::<Option<i64>, _>("year"),
+                r.get::<Option<String>, _>("journal"),
+            )
+        })
+        .collect();
+
+    let raw = params.raw.unwrap_or(false);
+    let settings = settings.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+    tokio::spawn(async move {
+        for (id, title, year, journal) in docs {
+            let md_path = paths::get_markdown_path(&settings, id);
+            let Ok(content) = tokio::fs::read_to_string(&md_path).await else { continue };
+            let content = if raw { content } else { rewrite_image_paths(&content, id) };
+            let line = json!({
+                "id": id,
+                "title": title,
+                "year": year,
+                "journal": journal,
+                "lines": content.lines().count(),
+                "content": content,
+            });
+            let mut buf = serde_json::to_vec(&line).unwrap_or_default();
+            buf.push(b'\n');
+            if tx.send(Ok(Bytes::from(buf))).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut resp = Response::new(Body::from_stream(ReceiverStream::new(rx)));
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-ndjson; charset=utf-8"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"okb-markdown.ndjson\""),
+    );
+    resp
+}
+
 async fn get_markdown(
     axum::Extension(role): axum::Extension<auth::Role>,
     axum::Extension(db): axum::Extension<Arc<Database>>,

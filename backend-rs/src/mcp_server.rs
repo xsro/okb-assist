@@ -18,7 +18,7 @@ use crate::database::Database;
 use crate::models::{DocStatus, Document};
 use crate::paths;
 use crate::routers::documents::{get_or_create_alias, sync_doc_file_sizes, write_atomic};
-use crate::services::grep_search::{grep_search as do_grep, parse_doc_ids};
+use crate::services::grep_search::{grep_search as do_grep, parse_doc_ids, GrepQuery, MatchMode};
 
 /// Document 全部列的 SELECT 语句（列顺序与 `Document` 结构体字段一致）。
 // `year` 必须 CAST：老库里有写成 `''`（TEXT）的年份，按 `Option<i64>` 解码 TEXT 会报
@@ -56,19 +56,26 @@ impl McpServer {
         let mut tools = vec![
             json!({
                 "name": "grep_search",
-                "description": "Full-text search of document content (grep-based, lightweight and fast). No vector database required, supports regex. Results are sorted by document ID ascending; use start_after_id for cursor-based pagination.",
+                "description": "Full-text search of document content (grep-based, lightweight and fast). No vector database required, supports regex. Results are per document, each with `match_count` and a `matches[]` array (`line`/`column`/`matched`/`sentence`/`section`). Use `mode=match` for match-centric results, `count_only=true` for counts only (cheap), `strip_references=true` to ignore the References section, and `whole_word=true` to avoid substring hits (e.g. Digit vs Digital). Sorted by document ID ascending; use start_after_id for cursor pagination.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Search keywords (supports regex)"},
-                        "limit": {"type": "integer", "default": 10, "description": "Results per page (alias: max_results)"},
-                        "max_results": {"type": "integer", "default": 10, "description": "Results per page (alias for limit)"},
-                        "start_after_id": {"type": "integer", "default": 0, "description": "Cursor: start scanning from document IDs greater than this value. Use last_id from previous response for next page."},
+                        "query": {"type": "string", "description": "Search keywords (literal by default when regex=false; regex when regex=true)"},
+                        "regex": {"type": "boolean", "default": true, "description": "Treat query as a regular expression"},
+                        "case_sensitive": {"type": "boolean", "default": false},
+                        "whole_word": {"type": "boolean", "default": false, "description": "Wrap the pattern in word boundaries"},
+                        "mode": {"type": "string", "default": "doc", "enum": ["doc", "match"], "description": "doc: one entry per document (default); match: same shape but content keeps all match blocks"},
+                        "max_matches_per_doc": {"type": "integer", "default": 5, "description": "Cap on returned matches per document (match_count still counts all)"},
+                        "include_sentence": {"type": "boolean", "default": true, "description": "Include the full sentence around each match"},
+                        "strip_references": {"type": "boolean", "default": false, "description": "Skip matches inside the References/Bibliography section"},
+                        "count_only": {"type": "boolean", "default": false, "description": "Return only {id, match_count}"},
+                        "limit": {"type": "integer", "default": 10, "description": "Max documents per page (alias: max_results)"},
+                        "max_results": {"type": "integer", "default": 10, "description": "Alias for limit"},
+                        "start_after_id": {"type": "integer", "default": 0, "description": "Cursor: scan documents with ID greater than this value"},
                         "context": {"type": "integer", "default": 2, "description": "Number of context lines before/after each match"},
-                        "max_context_chars": {"type": "integer", "default": 500, "description": "Maximum characters per result content (0 = no truncation)"},
+                        "max_context_chars": {"type": "integer", "default": 500, "description": "Maximum characters per document content (0 = no truncation)"},
                         "doc_ids": {"type": "string", "default": "", "description": "Document ID scope, supports commas and ranges (e.g. '1,2,5-100')"},
-                        "algorithm": {"type": "string", "default": "full"},
-                        "regex": {"type": "boolean", "default": true},
+                        "algorithm": {"type": "string", "default": "full", "enum": ["full", "fast"], "description": "fast: metadata prefilter candidates before scanning"},
                         "journal": {"type": "string", "default": ""},
                         "year_start": {"type": "integer", "default": 0},
                         "year_end": {"type": "integer", "default": 0}
@@ -89,6 +96,7 @@ impl McpServer {
                         "offset": {"type": "integer", "default": 0, "description": "Zero-based result offset (overrides page when provided)"},
                         "year_from": {"type": "integer", "default": 0, "description": "Filter: minimum publication year"},
                         "year_to": {"type": "integer", "default": 0, "description": "Filter: maximum publication year"},
+                        "journal": {"type": "string", "default": "", "description": "Filter: journal (case-insensitive substring)"},
                         "doc_type": {"type": "string", "default": "", "description": "Filter: document type (comma-separated for multiple)"},
                         "fields": {"type": "array", "items": {"type": "string"}, "description": "Optional list of fields to return (e.g. ['id','title','year'])"},
                         "sort_by": {"type": "string", "default": "updated_at", "description": "Sort field: title, authors, year, id, journal, doc_type, created_at, updated_at, pdf_size, md_size, zip_size"},
@@ -137,8 +145,12 @@ impl McpServer {
                         "has_pdf": {"type": "string", "default": "", "description": "1 = has PDF, 0 = no PDF"},
                         "has_zip": {"type": "string", "default": "", "description": "1 = has image asset zip, 0 = none"},
                         "pdf_health": {"type": "string", "default": "", "description": "ok / warning / error / missing / unchecked (comma-separated)"},
+                        "journal": {"type": "string", "default": "", "description": "Filter by journal (case-insensitive substring). Combine with journal_exact for equality."},
+                        "journal_exact": {"type": "boolean", "default": false, "description": "Exact journal match (default: substring)"},
+                        "year_from": {"type": "integer", "default": 0, "description": "Filter: minimum publication year"},
+                        "year_to": {"type": "integer", "default": 0, "description": "Filter: maximum publication year"},
                         "page": {"type": "integer", "default": 1},
-                        "page_size": {"type": "integer", "default": 20, "description": "Results per page (1-100, alias: limit)"},
+                        "page_size": {"type": "integer", "default": 20, "description": "Results per page (1-500, alias: limit)"},
                         "limit": {"type": "integer", "default": 20, "description": "Results per page (alias for page_size)"},
                         "fields": {"type": "array", "items": {"type": "string"}, "description": "Optional list of fields to return (e.g. ['id','title','year'])"},
                         "sort_by": {"type": "string", "default": "created_at", "description": "Sort field: title, authors, year, id, journal, doc_type, created_at, updated_at, pdf_size, md_size, zip_size"},
@@ -159,6 +171,38 @@ impl McpServer {
                 "name": "get_stats",
                 "description": "Get knowledge base statistics, including total document count, counts by status and type.",
                 "inputSchema": {"type": "object", "properties": {}}
+            }),
+            json!({
+                "name": "get_facets",
+                "description": "Aggregate counts for one metadata field (journal / year / doc_type / source / language / pdf_health / category). Answers questions like 'which journals exist and how many documents each has' or 'year distribution of a journal' without paging the whole table. Filters accept the same q/journal/year_from/year_to as list_documents.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "field": {"type": "string", "enum": ["journal", "year", "doc_type", "source", "language", "pdf_health", "category"], "default": "journal"},
+                        "query": {"type": "string", "default": "", "description": "Optional title/author/filename keyword filter"},
+                        "journal": {"type": "string", "default": ""},
+                        "journal_exact": {"type": "boolean", "default": false},
+                        "year_from": {"type": "integer", "default": 0},
+                        "year_to": {"type": "integer", "default": 0},
+                        "limit": {"type": "integer", "default": 100, "description": "Max buckets (1-1000)"}
+                    }
+                }
+            }),
+            json!({
+                "name": "read_markdown_batch",
+                "description": "Read several documents' Markdown in one call (batch version of read_markdown). Returns items[] with content/total_lines/hash and skipped[] for documents without Markdown. Use `budget_chars` (default 1000000) to cap the total payload; items beyond the budget are returned with truncated=true and a hint to read them individually.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ids": {"type": "array", "items": {"type": "integer"}, "description": "Document IDs"},
+                        "full": {"type": "boolean", "default": true, "description": "true = whole file; false = first line_count lines"},
+                        "line_count": {"type": "integer", "default": 5000},
+                        "raw": {"type": "boolean", "default": false, "description": "Keep original image paths instead of rewriting them to API URLs"},
+                        "include_hash": {"type": "boolean", "default": false},
+                        "budget_chars": {"type": "integer", "default": 1000000}
+                    },
+                    "required": ["ids"]
+                }
             }),
             json!({
                 "name": "list_doc_types",
@@ -384,6 +428,8 @@ impl McpServer {
                 self.tool_get_document_abstract(args).await
             }
             "get_stats" => self.tool_get_stats().await,
+            "get_facets" => self.tool_get_facets(args).await,
+            "read_markdown_batch" => self.tool_read_markdown_batch(args).await,
             "list_doc_types" => self.tool_list_doc_types().await,
             "get_toc" => {
                 let _id = check_required_id!();
@@ -580,21 +626,18 @@ impl McpServer {
     }
 
     async fn tool_grep_search(&self, args: &Value) -> String {
-        let query = args["query"].as_str().unwrap_or("").to_string();
+        let query = args["query"].as_str().unwrap_or("").trim().to_string();
+        if query.is_empty() {
+            return Self::err("invalid_argument", "查询不能为空");
+        }
         let context = args["context"].as_i64().unwrap_or(2).max(0) as usize;
         let doc_ids = args["doc_ids"].as_str().unwrap_or("").to_string();
         let algorithm = args["algorithm"].as_str().unwrap_or("full").to_string();
-        let regex = args["regex"].as_bool().unwrap_or(true);
-        let journal = args["journal"].as_str().unwrap_or("").to_string();
+        let journal = args["journal"].as_str().unwrap_or("").trim().to_string();
         let year_start = args["year_start"].as_i64().unwrap_or(0);
         let year_end = args["year_end"].as_i64().unwrap_or(0);
         let max_context_chars = args["max_context_chars"].as_i64().unwrap_or(500).max(0) as usize;
         let start_after_id = args["start_after_id"].as_i64().filter(|v| *v > 0);
-
-        // query 为空由前置校验拦截，这里保留冗余检查以防绕开
-        if query.trim().is_empty() {
-            return Self::err("invalid_argument", "查询不能为空");
-        }
 
         let limit = args["limit"]
             .as_i64()
@@ -607,28 +650,33 @@ impl McpServer {
             Err(e) => return Self::err("invalid_argument", &e),
         };
 
-        let journal_opt = if journal.trim().is_empty() { None } else { Some(journal.trim()) };
-        let year_start_opt = if year_start > 0 { Some(year_start) } else { None };
-        let year_end_opt = if year_end > 0 { Some(year_end) } else { None };
+        let mut q = GrepQuery::new(query.clone());
+        q.context = context;
+        q.limit = limit;
+        q.max_matches_per_doc = args["max_matches_per_doc"]
+            .as_i64()
+            .map(|v| v.clamp(0, 200) as usize)
+            .unwrap_or(5);
+        q.doc_ids = id_list;
+        q.algorithm = algorithm;
+        q.regex = args["regex"].as_bool().unwrap_or(true);
+        q.case_sensitive = args["case_sensitive"].as_bool().unwrap_or(false);
+        q.whole_word = args["whole_word"].as_bool().unwrap_or(false);
+        q.include_sentence = args["include_sentence"].as_bool().unwrap_or(true);
+        q.strip_references = args["strip_references"].as_bool().unwrap_or(false);
+        q.count_only = args["count_only"].as_bool().unwrap_or(false);
+        q.mode = MatchMode::parse(args["mode"].as_str().unwrap_or("doc"));
+        q.journal = if journal.is_empty() { None } else { Some(journal) };
+        q.year_start = if year_start > 0 { Some(year_start) } else { None };
+        q.year_end = if year_end > 0 { Some(year_end) } else { None };
+        q.start_after_id = start_after_id;
 
-        let results = do_grep(
-            query.trim(),
-            context,
-            limit,
-            id_list.as_deref(),
-            &algorithm,
-            regex,
-            self.db.pool(),
-            &self.settings,
-            journal_opt,
-            year_start_opt,
-            year_end_opt,
-            start_after_id,
-        )
-        .await;
+        let all_results = match do_grep(&q, self.db.pool(), &self.settings).await {
+            Ok(v) => v,
+            Err(e) => return Self::err("invalid_argument", &e),
+        };
 
         // 批量查询文档元数据（避免 N+1）
-        let all_results: Vec<Value> = results;
         let ids: Vec<i64> = all_results.iter().filter_map(|hit| hit["id"].as_i64()).collect();
         let mut doc_map: std::collections::HashMap<i64, Document> = std::collections::HashMap::new();
         if !ids.is_empty() {
@@ -640,18 +688,31 @@ impl McpServer {
                 }
             }
         }
+        let mut total_matches = 0i64;
         let mut enriched = Vec::new();
         for hit in all_results {
             let doc_id = hit["id"].as_i64();
-            let raw_content = hit["content"].as_str().unwrap_or("").to_string();
-            let content = Self::truncate_chars(&raw_content, max_context_chars);
-            let truncated = max_context_chars > 0 && raw_content.chars().count() > max_context_chars;
-            let mut info = json!({
-                "id": doc_id,
-                "content": content,
-                "truncated": truncated,
-                "original_length": raw_content.chars().count(),
-            });
+            total_matches += hit["match_count"].as_i64().unwrap_or(0);
+            let mut info = if q.count_only {
+                json!({
+                    "id": doc_id,
+                    "match_count": hit["match_count"].clone(),
+                })
+            } else {
+                let raw_content = hit["content"].as_str().unwrap_or("").to_string();
+                let content = Self::truncate_chars(&raw_content, max_context_chars);
+                let truncated =
+                    max_context_chars > 0 && raw_content.chars().count() > max_context_chars;
+                json!({
+                    "id": doc_id,
+                    "match_count": hit["match_count"].clone(),
+                    "content": content,
+                    "truncated": truncated,
+                    "original_length": raw_content.chars().count(),
+                    "first_line": hit["first_line"].clone(),
+                    "matches": hit["matches"].clone(),
+                })
+            };
             if let Some(id) = doc_id {
                 if let Some(doc) = doc_map.get(&id) {
                     info["title"] = json!(doc.title.clone().unwrap_or_default());
@@ -663,15 +724,17 @@ impl McpServer {
             enriched.push(info);
         }
 
-        // 计算 last_id（结果中最大的 doc_id）
-        let last_id = enriched.iter()
+        let last_id = enriched
+            .iter()
             .filter_map(|r| r["id"].as_i64())
             .max();
 
         Self::pretty(&json!({
             "query": query,
+            "mode": if q.mode == MatchMode::Match { "match" } else { "doc" },
             "limit": limit,
             "returned": enriched.len(),
+            "total_matches": total_matches,
             "last_id": last_id,
             "results": enriched,
         }))
@@ -682,6 +745,7 @@ impl McpServer {
         let year_from = args["year_from"].as_i64().unwrap_or(0);
         let year_to = args["year_to"].as_i64().unwrap_or(0);
         let doc_type = args["doc_type"].as_str().unwrap_or("").to_string();
+        let journal = args["journal"].as_str().unwrap_or("").trim().to_string();
         let fields = Self::parse_fields(args);
         let sort_by = args["sort_by"].as_str().unwrap_or("updated_at").to_string();
         let sort_order = args["sort_order"].as_str().unwrap_or("desc").to_string();
@@ -695,7 +759,7 @@ impl McpServer {
 
         // 计数
         let mut cqb = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM documents WHERE ");
-        append_search_info_filters(&mut cqb, &like, year_from, year_to, &doc_type);
+        append_search_info_filters(&mut cqb, &like, year_from, year_to, &doc_type, &journal);
         let total: i64 = cqb
             .build()
             .fetch_one(self.db.pool())
@@ -705,7 +769,7 @@ impl McpServer {
 
         // 查询
         let mut qb = sqlx::QueryBuilder::new(format!("SELECT {} FROM documents WHERE ", DOC_COLUMNS));
-        append_search_info_filters(&mut qb, &like, year_from, year_to, &doc_type);
+        append_search_info_filters(&mut qb, &like, year_from, year_to, &doc_type, &journal);
         Self::append_order_clause(&mut qb, &sort_by, &sort_order);
         qb.push(" LIMIT ").push_bind(limit)
             .push(" OFFSET ").push_bind(offset);
@@ -866,7 +930,7 @@ impl McpServer {
             .as_i64()
             .or_else(|| args["limit"].as_i64())
             .unwrap_or(20)
-            .clamp(1, 100) as i64;
+            .clamp(1, 500) as i64;
         let fields = Self::parse_fields(args);
         let sort_by = args["sort_by"].as_str().unwrap_or("created_at").to_string();
         let sort_order = args["sort_order"].as_str().unwrap_or("desc").to_string();
@@ -993,6 +1057,145 @@ impl McpServer {
             "status_counts": status_counts,
             "type_counts": type_counts_sorted,
             "indexed_count": indexed_count,
+        }))
+    }
+
+    /// 元数据分面统计（journal / year / doc_type / source / language / pdf_health / category）。
+    async fn tool_get_facets(&self, args: &Value) -> String {
+        let field = args["field"].as_str().unwrap_or("journal").to_ascii_lowercase();
+        let expr = match field.as_str() {
+            "journal" => "COALESCE(NULLIF(TRIM(journal), ''), '(unknown)')",
+            "year" => "CAST(NULLIF(TRIM(year), '') AS TEXT)",
+            "doc_type" => "COALESCE(NULLIF(TRIM(doc_type), ''), '(unknown)')",
+            "source" => "COALESCE(NULLIF(TRIM(source), ''), '(unknown)')",
+            "language" => "COALESCE(NULLIF(TRIM(language), ''), '(unknown)')",
+            "pdf_health" => "COALESCE(NULLIF(TRIM(pdf_health), ''), '(unchecked)')",
+            "category" => "COALESCE(NULLIF(TRIM(category), ''), '(unknown)')",
+            other => return Self::err("invalid_argument", &format!("不支持的分面字段：{}", other)),
+        };
+        let limit = args["limit"].as_i64().unwrap_or(100).clamp(1, 1000);
+
+        let query = args["query"].as_str().unwrap_or("");
+        let doc_type = args["doc_type"].as_str().unwrap_or("");
+        let mut qb = sqlx::QueryBuilder::new(format!(
+            "SELECT {} AS bucket, COUNT(*) AS count FROM documents WHERE 1=1",
+            expr
+        ));
+        if let Err(e) = append_list_filters(&mut qb, query, doc_type, args) {
+            return Self::err("invalid_argument", &e);
+        }
+        qb.push(" GROUP BY bucket ORDER BY count DESC, bucket ASC LIMIT ")
+            .push_bind(limit);
+
+        let rows = qb.build().fetch_all(self.db.pool()).await.unwrap_or_default();
+        let buckets: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "value": r.get::<Option<String>, _>("bucket"),
+                    "count": r.get::<i64, _>("count"),
+                })
+            })
+            .collect();
+        let total: i64 = buckets
+            .iter()
+            .filter_map(|b| b["count"].as_i64())
+            .sum();
+
+        Self::pretty(&json!({
+            "field": field,
+            "total": total,
+            "buckets": buckets,
+        }))
+    }
+
+    /// 批量读取 Markdown（一次调用返回多篇，带总字节预算）。
+    async fn tool_read_markdown_batch(&self, args: &Value) -> String {
+        let ids: Vec<i64> = args["ids"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_i64()).collect())
+            .unwrap_or_default();
+        if ids.is_empty() {
+            return Self::err("invalid_argument", "ids 不能为空");
+        }
+        let full = args["full"].as_bool().unwrap_or(true);
+        let line_count = args["line_count"].as_i64().unwrap_or(5000).max(1) as usize;
+        let raw = args["raw"].as_bool().unwrap_or(false);
+        let include_hash = args["include_hash"].as_bool().unwrap_or(false);
+        let budget = args["budget_chars"].as_i64().unwrap_or(1_000_000).max(1) as usize;
+
+        let mut items: Vec<Value> = Vec::new();
+        let mut skipped: Vec<Value> = Vec::new();
+        let mut used = 0usize;
+
+        for id in ids {
+            if self.fetch_doc(id).await.is_none() {
+                skipped.push(json!({"id": id, "reason": "not_found"}));
+                continue;
+            }
+            let md_path = paths::get_markdown_path(&self.settings, id);
+            let content = match std::fs::read_to_string(&md_path) {
+                Ok(c) => c,
+                Err(_) => {
+                    skipped.push(json!({"id": id, "reason": "markdown_not_generated"}));
+                    continue;
+                }
+            };
+            let total_lines = content.lines().count();
+            let hash = if include_hash {
+                Some(crate::utils::sha256_hex_async(content.clone().into_bytes()).await)
+            } else {
+                None
+            };
+            let body = if raw {
+                content.clone()
+            } else {
+                crate::routers::documents::rewrite_image_paths(&content, id)
+            };
+            let body = if full {
+                body
+            } else {
+                body.lines().take(line_count).collect::<Vec<_>>().join("
+")
+            };
+
+            let budget_left = budget.saturating_sub(used);
+            let (out, truncated) = if body.chars().count() > budget_left {
+                // truncate_chars(_, 0) 的语义是「不截断」，这里预算为 0 时应返回空串
+                let cut = if budget_left == 0 {
+                    String::new()
+                } else {
+                    Self::truncate_chars(&body, budget_left)
+                };
+                (cut, true)
+            } else {
+                (body, false)
+            };
+            used += out.chars().count();
+
+            let mut item = json!({
+                "id": id,
+                "total_lines": total_lines,
+                "content": out,
+                "truncated": truncated,
+            });
+            if let Some(h) = hash {
+                item["hash"] = json!(h);
+            }
+            if truncated {
+                item["hint"] = json!("payload budget exhausted; read this document with read_markdown(id, line_start, line_count)");
+            }
+            items.push(item);
+            if used >= budget {
+                break;
+            }
+        }
+
+        Self::pretty(&json!({
+            "items": items,
+            "skipped": skipped,
+            "budget_chars": budget,
+            "used_chars": used,
         }))
     }
 
@@ -1499,6 +1702,21 @@ fn append_list_filters<'a>(
             .push(" OR authors LIKE ").push_bind(like.clone())
             .push(" OR filename LIKE ").push_bind(like).push(")");
     }
+    if let Some(j) = args["journal"].as_str().filter(|s| !s.trim().is_empty()) {
+        if args["journal_exact"].as_bool().unwrap_or(false) {
+            qb.push(" AND journal = ").push_bind(j.trim().to_string());
+        } else {
+            qb.push(" AND journal LIKE ").push_bind(format!("%{}%", j.trim()));
+        }
+    }
+    for (key, op) in [("year_from", ">="), ("year_to", "<=")] {
+        if let Some(y) = args[key].as_i64().filter(|v| *v > 0) {
+            qb.push(" AND CAST(NULLIF(TRIM(year), '') AS INTEGER) ")
+                .push(op)
+                .push(" ")
+                .push_bind(y);
+        }
+    }
     // 类型先归一到标准词表：模型（或用户）传 `article` / `journal` 也能命中
     let types = crate::services::doc_type::normalize_many(doc_type);
     if !types.is_empty() {
@@ -1587,6 +1805,7 @@ fn append_search_info_filters<'a>(
     year_from: i64,
     year_to: i64,
     doc_type: &str,
+    journal: &str,
 ) {
     qb.push("(");
     let fields = [
@@ -1613,10 +1832,16 @@ fn append_search_info_filters<'a>(
     }
     qb.push(")");
     if year_from > 0 {
-        qb.push(" AND year >= ").push_bind(year_from);
+        qb.push(" AND CAST(NULLIF(TRIM(year), '') AS INTEGER) >= ")
+            .push_bind(year_from);
     }
     if year_to > 0 {
-        qb.push(" AND year <= ").push_bind(year_to);
+        qb.push(" AND CAST(NULLIF(TRIM(year), '') AS INTEGER) <= ")
+            .push_bind(year_to);
+    }
+    if !journal.trim().is_empty() {
+        qb.push(" AND journal LIKE ")
+            .push_bind(format!("%{}%", journal.trim()));
     }
     // 类型先归一到标准词表：模型（或用户）传 `article` / `journal` 也能命中
     let types = crate::services::doc_type::normalize_many(doc_type);

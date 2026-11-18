@@ -8,13 +8,15 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 
 | 工具名称 | 功能 | 核心参数 |
 |---------|------|---------|
-| `grep_search` | 全文搜索（纯 Rust 实现，轻量快速），支持正则/字面量、**游标分页**、上下文截断、期刊/年份/文档范围过滤 | `query`, `regex`, `algorithm`, `doc_ids`, `context`, `start_after_id`, `journal`, `year_start`, `year_end` |
-| `search_info` | 搜索文献元数据（中英文），支持分页、字段过滤、年份/类型过滤、排序 | `query`, `fields`, `year_from`, `year_to`, `doc_type`, `sort_by`, `sort_order` |
+| `grep_search` | 全文搜索（纯 Rust 实现），支持正则/字面量、**match 级结果**（`matched`/`column`/`sentence`/`section`）、词边界、跳过参考文献、只计数、游标分页 | `query`, `regex`, `case_sensitive`, `whole_word`, `mode`, `max_matches_per_doc`, `include_sentence`, `strip_references`, `count_only`, `doc_ids`, `journal`, `year_start`, `year_end` |
+| `search_info` | 搜索文献元数据（中英文），支持分页、字段过滤、年份/期刊/类型过滤、排序 | `query`, `fields`, `year_from`, `year_to`, `journal`, `doc_type`, `sort_by`, `sort_order` |
 | `read_markdown` | 读取文献 Markdown 内容（行切片分页），或按标题提取指定章节 | `id`, `line_start`, `line_count`, `section`, `sections` |
+| `read_markdown_batch` | **批量**读取多篇 Markdown（一次调用，带 `budget_chars` 预算与 `skipped` 列表） | `ids`, `full`, `line_count`, `raw`, `include_hash`, `budget_chars` |
 | `get_document_info` | 获取文献详细信息（含元数据、状态、PDF/Markdown 链接） | `id` |
-| `list_documents` | 搜索/列出文献，支持标题/作者搜索、**文件事实过滤**（`md_state`/`pdf_state`/`zip_state`/`synced`/`has_*`/`pdf_health`）与类型过滤、字段过滤、排序 | `query`, `doc_type`, `md_state`, `pdf_state`, `zip_state`, `synced`, `has_md`, `has_pdf`, `has_zip`, `pdf_health`, `page`, `page_size`, `fields`, `sort_by`, `sort_order` |
+| `list_documents` | 搜索/列出文献，支持标题/作者搜索、**期刊/年份过滤**、**文件事实过滤**（`md_state`/`pdf_state`/`zip_state`/`synced`/`has_*`/`pdf_health`）与类型过滤、字段过滤、排序 | `query`, `journal`, `journal_exact`, `year_from`, `year_to`, `doc_type`, `md_state`, `pdf_state`, `zip_state`, `synced`, `has_md`, `has_pdf`, `has_zip`, `pdf_health`, `page`, `page_size`(≤500), `fields`, `sort_by`, `sort_order` |
 | `get_document_abstract` | 获取文献摘要（中英文） | `id` |
 | `get_stats` | 获取知识库统计信息（总数、状态分布、类型分布） | 无 |
+| `get_facets` | **分面统计**：按 `journal`/`year`/`doc_type`/`source`/`language`/`pdf_health`/`category` 聚合计数 | `field`, `query`, `journal`, `year_from`, `year_to`, `limit` |
 | `list_doc_types` | 列出所有已使用的文献类型 + 标准类型词表（`standard`，含中文标签；筛选时应以它为准） | 无 |
 | `get_toc` | 获取文献目录（标题+行号），不受分页影响 | `id` |
 | `edit_markdown` 🔒 | **编辑**文献 Markdown 源码（按行范围替换/插入/删行，支持 `expected_text` 校验与 `dry_run` 预览） | `id`, `line_start`, `line_count`, `content`, `delete`, `expected_text`, `base_hash`, `dry_run` |
@@ -42,8 +44,15 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 |------|------|--------|------|
 | `query` | string | **必填** | 搜索关键词或正则表达式 |
 | `regex` | bool | `true` | 是否将 `query` 解释为正则表达式；`false` 时为字面量精确匹配 |
+| `case_sensitive` | bool | `false` | 是否区分大小写（默认不区分） |
+| `whole_word` | bool | `false` | 是否按词边界匹配（`` 包裹），避免 `Digit` 命中 `Digital` |
+| `mode` | string | `"doc"` | `doc`：每文档一条结果；`match`：同样的结构，但 `content` 聚合全部命中块 |
+| `max_matches_per_doc` | int | `5` | 每文档返回的 `matches[]` 上限（`match_count` 仍是**全量**计数） |
+| `include_sentence` | bool | `true` | 是否返回命中所在完整句子（`sentence`） |
+| `strip_references` | bool | `false` | 跳过 `References` / `Bibliography` 小节内的命中（消除引用列表误命中） |
+| `count_only` | bool | `false` | 只返回 `{id, match_count}`，不返回正文（做统计最省流量） |
 | `algorithm` | string | `"full"` | 搜索算法：`"full"`（全量扫描）或 `"fast"`（元数据预筛候选后扫描） |
-| `limit` | int | `10` | 每页返回条数（别名：`max_results`） |
+| `limit` | int | `10` | 每页返回的**文档**数（别名：`max_results`） |
 | `max_results` | int | `10` | `limit` 的别名 |
 | `start_after_id` | int | `0` | **游标**：仅返回 ID > 此值的文档。首次请求可不传（从头开始）；后续请求传上一次响应的 `last_id` 即可获取下一页 |
 | `context` | int | `2` | 匹配行前后各保留的上下文行数 |
@@ -57,24 +66,43 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 
 ```json
 {
-  "query": "transformer",
+  "query": "Panda",
+  "mode": "doc",
   "limit": 10,
-  "returned": 5,
-  "last_id": 52,
+  "returned": 1,
+  "total_matches": 2,
+  "last_id": 1001,
   "results": [
     {
-      "id": 42,
+      "id": 1001,
+      "match_count": 2,
       "content": "...matching lines with context...",
       "truncated": false,
-      "original_length": 320,
-      "title": "Attention Is All You Need",
-      "authors": "Vaswani et al.",
-      "year": 2017,
-      "journal": "NeurIPS"
+      "original_length": 99,
+      "first_line": 1,
+      "matches": [
+        {"line": 3, "column": 23, "matched": "Panda",
+         "sentence": "We use a Franka Emika Panda arm and a KUKA LWR4.",
+         "section": "VI. Experiments"},
+        {"line": 3, "column": 54, "matched": "Panda",
+         "sentence": "The Panda is the leader.", "section": "VI. Experiments"}
+      ],
+      "title": "Robot A",
+      "authors": "A. Author",
+      "year": 2023,
+      "journal": "IEEE Transactions on Robotics"
     }
   ]
 }
 ```
+
+> **`matches[]` 字段说明**
+> - `line`：1-indexed 行号；`column`：该行内 1-indexed 的**字符**列号
+> - `matched`：实际命中的文本（正则捕获到的部分，可判断是哪个别名命中）
+> - `sentence`：命中所在的完整句子（`include_sentence=false` 时不返回）
+> - `section`：命中位置上方最近的 Markdown 标题（用于区分“实验节”与“参考文献/作者简介”）
+> - `match_count`：该文档内**全部**命中数，不受 `max_matches_per_doc` 截断
+> - `count_only=true` 时结果只有 `{id, match_count}`，`total_matches` 仍为全量
 
 > **游标分页说明**：
 > - `last_id` 为本次返回结果中最大的文档 ID；若为 `null`，表示已扫描完全部文档，没有更多结果
@@ -321,13 +349,16 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `query` | string | `""` | 搜索关键词（匹配标题、作者、文件名） |
+| `journal` | string | `""` | 期刊名过滤（默认不区分大小写的子串匹配） |
+| `journal_exact` | bool | `false` | `true` 时按期刊全名精确匹配 |
+| `year_from` / `year_to` | int | `0` | 出版年区间（含端点，`0` 表示不限） |
 | `doc_type` | string | `""` | 文献类型过滤（逗号分隔多值） |
 | `md_state` / `pdf_state` / `zip_state` | string | `""` | 文件三态：`present` / `absent` / `unknown`（逗号分隔多值） |
 | `synced` | string | `""` | `1` = 文件事实已同步，`0` = 未同步（状态未知） |
 | `has_md` / `has_pdf` / `has_zip` | string | `""` | `1` 有 / `0` 无（不含未同步语义，需精确用三态） |
 | `pdf_health` | string | `""` | `ok` / `warning` / `error` / `missing` / `unchecked`（逗号分隔多值） |
 | `page` | int | `1` | 页码 |
-| `page_size` | int | `20` | 每页条数（1-100，别名：`limit`） |
+| `page_size` | int | `20` | 每页条数（1-500，别名：`limit`） |
 | `limit` | int | `20` | `page_size` 的别名 |
 | `fields` | string[] | — | 字段白名单 |
 | `sort_by` | string | `"created_at"` | 排序字段 |
@@ -404,6 +435,76 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
   "indexed_count": 120
 }
 ```
+
+---
+
+### `get_facets` — 元数据分面统计
+
+按某个字段做 `GROUP BY` 计数，用来回答「库里有哪几本期刊、各多少篇」「某期刊的年份分布」这类问题，**不必翻页枚举全库**。
+
+**参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `field` | string | `"journal"` | `journal` / `year` / `doc_type` / `source` / `language` / `pdf_health` / `category` |
+| `query` | string | `""` | 可选的标题/作者/文件名关键字过滤 |
+| `journal` | string | `""` | 先按期刊过滤（子串） |
+| `journal_exact` | bool | `false` | 期刊精确匹配 |
+| `year_from` / `year_to` | int | `0` | 年份区间 |
+| `limit` | int | `100` | 返回的分桶数上限（1-1000） |
+
+**返回示例：**
+
+```json
+{
+  "field": "journal",
+  "total": 245,
+  "buckets": [
+    {"value": "IEEE Transactions on Robotics", "count": 233},
+    {"value": "(unknown)", "count": 12}
+  ]
+}
+```
+
+> `total` 是**返回分桶**的计数之和；当 `limit` 截断了分桶（`buckets` 少于实际值）时，它小于全库文档数。
+> `year` 分桶的 `value` 是字符串（可能是 `"(unknown)"`）。
+
+对应 REST：`GET /assist/api/stats/facets?field=journal&limit=100`（MCP 令牌可只读访问）。
+
+---
+
+### `read_markdown_batch` — 批量读取 Markdown
+
+一次调用读取多篇文献的 Markdown，适合「把某个期刊的全部全文取回本地处理」这类批量任务。
+
+**参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `ids` | int[] | **必填** | 文档 ID 列表 |
+| `full` | bool | `true` | `true` 读整篇；`false` 只读前 `line_count` 行 |
+| `line_count` | int | `5000` | `full=false` 时的行数 |
+| `raw` | bool | `false` | `true` 保留原始图片路径；`false` 重写为可访问的 API URL |
+| `include_hash` | bool | `false` | 是否返回文件 sha256（写工具的 `base_hash`） |
+| `budget_chars` | int | `1000000` | 本次调用的总字符预算；超出后剩余文档标记 `truncated=true` 并提示单篇读取 |
+
+**返回示例：**
+
+```json
+{
+  "items": [
+    {"id": 1001, "total_lines": 1200, "content": "...", "truncated": false}
+  ],
+  "skipped": [{"id": 9999, "reason": "markdown_not_generated"}],
+  "budget_chars": 1000000,
+  "used_chars": 51234
+}
+```
+
+对应 REST：
+- `GET /assist/api/markdown/batch?ids=1,2,3&full=1`
+- `POST /assist/api/markdown/batch` body `{"ids":[1,2,3]}`
+- `GET /assist/api/markdown/export?journal=...&year_from=...` 流式导出 NDJSON（每行一篇）
 
 ---
 
@@ -584,6 +685,28 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 ```
 
 > 编辑只改 Markdown 文件本身（并同步 `md_size`）：不会自动重新解析 PDF，也不会重建向量索引。
+
+---
+
+## MCP 令牌的只读 API 访问
+
+MCP 专属令牌（`scope=mcp`）传统上只能调用 `/assist/mcp/stream`。为了做批量分析（取全文 / 统计 / 分面），现在**只读端点**也接受 MCP 令牌：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET/HEAD | `/assist/api/documents*` | 列表、详情、`markdown`、`toc`、`chunks`、`search-info`、`grep-search`、`doc-types` |
+| GET/HEAD | `/assist/api/markdown/batch` | 批量读取（也可用 POST，参数放在 body 里） |
+| POST | `/assist/api/markdown/batch` | 同上（ids 太长时用 POST） |
+| GET/HEAD | `/assist/api/markdown/export` | 流式 NDJSON 导出 |
+| GET/HEAD | `/assist/api/stats/facets` | 分面统计 |
+
+其他写操作（上传、编辑 Markdown、解析、删除、配置等）仍然返回：
+
+```json
+{"code": "mcp_only_token", "detail": "该令牌仅用于 MCP，不能访问此 API；只读端点（…）除外"}
+```
+
+请求方式与 API 令牌一致：`X-Token: okb_...` 或 `Authorization: Bearer okb_...`。
 
 ---
 

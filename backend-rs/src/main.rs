@@ -573,6 +573,35 @@ const UNINITIALIZED_ALLOWED_PATHS: &[&str] = &[
     "/assist/api/auth/bootstrap",
 ];
 
+/// MCP 专属令牌（`okb_...` 且权限为 `MCP`）允许访问的**只读** API 前缀。
+///
+/// 语义：MCP 令牌本来只能在 `/assist/mcp/stream` 上工作；但「取全文 / 批注 / 统计」这类
+/// 只读操作如果必须再签一个 API 令牌，会让 agent 侧配置变复杂。这里放行 GET/HEAD 的
+/// 只读端点，写操作（POST/PUT/PATCH/DELETE）仍然一律拒绝。
+const MCP_READONLY_PREFIXES: &[&str] = &[
+    // 列表/详情/markdown/toc/chunks/search-info/grep-search/doc-types
+    "/assist/api/documents",
+    // 批量与导出
+    "/assist/api/markdown/",
+    // 分面统计
+    "/assist/api/stats/",
+];
+
+/// 白名单里的「读语义 POST」端点（批量读取参数太长时用 POST 传 ids）。
+const MCP_READONLY_POST_PATHS: &[&str] = &["/assist/api/markdown/batch"];
+
+/// 判断请求是否属于「MCP 令牌可读」的只读端点。
+fn is_mcp_readonly(method: &http::Method, path: &str) -> bool {
+    let normalized = path.trim_end_matches('/');
+    if method == http::Method::POST {
+        return MCP_READONLY_POST_PATHS.contains(&normalized);
+    }
+    if !(method == http::Method::GET || method == http::Method::HEAD) {
+        return false;
+    }
+    MCP_READONLY_PREFIXES.iter().any(|p| path.starts_with(p))
+}
+
 /// 鉴权中间件（仅保护 `/assist/api/*`）。
 ///
 /// 判定顺序：
@@ -677,13 +706,14 @@ async fn token_middleware(mut req: axum::extract::Request, next: Next) -> Respon
     // 凭证：会话 token → 用户 API token
     if let Some(token) = auth::extract_token(&req) {
         if let Some(principal) = auth::resolve_principal(&token, &user_store, &sessions) {
-            // 作用域严格互斥：MCP 专属令牌不能调 `/assist/api/*`
-            if !principal.api {
+            // 作用域互斥：MCP 专属令牌不能**写** `/assist/api/*`；
+            // 但只读端点（取全文 / TOC / 统计 / 分面）放行，避免 agent 侧再配一个 API 令牌。
+            if !principal.api && !is_mcp_readonly(req.method(), &path) {
                 log_api_request_start(&req, Some(&principal), "mcp_only_token");
                 return (
                     http::StatusCode::UNAUTHORIZED,
                     axum::Json(serde_json::json!({
-                        "detail": "该令牌仅用于 MCP，不能访问 API；请使用权限为 API 的令牌或会话登录",
+                        "detail": "该令牌仅用于 MCP，不能访问此 API；只读端点（GET /assist/api/documents*、/assist/api/markdown/*、/assist/api/stats/*）除外",
                         "code": "mcp_only_token",
                     })),
                 )
@@ -945,5 +975,26 @@ pub(crate) fn cache_control_for(path: &std::path::Path) -> &'static str {
             "public, max-age=31536000, immutable"
         }
         _ => "public, max-age=86400",
+    }
+}
+#[cfg(test)]
+mod mcp_readonly_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_token_readonly_rules() {
+        // 读：允许
+        assert!(is_mcp_readonly(&http::Method::GET, "/assist/api/documents/96/markdown"));
+        assert!(is_mcp_readonly(&http::Method::HEAD, "/assist/api/documents"));
+        assert!(is_mcp_readonly(&http::Method::GET, "/assist/api/stats/facets"));
+        assert!(is_mcp_readonly(&http::Method::GET, "/assist/api/markdown/export"));
+        // 批量读取：GET 与 POST 都允许（POST 参数放 body）
+        assert!(is_mcp_readonly(&http::Method::GET, "/assist/api/markdown/batch"));
+        assert!(is_mcp_readonly(&http::Method::POST, "/assist/api/markdown/batch/"));
+        // 写：拒绝
+        assert!(!is_mcp_readonly(&http::Method::PUT, "/assist/api/documents/96/markdown"));
+        assert!(!is_mcp_readonly(&http::Method::POST, "/assist/api/documents/upload"));
+        assert!(!is_mcp_readonly(&http::Method::DELETE, "/assist/api/documents/96"));
+        assert!(!is_mcp_readonly(&http::Method::POST, "/assist/api/documents/96/rehash"));
     }
 }
