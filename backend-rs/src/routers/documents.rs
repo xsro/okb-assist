@@ -3105,6 +3105,8 @@ where
 /// 全文 grep 搜索
 #[derive(Debug, Deserialize)]
 pub struct GrepSearchQuery {
+    /// 关键词/正则。REST 习惯用 `q`，同时接受 `query`（与 MCP 工具参数同名）
+    #[serde(alias = "query")]
     pub q: Option<String>,
     pub limit: Option<i64>,
     pub context: Option<i64>,
@@ -3136,7 +3138,13 @@ async fn grep_search(
 ) -> Response {
     let q = params.q.unwrap_or_default();
     if q.trim().is_empty() {
-        return Json(json!({"results": [], "query": q})).into_response();
+        // 早先这里静默回空结果，客户端拿错参数名（query 而非 q）时极难发现，改为明确的 400
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "detail": "缺少查询参数 q（也接受 query）",
+            "results": [],
+            "query": q
+        })))
+            .into_response();
     }
 
     // 解析 doc_ids

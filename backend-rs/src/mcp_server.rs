@@ -98,7 +98,7 @@ impl McpServer {
                         "year_to": {"type": "integer", "default": 0, "description": "Filter: maximum publication year"},
                         "journal": {"type": "string", "default": "", "description": "Filter: journal (case-insensitive substring)"},
                         "doc_type": {"type": "string", "default": "", "description": "Filter: document type (comma-separated for multiple)"},
-                        "fields": {"type": "array", "items": {"type": "string"}, "description": "Optional list of fields to return (e.g. ['id','title','year'])"},
+                        "fields": {"type": "array", "items": {"type": "string"}, "description": "Optional field whitelist. Available keys: id, title, authors, year, doi, journal, keywords, abstract, category, doc_type, language, i18n, status. Unknown keys are dropped silently."},
                         "sort_by": {"type": "string", "default": "updated_at", "description": "Sort field: title, authors, year, id, journal, doc_type, created_at, updated_at, pdf_size, md_size, zip_size"},
                         "sort_order": {"type": "string", "default": "desc", "description": "Sort direction: asc or desc"}
                     },
@@ -152,7 +152,7 @@ impl McpServer {
                         "page": {"type": "integer", "default": 1},
                         "page_size": {"type": "integer", "default": 20, "description": "Results per page (1-500, alias: limit)"},
                         "limit": {"type": "integer", "default": 20, "description": "Results per page (alias for page_size)"},
-                        "fields": {"type": "array", "items": {"type": "string"}, "description": "Optional list of fields to return (e.g. ['id','title','year'])"},
+                        "fields": {"type": "array", "items": {"type": "string"}, "description": "Optional field whitelist. Available keys: id, filename, title, authors, year, doi, journal, keywords, abstract, category, doc_type, language, i18n, status, status_message, synced, has_markdown (alias has_md), has_pdf, has_asset (alias has_zip), pdf_health, pdf_size, md_size, pdf_need_auth_url, temp_downloadable_pdf_url, temp_downloadable_pdf_expiration, markdown_url, detail_url. Unknown keys are dropped silently."},
                         "sort_by": {"type": "string", "default": "created_at", "description": "Sort field: title, authors, year, id, journal, doc_type, created_at, updated_at, pdf_size, md_size, zip_size"},
                         "sort_order": {"type": "string", "default": "desc", "description": "Sort direction: asc or desc"}
                     }
@@ -190,7 +190,7 @@ impl McpServer {
             }),
             json!({
                 "name": "read_markdown_batch",
-                "description": "Read several documents' Markdown in one call (batch version of read_markdown). Returns items[] with content/total_lines/hash and skipped[] for documents without Markdown. Use `budget_chars` (default 1000000) to cap the total payload; items beyond the budget are returned with truncated=true and a hint to read them individually.",
+                "description": "Read several documents' Markdown in one call (batch version of read_markdown). Returns items[] with content/total_lines/hash and skipped[] for documents without Markdown. Use `budget_chars` (default 1000000) to cap the total payload; the document that crosses the budget is returned with truncated=true and a hint, and every remaining document is listed in skipped[] with reason=budget_exhausted (nothing is dropped silently).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -199,7 +199,7 @@ impl McpServer {
                         "line_count": {"type": "integer", "default": 5000},
                         "raw": {"type": "boolean", "default": false, "description": "Keep original image paths instead of rewriting them to API URLs"},
                         "include_hash": {"type": "boolean", "default": false},
-                        "budget_chars": {"type": "integer", "default": 1000000}
+                        "budget_chars": {"type": "integer", "default": 1000000, "description": "Total payload budget in chars; documents after the budget is exhausted are reported in skipped[] with reason=budget_exhausted"}
                     },
                     "required": ["ids"]
                 }
@@ -571,12 +571,31 @@ impl McpServer {
             .filter(|v| !v.is_empty())
     }
 
+    /// 字段别名 → 输出里真正的键名。
+    ///
+    /// 过滤参数名（`has_md` / `has_zip`）与 `format_doc()` 的输出键（`has_markdown` / `has_asset`）
+    /// 历史上不一致，客户端照着参数名写 `fields: ["has_md"]` 时会被静默丢掉、返回里没有这个字段。
+    /// 这里做一次归一，新增输出键时若希望 `fields` 接受别名，在此加一行即可。
+    fn canonical_field(name: &str) -> &str {
+        match name {
+            "has_md" | "has_markdown" => "has_markdown",
+            "has_zip" | "has_asset" => "has_asset",
+            _ => name,
+        }
+    }
+
     /// 按字段白名单过滤 JSON 对象；无白名单时原样返回。
+    ///
+    /// 白名单先过 [`Self::canonical_field`] 归一，因此 `has_md` / `has_zip` 这类过滤参数名
+    /// 也能取到 `has_markdown` / `has_asset`；无法识别的字段名仍然忽略（不报错）。
     fn filter_fields(value: &mut Value, fields: &Option<Vec<String>>) {
         if let Some(fields) = fields {
             if let Some(obj) = value.as_object_mut() {
-                let keep: std::collections::HashSet<&str> = fields.iter().map(|s| s.as_str()).collect();
-                obj.retain(|k, _| keep.contains(k.as_str()));
+                let keep: std::collections::HashSet<&str> = fields
+                    .iter()
+                    .map(|s| Self::canonical_field(s.as_str()))
+                    .collect();
+                obj.retain(|k, _| keep.contains(Self::canonical_field(k.as_str())));
             }
         }
     }
@@ -1127,8 +1146,19 @@ impl McpServer {
         let mut items: Vec<Value> = Vec::new();
         let mut skipped: Vec<Value> = Vec::new();
         let mut used = 0usize;
+        // 预算用尽后不再读取剩余文档，但必须逐个记入 skipped ——
+        // 直接 break 会让这些 id 既不出现于 items 也不出现于 skipped（客户端无从得知被跳过）。
+        let mut budget_exhausted = false;
 
         for id in ids {
+            if budget_exhausted {
+                skipped.push(json!({
+                    "id": id,
+                    "reason": "budget_exhausted",
+                    "detail": "payload budget exhausted; read this document with read_markdown(id, line_start, line_count)"
+                }));
+                continue;
+            }
             if self.fetch_doc(id).await.is_none() {
                 skipped.push(json!({"id": id, "reason": "not_found"}));
                 continue;
@@ -1187,7 +1217,7 @@ impl McpServer {
             }
             items.push(item);
             if used >= budget {
-                break;
+                budget_exhausted = true;
             }
         }
 
@@ -2261,4 +2291,47 @@ pub async fn mcp_options_handler() -> Response {
         ],
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod field_filter_tests {
+    use super::*;
+
+    /// 过滤参数名（has_md / has_zip）必须能取到输出键（has_markdown / has_asset）
+    #[test]
+    fn fields_alias_matches_output_keys() {
+        let mut v = json!({
+            "id": 1,
+            "title": "t",
+            "has_markdown": true,
+            "has_pdf": false,
+            "has_asset": true,
+        });
+        let fields = Some(vec![
+            "id".to_string(),
+            "has_md".to_string(),
+            "has_pdf".to_string(),
+        ]);
+        McpServer::filter_fields(&mut v, &fields);
+        let obj = v.as_object().unwrap();
+        assert!(obj.contains_key("id"));
+        assert!(obj.get("has_markdown").and_then(|x| x.as_bool()) == Some(true));
+        assert!(obj.contains_key("has_pdf"));
+        assert!(!obj.contains_key("title"));
+        assert!(!obj.contains_key("has_asset"));
+
+        // 别名与真名等价
+        assert_eq!(McpServer::canonical_field("has_md"), McpServer::canonical_field("has_markdown"));
+        assert_eq!(McpServer::canonical_field("has_zip"), McpServer::canonical_field("has_asset"));
+        // 未知名保持原样（被 retain 丢弃，不 panic）
+        assert_eq!(McpServer::canonical_field("bogus"), "bogus");
+    }
+
+    /// 无白名单时原样返回
+    #[test]
+    fn fields_none_keeps_everything() {
+        let mut v = json!({"id": 1, "title": "t"});
+        McpServer::filter_fields(&mut v, &None);
+        assert_eq!(v.as_object().unwrap().len(), 2);
+    }
 }

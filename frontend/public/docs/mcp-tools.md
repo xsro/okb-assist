@@ -45,7 +45,7 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | `query` | string | **必填** | 搜索关键词或正则表达式 |
 | `regex` | bool | `true` | 是否将 `query` 解释为正则表达式；`false` 时为字面量精确匹配 |
 | `case_sensitive` | bool | `false` | 是否区分大小写（默认不区分） |
-| `whole_word` | bool | `false` | 是否按词边界匹配（`` 包裹），避免 `Digit` 命中 `Digital` |
+| `whole_word` | bool | `false` | 是否按词边界匹配（用 `\b` 包裹），避免 `Digit` 命中 `Digital` |
 | `mode` | string | `"doc"` | `doc`：每文档一条结果；`match`：同样的结构，但 `content` 聚合全部命中块 |
 | `max_matches_per_doc` | int | `5` | 每文档返回的 `matches[]` 上限（`match_count` 仍是**全量**计数） |
 | `include_sentence` | bool | `true` | 是否返回命中所在完整句子（`sentence`） |
@@ -61,6 +61,19 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | `journal` | string | `""` | 按期刊名模糊过滤（忽略大小写） |
 | `year_start` | int | `0` | 起始年份（>0 时生效） |
 | `year_end` | int | `0` | 结束年份（>0 时生效） |
+
+**REST 等价端点：** `GET /assist/api/documents/grep-search`（MCP 令牌可只读访问）。
+
+| REST 参数 | 对应 MCP 参数 | 备注 |
+|---|---|---|
+| `q`（也接受 `query`） | `query` | **REST 历史上叫 `q`**；两名字都收，缺失/为空白返回 400 |
+| `mode` / `count_only` / `strip_references` / `whole_word` / `case_sensitive` | 同名 | 布尔参数可写 `1`/`0` 或 `true`/`false` |
+| `limit` / `context` / `max_matches_per_doc` / `doc_ids` / `journal` / `year_start` / `year_end` / `start_after_id` / `max_context_chars` | 同名 | — |
+
+```bash
+curl -s -H "Authorization: Bearer okb_..." \
+  "http://127.0.0.1:5001/assist/api/documents/grep-search?q=Panda&mode=match&strip_references=1&doc_ids=96,1562"
+```
 
 **返回格式：**
 
@@ -216,7 +229,7 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | `year_from` | int | `0` | 起始年份过滤 |
 | `year_to` | int | `0` | 结束年份过滤 |
 | `doc_type` | string | `""` | 文献类型过滤（逗号分隔多值） |
-| `fields` | string[] | — | 字段白名单，如 `["id","title","year"]`；省略返回全部字段 |
+| `fields` | string[] | — | 字段白名单，如 `["id","title","year"]`；省略返回全部字段。可用键见「字段过滤」一节 |
 | `sort_by` | string | `"updated_at"` | 排序字段 |
 | `sort_order` | string | `"desc"` | 排序方向：`"asc"` 或 `"desc"` |
 
@@ -360,7 +373,7 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | `page` | int | `1` | 页码 |
 | `page_size` | int | `20` | 每页条数（1-500，别名：`limit`） |
 | `limit` | int | `20` | `page_size` 的别名 |
-| `fields` | string[] | — | 字段白名单 |
+| `fields` | string[] | — | 字段白名单。可用键见「字段过滤」一节 |
 | `sort_by` | string | `"created_at"` | 排序字段 |
 | `sort_order` | string | `"desc"` | 排序方向 |
 
@@ -486,7 +499,7 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | `line_count` | int | `5000` | `full=false` 时的行数 |
 | `raw` | bool | `false` | `true` 保留原始图片路径；`false` 重写为可访问的 API URL |
 | `include_hash` | bool | `false` | 是否返回文件 sha256（写工具的 `base_hash`） |
-| `budget_chars` | int | `1000000` | 本次调用的总字符预算；超出后剩余文档标记 `truncated=true` 并提示单篇读取 |
+| `budget_chars` | int | `1000000` | 本次调用的总字符预算；跨过预算的那篇返回 `truncated=true` + `hint`，**其后所有文档**进 `skipped[]`（`reason="budget_exhausted"`），不会被静默丢弃 |
 
 **返回示例：**
 
@@ -495,11 +508,17 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
   "items": [
     {"id": 1001, "total_lines": 1200, "content": "...", "truncated": false}
   ],
-  "skipped": [{"id": 9999, "reason": "markdown_not_generated"}],
+  "skipped": [
+    {"id": 9999, "reason": "markdown_not_generated"},
+    {"id": 1002, "reason": "budget_exhausted", "detail": "payload budget exhausted; read this document with read_markdown(id, line_start, line_count)"}
+  ],
   "budget_chars": 1000000,
   "used_chars": 51234
 }
 ```
+
+> `skipped[].reason` 只有三种：`not_found`（库里没有这个 id）、`markdown_not_generated`（没有 Markdown）、
+> `budget_exhausted`（预算已用完）。**传入的 id 一定会在 `items` 或 `skipped` 里出现一次**，不会凭空消失。
 
 对应 REST：
 - `GET /assist/api/markdown/batch?ids=1,2,3&full=1`
@@ -730,6 +749,28 @@ MCP 专属令牌（`scope=mcp`）传统上只能调用 `/assist/mcp/stream`。�
 ### 字段过滤
 
 `search_info`、`list_documents` 支持 `fields` 参数（字符串数组），只返回指定字段；省略时返回全部字段。
+**无法识别的键会被静默忽略**（不会报错，也不会出现在返回里），拼错字段名时表现为「字段没返回」。
+
+**`list_documents` 可用键**（即返回对象的键名）：
+
+```text
+id, filename, title, authors, year, doi, journal, keywords, abstract, category,
+doc_type, language, i18n, status, status_message, synced,
+has_markdown (别名 has_md), has_pdf, has_asset (别名 has_zip),
+pdf_health, pdf_size, md_size,
+pdf_need_auth_url, temp_downloadable_pdf_url, temp_downloadable_pdf_expiration,
+markdown_url, detail_url
+```
+
+**`search_info` 可用键**：
+
+```text
+id, title, authors, year, doi, journal, keywords, abstract, category,
+doc_type, language, i18n, status
+```
+
+> `has_markdown` / `has_asset` 是最初的返回键名，而**过滤参数**叫 `has_md` / `has_zip`。两者都能写进
+> `fields`：`["has_md"]` 与 `["has_markdown"]` 等价，`["has_zip"]` 与 `["has_asset"]` 等价。
 
 ### 统一错误格式
 
