@@ -4896,27 +4896,35 @@ async fn get_image_from_zip(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e}))).into_response(),
     }
 
+    // 只读中央目录 + 目标条目（命中缓存时零磁盘 I/O）；包是否存在由 `read_image` 自己 stat 判断
     let zip_path = paths::get_asset_path(&settings, id);
-    if !std::path::Path::new(&zip_path).exists() {
-        return (StatusCode::NOT_FOUND, Json(json!({"detail": "图片包不存在"}))).into_response();
+    match image_cache::read_image(id, &zip_path, &filename).await {
+        image_cache::ImageLookup::Found(data) => {
+            let mime = image_mime(&filename);
+            // 零拷贝：缓存里的 Arc<[u8]> 直接变成响应体，不再复制图片字节
+            let body = Body::from(Bytes::from_owner(data));
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "public, max-age=86400")],
+                body,
+            )
+                .into_response()
+        }
+        image_cache::ImageLookup::Missing => {
+            (StatusCode::NOT_FOUND, Json(json!({"detail": "图片不存在"}))).into_response()
+        }
+        image_cache::ImageLookup::NoPackage => {
+            (StatusCode::NOT_FOUND, Json(json!({"detail": "图片包不存在"}))).into_response()
+        }
+        image_cache::ImageLookup::Corrupt(msg) => {
+            tracing::warn!("图片包损坏 (doc_id={}, {}): {}", id, filename, msg);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"detail": "图片包损坏或无法读取", "error": msg})),
+            )
+                .into_response()
+        }
     }
-
-    // 按 doc 缓存 zip 字节（LRU）：同一篇文档的 N 张图片只读一次盘
-    let raw = match image_cache::load(id, &zip_path).await {
-        Some(r) => r,
-        None => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "读取图片包失败"}))).into_response(),
-    };
-
-    // zip 解析与解压是 CPU 操作，放后台线程
-    let want = filename.clone();
-    let img_data = match tokio::task::spawn_blocking(move || image_cache::read_image(&raw, &want)).await {
-        Ok(Some(data)) => data,
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"detail": "图片不存在"}))).into_response(),
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": "读取图片失败"}))).into_response(),
-    };
-
-    let mime = image_mime(&filename);
-    (StatusCode::OK, [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "public, max-age=86400")], img_data).into_response()
 }
 
 /// POST /assist/api/documents/{id}/pdf/ —— 替换已有文档的 PDF
