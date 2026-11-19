@@ -58,7 +58,7 @@ OKB-Assist MCP 服务器提供以下工具，供 AI 助手（如 CodeBuddy、Cla
 | `context` | int | `2` | 匹配行前后各保留的上下文行数 |
 | `max_context_chars` | int | `500` | 每条结果 `content` 的最大字符数；`0` 表示不截断 |
 | `doc_ids` | string | `""` | 限定搜索的文档 ID，支持逗号分隔和范围（如 `"1,2,5-100"`） |
-| `journal` | string | `""` | 按期刊名模糊过滤（忽略大小写） |
+| `journal` | string | `""` | 按期刊名模糊过滤（忽略大小写）；写期刊**别名**（如 `TRO`）时按别名表的全名集合精确匹配 |
 | `year_start` | int | `0` | 起始年份（>0 时生效） |
 | `year_end` | int | `0` | 结束年份（>0 时生效） |
 
@@ -362,7 +362,7 @@ curl -s -H "Authorization: Bearer okb_..." \
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `query` | string | `""` | 搜索关键词（匹配标题、作者、文件名） |
-| `journal` | string | `""` | 期刊名过滤（默认不区分大小写的子串匹配） |
+| `journal` | string | `""` | 期刊名过滤（默认不区分大小写的子串匹配）；写**别名**（`TRO`/`TAC`…）时按别名表的全名集合精确匹配（大小写不敏感） |
 | `journal_exact` | bool | `false` | `true` 时按期刊全名精确匹配 |
 | `year_from` / `year_to` | int | `0` | 出版年区间（含端点，`0` 表示不限） |
 | `doc_type` | string | `""` | 文献类型过滤（逗号分隔多值） |

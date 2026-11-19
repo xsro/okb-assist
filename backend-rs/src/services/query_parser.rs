@@ -79,6 +79,9 @@ const C_ALL: &[&str] = &[
 enum FieldSpec {
     /// 文本列集合，任一列 LIKE 命中即算命中
     Text(&'static [&'static str]),
+    /// 期刊（`SO=` / `journal:`）：值命中别名表时按期刊全名精确匹配（可一对多），
+    /// 否则退化为 `C_JOURNAL` 的文本子串匹配。别名表见 `services::journal_alias`。
+    Journal,
     /// 数值列（支持 `=` / `>` / `>=` / `<` / `<=` / `a-b` 范围）
     Number(&'static str),
     /// 枚举列（逗号多选 → `IN (…)`，值先过 `doc_type::normalize`）
@@ -100,7 +103,8 @@ fn resolve_tag(raw: &str) -> Option<FieldSpec> {
         // 文本（WoS 标签 + 旧前缀，二者等价）
         "ti" | "title" => FieldSpec::Text(C_TITLE),
         "au" | "author" | "authors" => FieldSpec::Text(C_AUTHORS),
-        "so" | "journal" | "publication" => FieldSpec::Text(C_JOURNAL),
+        // 期刊：命中别名（TRO / TAC / RAL …）时按全名集合精确匹配，否则退回文本子串
+        "so" | "journal" | "publication" => FieldSpec::Journal,
         "ab" | "abstract" => FieldSpec::Text(C_ABSTRACT),
         "ak" | "kw" | "keyword" | "keywords" => FieldSpec::Text(C_KEYWORDS),
         "do" | "doi" => FieldSpec::Text(C_DOI),
@@ -349,6 +353,8 @@ enum Node {
     Range { column: &'static str, min: Option<i64>, max: Option<i64> },
     /// 枚举多选
     Enum { column: &'static str, values: Vec<String> },
+    /// 期刊别名展开后的期刊全名集合（`journal` / `i18n.en.journal` 任一列精确命中，大小写不敏感）
+    JournalSet { values: Vec<String> },
     /// 字面量 SQL（文件事实三态，不占绑定参数）
     Raw(String),
     /// PDF 健康（可能带绑定值）
@@ -375,18 +381,20 @@ fn combine_or(mut terms: Vec<Node>) -> Option<Node> {
 
 // ── 语法分析（递归下降） ────────────────────────────────
 
-struct Parser {
+struct Parser<'a> {
     toks: Vec<Spanned>,
     i: usize,
     /// 字段上下文：字段后跟括号组时，组内的裸值套用该字段（`TS=(a OR b)`）
     ctx: Option<FieldSpec>,
     sort_by: Option<String>,
     sort_order: Option<String>,
+    /// 期刊别名表（`config.json` 的 `journal_aliases`），用于 `SO=` 的一对多展开
+    aliases: &'a [crate::services::journal_alias::JournalAlias],
 }
 
-impl Parser {
-    fn new(toks: Vec<Spanned>) -> Self {
-        Self { toks, i: 0, ctx: None, sort_by: None, sort_order: None }
+impl<'a> Parser<'a> {
+    fn new(toks: Vec<Spanned>, aliases: &'a [crate::services::journal_alias::JournalAlias]) -> Self {
+        Self { toks, i: 0, ctx: None, sort_by: None, sort_order: None, aliases }
     }
 
     fn peek(&self) -> Option<&Tok> {
@@ -577,6 +585,30 @@ impl Parser {
                 let raw = self.take_value_text(name, sep, pos)?;
                 Ok(Node::Text { columns, pattern: like_pattern(&raw) })
             }
+            FieldSpec::Journal => {
+                // `SO=(TRO OR TAC)` 同样支持把期刊压进组内
+                if matches!(self.peek(), Some(Tok::LParen)) {
+                    let saved = self.ctx;
+                    self.ctx = Some(FieldSpec::Journal);
+                    let node = self.parse_primary();
+                    self.ctx = saved;
+                    return node;
+                }
+                let raw = self.take_value_text(name, sep, pos)?;
+                Ok(self.journal_leaf(&raw))
+            }
+        }
+    }
+
+    /// 期刊叶子：命中别名表 → 期刊全名集合（可一对多）；否则退回文本子串匹配。
+    ///
+    /// 别名命中走**精确**匹配（`journal COLLATE NOCASE IN (…)`），所以
+    /// `SO=TRO` 不会把 `IEEE Robotics and Automation Letters` 之类带进来；
+    /// 想按片段搜仍可写完整期刊名（`SO=Robotics Transactions` 之类走 LIKE）。
+    fn journal_leaf(&self, raw: &str) -> Node {
+        match crate::services::journal_alias::resolve(self.aliases, raw) {
+            Some(names) => Node::JournalSet { values: names.to_vec() },
+            None => Node::Text { columns: C_JOURNAL, pattern: like_pattern(raw) },
         }
     }
 
@@ -607,6 +639,7 @@ impl Parser {
             Some(FieldSpec::Text(columns)) => {
                 Ok(Node::Text { columns, pattern: like_pattern(&raw) })
             }
+            Some(FieldSpec::Journal) => Ok(self.journal_leaf(&raw)),
             Some(FieldSpec::Number(column)) => match parse_range(&raw) {
                 Some(range) => Ok(Node::Range { column, min: range.min, max: range.max }),
                 // 不是数值就按文本兜底（老写法把不能解析的值当文本搜）
@@ -856,10 +889,20 @@ impl CompiledQuery {
     }
 }
 
-/// 解析并编译检索式。
+/// 解析并编译检索式（空别名表：`SO=` 只做文本子串匹配）。
+///
+/// 带别名表请用 [`compile_with`]。
 pub fn compile(input: &str) -> Result<CompiledQuery, QueryError> {
+    compile_with(input, &[])
+}
+
+/// 解析并编译检索式，`SO=` / `journal:` 支持期刊别名（见 `services::journal_alias`）。
+pub fn compile_with(
+    input: &str,
+    aliases: &[crate::services::journal_alias::JournalAlias],
+) -> Result<CompiledQuery, QueryError> {
     let toks = lex(input)?;
-    let mut parser = Parser::new(toks);
+    let mut parser = Parser::new(toks, aliases);
     let node = parser.parse()?;
     let mut sql = String::new();
     let mut binds: Vec<String> = Vec::new();
@@ -936,6 +979,12 @@ fn emit(node: &Node, sql: &mut String, binds: &mut Vec<String>) {
             }
             (None, None) => sql.push_str("1=1"),
         },
+        Node::JournalSet { values } => {
+            let (sql_text, extra) =
+                crate::services::journal_alias::in_clause(crate::services::journal_alias::JOURNAL_COLUMNS, values);
+            sql.push_str(&sql_text);
+            binds.extend(extra);
+        }
         Node::Enum { column, values } => {
             let placeholders = vec!["?"; values.len()].join(",");
             sql.push_str(&format!("{} IN ({})", column, placeholders));
@@ -995,6 +1044,46 @@ mod tests {
         assert_eq!(ab, bb);
         assert!(a.contains("title LIKE ?"));
         assert_eq!(ab, vec!["%attention%".to_string(); 2]);
+    }
+
+    #[test]
+    fn test_journal_alias_expands_to_journal_set() {
+        let aliases = crate::services::journal_alias::from_value(&serde_json::json!({
+            "items": [
+                { "alias": "TRO", "journals": ["IEEE Transactions on Robotics", "IEEE Transactions on Robotics and Automation"] }
+            ]
+        }));
+        let c = compile_with("SO=TRO", &aliases).expect("语法应通过");
+        // 两列 × 两个期刊名 = 4 个绑定值，且两列都用 NOCASE 精确匹配（不再 LIKE）
+        assert_eq!(c.binds.len(), 4, "SQL: {} binds: {:?}", c.where_clause, c.binds);
+        assert!(!c.where_clause.contains("LIKE"), "别名命中不应退化为 LIKE: {}", c.where_clause);
+        assert_eq!(c.where_clause.matches("COLLATE NOCASE IN (?,?)").count(), 2, "{}", c.where_clause);
+        assert_eq!(c.binds[0], "IEEE Transactions on Robotics");
+        assert_eq!(c.binds[2], "IEEE Transactions on Robotics");
+
+        // 大小写/多余空白不影响命中
+        assert_eq!(compile_with("so=  tro ", &aliases).unwrap().binds.len(), 4);
+        // 未命中别名 → 老行为（两列 LIKE 子串）
+        let c2 = compile_with("SO=TROX", &aliases).unwrap();
+        assert!(c2.where_clause.contains("LIKE"));
+        // 不带别名表（compile）时行为完全不变
+        let c3 = compile("SO=TRO").unwrap();
+        assert!(c3.where_clause.contains("LIKE"));
+        assert_eq!(c3.binds.len(), 2);
+    }
+
+    #[test]
+    fn test_journal_alias_inside_group() {
+        let aliases = crate::services::journal_alias::from_value(&serde_json::json!({
+            "items": [
+                { "alias": "TRO", "journals": ["IEEE Transactions on Robotics"] },
+                { "alias": "TAC", "journals": ["IEEE Transactions on Automatic Control"] }
+            ]
+        }));
+        let c = compile_with("SO=(TRO OR TAC)", &aliases).expect("语法应通过");
+        // 两个别名各 2 列 × 1 个期刊名 = 4
+        assert_eq!(c.binds.len(), 4, "SQL: {}", c.where_clause);
+        assert!(c.where_clause.contains(" OR "));
     }
 
     #[test]

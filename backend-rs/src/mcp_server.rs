@@ -644,6 +644,7 @@ impl McpServer {
         compiled: &crate::services::query_parser::CompiledQuery,
         doc_type: &str,
         args: &Value,
+        aliases: &[crate::services::journal_alias::JournalAlias],
     ) -> Result<(), String> {
         // 注意：`where_clause` 里的 `?` 是**纯文本占位符**，而 `QueryBuilder::push_bind` 自己还会
         // 插一个占位符。直接 `push(where_clause)` + 逐个 `push_bind` 会得到
@@ -663,7 +664,7 @@ impl McpServer {
             }
         }
         qb.push(")");
-        append_list_filters(qb, "", doc_type, args)
+        append_list_filters(qb, "", doc_type, args, aliases)
     }
 
     /// 拼接 ORDER BY 子句（防 SQL 注入：仅允许白名单字段）。
@@ -816,7 +817,9 @@ impl McpServer {
         // 语法错误必须报出来（带字符位置）—— 以前这里走朴素 `LIKE '%整串%'`，调用方写
         // `SO="…" AND PY=2020` 会被当成一个超长字面量，于是**静默回 0 条**，让人误以为
         // 「库里没有」（AGENTS.md 易错点 29：不要把无法解析的检索式静默降级成空结果）。
-        let compiled = match crate::services::query_parser::compile(&query) {
+        // 期刊别名（config.json 的 `journal_aliases`）：`SO=TRO` 在编译期展开成期刊全名集合
+        let aliases = self.settings.journal_aliases();
+        let compiled = match crate::services::query_parser::compile_with(&query, &aliases) {
             Ok(c) => c,
             Err(e) => {
                 let detail = match e.position {
@@ -831,7 +834,7 @@ impl McpServer {
 
         // 计数
         let mut cqb = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM documents WHERE ");
-        if let Err(e) = Self::push_search_where(&mut cqb, &compiled, &doc_type, args) {
+        if let Err(e) = Self::push_search_where(&mut cqb, &compiled, &doc_type, args, &aliases) {
             return Self::err("invalid_argument", &e);
         }
         // 查库失败必须报错：`unwrap_or(0)` / `unwrap_or_default()` 会把任何 SQL 问题（拼错括号、
@@ -843,7 +846,7 @@ impl McpServer {
 
         // 查询
         let mut qb = sqlx::QueryBuilder::new(format!("SELECT {} FROM documents WHERE ", DOC_COLUMNS));
-        if let Err(e) = Self::push_search_where(&mut qb, &compiled, &doc_type, args) {
+        if let Err(e) = Self::push_search_where(&mut qb, &compiled, &doc_type, args, &aliases) {
             return Self::err("invalid_argument", &e);
         }
         let sort_by = compiled.sort_by.clone().unwrap_or(sort_by_arg);
@@ -1013,8 +1016,9 @@ impl McpServer {
         let sort_order = args["sort_order"].as_str().unwrap_or("desc").to_string();
 
         // 计数
+        let aliases = self.settings.journal_aliases();
         let mut cqb = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM documents WHERE 1=1");
-        if let Err(e) = append_list_filters(&mut cqb, &query, &doc_type, args) {
+        if let Err(e) = append_list_filters(&mut cqb, &query, &doc_type, args, &aliases) {
             return Self::err("invalid_argument", &e);
         }
         // 查库失败必须报错：`unwrap_or(0)` / `unwrap_or_default()` 会把任何 SQL 问题（拼错括号、
@@ -1026,7 +1030,7 @@ impl McpServer {
 
         // 分页查询
         let mut qb = sqlx::QueryBuilder::new(format!("SELECT {} FROM documents WHERE 1=1", DOC_COLUMNS));
-        if let Err(e) = append_list_filters(&mut qb, &query, &doc_type, args) {
+        if let Err(e) = append_list_filters(&mut qb, &query, &doc_type, args, &aliases) {
             return Self::err("invalid_argument", &e);
         }
         Self::append_order_clause(&mut qb, &sort_by, &sort_order);
@@ -1157,7 +1161,7 @@ impl McpServer {
             "SELECT {} AS bucket, COUNT(*) AS count FROM documents WHERE 1=1",
             expr
         ));
-        if let Err(e) = append_list_filters(&mut qb, query, doc_type, args) {
+        if let Err(e) = append_list_filters(&mut qb, query, doc_type, args, &self.settings.journal_aliases()) {
             return Self::err("invalid_argument", &e);
         }
         qb.push(" GROUP BY bucket ORDER BY count DESC, bucket ASC LIMIT ")
@@ -1783,6 +1787,7 @@ fn append_list_filters<'a>(
     query: &str,
     doc_type: &str,
     args: &Value,
+    aliases: &[crate::services::journal_alias::JournalAlias],
 ) -> Result<(), String> {
     use crate::services::file_state::{self, FileKind};
 
@@ -1792,16 +1797,36 @@ fn append_list_filters<'a>(
             .push(" OR authors LIKE ").push_bind(like.clone())
             .push(" OR filename LIKE ").push_bind(like).push(")");
     }
-    if let Some(j) = args["journal"].as_str().filter(|s| !s.trim().is_empty()) {
-        if args["journal_exact"].as_bool().unwrap_or(false) {
+    if let Some(raw_journal) = args["journal"].as_str().filter(|s| !s.trim().is_empty()) {
+        // 期刊别名优先（TRO / TAC / RAL …）：一个别名可映射多个期刊全名，
+        // 命中后按 `journal` / `i18n.en.journal` 精确匹配（COLLATE NOCASE，
+        // 顺带覆盖库里大小写不一致的写法）。别名表见 config.json 的 `journal_aliases`。
+        if let Some(names) = crate::services::journal_alias::resolve(aliases, raw_journal) {
+            qb.push(" AND (");
+            for (ci, col) in crate::services::journal_alias::JOURNAL_COLUMNS.iter().enumerate() {
+                if ci > 0 {
+                    qb.push(" OR ");
+                }
+                qb.push(*col).push(" COLLATE NOCASE IN (");
+                for (i, name) in names.iter().enumerate() {
+                    if i > 0 {
+                        qb.push(", ");
+                    }
+                    qb.push_bind(name.clone());
+                }
+                qb.push(")");
+            }
+            qb.push(")");
+        } else if args["journal_exact"].as_bool().unwrap_or(false) {
             // 必须 COLLATE NOCASE：SQLite 的 `=` 走 BINARY 排序规则（大小写敏感），而下面的 `LIKE`
             // 对 ASCII 不敏感，两者不一致。库里同一期刊常有两种写法（`IEEE Transactions on
             // Robotics` 与 `IEEE TRANSACTIONS ON ROBOTICS`），少了 NOCASE 精确匹配会悄悄漏掉一半。
             qb.push(" AND journal = ")
-                .push_bind(j.trim().to_string())
+                .push_bind(raw_journal.trim().to_string())
                 .push(" COLLATE NOCASE");
         } else {
-            qb.push(" AND journal LIKE ").push_bind(format!("%{}%", j.trim()));
+            qb.push(" AND journal LIKE ")
+                .push_bind(format!("%{}%", raw_journal.trim()));
         }
     }
     for (key, op) in [("year_from", ">="), ("year_to", "<=")] {

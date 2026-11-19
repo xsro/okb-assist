@@ -238,6 +238,18 @@ impl Settings {
             .unwrap_or_else(|| "standard".to_string())
     }
 
+    // ── 期刊别名 ──
+
+    /// 期刊别名表（`config.json` 的 `journal_aliases` 段，解析规则见 `services::journal_alias`）。
+    ///
+    /// 检索式 `SO=TRO`、MCP/HTTP 的 `journal=TRO` 都靠它映射到一组期刊全名；
+    /// 每次都从配置实时读取，所以 `reload_config` 或保存配置后立即生效。
+    pub fn journal_aliases(&self) -> Vec<crate::services::journal_alias::JournalAlias> {
+        crate::services::journal_alias::from_value(
+            self.get_config().get("journal_aliases").unwrap_or(&serde_json::Value::Null),
+        )
+    }
+
     // ── LLM ──
     //
     // `llm.models` 是 LLM 模型池（被「问答」tab 用于选模型，也是抽取/embedding 的回退来源）；

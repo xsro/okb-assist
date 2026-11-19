@@ -85,6 +85,14 @@ fn normalize_service_config(mut raw: serde_json::Value) -> serde_json::Value {
         }
     }
 
+    // journal_aliases 段归一化：别名表只影响检索过滤，格式必须是 {version, items:[{alias, journals[]}]}。
+    // 手写配置常见错误（写成数组、journals 写成字符串、别名重复）在这里统一成合法结构；
+    // 真正「拒绝保存」的校验在 `PUT /assist/api/config`（services::journal_alias::validate）。
+    if raw.get("journal_aliases").is_some() {
+        raw["journal_aliases"] =
+            crate::services::journal_alias::normalized_value(&raw["journal_aliases"]);
+    }
+
     // pdf 段归一化：engine 只能是 mutool / mupdf（未知取值当 mutool）。
     // 注意：不在这里做「是否编入 mupdf」的能力兜底，配置值原样保留
     // （换回带 feature 的二进制后仍按原选择走，见 services::pdf_engine::active）。
@@ -167,8 +175,49 @@ pub fn default_config() -> serde_json::Value {
                 }
             }
         ],
+        // 期刊别名表：缩写 → 一组期刊全名（检索式 `SO=TRO`、`?journal=TRO` 都认）。
+        // 命中后按期刊全名精确匹配（大小写不敏感），见 services::journal_alias。
+        "journal_aliases": default_journal_aliases_section(),
         "users": default_users_section(),
         "drive": default_drive_section()
+    })
+}
+
+/// 默认的 `journal_aliases` 段：预置常见的机器人 / 控制类 IEEE 期刊缩写。
+///
+/// 只影响检索过滤，不会改库里的 `journal` 值；用户可在「配置 → 期刊别名」里增删。
+/// 同一个别名可以挂多个期刊名（旧刊名 / 另一套拼写各占一条），命中时按
+/// `journal COLLATE NOCASE IN (…)` 精确匹配。
+pub fn default_journal_aliases_section() -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "items": [
+            { "alias": "TRO", "journals": [
+                "IEEE Transactions on Robotics",
+                "IEEE Transactions on Robotics and Automation"
+            ] },
+            { "alias": "T-RO", "journals": [
+                "IEEE Transactions on Robotics",
+                "IEEE Transactions on Robotics and Automation"
+            ] },
+            { "alias": "TAC", "journals": ["IEEE Transactions on Automatic Control"] },
+            { "alias": "RAL", "journals": ["IEEE Robotics and Automation Letters"] },
+            { "alias": "RA-L", "journals": ["IEEE Robotics and Automation Letters"] },
+            { "alias": "TASE", "journals": ["IEEE Transactions on Automation Science and Engineering"] },
+            { "alias": "T-ASE", "journals": ["IEEE Transactions on Automation Science and Engineering"] },
+            { "alias": "TIE", "journals": ["IEEE Transactions on Industrial Electronics"] },
+            { "alias": "TMECH", "journals": ["IEEE/ASME Transactions on Mechatronics"] },
+            { "alias": "TII", "journals": ["IEEE Transactions on Industrial Informatics"] },
+            { "alias": "IJRR", "journals": [
+                "The International Journal of Robotics Research",
+                "International Journal of Robotics Research"
+            ] },
+            { "alias": "RAS", "journals": ["Robotics and Autonomous Systems"] },
+            { "alias": "JIRS", "journals": [
+                "Journal of Intelligent & Robotic Systems",
+                "Journal of Intelligent and Robotic Systems"
+            ] }
+        ]
     })
 }
 

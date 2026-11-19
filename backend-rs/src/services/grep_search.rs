@@ -406,7 +406,9 @@ pub async fn grep_search(
     // 1. 期刊/年份元数据预筛
     let mut doc_ids_owned: Option<Vec<i64>> = q.doc_ids.clone();
     if q.journal.is_some() || q.year_start.is_some() || q.year_end.is_some() {
-        let meta = meta_filter_ids(db, q.journal.as_deref(), q.year_start, q.year_end).await;
+        // 期刊过滤支持别名（TRO / TAC …），与检索式 `SO=`、列表 `?journal=` 同一套解析
+        let aliases = settings.journal_aliases();
+        let meta = meta_filter_ids(db, q.journal.as_deref(), &aliases, q.year_start, q.year_end).await;
         match doc_ids_owned.as_mut() {
             Some(ids) => {
                 let set: HashSet<i64> = meta.into_iter().collect();
@@ -571,17 +573,46 @@ pub async fn metadata_candidate_ids(db: &sqlx::SqlitePool, query: &str) -> Vec<i
     }
 }
 
-/// 期刊/年份过滤（AND 关系，journal 忽略大小写 LIKE 模糊匹配）
+/// 期刊/年份过滤（AND 关系）。
+///
+/// 期刊值先查 `journal_aliases`：命中别名 → `journal` / `i18n.en.journal` 精确匹配（大小写不敏感，
+/// 可一对多）；未命中 → 原来的忽略大小写 LIKE 模糊匹配。
 pub async fn meta_filter_ids(
     db: &sqlx::SqlitePool,
     journal: Option<&str>,
+    aliases: &[crate::services::journal_alias::JournalAlias],
     year_start: Option<i64>,
     year_end: Option<i64>,
 ) -> Vec<i64> {
+    use crate::services::journal_alias;
     let mut qb = sqlx::QueryBuilder::new("SELECT id FROM documents WHERE 1=1");
     if let Some(j) = journal {
-        if !j.trim().is_empty() {
-            qb.push(" AND journal LIKE ").push_bind(format!("%{}%", j.trim()));
+        let j = j.trim();
+        if !j.is_empty() {
+            match journal_alias::resolve(aliases, j) {
+                Some(names) => {
+                    // 这里显式 push + push_bind 拼 IN 列表（不用 `in_clause`：它返回的文本里已带 `?`，
+                    // 再交给 push_bind 会多插一遍占位符，见 mcp_server::push_search_where 的注释）
+                    qb.push(" AND (");
+                    for (ci, col) in journal_alias::JOURNAL_COLUMNS.iter().enumerate() {
+                        if ci > 0 {
+                            qb.push(" OR ");
+                        }
+                        qb.push(*col).push(" COLLATE NOCASE IN (");
+                        for (i, name) in names.iter().enumerate() {
+                            if i > 0 {
+                                qb.push(", ");
+                            }
+                            qb.push_bind(name.clone());
+                        }
+                        qb.push(")");
+                    }
+                    qb.push(")");
+                }
+                None => {
+                    qb.push(" AND journal LIKE ").push_bind(format!("%{}%", j));
+                }
+            }
         }
     }
     if let Some(ys) = year_start {
@@ -590,7 +621,13 @@ pub async fn meta_filter_ids(
     if let Some(ye) = year_end {
         qb.push(" AND CAST(NULLIF(TRIM(year), '') AS INTEGER) <= ").push_bind(ye);
     }
-    let rows = qb.build().fetch_all(db).await.unwrap_or_default();
+    let rows = match qb.build().fetch_all(db).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "grep_search 元数据预筛失败，按无预筛处理");
+            return Vec::new();
+        }
+    };
     rows.iter().map(|r| r.get::<i64, _>("id")).collect()
 }
 

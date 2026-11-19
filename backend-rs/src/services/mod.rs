@@ -13,6 +13,7 @@ pub mod dup_scan;
 pub mod fetch;
 pub mod file_state;
 pub mod image_cache;
+pub mod journal_alias;
 pub mod llm;
 pub mod md_meta;
 pub mod mineru;

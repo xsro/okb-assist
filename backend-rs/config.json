@@ -9,6 +9,93 @@
     "public_folders": [],
     "quota_overrides": {}
   },
+  "journal_aliases": {
+    "items": [
+      {
+        "alias": "TRO",
+        "journals": [
+          "IEEE Transactions on Robotics",
+          "IEEE Transactions on Robotics and Automation"
+        ]
+      },
+      {
+        "alias": "T-RO",
+        "journals": [
+          "IEEE Transactions on Robotics",
+          "IEEE Transactions on Robotics and Automation"
+        ]
+      },
+      {
+        "alias": "TAC",
+        "journals": [
+          "IEEE Transactions on Automatic Control"
+        ]
+      },
+      {
+        "alias": "RAL",
+        "journals": [
+          "IEEE Robotics and Automation Letters"
+        ]
+      },
+      {
+        "alias": "RA-L",
+        "journals": [
+          "IEEE Robotics and Automation Letters"
+        ]
+      },
+      {
+        "alias": "TASE",
+        "journals": [
+          "IEEE Transactions on Automation Science and Engineering"
+        ]
+      },
+      {
+        "alias": "T-ASE",
+        "journals": [
+          "IEEE Transactions on Automation Science and Engineering"
+        ]
+      },
+      {
+        "alias": "TIE",
+        "journals": [
+          "IEEE Transactions on Industrial Electronics"
+        ]
+      },
+      {
+        "alias": "TMECH",
+        "journals": [
+          "IEEE/ASME Transactions on Mechatronics"
+        ]
+      },
+      {
+        "alias": "TII",
+        "journals": [
+          "IEEE Transactions on Industrial Informatics"
+        ]
+      },
+      {
+        "alias": "IJRR",
+        "journals": [
+          "The International Journal of Robotics Research",
+          "International Journal of Robotics Research"
+        ]
+      },
+      {
+        "alias": "RAS",
+        "journals": [
+          "Robotics and Autonomous Systems"
+        ]
+      },
+      {
+        "alias": "JIRS",
+        "journals": [
+          "Journal of Intelligent & Robotic Systems",
+          "Journal of Intelligent and Robotic Systems"
+        ]
+      }
+    ],
+    "version": 1
+  },
   "llm": {
     "models": [
       {

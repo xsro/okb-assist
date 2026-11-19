@@ -80,6 +80,18 @@ export interface PdfCapabilities {
   active: PdfEngineName
 }
 
+/** 期刊别名：一个缩写 → 多个期刊全名（检索时 `SO=TRO` / `journal=TRO` 都认） */
+export interface JournalAliasItem {
+  alias: string
+  journals: string[]
+}
+
+/** `config.json` 的 `journal_aliases` 段 */
+export interface JournalAliasesConfig {
+  version?: number
+  items: JournalAliasItem[]
+}
+
 export interface ServiceConfig {
   base_url: string
   active_mineru?: string
@@ -93,6 +105,8 @@ export interface ServiceConfig {
   /** 信息补全（元数据抽取）使用的模型 */
   llm_extract: LlmExtractConfig
   vector_dbs: VectorDbConfig[]
+  /** 期刊别名表（缩写 → 一组期刊全名） */
+  journal_aliases?: JournalAliasesConfig
 }
 
 /** `system.json` 内容（管理员可见）。凭据已全部迁到 `config.json` 的 `users` 段 */

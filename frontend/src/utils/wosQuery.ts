@@ -33,7 +33,7 @@ export const WOS_FIELDS: WosField[] = [
   { tag: 'TS', label: '主题（题名/关键词/摘要）', kind: 'text', hint: '可跟括号组：TS=(a OR b)' },
   { tag: 'TI', label: '标题', kind: 'text', hint: '标题关键词，支持 * 通配符', aliases: ['title'] },
   { tag: 'AU', label: '作者', kind: 'text', hint: '作者名，支持 * 通配符', aliases: ['author', 'authors'] },
-  { tag: 'SO', label: '期刊/会议', kind: 'text', hint: '含空格用引号', aliases: ['journal'] },
+  { tag: 'SO', label: '期刊/会议', kind: 'text', hint: '支持别名 TRO/TAC…，含空格用引号', aliases: ['journal'] },
   { tag: 'AB', label: '摘要', kind: 'text', hint: '摘要关键词', aliases: ['abstract'] },
   { tag: 'AK', label: '作者关键词', kind: 'text', hint: '关键词字段', aliases: ['kw', 'keyword', 'keywords'] },
   { tag: 'DO', label: 'DOI', kind: 'text', hint: '10.1000/xyz123', aliases: ['doi'] },

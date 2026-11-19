@@ -74,7 +74,7 @@ cargo build --release
 | `backend-rs/src/routers/` | 路由组：`documents.rs`、`pipeline.rs`、`chat.rs`、`admin.rs`、`config.rs`、`auth.rs`、`users.rs`、`drive.rs`、`openapi.rs`、`mod.rs` |
 | `backend-rs/src/services/drive.rs` | 用户网盘：路径安全、角色阈值、配额统计、目录列举、Content-Type 推断 |
 | `backend-rs/src/services/pdf_engine.rs` | PDF 解析引擎运行时选择（`mutool` 命令行 / 内置 `mupdf`，含能力兜底） |
-| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`doc_type.rs`（**文档类型唯一词表**：归一化 / 标准列表 / Crossref 映射，见下方「文档类型词表」）、`file_state.rs`（文件事实 → 文献状态推导 + 运行时状态注册表 + 三态/PDF 健康 SQL 条件）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`（**检索式唯一解析器**：WoS 风格词法/语法分析 → AST → SQL，见易错点 29）、`chat_store.rs`（问答会话文件存取）、`dup_scan.rs`（**重复检测唯一实现**：标题归一化 + 内容词分块 + 分带 Levenshtein + 并查集聚类，结果原子写入 `tmp_folder_path`，见「重复检测」一节）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存）、`pdf_split.rs`（mutool 按页切分 PDF，供 MinerU 分片解析）、`fetch.rs`（大文件上传/下载兜底：无整体超时的客户端 + 流式落盘 + 重试 + 断点续传，见「解析结果包下载兜底」） |
+| `backend-rs/src/services/` | 后端适配器：`bibtex.rs`（BibTeX 解析 / LaTeX 还原）、`doc_type.rs`（**文档类型唯一词表**：归一化 / 标准列表 / Crossref 映射，见下方「文档类型词表」）、`file_state.rs`（文件事实 → 文献状态推导 + 运行时状态注册表 + 三态/PDF 健康 SQL 条件）、`llm.rs`（LLM/Embedding，支持 ollama 原生与 openai 兼容协议）、`qdrant.rs`、`mineru.rs`、`grep_search.rs`、`crossref.rs`、`pdf_meta.rs`、`citation.rs`（BibTeX / GB/T 7714 引用条目）、`vector_db.rs`、`datalab.rs`、`query_parser.rs`（**检索式唯一解析器**：WoS 风格词法/语法分析 → AST → SQL，见易错点 29）、`journal_alias.rs`（**期刊别名唯一实现**：缩写 → 多个期刊全名，见「期刊别名」一节）、`chat_store.rs`（问答会话文件存取）、`dup_scan.rs`（**重复检测唯一实现**：标题归一化 + 内容词分块 + 分带 Levenshtein + 并查集聚类，结果原子写入 `tmp_folder_path`，见「重复检测」一节）、`image_cache.rs`（图片资源包按 doc 的 LRU 缓存）、`pdf_split.rs`（mutool 按页切分 PDF，供 MinerU 分片解析）、`fetch.rs`（大文件上传/下载兜底：无整体超时的客户端 + 流式落盘 + 重试 + 断点续传，见「解析结果包下载兜底」） |
 | `backend-rs/src/config_manager.rs`、`backend-rs/src/config.rs` | 配置加载（JSON 文件，带缓存） |
 | `backend-rs/src/database.rs`、`backend-rs/src/models.rs` | 数据模型与 SQLite 连接 |
 | `backend-rs/src/paths.rs` | 由 `system.json` 模板解析 PDF/Markdown/info/asset 路径 |
@@ -104,6 +104,9 @@ cargo build --release
 - `backend-rs/system.json`：系统配置，改后**必须重启进程**才生效（进程内缓存）。
 - 配置读取层：`backend-rs/src/config_manager.rs`（带锁 + 进程内缓存）；`backend-rs/src/config.rs:Settings` 是单例代理，属性每次从 JSON 实时读取。
 - 添加新配置字段时：在 `config_manager.rs` 的默认值中加默认值；若是敏感字段，扩展脱敏函数。
+- `config.json` 的 `journal_aliases` 是**期刊别名表**（缩写 → 一组期刊全名，见下方「期刊别名」一节）：
+  `PUT /assist/api/config` 会走 `services::journal_alias::validate` 严格校验（别名重复/空、期刊名为空一律 400），
+  落盘前统一规范化（去空白、期刊名忽略大小写去重）。
 - `config.json` 中 MinerU 配置支持多配置数组，通过 `active_mineru` 按 `name` 选择当前使用的配置。每个配置的 `max_tasks` 控制该 MinerU 服务的并发解析数（对应 `pipeline.rs` 中独立的 `MINERU_SEMAPHORE`），`task_timeout` 控制单任务超时，`page_chunk` 控制分片解析的每片页数（默认 100，见下方「MinerU 分片解析」），`download_timeout` / `download_retries` 控制解析结果包的下载兜底（默认 120 秒停滞超时 / 重试 3 次，见下方「解析结果包下载兜底」），`token` 为 API 认证凭据。
 - 文件路径来自 `system.json` 的路径模板（含 `{id}` 占位符），在 `backend-rs/src/paths.rs` 解析，**不要**在 `Document` 模型里加路径列。
 
@@ -535,6 +538,46 @@ BibTeX 导入写 `inproceedings`（现在 `bibtex.rs` 已映射）、旧版实�
   历史脏值单独列一项提示「保存后归一为 …」），`QueryBuilder.vue` 的「文献类型」筛选也用它，
   列表/详情页显示中文标签（原始值放 `title` / 括号里）。**不要在模板里手写 `<option>`**。
 
+### 期刊别名（`services/journal_alias.rs` + `config.json` 的 `journal_aliases`）
+
+期刊缩写（`TRO` / `TAC` / `RAL` …）在检索里曾经只能靠子串 `LIKE` 硬碰：`journal=TAC` 在 7541 篇的库里
+只命中 **1** 篇（期刊名里带 "TAC" 的），而库里 `IEEE Transactions on Automatic Control` 实际有 **2965** 篇。
+别名表就是把这个缺口补上——**一个缩写映射到一组期刊全名**，命中后按期刊全名精确匹配。
+
+```json
+{
+  "journal_aliases": {
+    "version": 1,
+    "items": [
+      { "alias": "TRO", "journals": ["IEEE Transactions on Robotics", "IEEE Transactions on Robotics and Automation"] },
+      { "alias": "TAC", "journals": ["IEEE Transactions on Automatic Control"] }
+    ]
+  }
+}
+```
+
+| 场景 | 入口 | 行为 |
+|---|---|---|
+| 检索式 `SO=TRO` / `journal:TRO` / `SO=(TRO OR TAC)` | `query_parser::compile_with`（`FieldSpec::Journal` → `Node::JournalSet`） | 编译期展开成 `(journal COLLATE NOCASE IN (…) OR json_extract(i18n,'$.en.journal') COLLATE NOCASE IN (…))` |
+| MCP/HTTP 的 `journal` 参数（`list_documents`、`get_facets`、`search_info`） | `mcp_server::append_list_filters` | 同上（与 `journal_exact` 无关：别名命中就是精确集合） |
+| `grep_search` 的 `journal` 参数 | `services::grep_search::meta_filter_ids` | 同上 |
+| 未命中别名 | 全部回退 | 仍是原来的忽略大小写**子串** `LIKE`，行为不变 |
+
+- **匹配语义**：别名大小写/多余空白不敏感（`normalize_key()`）；**期刊名精确匹配**（`COLLATE NOCASE`），
+  不做片段模糊 —— `SO=TRO` 不会把 `IEEE Robotics and Automation Letters` 带进来。
+  想按片段搜就直接写片段（走 LIKE）。
+- **一对多**：`journals` 是数组，旧刊名/另一种拼写各占一条（默认表里 `TRO` 同时挂了
+  `…on Robotics` 与 `…on Robotics and Automation`，`JIRS` 挂了 `&` / `and` 两种写法）。
+- **只影响过滤**：不改库里已存的 `journal` 值，**也不合并 `get_facets` 的分桶**（分面仍按原始值分组，
+  所以库里的两种大小写写法还是两个桶 —— 这是刻意的，免得统计口径和数据库对不上）。
+- **默认表**：`config_manager::default_journal_aliases_section()` 预置 13 条常用机器人/控制期刊缩写
+  （TRO / T-RO / TAC / RAL / RA-L / TASE / T-ASE / TIE / TMECH / TII / IJRR / RAS / JIRS）；
+  文件里没有这一段时默认值生效，保存过一次后就落盘可见。
+- **UI**：`components/config/JournalAliasConfigSection.vue`（配置页「期刊别名」区，增删改 + 行内校验，
+  保存失败会显示服务端 detail）。别名重复/为空在**前端就地提示**，服务端再兜一层。
+- **约定**：新增任何「按期刊过滤」的入口都必须先 `journal_alias::resolve()`，不要在别处另写映射表
+  （与 `doc_type` / `i18n` / `file_state` 同一套规矩）。
+
 ### 重复检测（`services/dup_scan.rs`）
 
 去重页的两条依据（**标题相似** / **DOI 重复**）只有一套实现：`backend-rs/src/services/dup_scan.rs`。
@@ -894,7 +937,7 @@ HTTP 端到端 release **1.7s**。`scan()` 是 CPU 密集，router 里必须 `sp
 | `AceEditor.vue` | Markdown 编辑器（ace-builds 1.44.0），编辑+自适应分屏预览+KaTeX（桌面左右 / 移动上下，可拖拽比例）；`showToolbar` / `showPreviewControls` / `readOnly` 可裁剪为纯源码编辑器 |
 | `McpConfigPanel.vue` | MCP 配置面板：展示当前账号/MCP 权限 + **「我的 MCP 令牌」管理**（本页直接创建、显示/复制明文、撤销、选用哪一把写入参考配置；没有令牌时提醒先创建；不再要求粘贴令牌、也不再用会话 token 生成配置） |
 | `McpSkillPanel.vue` | MCP Skill 面板 |
-| `config/` | 配置子组件：`BaseUrlSection.vue`、`PdfEngineSection.vue`、`MineruConfigSection.vue`、`LlmConfigSection.vue`、`LlmExtractConfigSection.vue`、`VectorDbConfigSection.vue` |
+| `config/` | 配置子组件：`BaseUrlSection.vue`、`PdfEngineSection.vue`、`MineruConfigSection.vue`、`LlmConfigSection.vue`、`LlmExtractConfigSection.vue`、`VectorDbConfigSection.vue`、`JournalAliasConfigSection.vue`（期刊别名增删改 + 行内校验） |
 | `BibtexImportPanel.vue` | 上传页的「从 BibTeX 批量新建条目」面板（选 `.bib` → 预览可新建/已存在 → 只为缺失条目建记录，逐条结果可跳转已有/新建文档）；`api/documents.ts::importBibtex(content, dryRun)` |
 
 ### 路由与视图（`src/router/index.ts` + `src/views/`）

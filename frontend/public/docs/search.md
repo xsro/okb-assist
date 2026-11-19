@@ -24,7 +24,7 @@ PDF=present AND HEALTH=ok
 | `TS=` | — | **主题**：标题 + 作者关键词 + 摘要（中英双语列） | `TS=(transformer OR "deep learning")` |
 | `TI=` | `title:` | 标题 | `TI=attention`、`TI="attention is all you need"` |
 | `AU=` | `author:` / `authors:` | 作者 | `AU=Vaswani*` |
-| `SO=` | `journal:` | 期刊 / 会议名 | `SO="IEEE TRANSACTIONS ON …"` |
+| `SO=` | `journal:` | 期刊 / 会议名（**支持期刊别名**，见下） | `SO="IEEE TRANSACTIONS ON …"`、`SO=TRO` |
 | `AB=` | `abstract:` | 摘要 | `AB=pre-training` |
 | `AK=` | `keyword:` / `keywords:` | 作者关键词 | `AK=reinforcement` |
 | `DO=` | `doi:` | DOI | `DO=10.1000/xyz123` |
@@ -48,6 +48,25 @@ PDF=present AND HEALTH=ok
 
 > **不要用 `status:`** —— 文献状态由「文件事实 + 运行时」推导，库里没有这一列。
 > 想看「已解析」用 `MD=present`，想看「待解析」用 `PDF=present AND MD=absent`。
+
+### 期刊别名（`SO=TRO`、`SO=TAC` …）
+
+`SO=` / `journal:` 的值会先查**期刊别名表**：命中就把这一条展开成一组期刊全名，按**期刊全名精确匹配**
+（大小写不敏感），因此库里的 `IEEE Transactions on Robotics` 与 `IEEE TRANSACTIONS ON ROBOTICS`
+两种写法会一起命中，而 `IEEE Robotics and Automation Letters` 不会被带进来。
+
+```text
+SO=TRO                    # 别名，命中该刊（含旧刊名，按配置表）
+SO=(TRO OR TAC) AND PY>2020
+SO="IEEE Transactions on Robotics"   # 不是别名 → 仍按期刊名子串模糊匹配
+```
+
+- 一个别名可以对应**多个**期刊名（旧刊名、另一种拼写），由管理员在
+  「配置 → 期刊别名」里维护，数据存在 `config.json` 的 `journal_aliases` 段；
+- 默认预置了 TRO / T-RO / TAC / RAL / RA-L / TASE / T-ASE / TIE / TMECH / TII / IJRR / RAS / JIRS；
+- 别名**不做片段匹配**，想按片段搜就直接写片段（如 `SO=Robotics`）；
+- 文献列表页的「期刊」筛选、工具页的 `grep_search`、MCP 的 `journal` 参数走同一套别名规则；
+- 别名只影响**检索过滤**，不会修改库里已存的期刊名，也不会合并期刊分面统计里的分桶。
 
 ## 布尔运算与括号
 

@@ -2910,7 +2910,8 @@ async fn search_info(
     }
 
     // 解析检索式（WoS 风格，旧 `field:value` 语法同样支持）
-    let compiled = match crate::services::query_parser::compile(&q) {
+    // `journal_aliases` 一并传入：`SO=TRO` / `SO=TAC` 这类缩写在编译期展开成期刊全名集合
+    let compiled = match crate::services::query_parser::compile_with(&q, &settings.journal_aliases()) {
         Ok(c) => c,
         Err(e) => {
             return (

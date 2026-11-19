@@ -26,6 +26,8 @@
 
       <PdfEngineSection v-model="config" />
 
+      <JournalAliasConfigSection v-model="config" />
+
       <MineruConfigSection
         ref="mineruSectionRef"
         :configs="config.mineru"
@@ -76,6 +78,7 @@ import { useToast } from '@/composables/useToast'
 import type { ServiceConfig } from '@/types/config'
 import BaseUrlSection from '@/components/config/BaseUrlSection.vue'
 import PdfEngineSection from '@/components/config/PdfEngineSection.vue'
+import JournalAliasConfigSection from '@/components/config/JournalAliasConfigSection.vue'
 import MineruConfigSection from '@/components/config/MineruConfigSection.vue'
 import LlmConfigSection from '@/components/config/LlmConfigSection.vue'
 import LlmExtractConfigSection from '@/components/config/LlmExtractConfigSection.vue'
@@ -90,6 +93,7 @@ const originalConfig = ref<ServiceConfig | null>(null)
 const mineruSectionRef = ref<InstanceType<typeof MineruConfigSection> | null>(null)
 const llmExtractSectionRef = ref<InstanceType<typeof LlmExtractConfigSection> | null>(null)
 const vectorDbSectionRef = ref<InstanceType<typeof VectorDbConfigSection> | null>(null)
+const journalAliasSectionRef = ref<InstanceType<typeof JournalAliasConfigSection> | null>(null)
 
 function onConfigUpdate() {
   // 子组件已直接修改响应式对象，无需额外操作
@@ -118,6 +122,17 @@ async function load() {
       raw.pdf = { engine: 'mutool' }
     } else {
       raw.pdf.engine = raw.pdf.engine === 'mupdf' ? 'mupdf' : 'mutool'
+    }
+    // 期刊别名表：缺省 {version:1, items:[]}（老配置里没有这一段）
+    if (!raw.journal_aliases || typeof raw.journal_aliases !== 'object') {
+      raw.journal_aliases = { version: 1, items: [] }
+    }
+    if (!Array.isArray(raw.journal_aliases.items)) {
+      raw.journal_aliases.items = []
+    }
+    for (const item of raw.journal_aliases.items) {
+      item.alias = item.alias || ''
+      item.journals = Array.isArray(item.journals) ? item.journals : []
     }
     config.value = raw
     // 表单缺省值补齐（模型池、抽取模型、各向量库 embedding）
@@ -195,13 +210,20 @@ async function syncServiceStatus() {
 }
 
 async function save() {
+  const problems = journalAliasSectionRef.value?.problems ?? []
+  if (problems.length) {
+    showError(`期刊别名未通过校验：${problems[0]}`)
+    return
+  }
   try {
     await updateServiceConfig(config.value!)
     originalConfig.value = JSON.parse(JSON.stringify(config.value))
     showSuccess('配置已保存')
     await syncServiceStatus()
-  } catch {
-    showError('保存失败')
+  } catch (e: any) {
+    // 服务端的校验信息（如「别名 TRO 重复」）比笼统的「保存失败」有用得多
+    const detail = e?.response?.data?.detail
+    showError(detail ? `保存失败：${detail}` : '保存失败')
   }
 }
 

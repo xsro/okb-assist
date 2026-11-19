@@ -211,6 +211,15 @@ async fn update_config(
         }
     }
 
+    // 期刊别名表（`journal_aliases`）：校验通过后落**规范化**的值
+    // （去首尾空白、折叠空白、期刊名去重、丢掉空项）；别名重复/期刊名为空一律 400。
+    if let Some(raw) = body.get("journal_aliases") {
+        if let Err(detail) = crate::services::journal_alias::validate(raw) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"detail": detail}))).into_response();
+        }
+        config["journal_aliases"] = crate::services::journal_alias::normalized_value(raw);
+    }
+
     if let Err(e) = cm.save_config(&config) {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
             .into_response();
