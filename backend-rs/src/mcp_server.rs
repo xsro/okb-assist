@@ -85,19 +85,27 @@ impl McpServer {
             }),
             json!({
                 "name": "search_info",
-                "description": "Search document metadata (title, authors, journal, keywords, abstract, DOI, etc.), supports Chinese and English. Supports pagination via page/offset (alias: max_results for limit), field filtering and year/type filters.",
+                "description": "Search document metadata (title, authors, journal, keywords, abstract, DOI, etc.), supports Chinese and English. `query` is a Web-of-Science style expression compiled by the SAME parser as the HTTP `/assist/api/documents/search-info` endpoint: a bare word searches all fields (keywords are ANDed), `TAG=value` selects a field (TI/AU/SO/AB/AK/DO/PY/DT/PDF/MD/HEALTH/TS/ALL ...), AND/OR/NOT and parentheses are supported, `*`/`?` are wildcards, quoted text is a phrase, and `SORT=YEAR ORDER=DESC` sets the ordering. A syntax error returns code=`query_error` with the character position — it is never silently turned into an empty result. The extra parameters (year_from/year_to, doc_type, journal, journal_exact, pdf_state/md_state/zip_state, has_md/has_pdf/has_zip, pdf_health) are ANDed onto the expression.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string"},
+                        "query": {"type": "string", "description": "WoS-style query, e.g. `TI=robot AND PY=2020-2024` / `SO=\"IEEE Transactions on Robotics\"` / `robot AND (SLAM OR VIO)`"},
                         "limit": {"type": "integer", "default": 10, "description": "Results per page (alias: max_results)"},
                         "max_results": {"type": "integer", "default": 10, "description": "Results per page (alias for limit)"},
                         "page": {"type": "integer", "default": 1, "description": "Page number (1-based). Use offset for precise control."},
                         "offset": {"type": "integer", "default": 0, "description": "Zero-based result offset (overrides page when provided)"},
                         "year_from": {"type": "integer", "default": 0, "description": "Filter: minimum publication year"},
                         "year_to": {"type": "integer", "default": 0, "description": "Filter: maximum publication year"},
-                        "journal": {"type": "string", "default": "", "description": "Filter: journal (case-insensitive substring)"},
+                        "journal": {"type": "string", "default": "", "description": "Filter: journal (case-insensitive substring). Combine with journal_exact for equality."},
+                        "journal_exact": {"type": "boolean", "default": false, "description": "Exact journal match, case-insensitive via COLLATE NOCASE (default: substring)"},
                         "doc_type": {"type": "string", "default": "", "description": "Filter: document type (comma-separated for multiple)"},
+                        "pdf_state": {"type": "string", "default": "", "description": "PDF file facts: present / absent / unknown (comma-separated)"},
+                        "md_state": {"type": "string", "default": "", "description": "Markdown file facts: present / absent / unknown"},
+                        "zip_state": {"type": "string", "default": "", "description": "Image asset zip file facts: present / absent / unknown"},
+                        "has_pdf": {"type": "string", "default": "", "description": "1 = has PDF, 0 = no PDF"},
+                        "has_md": {"type": "string", "default": "", "description": "1 = has Markdown, 0 = no Markdown"},
+                        "has_zip": {"type": "string", "default": "", "description": "1 = has image asset zip, 0 = none"},
+                        "pdf_health": {"type": "string", "default": "", "description": "ok / warning / error / missing / unchecked (comma-separated)"},
                         "fields": {"type": "array", "items": {"type": "string"}, "description": "Optional field whitelist. Available keys: id, title, authors, year, doi, journal, keywords, abstract, category, doc_type, language, i18n, status. Unknown keys are dropped silently."},
                         "sort_by": {"type": "string", "default": "updated_at", "description": "Sort field: title, authors, year, id, journal, doc_type, created_at, updated_at, pdf_size, md_size, zip_size"},
                         "sort_order": {"type": "string", "default": "desc", "description": "Sort direction: asc or desc"}
@@ -146,7 +154,7 @@ impl McpServer {
                         "has_zip": {"type": "string", "default": "", "description": "1 = has image asset zip, 0 = none"},
                         "pdf_health": {"type": "string", "default": "", "description": "ok / warning / error / missing / unchecked (comma-separated)"},
                         "journal": {"type": "string", "default": "", "description": "Filter by journal (case-insensitive substring). Combine with journal_exact for equality."},
-                        "journal_exact": {"type": "boolean", "default": false, "description": "Exact journal match (default: substring)"},
+                        "journal_exact": {"type": "boolean", "default": false, "description": "Exact journal match, case-insensitive via COLLATE NOCASE (default: substring)"},
                         "year_from": {"type": "integer", "default": 0, "description": "Filter: minimum publication year"},
                         "year_to": {"type": "integer", "default": 0, "description": "Filter: maximum publication year"},
                         "page": {"type": "integer", "default": 1},
@@ -626,6 +634,38 @@ impl McpServer {
         ("zip_size", "zip_size"),
     ];
 
+    /// 把「检索式 + 结构化筛选」写进 QueryBuilder（不含 `WHERE` 关键字）。
+    ///
+    /// 检索式在前（它的 `?` 先出现，绑定值紧随其后），然后由 `append_list_filters` 追加
+    /// ` AND …` 形式的 year / doc_type / journal / 文件事实 / PDF 健康筛选 —— 与 `list_documents`
+    /// 共用同一份实现，避免两套筛选语义漂移。两者是 AND 关系。
+    fn push_search_where<'a>(
+        qb: &mut sqlx::QueryBuilder<'a, sqlx::Sqlite>,
+        compiled: &crate::services::query_parser::CompiledQuery,
+        doc_type: &str,
+        args: &Value,
+    ) -> Result<(), String> {
+        // 注意：`where_clause` 里的 `?` 是**纯文本占位符**，而 `QueryBuilder::push_bind` 自己还会
+        // 插一个占位符。直接 `push(where_clause)` + 逐个 `push_bind` 会得到
+        // `… LIKE ? …)))) ??????????`（占位符全堆到末尾）→ `near "?": syntax error`。
+        // 所以这里按 `?` 切开：文本走 push、值走 push_bind，占位符由 QueryBuilder 补在正确位置。
+        // （编译器只会为「值」生成 `?`，不会把 `?` 写进字符串字面量。）
+        qb.push("(");
+        let mut parts = compiled.where_clause.split('?');
+        qb.push(parts.next().unwrap_or(""));
+        for b in &compiled.binds {
+            qb.push_bind(b.clone());
+            match parts.next() {
+                Some(rest) => {
+                    qb.push(rest);
+                }
+                None => break,
+            }
+        }
+        qb.push(")");
+        append_list_filters(qb, "", doc_type, args)
+    }
+
     /// 拼接 ORDER BY 子句（防 SQL 注入：仅允许白名单字段）。
     fn append_order_clause<'a>(
         qb: &mut sqlx::QueryBuilder<'a, sqlx::Sqlite>,
@@ -761,42 +801,60 @@ impl McpServer {
 
     async fn tool_search_info(&self, args: &Value) -> String {
         let query = args["query"].as_str().unwrap_or("").to_string();
-        let year_from = args["year_from"].as_i64().unwrap_or(0);
-        let year_to = args["year_to"].as_i64().unwrap_or(0);
         let doc_type = args["doc_type"].as_str().unwrap_or("").to_string();
-        let journal = args["journal"].as_str().unwrap_or("").trim().to_string();
         let fields = Self::parse_fields(args);
-        let sort_by = args["sort_by"].as_str().unwrap_or("updated_at").to_string();
-        let sort_order = args["sort_order"].as_str().unwrap_or("desc").to_string();
+        // 排序参数只是兜底：检索式里的 `SORT=` / `ORDER=` 优先（与 HTTP 端点同源语义）
+        let sort_by_arg = args["sort_by"].as_str().unwrap_or("updated_at").to_string();
+        let sort_order_arg = args["sort_order"].as_str().unwrap_or("desc").to_string();
 
         if query.trim().is_empty() {
             return Self::err("invalid_argument", "查询不能为空");
         }
 
+        // 检索式统一交给 `services::query_parser`（与 HTTP `/documents/search-info` 同一套语法）：
+        // 裸词按全字段匹配、`TAG=值`、AND/OR/NOT、括号、`*`/`?`、`SORT=`/`ORDER=`。
+        // 语法错误必须报出来（带字符位置）—— 以前这里走朴素 `LIKE '%整串%'`，调用方写
+        // `SO="…" AND PY=2020` 会被当成一个超长字面量，于是**静默回 0 条**，让人误以为
+        // 「库里没有」（AGENTS.md 易错点 29：不要把无法解析的检索式静默降级成空结果）。
+        let compiled = match crate::services::query_parser::compile(&query) {
+            Ok(c) => c,
+            Err(e) => {
+                let detail = match e.position {
+                    Some(p) => format!("检索式语法错误：{}（第 {} 个字符附近）", e.message, p),
+                    None => format!("检索式语法错误：{}", e.message),
+                };
+                return Self::err("query_error", &detail);
+            }
+        };
+
         let (offset, limit) = Self::parse_pagination(args, 10, 100);
-        let like = format!("%{}%", query.trim());
 
         // 计数
         let mut cqb = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM documents WHERE ");
-        append_search_info_filters(&mut cqb, &like, year_from, year_to, &doc_type, &journal);
-        let total: i64 = cqb
-            .build()
-            .fetch_one(self.db.pool())
-            .await
-            .map(|r| r.get::<i64, _>(0))
-            .unwrap_or(0);
+        if let Err(e) = Self::push_search_where(&mut cqb, &compiled, &doc_type, args) {
+            return Self::err("invalid_argument", &e);
+        }
+        // 查库失败必须报错：`unwrap_or(0)` / `unwrap_or_default()` 会把任何 SQL 问题（拼错括号、
+        // 列类型不匹配）伪装成「库里没有匹配的文献」，让调用方（含 LLM）得出完全错误的结论（易错点 25 同类）。
+        let total: i64 = match cqb.build().fetch_one(self.db.pool()).await {
+            Ok(r) => r.get::<i64, _>(0),
+            Err(e) => return Self::err("query_failed", &e.to_string()),
+        };
 
         // 查询
         let mut qb = sqlx::QueryBuilder::new(format!("SELECT {} FROM documents WHERE ", DOC_COLUMNS));
-        append_search_info_filters(&mut qb, &like, year_from, year_to, &doc_type, &journal);
-        Self::append_order_clause(&mut qb, &sort_by, &sort_order);
+        if let Err(e) = Self::push_search_where(&mut qb, &compiled, &doc_type, args) {
+            return Self::err("invalid_argument", &e);
+        }
+        let sort_by = compiled.sort_by.clone().unwrap_or(sort_by_arg);
+        let sort_dir = compiled.sort_order.clone().unwrap_or(sort_order_arg);
+        Self::append_order_clause(&mut qb, &sort_by, &sort_dir);
         qb.push(" LIMIT ").push_bind(limit)
             .push(" OFFSET ").push_bind(offset);
-        let docs: Vec<Document> = qb
-            .build_query_as::<Document>()
-            .fetch_all(self.db.pool())
-            .await
-            .unwrap_or_default();
+        let docs: Vec<Document> = match qb.build_query_as::<Document>().fetch_all(self.db.pool()).await {
+            Ok(v) => v,
+            Err(e) => return Self::err("query_failed", &e.to_string()),
+        };
 
         let results: Vec<Value> = docs
             .iter()
@@ -959,12 +1017,12 @@ impl McpServer {
         if let Err(e) = append_list_filters(&mut cqb, &query, &doc_type, args) {
             return Self::err("invalid_argument", &e);
         }
-        let total: i64 = cqb
-            .build()
-            .fetch_one(self.db.pool())
-            .await
-            .map(|r| r.get::<i64, _>(0))
-            .unwrap_or(0);
+        // 查库失败必须报错：`unwrap_or(0)` / `unwrap_or_default()` 会把任何 SQL 问题（拼错括号、
+        // 列类型不匹配）伪装成「库里没有匹配的文献」，让调用方（含 LLM）得出完全错误的结论（易错点 25 同类）。
+        let total: i64 = match cqb.build().fetch_one(self.db.pool()).await {
+            Ok(r) => r.get::<i64, _>(0),
+            Err(e) => return Self::err("query_failed", &e.to_string()),
+        };
 
         // 分页查询
         let mut qb = sqlx::QueryBuilder::new(format!("SELECT {} FROM documents WHERE 1=1", DOC_COLUMNS));
@@ -975,11 +1033,10 @@ impl McpServer {
         qb.push(" LIMIT ").push_bind(page_size)
             .push(" OFFSET ").push_bind((page - 1).saturating_mul(page_size));
 
-        let docs: Vec<Document> = qb
-            .build_query_as::<Document>()
-            .fetch_all(self.db.pool())
-            .await
-            .unwrap_or_default();
+        let docs: Vec<Document> = match qb.build_query_as::<Document>().fetch_all(self.db.pool()).await {
+            Ok(v) => v,
+            Err(e) => return Self::err("query_failed", &e.to_string()),
+        };
         let items: Vec<Value> = docs
             .iter()
             .map(|d| {
@@ -1106,7 +1163,10 @@ impl McpServer {
         qb.push(" GROUP BY bucket ORDER BY count DESC, bucket ASC LIMIT ")
             .push_bind(limit);
 
-        let rows = qb.build().fetch_all(self.db.pool()).await.unwrap_or_default();
+        let rows = match qb.build().fetch_all(self.db.pool()).await {
+            Ok(v) => v,
+            Err(e) => return Self::err("query_failed", &e.to_string()),
+        };
         let buckets: Vec<Value> = rows
             .iter()
             .map(|r| {
@@ -1734,7 +1794,12 @@ fn append_list_filters<'a>(
     }
     if let Some(j) = args["journal"].as_str().filter(|s| !s.trim().is_empty()) {
         if args["journal_exact"].as_bool().unwrap_or(false) {
-            qb.push(" AND journal = ").push_bind(j.trim().to_string());
+            // 必须 COLLATE NOCASE：SQLite 的 `=` 走 BINARY 排序规则（大小写敏感），而下面的 `LIKE`
+            // 对 ASCII 不敏感，两者不一致。库里同一期刊常有两种写法（`IEEE Transactions on
+            // Robotics` 与 `IEEE TRANSACTIONS ON ROBOTICS`），少了 NOCASE 精确匹配会悄悄漏掉一半。
+            qb.push(" AND journal = ")
+                .push_bind(j.trim().to_string())
+                .push(" COLLATE NOCASE");
         } else {
             qb.push(" AND journal LIKE ").push_bind(format!("%{}%", j.trim()));
         }
@@ -1797,94 +1862,35 @@ fn append_list_filters<'a>(
     }
 
     // PDF 健康（逗号多选；unchecked = IS NULL）
+    //
+    // 解析与 SQL 一律复用 `file_state::health_condition`（与 `routers/documents.rs`、检索式 `HEALTH=`
+    // 同一份实现），且整组条件必须自带括号：`AND pdf_health IN (?,?) OR pdf_health IS NULL` 会被
+    // SQL 解析成 `(… AND pdf_health IN (…)) OR pdf_health IS NULL`（AND 优先级高于 OR），
+    // 于是 journal / doc_type / has_md / year 对 NULL 分支全部失效，多选 `ok,unchecked` 会捞出整库。
     if let Some(raw) = args["pdf_health"].as_str().filter(|s| !s.trim().is_empty()) {
-        let mut values: Vec<String> = Vec::new();
-        let mut unchecked = false;
-        for item in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            match item.to_ascii_lowercase().as_str() {
-                "ok" | "warning" | "error" | "missing" => values.push(item.to_ascii_lowercase()),
-                "unchecked" | "none" | "null" => unchecked = true,
-                _ => return Err(format!("pdf_health 取值非法：{}（ok/warning/error/missing/unchecked）", item)),
+        match file_state::health_condition(raw).map_err(|e| format!("pdf_health {}", e))? {
+            None => {}
+            Some(file_state::HealthCondition::Sql(literal)) => {
+                qb.push(" AND (").push(literal).push(")");
             }
-        }
-        if !values.is_empty() {
-            qb.push(" AND pdf_health IN (");
-            for (i, v) in values.iter().enumerate() {
-                if i > 0 {
-                    qb.push(", ");
+            Some(file_state::HealthCondition::Values { values, include_null }) => {
+                qb.push(" AND (pdf_health IN (");
+                for (i, v) in values.iter().enumerate() {
+                    if i > 0 {
+                        qb.push(", ");
+                    }
+                    qb.push_bind(v.clone());
                 }
-                qb.push_bind(v.clone());
+                if include_null {
+                    qb.push(") OR pdf_health IS NULL)");
+                } else {
+                    qb.push("))");
+                }
             }
-            if unchecked {
-                qb.push(") OR pdf_health IS NULL");
-            } else {
-                qb.push(")");
-            }
-        } else if unchecked {
-            qb.push(" AND pdf_health IS NULL");
         }
     }
 
     Ok(())
-}
-
-/// 向 QueryBuilder 追加 search_info 的筛选条件（不含 WHERE 关键字）。
-fn append_search_info_filters<'a>(
-    qb: &mut sqlx::QueryBuilder<'a, sqlx::Sqlite>,
-    like: &str,
-    year_from: i64,
-    year_to: i64,
-    doc_type: &str,
-    journal: &str,
-) {
-    qb.push("(");
-    let fields = [
-        "title",
-        "json_extract(i18n, '$.en.title')",
-        "authors",
-        "json_extract(i18n, '$.en.authors')",
-        "journal",
-        "json_extract(i18n, '$.en.journal')",
-        "keywords",
-        "json_extract(i18n, '$.en.keywords')",
-        "abstract",
-        "json_extract(i18n, '$.en.abstract')",
-        "doi",
-        "category",
-        "source",
-        "filename",
-    ];
-    for (i, f) in fields.iter().enumerate() {
-        if i > 0 {
-            qb.push(" OR ");
-        }
-        qb.push(f).push(" LIKE ").push_bind(like.to_string());
-    }
-    qb.push(")");
-    if year_from > 0 {
-        qb.push(" AND CAST(NULLIF(TRIM(year), '') AS INTEGER) >= ")
-            .push_bind(year_from);
-    }
-    if year_to > 0 {
-        qb.push(" AND CAST(NULLIF(TRIM(year), '') AS INTEGER) <= ")
-            .push_bind(year_to);
-    }
-    if !journal.trim().is_empty() {
-        qb.push(" AND journal LIKE ")
-            .push_bind(format!("%{}%", journal.trim()));
-    }
-    // 类型先归一到标准词表：模型（或用户）传 `article` / `journal` 也能命中
-    let types = crate::services::doc_type::normalize_many(doc_type);
-    if !types.is_empty() {
-        qb.push(" AND doc_type IN (");
-        for (i, t) in types.iter().enumerate() {
-            if i > 0 {
-                qb.push(", ");
-            }
-            qb.push_bind(t.clone());
-        }
-        qb.push(")");
-    }
 }
 
 // ── Markdown 章节解析 ──

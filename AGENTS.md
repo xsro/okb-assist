@@ -490,7 +490,7 @@ PDF 相关能力（元数据/Info 字典/正文抽取、PDF 信息报告、**PDF
 | 单语言权威源（Crossref）按语言路由 | `i18n::base_language` + `i18n::route_target_lang`（基础语言非 en 时文本字段只写 `i18n.en`，不覆盖中文基础列） |
 | 手工编辑 `PUT /documents/:id` | 请求体 `i18n`（对象整体替换、`null` 清空）；校验走 `i18n::from_value` |
 | 去重合并 | `i18n::merge_missing`（目标优先） |
-| 搜索 | `json_extract(i18n, '$.en.title')` 等表达式（`query_parser` 的文本列常量 `C_ALL` / `C_TOPIC`、`grep_search`、MCP `append_search_info_filters`）；字段搜索不再有 `title_en:` 这类别名 |
+| 搜索 | `json_extract(i18n, '$.en.title')` 等表达式（`query_parser` 的文本列常量 `C_ALL` / `C_TOPIC`、`grep_search`；MCP `search_info` 也走 `query_parser::compile`，不再有自造的多列 LIKE）；字段搜索不再有 `title_en:` 这类别名 |
 
 - 存量迁移：`database.rs::migrate_i18n()` 在 `init()` 里把五个旧列搬进 `i18n`（与基础列相同的镜像值丢弃、
   已有 `i18n` 只补空），原值先备份到 `documents_i18n_legacy`，然后 `DROP COLUMN`；幂等。
@@ -1118,7 +1118,10 @@ OKB-Assist 通过 MinerU API 将 PDF 解析为 Markdown，支持三种接口类�
     `下载中:` 进度；处置与新增约定见上方「解析结果包下载兜底」与易错点 21。
 
 29. **检索式只有一套解析器：`services/query_parser.rs`（WoS 风格，兼容旧 `field:value`）**：`compile()` 直接返回
-    `where_clause` + `binds` + `sort_by/order`，`routers/documents.rs::search_info` 是**唯一调用方**。
+    `where_clause` + `binds` + `sort_by/order`，调用方是 `routers/documents.rs::search_info`（HTTP）与
+    `mcp_server.rs::tool_search_info`（MCP）—— 两者共用同一份解析，MCP 侧语法错误同样回 `query_error` 带字符位置，
+    **不要**再在别处另写 `LIKE '%整串%'`（历史 bug：MCP 曾自己拼 14 列 LIKE，`SO="…" AND PY=2020` 这类检索式
+    被当成一个超长字面量，静默返回 0 条，调用方误以为「库里没有」）。
     - 语法：`TAG=值`（旧写法 `tag:值` 等价）、`AND/OR/NOT`（`-条件` 是 `NOT` 的旧拼法）、括号任意嵌套、
       `TAG=(a OR b)` 把标签压进组内裸值、通配符 `*`→`%` `?`→`_` `$`→`%`；
     - **文本值必须过 `like_pattern()`**：`%`/`_`/`\` 转义，SQL 里配 `ESCAPE '\'`，不要把用户值直接拼进 LIKE；
