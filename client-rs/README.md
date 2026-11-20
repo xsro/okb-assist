@@ -14,7 +14,8 @@
 }
 ```
 
-- `url`（也接受 `base_url`）服务地址，缺省 `http://192.168.1.162:5001`；
+- `url`（也接受 `base_url`）服务地址，缺省 `http://192.168.1.162:5001`；**结尾多写 `/` 会自动去掉**
+  （所有请求都是 `{url}/assist/api/...` 拼出来的，留着斜杠会变成 `//assist/...` → 服务端一律 404）；
 - `token` 令牌，优先级：`--token` > `OKB_ASSIST_TOKEN` 环境变量 > `client.json` > 旧版 `~/.okb_assist_token`；
 - `storage_root` 仅 `zotero` 子命令使用，可被 `--storage-root` 覆盖。
 

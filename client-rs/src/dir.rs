@@ -114,7 +114,11 @@ fn scan_pdfs(dir: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
 pub(crate) async fn run_dir(args: &DirArgs) -> Result<()> {
     let cfg = load_config();
     let token = read_token(args.token.as_deref(), cfg.token.as_deref());
-    let base_url = args.base_url.clone().unwrap_or_else(|| cfg.base_url());
+    let base_url = args
+        .base_url
+        .clone()
+        .map(|u| normalize_base_url(&u))
+        .unwrap_or_else(|| cfg.base_url());
     let process = args.process;
     // 上传进度开关（`--no-progress`）
     PROGRESS_ENABLED.store(!args.interval.no_progress, Ordering::Relaxed);
@@ -436,8 +440,10 @@ async fn analyze_file(
     // 有 DOI 就以 DOI 为准：库里没有该 DOI，或有该 DOI 但条目没有 PDF，才需要传
     if let Some(doi) = doi.as_ref() {
         let action = match lookup_server_entry(client, base_url, token, index, doi).await {
-            None => Action::Create,
-            Some(entry) => {
+            // 请求本身失败：绝不能说成「库里没有」，否则用户会当成真重复去上传
+            Err(why) => Action::Blocked(format!("DOI 比对请求失败: {}", why)),
+            Ok(None) => Action::Create,
+            Ok(Some(entry)) => {
                 // 「没有文件」= 服务端没算出 file_hash，或健康检查已判定 missing
                 if entry.hash().is_empty() || entry.health() == "missing" {
                     Action::Attach(entry.id)
@@ -489,24 +495,21 @@ async fn analyze_file(
     }
 }
 
-/// 按 DOI 取服务端记录：`None` = 库里没有这个 DOI。
+/// 按 DOI 取服务端记录：`Ok(None)` = 库里没有这个 DOI，`Err` = 请求失败。
 ///
-/// 全量索引可用时在本地查；不可用时回退 `by-doi` 单条查询。回退路径分不清
-/// 「查不到」与「请求失败」，一律当「库里没有」处理 —— 真重复时服务端的 DOI 去重
-/// 会返回 409，不会造出第二条记录。
+/// 全量索引可用时在本地查（不会失败）；不可用时回退 `by-doi` 单条查询。
 async fn lookup_server_entry(
     client: &Client,
     base_url: &str,
     token: &Option<String>,
     index: &Option<ServerIndex>,
     doi: &str,
-) -> Option<ServerEntry> {
+) -> Result<Option<ServerEntry>, String> {
     match index {
-        Some(idx) => idx.lookup(doi).cloned(),
-        None => match api_lookup_by_doi(client, base_url, doi, token).await {
-            (true, Some(doc)) => Some(ServerEntry::from_doc_json(&doc)),
-            _ => None,
-        },
+        Some(idx) => Ok(idx.lookup(doi).cloned()),
+        None => api_lookup_by_doi(client, base_url, doi, token)
+            .await
+            .map(|doc| doc.map(|d| ServerEntry::from_doc_json(&d))),
     }
 }
 

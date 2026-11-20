@@ -268,6 +268,21 @@ pub(crate) struct UploadResult {
 /// 没有配置文件时使用的默认服务地址
 pub(crate) const DEFAULT_BASE_URL: &str = "http://192.168.1.162:5001";
 
+/// 规范化服务地址：去掉首尾空白与**结尾的斜杠**
+///
+/// 所有请求地址都是 `format!("{}/assist/api/...", base_url)` 拼出来的，配置里写成
+/// `http://host:5001/` 就会拼出 `http://host:5001//assist/api/...`，axum 对这种带空路径段
+/// 的 URL 一律返回 **404**。而 404 在比对逻辑里会被当成「库里没有这篇」/「哈希请求失败」，
+/// 于是整目录的 PDF 全部显示成「需上传（库中没有）」—— 实测踩过（2026-02，`url` 多写一个 `/`）。
+pub(crate) fn normalize_base_url(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        DEFAULT_BASE_URL.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// `~/.okb/client.json` 的内容。字段全部可选，缺什么就用默认/命令行值。
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ClientConfig {
@@ -390,10 +405,10 @@ impl SyncConfig {
 
 impl ClientConfig {
     pub(crate) fn base_url(&self) -> String {
-        self.url
-            .clone()
-            .filter(|u| !u.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
+        match self.url.as_deref() {
+            Some(u) => normalize_base_url(u),
+            None => DEFAULT_BASE_URL.to_string(),
+        }
     }
 }
 
@@ -650,7 +665,11 @@ pub(crate) async fn api_diff_hashes(
     {
         Ok(resp) if resp.status() == reqwest::StatusCode::OK => resp.json().await.ok(),
         Ok(resp) => {
-            eprintln!("错误: diff-hashes 请求失败: {}", resp.status());
+            eprintln!(
+                "错误: diff-hashes 请求失败: {}{}",
+                resp.status(),
+                wrong_base_url_hint(resp.status())
+            );
             None
         }
         Err(e) => {
@@ -695,7 +714,11 @@ pub(crate) async fn api_fetch_server_index(
             Some(ServerIndex::from_response(body))
         }
         Ok(resp) => {
-            eprintln!("  服务端索引请求失败: {}", resp.status());
+            eprintln!(
+                "  服务端索引请求失败: {}{}",
+                resp.status(),
+                wrong_base_url_hint(resp.status())
+            );
             None
         }
         Err(e) => {
@@ -1207,14 +1230,18 @@ pub(crate) async fn api_upload(
     UploadOutcome::Failed
 }
 
-/// 通过 DOI 查询服务器上已有的文献。
-/// 返回 `(found: bool, doc: Option<Value>)` 元组。
+/// 按 DOI 查询服务端记录。
+///
+/// 三态靠 `Result` 区分，**不要**把请求失败当成「库里没有」：
+/// `Ok(Some(doc))` 命中 / `Ok(None)` 确实没有这个 DOI / `Err(msg)` 查询本身失败。
+/// 历史 bug：老版本把非 200 一律当「没有」，服务地址写错（`//assist/...` → 404）时
+/// 整个目录的 PDF 都被报成「需上传（库中没有）」，用户以为库里真的没有。
 pub(crate) async fn api_lookup_by_doi(
     client: &Client,
     base_url: &str,
     doi: &str,
     token: &Option<String>,
-) -> (bool, Option<serde_json::Value>) {
+) -> Result<Option<serde_json::Value>, String> {
     let url = format!("{}/assist/api/documents/by-doi/{}", base_url, urlencoding(doi));
     let mut req = client.get(&url);
     if let Some(t) = token {
@@ -1225,27 +1252,36 @@ pub(crate) async fn api_lookup_by_doi(
             match resp.json::<serde_json::Value>().await {
                 Ok(body) => {
                     let found = body.get("found").and_then(|v| v.as_bool()).unwrap_or(false);
-                    if found {
-                        let doc = body.get("doc").cloned();
-                        (true, doc)
-                    } else {
-                        (false, None)
+                    if !found {
+                        return Ok(None);
+                    }
+                    match body.get("doc").cloned() {
+                        Some(doc) => Ok(Some(doc)),
+                        None => Err("服务端回 found=true 但没有 doc 字段".to_string()),
                     }
                 }
-                Err(e) => {
-                    eprintln!("  by-doi 解析响应失败: {}", e);
-                    (false, None)
-                }
+                Err(e) => Err(format!("解析响应失败: {}", e)),
             }
         }
-        Ok(resp) => {
-            eprintln!("  by-doi 查询失败: {}", resp.status());
-            (false, None)
+        Ok(resp) => Err(format!(
+            "HTTP {}{}",
+            resp.status(),
+            wrong_base_url_hint(resp.status())
+        )),
+        Err(e) => Err(format!("请求失败: {}", e)),
+    }
+}
+
+/// 404 等状态码最常见的原因是服务地址写错（端口 / 路径前缀 / 结尾多写 `/`），给一句提示
+pub(crate) fn wrong_base_url_hint(status: reqwest::StatusCode) -> &'static str {
+    match status {
+        reqwest::StatusCode::NOT_FOUND => {
+            "（检查 client.json 的 url / --base-url：端口、结尾是否多个 `/`、服务端版本是否太旧）"
         }
-        Err(e) => {
-            eprintln!("  by-doi 查询失败: {}", e);
-            (false, None)
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            "（检查 token 是否有效、是否有该作用域权限 —— API 令牌不能用于 MCP，MCP 令牌不能用于 API）"
         }
+        _ => "",
     }
 }
 
@@ -1451,5 +1487,17 @@ mod hash_doi_tests {
         let m: HashMap<String, String> = serde_json::from_str(&text).unwrap();
         assert_eq!(m.get("10.2000/aaa").map(|v| v.as_str()), Some("cafebabe"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 结尾斜杠会让拼出来的地址变成 `//assist/api/...`（axum 直接 404，整个目录都被报成「库里没有」）
+    #[test]
+    fn base_url_strips_trailing_slash() {
+        assert_eq!(normalize_base_url("http://h:5001/"), "http://h:5001");
+        assert_eq!(normalize_base_url("http://h:5001///"), "http://h:5001");
+        assert_eq!(normalize_base_url("  http://h:5001  "), "http://h:5001");
+        assert_eq!(normalize_base_url("http://h:5001/okb"), "http://h:5001/okb");
+        // 空值回退默认地址（不能拼出 `/assist/api/...` 这种裸路径）
+        assert_eq!(normalize_base_url("  "), DEFAULT_BASE_URL);
+        assert_eq!(normalize_base_url("/"), DEFAULT_BASE_URL);
     }
 }

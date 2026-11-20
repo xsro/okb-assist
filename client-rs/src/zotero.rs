@@ -722,7 +722,11 @@ async fn upload_one_zotero(
 pub(crate) async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
     let cfg = load_config();
     let token = read_token(args.token.as_deref(), cfg.token.as_deref());
-    let base_url = args.base_url.clone().unwrap_or_else(|| cfg.base_url());
+    let base_url = args
+        .base_url
+        .clone()
+        .map(|u| normalize_base_url(&u))
+        .unwrap_or_else(|| cfg.base_url());
     let storage_root = args
         .storage_root
         .clone()
@@ -945,9 +949,14 @@ pub(crate) async fn run_zotero(args: &ZoteroArgs) -> Result<()> {
         let server: Option<ServerEntry> = match &server_index {
             Some(idx) => idx.lookup(&d.doi).cloned(),
             None => match api_lookup_by_doi(&client, &base_url, &d.doi, &token).await {
-                (true, Some(doc)) => Some(ServerEntry::from_doc_json(&doc)),
-                // 查询失败或 found=true 但无 doc：安全起见视为新建
-                _ => None,
+                Ok(Some(doc)) => Some(ServerEntry::from_doc_json(&doc)),
+                // 确实没有这个 DOI：新建
+                Ok(None) => None,
+                // 查询失败：安全起见仍当新建（服务端 DOI 去重会兜一层 409），但要告诉用户为什么
+                Err(why) => {
+                    eprintln!("  警告: DOI {} 查询失败，按新建处理: {}", d.doi, why);
+                    None
+                }
             },
         };
 
